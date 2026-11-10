@@ -928,6 +928,7 @@ axe bot tg pin MSG [--silent] | unpin MSG
 axe bot tg react MSG EMOJI | typing [--chat C] | delete MSG
 axe bot tg file MSG[/N] [--out DIR]     # default $AXE_WORKTREE/.inbox
 axe bot tg history [--limit 50] [--before MSG] [--search Q] [--json]
+axe bot tg board show [--json] | set-message MSG | clear
 ```
 
 Targets must be allowlisted chats (403 otherwise); the default target is the
@@ -950,11 +951,29 @@ output reports the buttons Telegram says remain. `pin` and `unpin`
 `flags.pinned`; `--silent` sets `disable_notification` (private chats never
 notify). Groups need the bot to be an admin with `can_pin_messages`.
 
-**Read privacy.** `GET /api/bots/:name/tg/history` and
+**The "Waiting on you" board** is a rendered view, never a hand-kept list.
+`board set-message MSG` makes one of the bot's own text messages its board
+(`flags.board`; pin it with `pin MSG --silent`). Its lines are the escalated
+tasks in the bot's subscribed projects (`*` is all) and the bot's open cards:
+its text messages that still have buttons. A press (`flags.answered`), a
+`--clear-buttons` edit, a text edit without `--buttons` (Telegram drops the
+keyboard) or a delete closes a card. Each line shows the task id or card
+`#id`, a short title and its age, in Telegram HTML with an "Updated <time>"
+footer; lines that do not fit 4096 characters become "+N more". A per-bot
+thread re-renders after every committed change (and every 60 s) and calls
+`editMessageText` only when the set of lines or titles changed
+(`flags.board_key`), recording a `board_render` bot event. A failed edit is
+logged to stderr and as a `board_error` event and retried with backoff (5 s
+doubling to 5 min, at least `retry_after`). A hand edit of the board is
+rendered over. `board show` prints the current text and whether the message
+shows it.
+
+**Read privacy.** `GET /api/bots/:name/tg/history`, `/api/bots/:name/tg/board` and
 `/api/bots/:name/tg/file/:msg[/:n]` need the bearer token. Public:
 `GET /api/bots/:name/activity` (message metadata only: id, direction, kind,
 time, reply/edit links, attachment count, forwarded). Writes: POST
-`/api/bots/:name/tg/{send,send-file,edit,pin,unpin,react,typing,delete}`; `send-file`
+`/api/bots/:name/tg/{send,send-file,edit,pin,unpin,react,typing,delete,board}`
+(`board` takes `{"msg": MSG|null}`); `send-file`
 takes the raw file as the body with `as`, `name`, `caption`, `reply_to`,
 `chat`, `thread` query parameters.
 

@@ -817,6 +817,12 @@ enum TgCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// The pinned "Waiting on you" board the server renders from escalated
+    /// tasks in subscribed projects and open cards (messages with buttons)
+    Board {
+        #[command(subcommand)]
+        command: BoardCmd,
+    },
     /// Conversation history, both directions, oldest first
     History {
         #[arg(long, default_value_t = 50)]
@@ -830,6 +836,20 @@ enum TgCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum BoardCmd {
+    /// Show the board: its message, its lines and whether it is current
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make one of the bot's own text messages the board; the server edits
+    /// it in place from then on (pin it with `axe bot tg pin MSG --silent`)
+    SetMessage { msg: i64 },
+    /// Stop rendering a board for this bot
+    Clear,
 }
 
 /// Parses `--buttons "Label=data,Other=data2"`.
@@ -994,6 +1014,34 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
             std::fs::write(&file, &bytes).with_context(|| format!("write {}", file.display()))?;
             println!("{}", file.display());
         }
+        TgCmd::Board { command } => match command {
+            BoardCmd::Show { json } => {
+                let v: Value = c.get_private(&format!("{base}/board"), &[])?;
+                if *json {
+                    return print_json(&v);
+                }
+                match v["message"].as_i64() {
+                    Some(m) => println!(
+                        "board #{m} ({})",
+                        if v["current"] == true {
+                            "current"
+                        } else {
+                            "render pending"
+                        }
+                    ),
+                    None => println!("no board message (set one with `board set-message MSG`)"),
+                }
+                println!("{}", v["text"].as_str().unwrap_or(""));
+            }
+            BoardCmd::SetMessage { msg } => {
+                let _: Value = c.send("POST", &format!("{base}/board"), json!({"msg":msg}))?;
+                println!("board is #{msg}");
+            }
+            BoardCmd::Clear => {
+                let _: Value = c.send("POST", &format!("{base}/board"), json!({"msg":null}))?;
+                println!("board cleared");
+            }
+        },
         TgCmd::History {
             limit,
             before,

@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod admission;
 pub mod agent_proc;
+pub mod board;
 pub mod bot;
 pub mod channel;
 pub mod cli;

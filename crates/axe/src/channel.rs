@@ -23,6 +23,11 @@ pub trait Store: Send + Sync + 'static {
     fn conn(&self) -> MutexGuard<'_, Connection>;
     /// A database change was committed (wakes SSE clients).
     fn changed(&self);
+    /// The change counter that [`Store::changed`] bumps.
+    fn seq(&self) -> u64;
+    /// Waits until the counter moves past `seen` or `timeout` elapses; returns
+    /// the counter.
+    fn wait_changed(&self, seen: u64, timeout: std::time::Duration) -> u64;
     fn stopping(&self) -> bool;
 }
 

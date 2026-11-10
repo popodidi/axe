@@ -117,6 +117,12 @@ impl channel::Store for State {
     fn changed(&self) {
         self.notifier.bump();
     }
+    fn seq(&self) -> u64 {
+        self.notifier.current()
+    }
+    fn wait_changed(&self, seen: u64, timeout: Duration) -> u64 {
+        self.notifier.wait_past(seen, timeout)
+    }
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
@@ -1760,6 +1766,19 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                     req.query("search"),
                 )?,
             )
+        }
+        ("GET", ["api", "bots", name, "tg", "board"]) => ok(
+            200,
+            &crate::board::show(&st.conn(), name, crate::remote::epoch())?,
+        ),
+        ("POST", ["api", "bots", name, "tg", "board"]) => {
+            #[derive(Deserialize)]
+            struct Board {
+                msg: Option<i64>,
+            }
+            let b: Board = req.json()?;
+            let msg = crate::board::set_message(&mut st.conn(), name, b.msg)?;
+            ok(200, &json!({"message": msg}))
         }
         ("POST", ["api", "bots", name, "tg", action]) => tg_route(st, req, name, action),
         _ => return Ok(None),

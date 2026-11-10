@@ -20,6 +20,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+use crate::board;
 use crate::bot::{self, NewMessage};
 use crate::config;
 use crate::db::{Actor, Forbidden};
@@ -59,6 +60,14 @@ const ALERT_INTERVAL: Duration = Duration::from_secs(60);
 /// Attempts at one update before it is skipped (recorded as an event).
 const UPDATE_ATTEMPTS: u32 = 3;
 const OWNER_COMMANDS: [&str; 6] = ["status", "stop", "pause", "resume", "reset", "wake"];
+/// First wait after a failed board edit; it doubles up to [`BOARD_RETRY_MAX`].
+const BOARD_RETRY: Duration = Duration::from_secs(5);
+const BOARD_RETRY_MAX: Duration = Duration::from_secs(300);
+/// A board pass also runs this often with no change signal, for changes that
+/// did not come through the API.
+const BOARD_RESYNC: Duration = Duration::from_secs(60);
+/// At most one board pass this often, however busy the database is.
+const BOARD_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A failed Bot API call. Never contains the token.
 #[derive(Debug, Clone)]
@@ -422,11 +431,13 @@ impl Gateway {
         n
     }
 
-    /// Starts one poller thread and one typing thread per bot.
+    /// Starts one poller, one typing and one board thread per bot.
     pub fn start(self: &Arc<Self>, store: Arc<dyn Store>) {
         for b in self.bots.values() {
             let (gw, b2, store2) = (Arc::clone(self), Arc::clone(b), Arc::clone(&store));
             std::thread::spawn(move || gw.poll(&b2, store2.as_ref()));
+            let (b2, store2) = (Arc::clone(b), Arc::clone(&store));
+            std::thread::spawn(move || board_loop(&b2, store2.as_ref()));
             let (b, store) = (Arc::clone(b), Arc::clone(&store));
             std::thread::spawn(move || typing_loop(&b, store.as_ref()));
         }
@@ -1238,13 +1249,27 @@ impl Gateway {
             None if buttons.is_some() => "editMessageReplyMarkup",
             None => bail!("nothing to edit: give text, buttons or clear-buttons"),
         };
-        let res = b.paced(m.chat_id, || b.api.call(method, &p))?;
+        let res = match b.paced(m.chat_id, || b.api.call(method, &p)) {
+            Ok(r) => r,
+            // Telegram already shows this (for example clearing a keyboard an
+            // older text edit dropped): record the state all the same.
+            Err(e) if e.description.contains("message is not modified") => Value::Null,
+            Err(e) => return Err(e.into()),
+        };
         let conn = store.conn();
         if let Some(t) = text {
+            // Without `buttons`, Telegram drops the keyboard: the card closes.
             conn.execute(
-                "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.edited',json('true')) WHERE id=?2",
+                // A hand edit of the board is rendered over on the next pass.
+                "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key') WHERE id=?2",
                 params![t, msg],
             )?;
+            if buttons.is_none() {
+                conn.execute(
+                    "UPDATE bot_messages SET flags=json_remove(flags,'$.buttons') WHERE id=?1",
+                    [msg],
+                )?;
+            }
         }
         if let Some(bs) = buttons {
             // A new keyboard takes fresh presses: the old answer no longer
@@ -1415,6 +1440,96 @@ fn typing_loop(b: &TgBot, store: &dyn Store) {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Keeps the bot's board message in step with [`board::lines`]: a pass after
+/// every committed change (at most one per [`BOARD_MIN_INTERVAL`]) and at
+/// least every [`BOARD_RESYNC`]. A failed edit is logged (stderr and a
+/// `board_error` bot event) and retried with backoff.
+fn board_loop(b: &TgBot, store: &dyn Store) {
+    let mut backoff: Option<Duration> = None;
+    while !store.stopping() {
+        let seen = store.seq();
+        match board_pass(b, store) {
+            Ok(_) => backoff = None,
+            Err(e) => {
+                let mut d = backoff.map_or(BOARD_RETRY, |d| (d * 2).min(BOARD_RETRY_MAX));
+                if let Some(s) = e.downcast_ref::<ApiError>().and_then(|a| a.retry_after) {
+                    d = d.max(Duration::from_secs(s.min(MAX_RETRY_AFTER)));
+                }
+                backoff = Some(d);
+                eprintln!(
+                    "telegram: bot {}: board: {e:#}; retrying in {}s",
+                    b.name,
+                    d.as_secs()
+                );
+                let conn = store.conn();
+                if let Ok(id) = bot_id(&conn, &b.name) {
+                    let body = json!({"error": format!("{e:#}"), "retry_seconds": d.as_secs()});
+                    let _ = bot::event(
+                        &conn,
+                        id,
+                        &Actor::new("telegram"),
+                        "board_error",
+                        &body.to_string(),
+                    );
+                }
+                drop(conn);
+                store.changed();
+            }
+        }
+        match backoff {
+            Some(d) => {
+                let end = Instant::now() + d;
+                while !store.stopping() && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(200).min(end - Instant::now()));
+                }
+            }
+            None => {
+                store.wait_changed(seen, BOARD_RESYNC);
+                std::thread::sleep(BOARD_MIN_INTERVAL);
+            }
+        }
+    }
+}
+
+/// One board pass: edits the board message when its lines changed. Returns
+/// whether it edited.
+fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
+    let conn = store.conn();
+    let Ok(id) = bot_id(&conn, &b.name) else {
+        return Ok(false);
+    };
+    let Some(m) = board::message(&conn, &b.name)? else {
+        return Ok(false);
+    };
+    let lines = board::lines(&conn, &b.name)?;
+    let key = board::key(&lines);
+    if m.flags["board_key"].as_str() == Some(key.as_str()) {
+        return Ok(false);
+    }
+    drop(conn);
+    b.allowed(m.chat_id)?;
+    let text = board::render(&lines, now());
+    let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text, "parse_mode": "HTML"});
+    match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
+        Ok(_) => {}
+        // The text already matches (for example after a lost reply).
+        Err(e) if e.description.contains("message is not modified") => {}
+        Err(e) => return Err(e.into()),
+    }
+    let conn = store.conn();
+    board::rendered(&conn, m.id, &key, &text)?;
+    bot::event(
+        &conn,
+        id,
+        &Actor::new("telegram"),
+        "board_render",
+        &json!({"message": m.id, "lines": lines.len()}).to_string(),
+    )?;
+    drop(conn);
+    store.changed();
+    Ok(true)
 }
 
 /// (chat, thread) of the messages whose wakes the bot's live run took.
