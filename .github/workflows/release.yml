@@ -1,0 +1,134 @@
+name: release
+run-name: release ${{ github.ref_name }}
+
+# A `vX.Y.Z[-pre]` tag publishes, from one Docker build on the hlab CI VM:
+# - image ghcr.io/popodidi/axe:<tag> (its digest is in the release notes)
+# - axe-<tag>-linux-x86_64.tar.gz: the image's `axe` binary (dashboard embedded)
+# - axe-skills-<tag>.tar.gz: skills/axe
+# - a .sha256 file per asset and SHA256SUMS
+# Publishing to crates.io is not done here (no repository secrets); the job
+# only runs `cargo publish --dry-run`. A tag is never reused: a failed release
+# is retried with a new tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: "1"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  release:
+    if: github.repository == 'popodidi/axe' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, hlab-ci]
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/popodidi/axe
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag matches the crate version
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "axe-os"))')
+          test "v$version" = "$TAG" || { echo "tag $TAG does not match axe-os $version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run --locked -p axe-os
+      - name: Log in with this workflow's package token
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+      - name: Build and push the image
+        # Single-platform manifest (no attestation index) so the recorded digest
+        # is the one kubelet reports as the pod imageID. BUILDX_BUILDER is the
+        # runner's parallelism-limited builder.
+        run: |
+          set -euo pipefail
+          docker buildx build . \
+            --platform linux/amd64 --provenance=false --sbom=false \
+            --build-arg "GIT_COMMIT=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --tag "$IMAGE:$TAG" --push --metadata-file "$RUNNER_TEMP/build.json"
+          digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/build.json")
+          echo "IMAGE_DIGEST=$digest" >> "$GITHUB_ENV"
+      - name: Smoke-test the pushed image
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE@$IMAGE_DIGEST"
+          scripts/smoke_image.sh "$IMAGE@$IMAGE_DIGEST" "$GITHUB_SHA" "$VERSION"
+      - name: Package assets
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist" stage="$RUNNER_TEMP/stage"
+          rm -rf "$dist" "$stage" && mkdir -p "$dist" "$stage/bin"
+          cid=$(docker create "$IMAGE@$IMAGE_DIGEST")
+          docker cp "$cid:/usr/local/bin/axe" "$stage/bin/axe"
+          docker rm "$cid" >/dev/null
+          test "$("$stage/bin/axe" --version)" = "axe $VERSION"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$stage/bin/"
+          bin="axe-$TAG-linux-x86_64.tar.gz" skills="axe-skills-$TAG.tar.gz"
+          tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$bin" -C "$stage/bin" axe LICENSE-MIT LICENSE-APACHE README.md
+          tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$skills" -C skills axe
+          cd "$dist"
+          for f in "$bin" "$skills"; do sha256sum "$f" > "$f.sha256"; done
+          sha256sum "$bin" "$skills" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          {
+            echo "axe $VERSION, commit $GITHUB_SHA."
+            echo
+            echo "## Image"
+            echo
+            echo '```'
+            echo "$IMAGE:$TAG@$IMAGE_DIGEST"
+            echo '```'
+            echo
+            echo "## Assets (sha256)"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo
+            echo "The binary is Linux x86_64 (glibc 2.36+). Other platforms install from source:"
+            echo
+            echo '```'
+            echo "cargo install --locked --git https://github.com/$GITHUB_REPOSITORY --tag $TAG axe-os"
+            echo '```'
+            echo
+            echo "Built by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          } > "$RUNNER_TEMP/notes.md"
+          echo "DIST=$dist" >> "$GITHUB_ENV"
+      - name: Publish the GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pre=(); case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          python3 scripts/github_release.py --repo "$GITHUB_REPOSITORY" --tag "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${pre[@]}" "$DIST"/*
+          echo "image: $IMAGE:$TAG@$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io
+
+      # The hlab-ci PR VM is persistent: free this job's outputs (see ci.yml).
+      - name: Free the runner's disk
+        if: always()
+        run: rm -rf target "$RUNNER_TEMP/dist" "$RUNNER_TEMP/stage" && df -B1 /
