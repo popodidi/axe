@@ -1,30 +1,47 @@
-# Harvis taskq workspace
+# axe web dashboard
 
-Read-only Next.js App Router / TypeScript application. All task data stays in
- taskq; the browser uses GET only. No credentials or mutation UI are shipped.
+Read-only Next.js App Router / TypeScript application for an axe server. All
+task data stays in the server; the browser uses GET only. No credentials or
+mutation UI are shipped.
 
 ## Development and checks
 
 Node 24. `npm ci && npm run lint && npm run typecheck && npm test && npm run build`.
 Browser regressions use the production build and a delayed read-only API fixture:
-`npx playwright install chromium && npm run test:browser`.
+`npx playwright install chromium && npm run test:browser` (CI runs it with
+`--workers=1`).
 
 Use Playwright’s default per-user browser cache (on Linux,
-`~/.cache/ms-playwright`) so worktrees using the same browser revision reuse
-one download. Do not set `PLAYWRIGHT_BROWSERS_PATH` to a checkout-local path
-for routine CI or verification. Playwright selects the browser revision for
-each installed package version; dependency installs and test state remain
-local to each worktree. See [browser cache management](https://playwright.dev/docs/browsers#managing-browser-binaries).
-Reports and test results stay ignored inside the worktree.
+`~/.cache/ms-playwright`) so checkouts using the same browser revision reuse
+one download. See [browser cache management](https://playwright.dev/docs/browsers#managing-browser-binaries).
+Reports and test results stay ignored inside the checkout.
 `npm run dev` for development. `npm start` serves the exported build on port
-8080 (`PORT` override). `/healthz` returns `{ok:true}`; `/api/version` returns
-`{commit:...}` from `GIT_COMMIT` (development when unset).
+8080 (`PORT` override) for the browser tests. `/healthz` returns `{ok:true}`.
 
-Release verification follows the [hlab-service runbook](../../docs/operations/runbooks/hlab-service.md).
-Its HTTP check requires the dashboard title, Next.js asset references, no legacy
-Go toggle markup, and working task API/SSE. Quiet uses native system fonts, so
-an Inter reference is not a release requirement. Watch compatibility, readiness,
-image digests and the exact served commit are checked separately by that runbook.
+## Embedded in the server
+
+`npm run build` writes a static export to `web/out`. Building the crate with
+the `embed-ui` feature embeds that directory (`crates/axe/src/web.rs`,
+rust-embed) and `axe server` serves it at `/`; `/api/*`, `/healthz` and
+`/metrics` keep their routes. Build the UI first:
+
+```bash
+(cd web && npm ci && npm run build)
+cargo build --release --features embed-ui
+```
+
+The embedded page reads the API of the server that serves it. A standalone
+build (`npm start`, or any static host) points at a server with `?server=`,
+and that server must list the page's origin in `[server] cors_origins`.
+
+## API types
+
+`lib/api.ts` is generated from the Rust API types (`ts-rs`, cargo feature
+`ts`). `lib/api-contract.ts` checks at typecheck time that every generated
+type satisfies the shape the dashboard reads, so renaming, removing or
+retyping a field the dashboard uses fails `npm run typecheck`. CI fails when
+`lib/api.ts` is stale; regenerate it from the repository root with
+`AXE_BLESS=1 cargo test -p axe-os --features ts --test ts_bindings`.
 
 ## URL contract
 
@@ -34,7 +51,7 @@ The single `/` route uses query parameters, preserved across client navigation:
 | --- | --- | --- |
 | view | tasks | Tasks, Routines, Bots, Stats or Cost; legacy `overview`, `ops` and `live` redirect to Tasks |
 | project | empty | Exact filter across views |
-| state | active | Tasks only: `active` hides done; `all` includes done, or exact taskq status |
+| state | active | Tasks only: `active` hides done; `all` includes done, or exact server status |
 | status | empty | Routines only: empty is All; `enabled`, `paused` or `archived` |
 | q | empty | Case insensitive search: Task ID/title/spec |
 | days | 7 | Stats: 7, 30, 90 UTC calendar days through today, or custom; bot stats: 7, 30 or 90 |
@@ -48,7 +65,8 @@ The single `/` route uses query parameters, preserved across client navigation:
 | botrun | empty | Bot run ID whose log overlay is open (`/api/bot-runs/:id/log`) |
 | focus | empty | Focused task row ID |
 | tab | spec | Task: spec, events, runs, artifacts. Bot: profile (default), wakes, runs, events, stats |
-| taskq | http://taskq.hlab | API base URL; browser origin must be allowed by taskq CORS |
+| server | serving origin | API base URL; another origin must be allowed by the server's CORS |
+| cmd | `{cmd}` | Command-hint template; `{cmd}` is the quoted command, `{project}` the quoted project |
 | listY, detailY | 0 | Pane scroll offsets in CSS pixels |
 
 View, filter, task, page, and tab changes push history. Row focus replaces
@@ -69,7 +87,7 @@ Tasks and Stats; live runs and Watch remain in its Runs tab.
 ### Cost view
 
 Cost makes one read, `GET /api/stats/cost?since=&until=&step_days=&options=1` (plus any of `project`, `source`, `bot`, `routine`, `agent`, `model`, `workload`, `breakdown`), whatever the run count;
-taskq aggregates server-side over runs that ended in the period (`days`: 7, 30 or
+the server aggregates over runs that ended in the period (`days`: 7, 30 or
 90 UTC calendar days). Every breakdown covers every run, so their totals agree.
 Cost is an API-price estimate (Claude Code's `modelUsage.costUSD`), not a bill,
 and token types have no per-type cost. Output includes thinking, so the token
@@ -77,8 +95,8 @@ table separates them. Runs without usage are unknown and shown as such, never
 as zero: agents that report no result event (Codex today), killed runs, logs
 that are gone, and resumes whose session counters went backwards. A killed run's
 spend lands on the session's next known run. Cold or warm compares cache read
-to cache write on the run's first main-thread API call. Styled with the Harvis
-Quiet brand guide (`docs/reference/brand-guide.md`) through the shared tokens.
+to cache write on the run's first main-thread API call. Styled through the
+shared theme tokens.
 
 Its Over time charts reuse the Stats charts and buckets (`step_days` 1 up to 31
 days, else 7, anchored on the range start). A period with unknown runs, or one
@@ -108,7 +126,7 @@ concurrent spans additively; unfinished or invalid spans make runtime unknown.
 Counts use records, never the resettable run budget. Notes and repeated state
 snapshots are not escalation or completion transitions.
 
-Trends (task 235), below completions per day, plot each of the four metrics
+Trends, below completions per day, plot each of the four metrics
 over time: the mean per UTC completion bucket with a shaded ±1 SD band and the
 known sample count (n) per bucket. Ranges up to 31 days use daily buckets;
 longer ranges use seven-day weeks from the range start (the last may be
@@ -136,10 +154,8 @@ never converted to zero. Individual timelines and metrics remain in task detail.
 Read-only API contracts: `/api/tasks?all=1` is unpaginated;
 `/api/stats/history` returns, in one response, every task's actual state
 transitions and `run_start` events (ID order, bodies omitted), the IDs of
-tasks that are Routine occurrences, and every run's timing and agent (uncapped,
-task 381). Stats makes exactly this one history read,
-whatever the task or run count, never a read per task (task 364 replaced a
-per-task events and routine-backlink fan-out that grew to 700+ requests). Every
+tasks that are Routine occurrences, and every run's timing and agent (uncapped). Stats makes exactly this one history read,
+whatever the task or run count, never a read per task. Every
 matching done task whose creation precedes the range end is a candidate.
 Changing view, range or project aborts the in-flight read; stale results are
 discarded. A failed read shows History unavailable. Missing or invalid
@@ -159,7 +175,7 @@ project, whatever the scope. All is the default; Normal or Routine scopes the
 key figures, charts, tables, open and unknown-completion counts. Switching
 type, or grouping by task type, reuses loaded history.
 
-Brand guide: `docs/reference/brand-guide.md` (Quiet), using system/mono text,
+Theme: system/mono text,
 neutral bars with legends and exact counts, borderless sections, compact spacing and table primitives
 in both themes. Unit fixtures cover cohort boundaries, accounting, buckets,
 percentiles, unknowns and read bounds; browser fixtures cover ranges/navigation,
@@ -168,7 +184,7 @@ split controls, summaries, keyboard use, narrow/wide layouts and all load states
 
 ### Bots
 
-Generic bot monitoring (`docs/decisions/taskq-bots.md`, Dashboard); nothing is
+Generic bot monitoring; nothing is
 specific to one bot. Read-only and metadata-only: wakes come back with message
 text redacted, `/api/bots/:name/activity` carries no text, file or chat ids,
 and the dashboard never calls the inbox or any write.
@@ -181,7 +197,7 @@ failures. Search and project filter apply. A row opens `?bot=<name>` in place
 of the list; Back or Esc returns, focusing the row.
 
 Detail facts (project, agent, live run, next wake, session, failures)
-and `hv <project> taskq bot show|log <name>` commands sit above five tabs:
+and `axe bot show|log <name>` commands sit above five tabs:
 
 - **profile:** identity, conduct and notes, each with its edit history (the
   `identity`/`conduct`/`notes` events, rendered as diffs);
@@ -202,7 +218,7 @@ and `hv <project> taskq bot show|log <name>` commands sit above five tabs:
   Each read is the latest 1000 records; a read at the cap is reported as
   possibly truncated.
 
-Detail reads (bot, wakes, events, runs, activity) reload on every taskq change
+Detail reads (bot, wakes, events, runs, activity) reload on every server change
 (SSE `change`, or polling while disconnected), like the task list.
 `tests/bots.spec.ts` covers the list (both themes, wide and phone), the detail
 tabs, stats and the bot run log overlay; `lib/bot-stats.test.ts` the metrics.
@@ -215,10 +231,10 @@ Clicking anywhere in a task row opens it; the title button stays the keyboard
 target. Keyboard (outside form controls): j/k focus rows, Enter opens the
 focused row (Tasks), Esc closes the topmost pane (task, then routine, then bot) and drops `tab`, / focuses search. Views are ordered Tasks, Routines, Bots, Stats, Cost: g then t/r/b/s/c; legacy g then v opens Tasks.
 Shortcut hints sit beside each view link and in its tooltip. The refresh
-button next to the connection state reloads taskq data immediately. On phones
+button next to the connection state reloads server data immediately. On phones
 the navigation collapses into a top bar and detail occupies the full workspace.
 
-Layout: the chevron beside the `Harvis` brand collapses the navigation rail to
+Layout: the chevron beside the `axe` brand collapses the navigation rail to
 a 48px strip (view initials, connection dot, refresh, theme glyph; labels stay
 the accessible names). Three dividers (`role="separator"`,
 `components/dashboard/detail-resizer.tsx`) resize panes by dragging, arrow keys
@@ -227,7 +243,7 @@ right edge (216px default, 168-320px, yielding to 22vw on narrow desktops),
 the routine pane's left edge (392px, 320-560px) and the detail pane's left
 edge (48%, at least 360px, leaving the list 224px). CSS enforces the bounds at
 any viewport size. The collapsed state and all three widths persist in
-`localStorage` (`harvis-layout`) and apply before first paint
+`localStorage` (`axe-layout`) and apply before first paint
 (`lib/layout-script.ts`). Only the collapse toggle animates the rail. Phones
 ignore all of it and keep the top bar and full-width panes with Back.
 
@@ -249,49 +265,25 @@ into Details. No metadata fetches are made. `tests/compact-evidence.spec.ts`
 checks collapsed geometry and expanded controls at four widths in both themes;
 `EVIDENCE_DIR` optionally saves synthetic screenshots and measurements.
 
-Copyable commands use `hv` (`hv/src/main.rs`; `hv <project> <cmd...>` runs
-the command in `~/workspace/<project>` on hlab over ssh): `hv <project> taskq
-log <id>`, `hv <project> taskq show <id>`, `hv <project> tail -f <log_path>`,
-and for ended runs `hv <project> sh -c 'cd ~/workspace/.worktrees/<project>/task-<id>--work && exec claude --resume <sid>'`
+Copyable commands render through the `cmd` template (default `{cmd}`, the bare
+command): `axe log <id>`, `axe show <id>`, `tail -f <log_path>`, and for ended
+runs `sh -c 'cd ~/workspace/.worktrees/<project>/task-<id>--work && exec claude --resume <sid>'`
 (or `exec codex resume <sid>`). Dispatcher sessions run in the task worktree
-(`taskq/src/worktree.rs`) and Claude Code finds sessions by cwd, so resume
-starts there rather than in `~/workspace/<project>`. Arguments are quoted with hv's rule (safe words bare, anything
+(`crates/axe/src/worktree.rs`) and Claude Code finds sessions by cwd, so resume
+starts there. A template such as `?cmd=ssh%20agent-host%20{cmd}` runs them on the
+agent host, and `{project}` passes the project to a per-project wrapper.
+Arguments are quoted for a POSIX shell (safe words bare, anything
 else single-quoted); `lib/model.ts` builds them and `lib/model.test.ts` pins
 the exact strings.
 
 The sidebar's Light theme toggle (`aria-pressed`) switches palettes. Dark is
-the default; the choice is stored in localStorage `harvis-theme` (wrapped in
+the default; the choice is stored in localStorage `axe-theme` (wrapped in
 try/catch) and an inline head script (`lib/theme-script.ts`) sets
 `data-theme="light"` on `<html>` before first paint.
 
 Specs and event bodies use GFM, sanitized HTML, and highlighted fenced code;
 spec edit unified diffs use addition/deletion colors. Artifact links permit
 HTTP(S) only. Clipboard has a textarea fallback for plain HTTP deployments.
-
-## Deployment
-
-The dashboard ships as an immutable image through tagged CD (`infra/cd`,
-service `dashboard`). `Dockerfile` installs locked dependencies and exports
-Next.js in a build stage; the runtime stage holds only `node`, the export and
-`server.mjs`, with the source commit embedded as `GIT_COMMIT` (served by
-`/api/version`). It has no git, source credentials or package manager, and
-runs as uid 1000 with a read-only root filesystem.
-
-Each `main` push touching `infra/dashboard/**` runs
-`.github/workflows/publish-dashboard-image.yml`: it pushes
-`ghcr.io/popodidi/harvis-dashboard:sha-<commit>-run-<id>-<attempt>`, pulls it
-back by digest, runs `smoke_image.sh` (offline boot, `/healthz`, embedded commit,
-export, no build tooling), and uploads the `dashboard-image-release` provenance
-artifact. Publication never deploys. Delivery releases a merged commit by
-pushing `deploy/dashboard/YYYYMMDD.N`; CD substitutes the verified digest for
-the `:cd-release` placeholder in `deployment.yaml` and the kubelet pulls with
-`harvis-ghcr-read`. Ingress remains `harvis.hlab`; probes and `/api/version`
-are preserved. To check an image locally:
-
-```bash
-docker build --build-arg GIT_COMMIT="$(git rev-parse HEAD)" -t harvis-dashboard:local infra/dashboard
-infra/dashboard/smoke_image.sh harvis-dashboard:local "$(git rev-parse HEAD)"
-```
 
 ## Task sorting
 
@@ -307,9 +299,7 @@ the Sort menu still supports the original newest/oldest options.
 
 ## Design system
 
-Harvis Quiet: `docs/reference/brand-guide.md`, `docs/reference/taskq-design.md`
-(the dashboard contract) and `docs/quiet-design-tokens.css`, with owner
-overrides (20261103, ported from tn-eng-dashboard): sections are bordered
+The neutral axe theme: sections are bordered
 neutral cards on a `--surface-nav` canvas, tables have a filled header row and
 row hairlines, the sidebar and panes are `--surface-1` with one hairline,
 selects are the styled listbox in `components/ui/select.tsx`, and restrained
@@ -321,7 +311,7 @@ borderless: group with space, alignment and weight before any line or fill.
 Dark by default with the light palette behind `data-theme="light"`; the native
 system font stack (no remote font); monospace only for ids, commands, paths,
 code and timestamps. Composition: the navigation rail on `--surface-nav` with no
-border (`Harvis`, view links with key hints, connection, refresh, taskq base,
+border (`axe`, view links with key hints, connection, refresh, server base,
 theme toggle; the active view has a neutral fill and 600 weight); one 24px page
 heading per view; filters with visible sentence-case captions; tables with no
 header band or grid lines, about 32px rows, neutral hover and selected fills, a
@@ -334,7 +324,7 @@ with legends and exact counts. Diffs keep success/danger with `+`/`-`.
 
 | Layer | Path | Rule |
 | --- | --- | --- |
-| Brand tokens | `app/styles/brand-tokens.css` | Verbatim copy of `docs/quiet-design-tokens.css`; `lib/tokens.test.ts` fails on any drift. Fix with `cp docs/quiet-design-tokens.css infra/dashboard/app/styles/brand-tokens.css`. `docs/design-tokens.css` is no longer used by the dashboard. |
+| Theme tokens | `app/styles/brand-tokens.css` | The canonical neutral palette, type and spacing; the only other place literal colors live is `accent-tokens.css`. |
 | Breakpoints | `app/styles/breakpoints.module.css` | `@value` query tokens imported by feature modules; px allowed only here. |
 | App tokens | `app/styles/app-tokens.css` | Only `var(--brand-token)` expressions (plus `1px`, unitless numbers, and durations). |
 | Primitives | `components/ui/` | CSS modules on tokens: Button (primary, secondary, ghost, link, nav; `sm` default, `md` opt-in, `icon` press), Tag, StatusPill/StatusIcon, Panel/PanelHead/PageTitle (borderless sections), SectionLabel, Table/Th/Td, Input/Search/Select, Filter, CodeBlock/DiffBlock, Prose, EmptyState, Skeleton, Alert, Kbd, LiveDot, Tabs, Commands/Command/CopyButton. |
@@ -368,7 +358,7 @@ App tokens:
 
 ### Interaction and motion
 
-Implements `docs/reference/taskq-design.md`. Durations are Quiet tokens, which
+Durations are Quiet tokens, which
 reduced motion zeroes; JS timers read the same tokens (`lib/motion.ts`) and
 cleanup never waits for `transitionend`/`animationend`. The newest action wins.
 
@@ -441,7 +431,7 @@ Agent messages use sanitized Markdown; commands, outputs and unknown records
 use escaped text. Long output is collapsed behind an expand control.
 
 The viewer polls `GET /api/runs/<id>/log` once per second with at most one
-request outstanding. This avoids another long-lived SSE thread in taskq's
+request outstanding. This avoids another long-lived SSE thread in the server's
 thread-per-connection server. Existing task-change SSE and terminal commands
 remain unchanged. Initial reads return recent complete records; `before=<byte>`
 loads older history and `after=<byte>` follows. Both carry the returned
@@ -471,11 +461,11 @@ a reset run budget. No schema migration is needed.
 
 ### Access and sensitive output
 
-This preserves taskq's existing **network-only read boundary**: GET is readable
+This preserves the server's existing **network-only read boundary**: GET is readable
 without the write token and browser reads use the same CORS allowlist. CORS is
-not authentication. Anyone able to reach taskq can now read complete recorded
+not authentication. Anyone able to reach the server can read complete recorded
 agent logs, including prompts, command output, internal paths and any secrets
-an agent printed. There is no automatic redaction. Do not expose taskq or its
+an agent printed. There is no automatic redaction. Do not expose the server or its
 logs to an untrusted network. Public screenshot evidence must use synthetic
 fixtures only. A wider-access deployment needs a separate authentication and
 redaction decision before rollout.
@@ -485,14 +475,9 @@ redaction decision before rollout.
 From the repository root, run the full checks:
 
 ```bash
-(cd taskq && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --locked)
-cd infra/dashboard && npm ci && npm run lint && npm run typecheck && npm test && npm run build
-```
-
-From the repository root, run browser fixtures:
-
-```bash
-cd infra/dashboard && npx playwright install chromium && npm run test:browser
+cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
+(cd web && npm ci && npm run lint && npm run typecheck && npm test && npm run build)
+(cd web && npx playwright install chromium && npm run test:browser -- --workers=1)
 ```
 
 `tests/density.spec.ts` pins the compact layout contract (see Compact defaults).
@@ -503,50 +488,20 @@ exercises bounded buffering. Rust `run_log` and `server` tests cover real file
 appends, partial records, oversized records, cursor retries, pagination, run
 isolation and API validation. `dispatch` checks preserved logs after budget resets.
 
-For a browser against the actual taskq API (three terminals, all from repo root):
+For a browser against a real axe server (three terminals, all from repo root):
 
 ```bash
-cargo build --manifest-path taskq/Cargo.toml
-PORT=18080 STATIC_DIR=infra/dashboard/out node infra/dashboard/server.mjs
-python3 infra/dashboard/tests/run_log_fixture.py
+cargo build
+PORT=18080 STATIC_DIR=web/out node web/server.mjs
+python3 web/tests/run_log_fixture.py
 ```
 
 Open the URL printed by the fixture. It starts a temporary server with
 dispatch off, creates synthetic Claude/Codex streams and two finished
 attempts, and removes its temporary database/logs on Ctrl-C. Stop the static
-server with Ctrl-C too. Screenshots use `docs/reference/brand-guide.md` (Quiet):
-neutral canvas, system body text, monospace command output, neutral disclosure
+server with Ctrl-C too. Screenshots show the neutral theme:
+canvas, system body text, monospace command output, neutral disclosure
 controls and local danger color for errors, in both themes.
-
-### API-first rollout (ops authorization required)
-
-1. Obtain a separate explicit ops decision for the taskq-server/dispatcher
-   restart. It is excluded from the automatic `vm-service` target. Arrange a
-   quiet dispatcher window first: stopping the server can interrupt active
-   agents.
-2. In a checkout of the approved merged revision, build with
-   `cargo build --release --locked --manifest-path taskq/Cargo.toml`. Preserve
-   the currently installed binary for rollback. Under that ops authorization,
-   run `install -m 0755 taskq/target/release/taskq ~/.cargo/bin/taskq` and
-   `systemctl --user restart taskq-server`, then
-   `systemctl --user is-active taskq-server` and
-   `journalctl --user -u taskq-server -n 50 --no-pager`.
-3. Before every dashboard release, run
-   `python3 infra/dashboard/watch_preflight.py --base http://taskq.hlab`
-   from the repository root. This selects an existing recorded run and checks
-   the real log route without printing logs. A missing route fails the feature
-   preflight: stop release and block for ops. A supported route with a missing
-   log passes capability checking but still requires the post-rollout Watch
-   check. Browser fixtures are not deployed compatibility evidence. Upgrade
-   the API first under separate authorization.
-4. Queue a separate dashboard `hlab-service` delivery (`mode: tagged`,
-   `service: dashboard`) and follow the runbook's tagged mode: release tag,
-   workflow, ledger, readiness, digest and version checks. Check Watch on
-   both surfaces and a finished attempt after rollout.
-5. For rollback, request a tagged rollback using that runbook; if the server
-   also needs reverting, ops restores the saved binary and explicitly restarts
-   `taskq-server` in the agreed quiet window. Existing run records and log files
-   remain compatible. Do not run the general provisioning script for this change.
 
 ### Failure and recovery contract
 
@@ -594,10 +549,6 @@ to routine (or Esc) closes it, then Close (or Esc) closes the routine. Below
 1600px wide the list hides while both panes are open. Generated task detail
 links back to the routine and keeps the task stacked.
 Paused/archived routines retain history and do not show a future trigger.
-Management stays in `taskq routine`; the browser has no write credentials.
+Management stays in `axe routine`; the browser has no write credentials.
 Routine reads poll every five seconds with one request in flight and retain
 stale data on errors. History pages contain at most 100 occurrences.
-
-The API must ship first. For the authorized schema v10 rollout, follow
-`docs/operations/runbooks/taskq-routines-upgrade.md`, then the normal dashboard
-tagged-CD runbook. Task 140 explicitly combines both deliveries.

@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { compactFixture, references } from "./compact-fixture";
 import { choose, mockDesk, runs } from "./fixtures";
 import { runCommands } from "../lib/model";
-const base = "/?taskq=http://taskq.test&task=3";
+const base = "/?server=http://axe.test&task=3";
 test("run disclosure preserves full results and exact commands with mouse and keyboard", async ({
   page,
 }) => {
@@ -113,7 +113,7 @@ test("artifact search, types, date order, lossless details and copy", async ({
 });
 test("empty runs and artifacts stay honest", async ({ page }) => {
   await mockDesk(page);
-  await page.route("http://taskq.test/api/runs?*", (r) =>
+  await page.route("http://axe.test/api/runs?*", (r) =>
     r.fulfill({ json: [] }),
   );
   await page.goto(base + "&tab=runs");

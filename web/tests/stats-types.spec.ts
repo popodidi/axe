@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { statsTypesFixture } from "./stats-types-fixture";
 import { choose } from "./fixtures";
-const base = "/?taskq=http://taskq.test&view=stats";
+const base = "/?server=http://axe.test&view=stats";
 const reads = (page: Page) => {
   const urls: string[] = [];
   page.on("request", (r) => {
@@ -45,7 +45,7 @@ test("type filter scopes the whole report and reuses classification", async ({
   );
   const before = urls.length;
   // One stats history read classifies every task: no per-task reads.
-  expect(urls).toEqual(["http://taskq.test/api/stats/history"]);
+  expect(urls).toEqual(["http://axe.test/api/stats/history"]);
 
   await choose(page.getByLabel("Task type", { exact: true }), "normal");
   await expect(page).toHaveURL(/type=normal/);
@@ -77,7 +77,7 @@ test("type filter scopes the whole report and reuses classification", async ({
   expect(urls.length).toBe(before);
 
   // Composes with project and reload.
-  await choose(page.getByLabel("project", { exact: true }), "rake");
+  await choose(page.getByLabel("project", { exact: true }), "orbit");
   await expect(scope).toContainText("25 completed routine cohort tasks");
   await page.reload();
   await expect(page.getByLabel("Task type", { exact: true })).toHaveAttribute(
@@ -137,7 +137,7 @@ for (const width of [1440, 390])
     test(`type control ${width} ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 1400 });
       await page.addInitScript(
-        (t) => localStorage.setItem("harvis-theme", t),
+        (t) => localStorage.setItem("axe-theme", t),
         theme,
       );
       await statsTypesFixture(page);

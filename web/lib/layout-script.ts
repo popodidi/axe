@@ -2,7 +2,7 @@
 // the nav rail, the routine pane and the task detail pane. layoutScript in
 // app/layout.tsx applies it before first paint, like the theme; lib/layout.ts
 // reads and updates it.
-export const layoutKey = "harvis-layout";
+export const layoutKey = "axe-layout";
 export const detailSizeVar = "--detail-size";
 export const paneVars = {
   detail: "--detail-size",

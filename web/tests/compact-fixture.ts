@@ -13,7 +13,7 @@ export const references = [
 ];
 export async function compactFixture(page: import("@playwright/test").Page) {
   await mockDesk(page);
-  await page.route("http://taskq.test/api/tasks/3/events", (route) =>
+  await page.route("http://axe.test/api/tasks/3/events", (route) =>
     route.fulfill({
       json: references.map((body, i) => ({
         id: i,
@@ -27,7 +27,7 @@ export async function compactFixture(page: import("@playwright/test").Page) {
       })),
     }),
   );
-  await page.route("http://taskq.test/api/runs?*", (route) =>
+  await page.route("http://axe.test/api/runs?*", (route) =>
     route.fulfill({
       json: [
         runs[0],

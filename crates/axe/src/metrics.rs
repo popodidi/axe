@@ -32,6 +32,9 @@ pub fn route(path: &[String]) -> &'static str {
     let p: Vec<_> = path.iter().map(String::as_str).collect();
     match p.as_slice() {
         ["healthz"] => "/healthz",
+        // The embedded dashboard (`embed-ui`).
+        [] | ["_next", ..] => "/ui",
+        [file] if file.ends_with(".html") || file.ends_with(".txt") => "/ui",
         ["metrics"] => "/metrics",
         ["api", "tasks"] => "/api/tasks",
         ["api", "tasks", _] => "/api/tasks/:id",

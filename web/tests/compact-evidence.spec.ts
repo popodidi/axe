@@ -7,12 +7,12 @@ for (const theme of ["dark", "light"])
     test(`compact evidence ${theme} ${width}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 1000 });
       await page.addInitScript(
-        (t) => localStorage.setItem("harvis-theme", t),
+        (t) => localStorage.setItem("axe-theme", t),
         theme,
       );
       await compactFixture(page);
       for (const tab of ["runs", "artifacts"]) {
-        await page.goto(`/?taskq=http://taskq.test&task=3&tab=${tab}`);
+        await page.goto(`/?server=http://axe.test&task=3&tab=${tab}`);
         const detail = page.getByLabel("Task detail", { exact: true });
         await expect(detail).toContainText(
           tab === "runs" ? "npm run test:browser" : "layout-17.png",

@@ -1,9 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 import { mockDesk } from "./fixtures";
-// Quiet interaction contract (docs/reference/taskq-design.md): pane focus
+// Interaction contract: pane focus
 // return, inert exit, newest-action-wins, restored geometry without motion,
 // copy feedback, and reduced motion.
-const base = "/?taskq=http://taskq.test&view=tasks&state=all";
+const base = "/?server=http://axe.test&view=tasks&state=all";
 const detail = "#task-detail";
 const rowButton = (page: Page, id: number) =>
   page.locator(`#task-${id} button`);
@@ -108,19 +108,19 @@ test("rapid open, close and reselect: the newest action wins", async ({
   await page.keyboard.press("Escape");
   await rowButton(page, 5).click();
   await expect(page.locator(`${detail} h2[tabindex="-1"]`)).toHaveText(
-    "Ship tn-desk weekly digest",
+    "Ship tundra-desk weekly digest",
   );
   await expect(page.locator(detail)).toHaveCount(1);
   // The transition settles; no stale exit unmounts the new content.
   await expect(page.locator(detail)).not.toHaveAttribute("data-phase", /.+/);
   await expect(page.locator(detail)).not.toHaveAttribute("inert", "");
   await expect(page.locator(`${detail} h2[tabindex="-1"]`)).toHaveText(
-    "Ship tn-desk weekly digest",
+    "Ship tundra-desk weekly digest",
   );
   // Switching tasks replaces content without closing and reopening the pane.
   await rowButton(page, 7).click();
   await expect(page.locator(`${detail} h2[tabindex="-1"]`)).toHaveText(
-    "Triage semx-desk intake",
+    "Triage summit-desk intake",
   );
   await expect(page.locator(detail)).not.toHaveAttribute("data-phase", /.+/);
 });
@@ -131,7 +131,7 @@ test("restored geometry paints without animation; Back/Forward is immediate", as
   await mockDesk(page);
   await page.addInitScript(() =>
     localStorage.setItem(
-      "harvis-layout",
+      "axe-layout",
       JSON.stringify({ nav: "collapsed", detail: 500 }),
     ),
   );
@@ -219,7 +219,7 @@ test("Copy confirms only after clipboard success and keeps its width", async ({
     "Copied command",
   );
   expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(
-    "taskq log 3",
+    "axe log 3",
   );
   // Label resets after 1.5s.
   await expect(copy.getByText("Copied")).toHaveAttribute("data-hidden", "true", {

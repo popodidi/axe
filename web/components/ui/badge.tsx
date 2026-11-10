@@ -23,7 +23,7 @@ export function Tag({
     </span>
   );
 }
-// Quiet task-state symbols (docs/reference/taskq-design.md). Decorative: the
+// Task-state symbols. Decorative: the
 // adjacent label carries the meaning. Running is static, never rotating.
 const icons: Record<string, ReactNode> = {
   pending: <circle cx="8" cy="8" r="5.5" />,

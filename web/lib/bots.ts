@@ -1,5 +1,5 @@
 import { type Run, shellQuote } from "./model";
-// Read shapes of the taskq bot API (taskq/src/bot.rs). Message text is never
+// Read shapes of the axe bot API (crates/axe/src/bot.rs). Message text is never
 // read: wakes come back redacted and `activity` is metadata only.
 export type BotSummary = {
   name: string;
@@ -88,7 +88,7 @@ export type TaskAction = {
   kind: string;
 };
 export type Activity = { messages: MessageMeta[]; task_actions: TaskAction[] };
-/** Slot use the dispatcher reports in `/api/admission` (taskq `pools`). */
+/** Slot use the dispatcher reports in `/api/admission` (axe `pools`). */
 export type Slots = { used: number; total: number | null; configured?: number | null };
 export type Admission = {
   admitting: boolean | null;
@@ -109,13 +109,13 @@ export function poolSummary(a: Admission | null) {
 export function botHold(a: Admission | null) {
   return a?.bots_admitting === false ? a.bots_reason || "unknown" : null;
 }
-/** Every read is the latest this many records (the taskq cap). */
+/** Every read is the latest this many records (the server cap). */
 export const BOT_READ_LIMIT = 1000;
 export const botTabs = ["profile", "wakes", "runs", "events", "stats"];
 export function botStatus(b: Pick<BotSummary, "state" | "attention">) {
   return b.attention ? "Needs attention" : b.state === "paused" ? "Paused" : "Active";
 }
-/** The persistent bot worktree (taskq/src/dispatch/bots.rs `bot-<name>`). */
+/** The persistent bot worktree (crates/axe/src/dispatch/bots.rs `bot-<name>`). */
 export const botWorktree = (b: Pick<BotSummary, "project" | "name">) =>
   `~/workspace/.worktrees/${shellQuote(b.project)}/bot-${b.name}`;
 /** A bot run in the task-run shape, so `RunList` renders it unchanged. */

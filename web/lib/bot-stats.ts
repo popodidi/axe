@@ -52,7 +52,7 @@ export function trendOf(
     };
   });
 }
-/** Run outcome from taskq's `stop_reason` (bot::finish). */
+/** Run outcome from the server's `stop_reason` (bot::finish). */
 export function runOutcome(r: BotRun) {
   if (!r.ended_at) return "live";
   if (r.stop_reason === "exit" && r.exit_code === 0) return "ok";
@@ -88,7 +88,7 @@ export function replyLatencies(activity: Activity, range: DateRange) {
 }
 /**
  * Follow-up runs: a run whose prompt delivered a wake created while the
- * previous run of the bot was live (taskq's `during_previous`), i.e. a message
+ * previous run of the bot was live (the server's `during_previous`), i.e. a message
  * no hook took mid-run.
  */
 export function followUpRuns(runs: BotRun[], wakes: Wake[]) {

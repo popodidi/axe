@@ -3,7 +3,7 @@ import { mockDesk, tasks } from "./fixtures";
 // Task states are restrained tinted labels (owner override, accent-tokens.css):
 // pending purple, running blue, held/dependency wait amber, escalated danger,
 // done teal. Each keeps a decorative symbol plus readable text.
-const base = "/?taskq=http://taskq.test";
+const base = "/?server=http://axe.test";
 const list = [
   ...tasks,
   { ...tasks[3], id: 30, title: "Stored blocked hold", state: "blocked" },
@@ -48,7 +48,7 @@ for (const theme of ["dark", "light"])
     }) => {
       await page.setViewportSize({ width, height });
       await page.addInitScript(
-        (t) => localStorage.setItem("harvis-theme", t),
+        (t) => localStorage.setItem("axe-theme", t),
         theme,
       );
       await mockDesk(page, list);
@@ -62,10 +62,10 @@ for (const theme of ["dark", "light"])
       for (const [title, state] of [
         ["Stored blocked hold", "blocked"],
         ["Dependency wait", "blocked"],
-        ["Rotate hlab registry certificate", "escalated"],
+        ["Rotate lab registry certificate", "escalated"],
         ["Verify Lark reply ledger fix", "pending"],
         ["Make dashboard Overview a desk page", "in_progress"],
-        ["Archive amux experiments", "done"],
+        ["Archive alder experiments", "done"],
       ] as const) {
         await expect(pill(title)).toHaveAttribute("data-state", state);
         const [fg, bg] = await resolve(page, ...expected[state]);

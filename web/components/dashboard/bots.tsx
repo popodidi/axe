@@ -22,7 +22,7 @@ import {
 } from "../ui";
 import { RunList } from "./run-card";
 import { BarChart, TrendChart } from "./stats-charts";
-import { formatDuration, hv } from "../../lib/model";
+import { command, formatDuration } from "../../lib/model";
 import { dateRange } from "../../lib/stats";
 import { botStats } from "../../lib/bot-stats";
 import {
@@ -44,7 +44,7 @@ import {
   profileHistory,
 } from "../../lib/bots";
 import styles from "./bots.module.css";
-// Generic bot monitoring (docs/decisions/taskq-bots.md, Dashboard). Read-only
+// Generic bot monitoring. Read-only
 // and metadata-only: wakes arrive redacted, activity carries no message text.
 const when = (s: string | null) => (s ? new Date(s).toLocaleString() : "—");
 const date = (n: number) => new Date(n).toISOString().slice(0, 10);
@@ -87,7 +87,7 @@ export type BotListData = {
 };
 /**
  * The bot list and its per-row extras: live runs (one read) and the latest
- * message times (one metadata read per bot). Reloads on every taskq change.
+ * message times (one metadata read per bot). Reloads on every server change.
  */
 export function useBots(base: string, enabled: boolean, revision: number) {
   const [state, setState] = useState<BotListData>({
@@ -162,7 +162,7 @@ export function BotList({
         <Panel aria-label="Bots">
           <PanelHead
             label="Bots"
-            meta={[poolSummary(admission), "Read-only · manage with taskq bot"]
+            meta={[poolSummary(admission), "Read-only · manage with axe bot"]
               .filter(Boolean)
               .join(" · ")}
           />
@@ -238,7 +238,7 @@ export function BotList({
           </Table>
           {!filtered?.length && (
             <EmptyState>
-              {bots.length ? "No matching bots" : "No bots in taskq yet."}
+              {bots.length ? "No matching bots" : "No bots yet."}
             </EmptyState>
           )}
         </Panel>
@@ -366,13 +366,13 @@ export function BotDetail({
           <Commands>
             <Command
               label="show"
-              command={hv(d.bot.project, "taskq", "bot", "show", name)}
+              command={command(d.bot.project, ["axe", "bot", "show", name])}
               copyLabel="Copy bot show"
               onCopy={onCopy}
             />
             <Command
               label="log"
-              command={hv(d.bot.project, "taskq", "bot", "log", name)}
+              command={command(d.bot.project, ["axe", "bot", "log", name])}
               copyLabel="Copy bot log"
               onCopy={onCopy}
             />

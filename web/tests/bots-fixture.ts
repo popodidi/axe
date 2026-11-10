@@ -9,7 +9,7 @@ import type {
   BotSummary,
   Wake,
 } from "../lib/bots";
-// Read-only taskq bot API fixture: two generic bots, one with a live run and a
+// Read-only bot API fixture: two generic bots, one with a live run and a
 // week of runs, wakes, events and message metadata relative to today (UTC).
 const DAY = 86400000;
 const today = Math.floor(Date.now() / DAY) * DAY;
@@ -17,7 +17,7 @@ const today = Math.floor(Date.now() / DAY) * DAY;
 export const ago = (day: number, h = 0, m = 0, s = 0) =>
   new Date(today - day * DAY + h * 3600000 + m * 60000 + s * 1000).toISOString();
 const summary = (b: Partial<BotSummary> & { name: string }): BotSummary => ({
-  project: "harvis",
+  project: "atlas",
   agent: "claude",
   state: "active",
   attention: false,
@@ -37,7 +37,7 @@ export const bots: BotSummary[] = [
   }),
   summary({
     name: "watch-bot",
-    project: "rake",
+    project: "orbit",
     state: "paused",
     attention: true,
     failures: 3,
@@ -74,8 +74,8 @@ const run = (
   ended_at: end,
   exit_code: end ? 0 : null,
   stop_reason: end ? "exit" : null,
-  log_path: `/home/harvis/.local/state/taskq/logs/bot-ops-bot-${id}.log`,
-  current_activity: end ? "taskq bot tg send" : "gh pr checks 12",
+  log_path: `/home/agent/.local/state/axe/logs/bot-ops-bot-${id}.log`,
+  current_activity: end ? "axe bot tg send" : "gh pr checks 12",
   last_activity_at: end ?? ago(0, 0, 1),
   live: !end,
   ...extra,
@@ -168,7 +168,7 @@ export async function mockBots(page: Page) {
     headers: { "Access-Control-Allow-Origin": "*" },
   });
   // Task slots are full while a bot still runs in its own pool (task 345).
-  await page.route("http://taskq.test/api/admission", async (route) => {
+  await page.route("http://axe.test/api/admission", async (route) => {
     reads.push(route.request().method() + " /api/admission");
     return route.fulfill(
       json({
@@ -184,7 +184,7 @@ export async function mockBots(page: Page) {
       }),
     );
   });
-  await page.route(/^http:\/\/taskq\.test\/api\/(bots|bot-runs)/, async (route) => {
+  await page.route(/^http:\/\/axe\.test\/api\/(bots|bot-runs)/, async (route) => {
     const url = new URL(route.request().url());
     reads.push(route.request().method() + " " + url.pathname + url.search);
     const path = url.pathname.split("/").slice(2);

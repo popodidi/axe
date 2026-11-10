@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import type { StatsRun } from "../lib/stats";
-// Read-only taskq fixture for the desk: an ops queue, live and ended runs,
+// Read-only API fixture for the desk: an ops queue, live and ended runs,
 // per-project counts, and a spec that exercises compact Markdown.
 const spec = `## Outcome
 
@@ -25,14 +25,14 @@ cd infra/dashboard && npm ci && npm test
 const at = (minutes: number) =>
   new Date(Date.UTC(2026, 9, 28, 1, minutes)).toISOString();
 const rows: [number, string, string, string][] = [
-  [1, "Rotate hlab registry certificate", "harvis", "escalated"],
-  [2, "Approve rake backtest rollout", "rake", "escalated"],
-  [3, "Make dashboard Overview a desk page", "harvis", "in_progress"],
-  [4, "Verify Lark reply ledger fix", "harvis", "pending"],
-  [5, "Ship tn-desk weekly digest", "tn-desk", "pending"],
-  [6, "Archive amux experiments", "amux", "done"],
-  [7, "Triage semx-desk intake", "semx-desk", "escalated"],
-  [8, "Close out shipped dashboard rebuild", "harvis", "done"],
+  [1, "Rotate lab registry certificate", "atlas", "escalated"],
+  [2, "Approve orbit backtest rollout", "orbit", "escalated"],
+  [3, "Make dashboard Overview a desk page", "atlas", "in_progress"],
+  [4, "Verify Lark reply ledger fix", "atlas", "pending"],
+  [5, "Ship tundra-desk weekly digest", "tundra-desk", "pending"],
+  [6, "Archive alder experiments", "alder", "done"],
+  [7, "Triage summit-desk intake", "summit-desk", "escalated"],
+  [8, "Close out shipped dashboard rebuild", "atlas", "done"],
 ];
 export const tasks = rows.map(([id, title, project, state]) => ({
   id,
@@ -48,7 +48,7 @@ export const runs = [
   {
     id: 11,
     task_id: 3,
-    project: "harvis",
+    project: "atlas",
     agent: "claude",
     mode: "dispatch",
     started_at: at(20),
@@ -56,21 +56,21 @@ export const runs = [
     exit_code: null,
     current_activity: "npm run test:browser",
     last_activity_at: at(40),
-    log_path: "/home/harvis/.local/state/taskq/logs/run 11.log",
+    log_path: "/home/agent/.local/state/axe/logs/run 11.log",
     session_id: "48205d0b-549b-41f5-8e11-3ff79df32d56",
   },
   {
     id: 10,
     task_id: 4,
-    project: "harvis",
+    project: "atlas",
     agent: "codex",
     mode: "dispatch",
     started_at: at(5),
     ended_at: at(15),
     exit_code: 0,
-    current_activity: "taskq set 4 --state done",
+    current_activity: "axe set 4 --state done",
     last_activity_at: at(15),
-    log_path: "/home/harvis/.local/state/taskq/logs/run-10.log",
+    log_path: "/home/agent/.local/state/axe/logs/run-10.log",
     session_id: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
   },
 ];
@@ -86,7 +86,7 @@ type FixtureTask = (typeof tasks)[number] & {
   not_before?: string | null;
   waiting_on?: number[];
 };
-// Mirrors taskq: stored blocked is an actionable hold; a pending task with
+// Mirrors the server: stored blocked is an actionable hold; a pending task with
 // unfinished prerequisites is a dependency wait without block context.
 const queueOf = (list: FixtureTask[]) =>
   list
@@ -100,7 +100,7 @@ const queueOf = (list: FixtureTask[]) =>
             blocked_by: blockers[t.id]?.[0] ?? null,
             blocked_at: t.updated_at,
             blocker: blockers[t.id]
-              ? `blocked: ${blockers[t.id][1]}\nresolver: ops: decide\nresume: taskq set ${t.id} --state pending`
+              ? `blocked: ${blockers[t.id][1]}\nresolver: ops: decide\nresume: axe set ${t.id} --state pending`
               : null,
           }
         : {
@@ -133,41 +133,41 @@ export function depTasks(finished = false) {
     state: string,
     status = state,
   ) => ({ id, title, project, state, status });
-  const r20 = ref(20, "Build dependency storage", "harvis", "done");
-  const r21 = ref(21, "Build dependency dashboard", "rake", s21);
-  const r22 = ref(22, "Integrate dependencies", "harvis", "blocked");
+  const r20 = ref(20, "Build dependency storage", "atlas", "done");
+  const r21 = ref(21, "Build dependency dashboard", "orbit", s21);
+  const r22 = ref(22, "Integrate dependencies", "atlas", "blocked");
   const r23 = ref(
     23,
     "Document dependencies",
-    "harvis",
+    "atlas",
     "pending",
     finished ? "pending" : "blocked",
   );
   const wait = finished ? [] : [21];
   return [
     {
-      ...base(20, r20.title, "harvis"),
+      ...base(20, r20.title, "atlas"),
       state: "done",
       status: "done",
       waiting_on: [],
       deps: { blocked_by: [], blocks: [r22] },
     },
     {
-      ...base(21, r21.title, "rake"),
+      ...base(21, r21.title, "orbit"),
       state: s21,
       status: s21,
       waiting_on: [],
       deps: { blocked_by: [], blocks: [r22, r23] },
     },
     {
-      ...base(22, r22.title, "harvis"),
+      ...base(22, r22.title, "atlas"),
       state: "escalated",
       status: "escalated",
       waiting_on: wait,
       deps: { blocked_by: [r20, r21], blocks: [] },
     },
     {
-      ...base(23, r23.title, "harvis"),
+      ...base(23, r23.title, "atlas"),
       state: "pending",
       status: r23.status,
       waiting_on: wait,
@@ -191,7 +191,7 @@ export const manyTasks = [
   })),
 ];
 export async function mockDesk(page: Page, list: FixtureTask[] = tasks) {
-  await page.route("http://taskq.test/**", async (route) => {
+  await page.route("http://axe.test/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/stream") {
       await route.abort();

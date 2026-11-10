@@ -112,7 +112,7 @@ export function RunLog({
             s.stopped = true;
             setError(
               response.status === 404 && detail.startsWith("no route for ")
-                ? "API does not support run logs. Ask ops to upgrade the taskq API, then Retry."
+                ? "API does not support run logs. Upgrade the axe server, then Retry."
                 : response.status === 404 && /^(bot )?run \d+ not found$/.test(detail)
                   ? "Run not found. Check the run ID and API address, then Retry."
                   : `Log request failed (HTTP ${response.status}). Check API compatibility and access, then Retry.`,

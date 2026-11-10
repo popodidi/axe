@@ -8,10 +8,10 @@ test("artifacts deduplicate displayed values while events retain every record", 
     id: i + 1, at: "2026-10-30T00:00:00Z", actor: "agent",
     kind: "artifact", body, from_value: null, to_value: null,
   }));
-  await page.route("http://taskq.test/api/tasks/3/events", route => route.fulfill({
+  await page.route("http://axe.test/api/tasks/3/events", route => route.fulfill({
     json: events, headers: { "Access-Control-Allow-Origin": "*" },
   }));
-  await page.goto("/?taskq=http://taskq.test&task=3");
+  await page.goto("/?server=http://axe.test&task=3");
   const detail = page.getByLabel("Task detail", { exact: true });
   // Artifacts have their own tab.
   await detail.getByRole("tab", { name: "artifacts", exact: true }).click();

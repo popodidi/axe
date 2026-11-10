@@ -76,7 +76,7 @@ const keys = ["t", "r", "b", "s", "c"];
 type Snapshot = {
   tasks: Task[];
 };
-// Desktop detail pane lifecycle (docs/reference/taskq-design.md): "enter" mounts
+// Desktop detail pane lifecycle: "enter" mounts
 // at zero width, "opening"/"closing" run the 275ms boundary transition, null
 // is at rest (no width transition, so resizing follows the pointer exactly).
 type Phase = "enter" | "opening" | "closing" | null;
@@ -101,7 +101,11 @@ export default function Dashboard() {
   const botRun = p.get("botrun");
   const overlay = !!(watched || botRun);
   const tab = p.get("tab") || "spec";
-  const base = (p.get("taskq") || "http://taskq.hlab").replace(/\/+$/, "");
+  // The embedded UI talks to the server that serves it; `?server=` points a
+  // standalone build at another axe server (which must allow it in CORS).
+  const base = (
+    p.get("server") || (typeof location === "undefined" ? "" : location.origin)
+  ).replace(/\/+$/, "");
   const [data, setData] = useState<Snapshot | null>(null);
   const [detail, setDetail] = useState<{
     task: Task;
@@ -112,7 +116,7 @@ export default function Dashboard() {
   const [detailError, setDetailError] = useState("");
   const [connection, setConnection] = useState("Connecting");
   const [now, setClock] = useState(() => Date.now());
-  // Bumped on every taskq change (SSE, or polling while disconnected) so views
+  // Bumped on every server change (SSE, or polling while disconnected) so views
   // with their own reads (Bots) reload with the task list.
   const [revision, setRevision] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -490,11 +494,11 @@ export default function Dashboard() {
         <div className={styles.brandRow}>
           <div className={styles.brand}>
             <span aria-hidden className={styles.brandMark}>
-              H
+              A
             </span>
             <div className={styles.brandText}>
-              <div className={styles.brandName}>Harvis</div>
-              <div className={styles.brandMeta}>Taskq workspace</div>
+              <div className={styles.brandName}>axe</div>
+              <div className={styles.brandMeta}>Task queue</div>
             </div>
           </div>
           {/* Wide screens only; phones use the top bar. */}
@@ -558,7 +562,7 @@ export default function Dashboard() {
             </Button>
           </div>
           <span className={styles.hideNarrow}>
-            taskq <span className={styles.mono}>{base}</span>
+            server <span className={styles.mono}>{base}</span>
           </span>
           <span className={styles.hideNarrow}>Read-only</span>
           <Button
@@ -670,7 +674,7 @@ export default function Dashboard() {
             {error && (
               <div className={styles.alert}>
                 <Alert>
-                  Unable to refresh: {error}. Check taskq address and CORS.
+                  Unable to refresh: {error}. Check the server address and CORS.
                   Retrying automatically.
                 </Alert>
               </div>
@@ -801,7 +805,7 @@ export default function Dashboard() {
                         </Button>
                       </>
                     ) : (
-                      "No tasks in taskq yet."
+                      "No tasks yet."
                     )}
                   </EmptyState>
                 )}

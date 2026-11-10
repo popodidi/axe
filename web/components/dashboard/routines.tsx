@@ -126,7 +126,7 @@ export function RoutineList({
         <Panel aria-label="Routines">
           <PanelHead
             label="Routines"
-            meta="Read-only · manage with taskq routine"
+            meta="Read-only · manage with axe routine"
           />
           <Table className={styles.table}>
             <thead>

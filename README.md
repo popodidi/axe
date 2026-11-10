@@ -18,6 +18,8 @@ The crate is `axe-os`; the binary and the library are `axe`. Cargo features:
 | Feature | Default | What it adds |
 |---|---|---|
 | `telegram` | on | The Telegram gateway for bots (`[telegram]`, `axe bot tg`) |
+| `embed-ui` | off | The read-only dashboard from `web/`, served by `axe server` at `/`. Needs `web/out`: run `npm ci && npm run build` in `web/` first ([web/README.md](web/README.md)) |
+| `ts` | off | TypeScript bindings of the API types, checked against `web/lib/api.ts` by `tests/ts_bindings.rs` |
 
 `--no-default-features` builds a server without the gateway: `bot tg` calls
 answer 409, and a configured `[telegram]` table is ignored with a warning.
@@ -652,7 +654,11 @@ included) and downloads it to a new file, refusing to overwrite one.
 
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --locked
+cargo test --locked --features ts --test ts_bindings   # web/lib/api.ts is current
 ```
+
+The dashboard lives in `web/` (Node 24); its checks and the `embed-ui` build
+are in [web/README.md](web/README.md).
 
 
 ## Legacy v8 conversion

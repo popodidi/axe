@@ -31,7 +31,7 @@ describe("design-system style lint", () => {
     "grid-template-columns: repeat(2, minmax(0, 13px))",
   ])("rejects off-token px: %s", async (decl) => {
     expect(await errors(`.a { ${decl}; }`)).toContain(
-      "harvis/no-off-token-px",
+      "axe/no-off-token-px",
     );
   });
   it.each([
@@ -60,7 +60,7 @@ describe("design-system style lint", () => {
     "@container list (inline-size < -2px) { .a { color: inherit; } }",
     "@value bp-probe: (max-width: 13px);",
   ])("rejects px in query conditions outside the breakpoints file: %s", async (code) => {
-    expect(await errors(code)).toContain("harvis/no-off-token-px");
+    expect(await errors(code)).toContain("axe/no-off-token-px");
   });
   it("allows breakpoint tokens in feature queries", async () => {
     expect(
@@ -75,9 +75,9 @@ describe("design-system style lint", () => {
     ).toEqual([]);
     expect(
       await errors("@media (max-width: 13px) { .a { color: inherit; } }", breakpoints),
-    ).toContain("harvis/no-off-token-px");
+    ).toContain("axe/no-off-token-px");
     expect(await errors(".a { padding: 13px; }", breakpoints)).toContain(
-      "harvis/no-off-token-px",
+      "axe/no-off-token-px",
     );
   });
   it("lints the real breakpoints file cleanly", async () => {

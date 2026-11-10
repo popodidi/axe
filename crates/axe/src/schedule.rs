@@ -38,6 +38,7 @@ const INTERVAL_SAMPLES: usize = 512;
 const INTERVAL_BASE: i64 = 1_704_067_200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "BotSchedule"))]
 pub struct Schedule {
     pub id: i64,
     pub name: String,

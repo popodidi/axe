@@ -17,6 +17,8 @@ pub mod subscription;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 pub mod usage;
+#[cfg(feature = "embed-ui")]
+pub mod web;
 pub mod worktree;
 
 pub mod remote;

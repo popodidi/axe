@@ -1,11 +1,11 @@
 import { test, expect } from "@playwright/test";
 import { mockBots } from "./bots-fixture";
 import { choose } from "./fixtures";
-const base = "/?taskq=http://taskq.test";
+const base = "/?server=http://axe.test";
 for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
   test(`bots list ${theme} ${width}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 1000 });
-    await page.addInitScript((t) => localStorage.setItem("harvis-theme", t), theme);
+    await page.addInitScript((t) => localStorage.setItem("axe-theme", t), theme);
     const reads = await mockBots(page);
     await page.goto(base);
     await page.getByRole("button", { name: "Bots", exact: true }).click();
@@ -15,7 +15,7 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     await expect(list).toContainText("Bot slots 1/2 · Task slots 5/5");
     await expect(list.getByRole("alert")).toHaveCount(0);
     const ops = list.locator("#bot-ops-bot");
-    await expect(ops).toContainText("harvis · claude");
+    await expect(ops).toContainText("atlas · claude");
     await expect(ops).toContainText("Active");
     await expect(ops).toContainText("Run #31");
     await expect(ops).toContainText("gh pr checks 12");
@@ -34,7 +34,7 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     await expect(ops).toHaveCount(0);
     await expect(watch).toBeVisible();
     await page.getByLabel("Search bots").fill("");
-    await choose(page.getByLabel("project", { exact: true }), "rake");
+    await choose(page.getByLabel("project", { exact: true }), "orbit");
     await expect(ops).toHaveCount(0);
     // Read-only: GETs only, and never the inbox.
     expect(reads.every((r) => r.startsWith("GET ") && !r.includes("/inbox"))).toBe(true);

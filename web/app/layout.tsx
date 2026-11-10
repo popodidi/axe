@@ -3,8 +3,8 @@ import "./globals.css";
 import { themeScript } from "../lib/theme-script";
 import { layoutScript } from "../lib/layout-script";
 export const metadata = {
-  title: "Harvis · Tasks",
-  description: "Read-only taskq workspace",
+  title: "axe · Tasks",
+  description: "Read-only axe task queue dashboard",
 };
 export default function Layout({ children }: { children: ReactNode }) {
   return (

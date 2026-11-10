@@ -1,8 +1,6 @@
 /*
- * Dashboard app tokens. Every value is derived from a brand token in
- * brand-tokens.css, a verbatim copy of docs/quiet-design-tokens.css
- * (lib/tokens.test.ts fails on drift). Quiet roles: docs/reference/brand-guide.md
- * and docs/reference/taskq-design.md. Documented in README.md.
+ * Dashboard app tokens. Every value is derived from a theme token in
+ * brand-tokens.css (the neutral axe theme). Documented in README.md.
  */
 :root {
   color-scheme: dark;

@@ -16,7 +16,7 @@
   font-family: var(--font-mono);
 }
 
-/* Task states (docs/reference/taskq-design.md): symbol plus readable text. */
+/* Task states: symbol plus readable text. */
 .status {
   font-size: var(--text-caption);
   line-height: var(--lh-caption);

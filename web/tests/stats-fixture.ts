@@ -73,7 +73,7 @@ export async function statsFixture(page: Page) {
       id: 10,
       title: "Old creation, recent completion",
       created_at: "2026-10-01T00:00:00Z",
-      project: "rake",
+      project: "orbit",
     },
   ]);
   await mockFixtureHistory(page);

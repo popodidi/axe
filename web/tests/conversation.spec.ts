@@ -9,7 +9,7 @@ for (const agent of ["claude", "codex"])
         await conversationFixture(page, agent);
         await page.setViewportSize({ width, height: 900 });
         await page.goto(
-          "/?taskq=http://taskq.test&view=overview&sort=oldest&tab=runs&listY=214&run=11",
+          "/?server=http://axe.test&view=overview&sort=oldest&tab=runs&listY=214&run=11",
         );
         await page.evaluate(
           (theme) => (document.documentElement.dataset.theme = theme),

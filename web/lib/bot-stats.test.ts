@@ -240,12 +240,12 @@ describe("bot model", () => {
     expect(botStatus({ state: "active", attention: false })).toBe("Active");
   });
   it("maps bot runs to RunList runs that resume in the bot worktree", () => {
-    const r = asRun(run(9, t(0), t(0, 1), { session_id: "abc" }), { project: "tn-desk", name: "tn-cos" });
+    const r = asRun(run(9, t(0), t(0, 1), { session_id: "abc" }), { project: "tundra-desk", name: "chief" });
     expect(r.task_id).toBe(0);
     expect(runCommands(r).attach).toBe(
-      "hv tn-desk sh -c 'cd ~/workspace/.worktrees/tn-desk/bot-tn-cos && exec claude --resume abc'",
+      "sh -c 'cd ~/workspace/.worktrees/tundra-desk/bot-chief && exec claude --resume abc'",
     );
-    expect(runCommands(r).watch).toBe("hv tn-desk tail -f /logs/bot-9.log");
+    expect(runCommands(r).watch).toBe("tail -f /logs/bot-9.log");
     expect(asRun(run(2, t(0), t(0, 1), { stop_reason: "stop" }), { project: "p", name: "b" }).current_activity).toBe("Ended: stop");
   });
   it("profile history keeps one field, newest first", () => {

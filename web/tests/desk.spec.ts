@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { choose, depTasks, timedTasks, manyTasks, mockDesk } from "./fixtures";
-const base = "/?taskq=http://taskq.test";
+const base = "/?server=http://axe.test";
 for (const legacy of ["", "overview", "ops", "live"])
   test(`default/legacy ${legacy} opens Active Tasks and preserves task links`, async ({
     page,
@@ -40,10 +40,10 @@ test("explicit filters survive legacy redirect; keyboard, pagination and search 
   await expect(
     page.getByText("38 results · Page 2 / 2", { exact: true }),
   ).toBeVisible();
-  await choose(page.getByLabel("project", { exact: true }), "rake");
+  await choose(page.getByLabel("project", { exact: true }), "orbit");
   await choose(page.getByLabel("state", { exact: true }), "escalated");
   await choose(page.getByLabel("Sort", { exact: true }), "oldest");
-  await page.getByLabel("Search tasks").fill("rake");
+  await page.getByLabel("Search tasks").fill("orbit");
   await expect(page.locator("tbody tr")).toHaveCount(1);
   await expect(page.locator("#task-2")).toBeVisible();
   await page.getByLabel("Search tasks").blur();
@@ -101,7 +101,7 @@ test("theme toggle switches and persists across reload both ways", async ({
   ).toBe(dark);
 });
 test("stored light theme applies before first paint", async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("harvis-theme", "light"));
+  await page.addInitScript(() => localStorage.setItem("axe-theme", "light"));
   await mockDesk(page);
   await page.goto(base, { waitUntil: "commit" });
   // The inline head script runs before body parsing and hydration.

@@ -4,7 +4,7 @@ const longSpec = Array.from(
   (_, i) =>
     `## Section ${i}\n\nParagraph ${i} with enough content to scroll the task detail.\n`,
 ).join("\n");
-async function mockTaskq(page: Page) {
+async function mockServer(page: Page) {
   const tasks = Array.from({ length: 30 }, (_, i) => ({
     id: 30 - i,
     title: `Dashboard task ${30 - i}`,
@@ -15,7 +15,7 @@ async function mockTaskq(page: Page) {
     updated_at: "2026-10-27T00:00:00Z",
     runs: 0,
   }));
-  await page.route("http://taskq.test/**", async (route) => {
+  await page.route("http://axe.test/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/stream") {
       await route.abort();
@@ -48,12 +48,12 @@ async function scrollTo(page: Page, selector: string, y: number) {
     .toBe(y);
 }
 test.beforeEach(async ({ page }) => {
-  await mockTaskq(page);
+  await mockServer(page);
 });
 test("closing and history navigation restore task/tab detail scroll", async ({
   page,
 }) => {
-  await page.goto("/?taskq=http://taskq.test&view=tasks&task=29");
+  await page.goto("/?server=http://axe.test&view=tasks&task=29");
   await expect(page.locator(`${detail} h2`).first()).toContainText(
     "Dashboard task 29",
   );
@@ -120,7 +120,7 @@ test("shared focus is visible after delayed data, reload and history navigation"
   // Short enough that the focused row starts below the fold of the dense list.
   await page.setViewportSize({ width: 1440, height: 700 });
   const url =
-    "/?taskq=http://taskq.test&view=tasks&focus=6&task=30&tab=events&project=other&q=Dashboard";
+    "/?server=http://axe.test&view=tasks&focus=6&task=30&tab=events&project=other&q=Dashboard";
   await page.goto(url);
   const row = page.locator("#task-6");
   await expect(row).toBeAttached();
@@ -158,14 +158,14 @@ test("shared focus is visible after delayed data, reload and history navigation"
   await expect
     .poll(() => new URL(page.url()).searchParams.get("listY"))
     .toBeNull();
-  await page.waitForResponse("http://taskq.test/api/tasks?all=1");
+  await page.waitForResponse("http://axe.test/api/tasks?all=1");
   await expect
     .poll(() => page.locator(list).evaluate((el) => el.scrollTop))
     .toBe(0);
 });
 test("phone detail restores after close, Back and reload", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?taskq=http://taskq.test&view=tasks&task=29");
+  await page.goto("/?server=http://axe.test&view=tasks&task=29");
   await expect(page.locator(`${detail} h2`).first()).toContainText(
     "Dashboard task 29",
   );

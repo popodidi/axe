@@ -4,7 +4,7 @@
 // unescaped and case-folded, so 13PX, -13px, 1.3e1px and 13\70 x all count.
 import stylelint from "stylelint";
 import valueParser from "postcss-value-parser";
-const ruleName = "harvis/no-off-token-px";
+const ruleName = "axe/no-off-token-px";
 const messages = stylelint.utils.ruleMessages(ruleName, {
   rejected: (value) => `Use a design token instead of "${value}"`,
 });

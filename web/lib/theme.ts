@@ -1,6 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { themeKey } from "./theme-script";
-const event = "harvis-theme";
+const event = "axe-theme";
 function subscribe(fn: () => void) {
   window.addEventListener(event, fn);
   return () => window.removeEventListener(event, fn);

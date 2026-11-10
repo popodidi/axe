@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { mockFixtureHistory, statsFixture } from "./stats-fixture";
 import { choose, mockDesk, mockStatsHistory, tasks } from "./fixtures";
-const base = "/?taskq=http://taskq.test&view=stats";
+const base = "/?server=http://axe.test&view=stats";
 test("loading, errors, partial samples and unknown completion remain explicit", async ({
   page,
 }) => {
@@ -48,7 +48,7 @@ test("a large completed cohort loads with one history read and no per-task reads
   // Fixed "now" is 2026-10-29T12:00Z, so Last 7 days is 2026-10-23 .. 10-29 UTC.
   await page.clock.setFixedTime(new Date("2026-10-29T12:00:00Z"));
   const DAY = 86400000;
-  const projects = ["harvis", "rake", "tn-desk"];
+  const projects = ["atlas", "orbit", "tundra-desk"];
   const completion: Record<number, string> = {};
   for (let id = 1; id <= 75; id++)
     completion[id] =
@@ -68,7 +68,7 @@ test("a large completed cohort loads with one history read and no per-task reads
       ...tasks[7],
       id,
       title: `Cohort task ${id}`,
-      project: id <= 75 ? projects[id % 3] : "harvis",
+      project: id <= 75 ? projects[id % 3] : "atlas",
       created_at: "2026-09-01T00:00:00Z",
     };
   });
@@ -105,7 +105,7 @@ test("a large completed cohort loads with one history read and no per-task reads
   });
   const methods: string[] = [];
   page.on("request", (r) => {
-    if (r.url().startsWith("http://taskq.test")) methods.push(r.method());
+    if (r.url().startsWith("http://axe.test")) methods.push(r.method());
   });
   const scope = page.getByRole("region", { name: "Statistics scope" });
   const daily = page.getByRole("figure", { name: "Completions per day" });
@@ -123,15 +123,15 @@ test("a large completed cohort loads with one history read and no per-task reads
     }
   };
   const cohort = Array.from({ length: 75 }, (_, i) => i + 1);
-  const rake = cohort.filter((id) => id % 3 === 1);
+  const orbit = cohort.filter((id) => id % 3 === 1);
 
   // Changing project mid-load cancels the all-project read.
   await page.goto(base);
   await expect.poll(() => reads).toBeGreaterThanOrEqual(1);
-  await choose(page.getByLabel("project", { exact: true }), "rake");
-  await expect(scope).toContainText(`${rake.length} completed cohort tasks`);
+  await choose(page.getByLabel("project", { exact: true }), "orbit");
+  await expect(scope).toContainText(`${orbit.length} completed cohort tasks`);
   await expect(scope).toContainText("0 tasks with unknown completion");
-  await expectDaily(rake, "All tasks");
+  await expectDaily(orbit, "All tasks");
 
   // Back to all projects: a complete, consistent cohort larger than 50, from
   // one read; the reopened task 202 is not counted.
@@ -169,7 +169,7 @@ test("a large completed cohort loads with one history read and no per-task reads
   const before = reads;
   await choose(page.getByLabel("Split by", { exact: true }), "project");
   await expect(daily.locator("li", { hasText: "10-23:" })).toContainText(
-    "harvis:",
+    "atlas:",
   );
   expect(reads).toBe(before);
 

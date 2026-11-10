@@ -8,7 +8,7 @@ type Saved = {
   routine?: number;
   navWidth?: number;
 };
-const event = "harvis-layout";
+const event = "axe-layout";
 function read(): Saved {
   try {
     const saved = JSON.parse(localStorage.getItem(layoutKey) || "{}");

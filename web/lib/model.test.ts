@@ -7,6 +7,8 @@ import {
   safeLink,
   formatDuration,
   shellQuote,
+  command,
+  commandTemplate,
   taskCommands,
   runCommands,
   taskStatus,
@@ -21,7 +23,7 @@ const task = (id: number, state = "pending"): Task => ({
   id,
   title: "Task " + id,
   detail: "A spec",
-  project: "harvis",
+  project: "atlas",
   state,
   created_at: `2026-10-${id + 10}`,
   updated_at: "",
@@ -39,7 +41,7 @@ describe("URL task selection", () => {
     expect(
       selectTasks(
         [task(1), task(2, "done")],
-        new URLSearchParams("state=done&project=harvis&q=Task+2"),
+        new URLSearchParams("state=done&project=atlas&q=Task+2"),
       ).map((t) => t.id),
     ).toEqual([2]));
   it("legacy view=ops no longer narrows the task list", () =>
@@ -84,7 +86,7 @@ describe("hv commands", () => {
   const run = (agent: string, ended = true): Run => ({
     id: 1,
     task_id: 38,
-    project: "harvis",
+    project: "atlas",
     agent,
     mode: "dispatch",
     started_at: "2026-10-28T00:00:00Z",
@@ -92,32 +94,47 @@ describe("hv commands", () => {
     exit_code: 0,
     current_activity: null,
     last_activity_at: null,
-    log_path: "/home/harvis/.local/state/taskq/logs/run 1.log",
+    log_path: "/home/agent/.local/state/axe/logs/run 1.log",
     session_id: "48205d0b-549b-41f5-8e11",
   });
   it("task log and spec", () => {
-    expect(taskCommands({ id: 38, project: "harvis" })).toEqual({
-      log: "hv harvis taskq log 38",
-      spec: "hv harvis taskq show 38",
+    expect(taskCommands({ id: 38, project: "atlas" })).toEqual({
+      log: "axe log 38",
+      spec: "axe show 38",
     });
   });
   it("attach resumes in the task worktree, only after the run ended", () => {
     expect(runCommands(run("claude")).attach).toBe(
-      "hv harvis sh -c 'cd ~/workspace/.worktrees/harvis/task-38--work && exec claude --resume 48205d0b-549b-41f5-8e11'",
+      "sh -c 'cd ~/workspace/.worktrees/atlas/task-38--work && exec claude --resume 48205d0b-549b-41f5-8e11'",
     );
     expect(runCommands(run("codex")).attach).toBe(
-      "hv harvis sh -c 'cd ~/workspace/.worktrees/harvis/task-38--work && exec codex resume 48205d0b-549b-41f5-8e11'",
+      "sh -c 'cd ~/workspace/.worktrees/atlas/task-38--work && exec codex resume 48205d0b-549b-41f5-8e11'",
     );
     expect(runCommands(run("claude", false)).attach).toBeNull();
     expect(runCommands(run("other")).attach).toBeNull();
   });
   it("tail quotes a log path with spaces", () => {
     expect(runCommands(run("claude")).watch).toBe(
-      "hv harvis tail -f '/home/harvis/.local/state/taskq/logs/run 1.log'",
+      "tail -f '/home/agent/.local/state/axe/logs/run 1.log'",
     );
   });
-  it("quotes like hv: safe words bare, others literal", () => {
-    expect(shellQuote("tn-desk")).toBe("tn-desk");
+  it("renders hints through the command template", () => {
+    expect(commandTemplate("")).toBe("{cmd}");
+    const remote = commandTemplate("?cmd=" + encodeURIComponent("ssh box -- {cmd}"));
+    expect(remote).toBe("ssh box -- {cmd}");
+    expect(taskCommands({ id: 38, project: "atlas" }, remote).log).toBe(
+      "ssh box -- axe log 38",
+    );
+    const perProject = "run-in {project} {cmd}";
+    expect(command("it's", ["axe", "show", "1"], perProject)).toBe(
+      "run-in 'it'\\''s' axe show 1",
+    );
+    expect(runCommands(run("claude"), perProject).watch).toBe(
+      "run-in atlas tail -f '/home/agent/.local/state/axe/logs/run 1.log'",
+    );
+  });
+  it("quotes for a POSIX shell: safe words bare, others literal", () => {
+    expect(shellQuote("tundra-desk")).toBe("tundra-desk");
     expect(shellQuote("it's $HOME")).toBe("'it'\\''s $HOME'");
     expect(shellQuote("")).toBe("''");
   });

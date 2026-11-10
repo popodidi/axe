@@ -305,6 +305,7 @@ fn task_cols() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Task {
     pub id: i64,
     pub project: String,
@@ -334,6 +335,7 @@ pub struct Task {
 
 /// Dependency edges of one task, both directions, with each other task's status.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Deps {
     /// Prerequisites: tasks that must be done before this one can be claimed.
     pub blocked_by: Vec<DepRef>,
@@ -342,6 +344,7 @@ pub struct Deps {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DepRef {
     pub id: i64,
     pub project: String,
@@ -428,6 +431,7 @@ fn query_tasks(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Event {
     pub id: i64,
     pub task_id: i64,
@@ -1304,6 +1308,7 @@ pub fn delete_session(conn: &Connection, task: i64) -> Result<()> {
 
 /// One dispatcher run (one spawned agent process).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Run"))]
 pub struct RunRecord {
     pub id: i64,
     pub task_id: i64,

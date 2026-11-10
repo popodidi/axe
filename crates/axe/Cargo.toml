@@ -22,6 +22,10 @@ path = "src/main.rs"
 default = ["telegram"]
 # The Telegram gateway for bots (`[telegram]` in the server config).
 telegram = []
+# Serves the built dashboard (`web/out`, build it first) at `/` from `axe server`.
+embed-ui = ["dep:rust-embed"]
+# TypeScript bindings of the API types for `web/lib/api` (`tests/ts_bindings.rs`).
+ts = ["dep:ts-rs"]
 
 [dependencies]
 anyhow = "1"
@@ -43,6 +47,8 @@ libc = "0.2"
 croner = "4.0.2"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
+ts-rs = { version = "12", features = ["serde-json-impl"], optional = true }
+rust-embed = { version = "8", features = ["debug-embed"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

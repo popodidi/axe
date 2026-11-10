@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { mockDesk } from "./fixtures";
-const base = "/?taskq=http://taskq.test";
+const base = "/?server=http://axe.test";
 const detail = '[aria-label="Task detail"]';
 const list = '[aria-label="Task workspace"]';
 const width = (page: Page, selector: string) =>
@@ -121,7 +121,7 @@ test("detail pane resizes by drag and keyboard within bounds and persists", asyn
   await expect.poll(() => width(page, detail)).toBe(min + 64);
   await page.locator(`${list} #task-2 button`).click();
   await expect(page.locator(`${detail} h2`).first()).toHaveText(
-    "Approve rake backtest rollout",
+    "Approve orbit backtest rollout",
   );
   expect(await width(page, detail)).toBe(min + 64);
   await page.keyboard.press("Escape");
@@ -187,7 +187,7 @@ test("collapsed navigation is ignored on phones and returns on wide screens", as
   page,
 }) => {
   await page.addInitScript(() =>
-    localStorage.setItem("harvis-layout", JSON.stringify({ nav: "collapsed" })),
+    localStorage.setItem("axe-layout", JSON.stringify({ nav: "collapsed" })),
   );
   await mockDesk(page);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -222,7 +222,7 @@ for (const [w, h] of [
     }) => {
       if (theme === "light")
         await page.addInitScript(() =>
-          localStorage.setItem("harvis-theme", "light"),
+          localStorage.setItem("axe-theme", "light"),
         );
       await page.setViewportSize({ width: w, height: h });
       await mockDesk(page);

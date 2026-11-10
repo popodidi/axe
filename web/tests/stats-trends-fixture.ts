@@ -5,7 +5,7 @@ import { mockDesk, mockStatsHistory, tasks, runs } from "./fixtures";
 // Routine. Task 3000 completes today; completions are 0.6 days apart.
 const DAY = 86400000;
 const now = Date.parse("2026-10-29T12:00:00Z");
-const projects = ["harvis", "rake", "tn-desk"];
+const projects = ["atlas", "orbit", "tundra-desk"];
 export const trendIds = Array.from({ length: 150 }, (_, i) => 3000 + i);
 const k = (id: number) => id - 3000;
 export const completedAt = (id: number) =>
@@ -27,7 +27,7 @@ export async function statsTrendsFixture(
       state: "done",
       created_at: new Date(createdAt(id)).toISOString(),
     })),
-    { ...tasks[3], id: 3100, title: "Open trend task", project: "harvis" },
+    { ...tasks[3], id: 3100, title: "Open trend task", project: "atlas" },
   ]);
   const at = (t: number) => new Date(t).toISOString();
   const list = trendIds.flatMap((id) =>

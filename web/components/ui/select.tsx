@@ -5,8 +5,7 @@ import styles from "./select.module.css";
 export type Option = { value: string; label: string };
 export const choices = (values: string[]) =>
   values.map((value) => ({ value, label: value }));
-// Styled listbox select (ported from tn-eng-dashboard, owner request
-// 20261103: "drop down is ugly, make it prettier"). A combobox button opens an
+// Styled listbox select. A combobox button opens an
 // opaque menu. Keys: ArrowDown/ArrowUp open on the next/previous option and
 // move; Home/End; Enter/Space commit; Escape/Tab close; typing jumps by prefix.
 // Focus stays on the trigger (aria-activedescendant). `data-value` exposes the

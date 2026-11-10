@@ -146,7 +146,7 @@ export async function conversationFixture(page: Page, agent = "claude") {
     offset += new TextEncoder().encode(text).length + 1;
     return { text, start, end: offset, fragment: false };
   });
-  await page.route("http://taskq.test/api/runs/*/log?*", (route) =>
+  await page.route("http://axe.test/api/runs/*/log?*", (route) =>
     route.fulfill({
       json: {
         run: {

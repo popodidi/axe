@@ -29,7 +29,7 @@ const config = {
       "color",
       "color-mix",
     ],
-    "harvis/no-off-token-px": [
+    "axe/no-off-token-px": [
       true,
       { breakpointFiles: ["app/styles/breakpoints.module.css"] },
     ],

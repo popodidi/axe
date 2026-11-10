@@ -3,7 +3,7 @@ import { choose, mockDesk, runs } from "./fixtures";
 // Compact layout contract (README "Compact defaults"). These assert rendered
 // geometry, not token use: gutters, control sizes, filter wrapping, and the
 // Watch entry staying inside the run card's activity row.
-const base = "/?taskq=http://taskq.test";
+const base = "/?server=http://axe.test";
 const listRows = 'section[aria-label="Task workspace"] tbody tr';
 const widths = [
   [1440, 900],
@@ -13,7 +13,7 @@ const widths = [
 ] as const;
 async function theme(page: Page, name: string) {
   await page.addInitScript(
-    (t) => localStorage.setItem("harvis-theme", t),
+    (t) => localStorage.setItem("axe-theme", t),
     name,
   );
 }
@@ -85,14 +85,14 @@ for (const name of ["dark", "light"])
       await mockDesk(page);
       // Desktop widths keep the detail pane open beside the list.
       const detail = width > 760 ? "&task=3" : "";
-      await page.goto(`${base}&view=tasks&project=harvis&state=all${detail}`);
+      await page.goto(`${base}&view=tasks&project=atlas&state=all${detail}`);
       await expect(page.locator(listRows)).toHaveCount(4);
       if (detail)
         await expect(
           page.getByRole("heading", { name: "Outcome" }),
         ).toBeVisible();
       await expectReadableFilters(page, 3);
-      await page.goto(`${base}&project=harvis&view=stats`);
+      await page.goto(`${base}&project=atlas&view=stats`);
       // The report has its own filters (project, period, task type, group
       // by), no search.
       await expect(page.getByLabel("Search tasks")).toHaveCount(0);
@@ -116,7 +116,7 @@ test("filters work from the keyboard at phone width and reset to All", async ({
     page.locator("[data-caption]", { hasText: "project" }),
   ).toBeVisible();
   for (const [label, value, rows] of [
-    ["project", "harvis", 4],
+    ["project", "atlas", 4],
     ["state", "blocked", 0],
     ["state", "escalated", 1],
   ] as const) {
@@ -201,7 +201,7 @@ for (const name of ["dark", "light"])
       await page.setViewportSize({ width, height });
       await theme(page, name);
       await mockDesk(page);
-      await page.goto(`${base}&view=tasks&project=harvis&state=all&task=3`);
+      await page.goto(`${base}&view=tasks&project=atlas&state=all&task=3`);
       await expect(page.getByRole("heading", { name: "Outcome" })).toBeVisible();
       const pad = () =>
         page
@@ -243,7 +243,7 @@ async function logFixture(page: Page) {
     text: text(i),
     fragment: false,
   }));
-  await page.route("http://taskq.test/api/runs/*/log?*", (route) =>
+  await page.route("http://axe.test/api/runs/*/log?*", (route) =>
     route.fulfill({
       json: {
         run: runs[0],

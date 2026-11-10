@@ -163,40 +163,62 @@ export function isDiff(e: Event) {
     e.kind === "edit" && /^--- detail\r?\n\+\+\+ detail/.test(e.body || "")
   );
 }
-// Same rule as hv's quote(): safe words stay bare, anything else becomes
-// one literal single-quoted argument for the laptop shell.
+// Safe words stay bare, anything else becomes one literal single-quoted
+// argument for a POSIX shell.
 export function shellQuote(s: string) {
   return /^[\w@%+=:,./-]+$/.test(s)
     ? s
     : "'" + s.replaceAll("'", "'\\''") + "'";
 }
-// `hv <project> <cmd...>` runs cmd in ~/workspace/<project> on hlab over ssh.
-export function hv(project: string, ...args: string[]) {
-  return ["hv", project, ...args].map(shellQuote).join(" ");
+/**
+ * Command hints are rendered through a template so they paste into the shell
+ * where the operator runs them. `{cmd}` is the shell-quoted command and
+ * `{project}` the shell-quoted project. The default runs the command as is;
+ * `?cmd=` overrides it, e.g. `ssh agent-host {cmd}`.
+ */
+export const defaultCommandTemplate = "{cmd}";
+export function commandTemplate(
+  search = typeof location === "undefined" ? "" : location.search,
+) {
+  return new URLSearchParams(search).get("cmd") || defaultCommandTemplate;
 }
-export const taskCommands = (t: Pick<Task, "id" | "project">) => ({
-  log: hv(t.project, "taskq", "log", String(t.id)),
-  spec: hv(t.project, "taskq", "show", String(t.id)),
+export function command(
+  project: string,
+  args: string[],
+  template = commandTemplate(),
+) {
+  const cmd = args.map(shellQuote).join(" ");
+  return template.replace(/\{(cmd|project)\}/g, (_, key) =>
+    key === "cmd" ? cmd : shellQuote(project),
+  );
+}
+export const taskCommands = (
+  t: Pick<Task, "id" | "project">,
+  template = commandTemplate(),
+) => ({
+  log: command(t.project, ["axe", "log", String(t.id)], template),
+  spec: command(t.project, ["axe", "show", String(t.id)], template),
 });
-// Dispatcher sessions run in the task worktree (taskq/src/worktree.rs), and
-// Claude Code looks sessions up by cwd, so resume from that directory.
+// Dispatcher sessions run in the task worktree (crates/axe/src/worktree.rs),
+// and Claude Code looks sessions up by cwd, so resume from that directory.
 export function taskWorktree(r: Pick<Run, "project" | "task_id" | "cwd">) {
   if (r.cwd) return r.cwd;
   return `~/workspace/.worktrees/${shellQuote(r.project)}/task-${r.task_id}--work`;
 }
-export const runCommands = (r: Run) => ({
-  watch: hv(r.project, "tail", "-f", r.log_path),
+export const runCommands = (r: Run, template = commandTemplate()) => ({
+  watch: command(r.project, ["tail", "-f", r.log_path], template),
   attach:
     r.ended_at && r.session_id && ["codex", "claude"].includes(r.agent)
-      ? hv(
+      ? command(
           r.project,
-          "sh",
-          "-c",
-          `cd ${taskWorktree(r)} && exec ${
-            r.agent === "claude"
-              ? "claude --resume"
-              : "codex resume"
-          } ${shellQuote(r.session_id)}`,
+          [
+            "sh",
+            "-c",
+            `cd ${taskWorktree(r)} && exec ${
+              r.agent === "claude" ? "claude --resume" : "codex resume"
+            } ${shellQuote(r.session_id)}`,
+          ],
+          template,
         )
       : null,
 });

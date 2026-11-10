@@ -73,7 +73,7 @@ const stats = {
 async function mockCost(page: Page) {
   const requests: string[] = [];
   await mockDesk(page);
-  await page.route("http://taskq.test/api/stats/cost*", async (route) => {
+  await page.route("http://axe.test/api/stats/cost*", async (route) => {
     requests.push(route.request().url());
     await route.fulfill({ json: stats });
   });
@@ -84,7 +84,7 @@ test("shows every breakdown from one request and labels the estimate", async ({
   page,
 }) => {
   const requests = await mockCost(page);
-  await page.goto("/?taskq=http://taskq.test&view=cost");
+  await page.goto("/?server=http://axe.test&view=cost");
   await expect(page.getByRole("heading", { name: "Cost", exact: true })).toBeVisible();
   await expect(page.getByText("API-price estimate, not a bill")).toBeVisible();
   const figures = page.getByRole("region", { name: "Key figures" });
@@ -113,7 +113,7 @@ test("shows every breakdown from one request and labels the estimate", async ({
 
 test("draws time series from the same single request", async ({ page }) => {
   const requests = await mockCost(page);
-  await page.goto("/?taskq=http://taskq.test&view=cost");
+  await page.goto("/?server=http://axe.test&view=cost");
   const over = page.getByRole("region", { name: "Over time" });
   for (const name of [
     "Estimated cost",
@@ -131,7 +131,7 @@ test("draws time series from the same single request", async ({ page }) => {
 
 test("shades incomplete periods and plots no zero for them", async ({ page }) => {
   await mockCost(page);
-  await page.goto("/?taskq=http://taskq.test&view=cost");
+  await page.goto("/?server=http://axe.test&view=cost");
   const cost = page.getByRole("figure", { name: "Estimated cost", exact: true });
   await expect(cost).toContainText("before usage data begins");
   await expect(cost).toContainText("all 1 runs unknown");
@@ -145,24 +145,24 @@ test("shades incomplete periods and plots no zero for them", async ({ page }) =>
 
 test("uses weekly buckets past 31 days", async ({ page }) => {
   const requests = await mockCost(page);
-  await page.goto("/?taskq=http://taskq.test&view=cost&days=90");
+  await page.goto("/?server=http://axe.test&view=cost&days=90");
   await expect(page.getByText("4 / 5")).toBeVisible();
   expect(requests.at(-1)).toContain("step_days=7");
 });
 
 test("still shows the tables when the server has no series", async ({ page }) => {
   await mockDesk(page);
-  await page.route("http://taskq.test/api/stats/cost*", (route) =>
+  await page.route("http://axe.test/api/stats/cost*", (route) =>
     route.fulfill({ json: { ...stats, series: undefined } }),
   );
-  await page.goto("/?taskq=http://taskq.test&view=cost");
+  await page.goto("/?server=http://axe.test&view=cost");
   await expect(page.getByText("4 / 5")).toBeVisible();
   await expect(page.getByRole("region", { name: "Over time" })).toHaveCount(0);
 });
 
 test("changing the period makes one more request", async ({ page }) => {
   const requests = await mockCost(page);
-  await page.goto("/?taskq=http://taskq.test&view=cost");
+  await page.goto("/?server=http://axe.test&view=cost");
   await expect(page.getByText("4 / 5")).toBeVisible();
   await choose(page.getByLabel("Date range"), "30");
   await expect.poll(() => requests.length).toBe(2);
@@ -171,7 +171,7 @@ test("changing the period makes one more request", async ({ page }) => {
 
 test("each filter and breakdown is one request kept in the URL", async ({ page }) => {
   const requests = await mockCost(page);
-  await page.goto("/?taskq=http://taskq.test&view=cost");
+  await page.goto("/?server=http://axe.test&view=cost");
   await expect(page.getByText("4 / 5")).toBeVisible();
   expect(requests).toHaveLength(1);
   for (const [label, value, param, api] of [
@@ -214,22 +214,22 @@ test("each filter and breakdown is one request kept in the URL", async ({ page }
 
 test("says when filters match nothing", async ({ page }) => {
   await mockDesk(page);
-  await page.route("http://taskq.test/api/stats/cost*", (route) =>
+  await page.route("http://axe.test/api/stats/cost*", (route) =>
     route.fulfill({
       json: { ...stats, coverage: { ...stats.coverage, runs: 0 } },
     }),
   );
-  await page.goto("/?taskq=http://taskq.test&view=cost&project=gone");
+  await page.goto("/?server=http://axe.test&view=cost&project=gone");
   await expect(page.getByText("No finished runs match these filters.")).toBeVisible();
   await expect(page.getByLabel("Filter by project")).toHaveAttribute("data-value", "gone");
 });
 
 test("reports a failed load", async ({ page }) => {
   await mockDesk(page);
-  await page.route("http://taskq.test/api/stats/cost*", (route) =>
+  await page.route("http://axe.test/api/stats/cost*", (route) =>
     route.fulfill({ status: 500, body: "no" }),
   );
-  await page.goto("/?taskq=http://taskq.test&view=cost");
+  await page.goto("/?server=http://axe.test&view=cost");
   await expect(page.getByText("Could not load cost data")).toBeVisible();
 });
 
@@ -237,7 +237,7 @@ test("fits a phone without horizontal page overflow", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 800 });
   await mockCost(page);
   await page.goto(
-    "/?taskq=http://taskq.test&view=cost&project=a-very-long-project-name-for-phones&model=claude-opus-5-5&breakdown=context",
+    "/?server=http://axe.test&view=cost&project=a-very-long-project-name-for-phones&model=claude-opus-5-5&breakdown=context",
   );
   await expect(page.getByText("4 / 5")).toBeVisible();
   await expect(page.getByLabel("Stack cost chart by")).toBeVisible();

@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { choose } from "./fixtures";
 import { statsTrendsFixture, trendIds, completedAt } from "./stats-trends-fixture";
-const base = "/?taskq=http://taskq.test&view=stats";
+const base = "/?server=http://axe.test&view=stats";
 const titles = [
   "Runs per task over time",
   "Escalations per task over time",
@@ -83,22 +83,22 @@ test("trend charts follow range, scope and split, with readable groups", async (
   // Split by project: one mean line per group, only the highlighted band.
   await choose(page.getByLabel("Split by", { exact: true }), "project");
   const legend = runsChart.getByRole("list", { name: "Legend: highlight a group" });
-  await expect(legend.getByRole("button")).toHaveText(["harvis", "rake", "tn-desk"]);
-  await expect(legend.getByRole("button", { name: "harvis" })).toHaveAttribute("aria-pressed", "true");
+  await expect(legend.getByRole("button")).toHaveText(["atlas", "orbit", "tundra-desk"]);
+  await expect(legend.getByRole("button", { name: "atlas" })).toHaveAttribute("aria-pressed", "true");
   await expect(runsChart.locator("path[class*=band], rect[class*=band]").first()).toBeVisible();
   const bands = async () =>
     runsChart.locator("g:has(> [class*=band])").count();
   expect(await bands()).toBe(1);
-  await legend.getByRole("button", { name: "rake" }).click();
-  await expect(legend.getByRole("button", { name: "rake" })).toHaveAttribute("aria-pressed", "true");
+  await legend.getByRole("button", { name: "orbit" }).click();
+  await expect(legend.getByRole("button", { name: "orbit" })).toHaveAttribute("aria-pressed", "true");
   expect(await bands()).toBe(1);
   await plot.focus();
   await page.keyboard.press("End");
-  await expect(runsChart.locator("p[aria-live]")).toContainText(/^rake · /);
+  await expect(runsChart.locator("p[aria-live]")).toContainText(/^orbit · /);
   await page.keyboard.press("ArrowDown");
-  await expect(runsChart.locator("p[aria-live]")).toContainText(/^tn-desk · /);
-  await expect(legend.getByRole("button", { name: "tn-desk" })).toHaveAttribute("aria-pressed", "true");
-  await expect(runsChart.locator("ul li").filter({ hasText: /^harvis · / })).toHaveCount(13);
+  await expect(runsChart.locator("p[aria-live]")).toContainText(/^tundra-desk · /);
+  await expect(legend.getByRole("button", { name: "tundra-desk" })).toHaveAttribute("aria-pressed", "true");
+  await expect(runsChart.locator("ul li").filter({ hasText: /^atlas · / })).toHaveCount(13);
   await page.getByLabel("Split by", { exact: true }).focus();
   await section.screenshot({ path: test.info().outputPath("trends-project.png") });
 
@@ -144,7 +144,7 @@ for (const width of [1440, 390])
   for (const theme of ["dark", "light"])
     test(`trends layout ${width} ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 1400 });
-      await page.addInitScript((t) => localStorage.setItem("harvis-theme", t), theme);
+      await page.addInitScript((t) => localStorage.setItem("axe-theme", t), theme);
       await statsTrendsFixture(page);
       await page.goto(base + "&days=30");
       const section = page.getByRole("region", { name: "Trends" });
@@ -163,13 +163,13 @@ for (const width of [1440, 390])
       ).toBe(true);
       // Keyboard: Tab reaches the legend buttons and the plot.
       const first = section.getByRole("figure").first();
-      await first.getByRole("button", { name: "harvis" }).focus();
+      await first.getByRole("button", { name: "atlas" }).focus();
       await page.keyboard.press("Tab");
       await page.keyboard.press("Tab");
       await page.keyboard.press("Tab");
       await expect(first.getByRole("group")).toBeFocused();
       await page.keyboard.press("ArrowLeft");
-      await expect(first.locator("p[aria-live]")).toContainText(/^harvis · /);
+      await expect(first.locator("p[aria-live]")).toContainText(/^atlas · /);
       await section.screenshot({
         path: test.info().outputPath(`trends-${width}-${theme}.png`),
       });

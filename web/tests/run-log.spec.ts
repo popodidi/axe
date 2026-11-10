@@ -2,7 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { mockDesk, runs } from "./fixtures";
 import type { Run } from "../lib/model";
 import type { LogLine } from "../lib/run-log";
-const base = "/?taskq=http://taskq.test";
+const base = "/?server=http://axe.test";
 const message = (text: string, agent: string) =>
   agent === "claude"
     ? { type: "assistant", message: { content: [{ type: "text", text }] } }
@@ -27,13 +27,13 @@ async function fixture(page: Page, agent = "claude") {
   for (let i = 0; i < 40; i++) append(message(`Initial message ${i}`, agent));
   let disconnect = false;
   const requests: string[] = [];
-  await page.route("http://taskq.test/api/runs?*", (route) => {
+  await page.route("http://axe.test/api/runs?*", (route) => {
     const url = new URL(route.request().url());
     return route.fulfill({
       json: url.searchParams.has("task") ? history : [run],
     });
   });
-  await page.route("http://taskq.test/api/runs/*/log?*", async (route) => {
+  await page.route("http://axe.test/api/runs/*/log?*", async (route) => {
     requests.push(route.request().url());
     if (disconnect) return route.abort();
     const url = new URL(route.request().url());
@@ -332,7 +332,7 @@ test("unsupported API stops polling and offers explicit recovery", async ({
 }) => {
   await fixture(page);
   let requests = 0;
-  await page.route("http://taskq.test/api/runs/*/log?*", (route) => {
+  await page.route("http://axe.test/api/runs/*/log?*", (route) => {
     requests++;
     return route.fulfill({
       status: 404,
@@ -366,7 +366,7 @@ for (const scenario of [
     const f = await fixture(page);
     let requests = 0;
     let recovered = false;
-    await page.route("http://taskq.test/api/runs/*/log?*", (route) => {
+    await page.route("http://axe.test/api/runs/*/log?*", (route) => {
       requests++;
       if (!recovered) {
         if (scenario === "unknown")

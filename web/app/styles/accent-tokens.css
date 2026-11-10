@@ -1,7 +1,5 @@
 /*
- * Owner-requested restrained accents on top of Harvis Quiet (same palette as
- * tn-eng-dashboard, 20261103: "more colors, purely black and white is too dry",
- * then "a bit too much, less color"). Color marks state and data only: status
+ * Restrained accents on top of the neutral axe theme. Color marks state and data only: status
  * labels, live dot, chart bars and the selected menu option. Chrome, cards,
  * navigation and focus stay neutral. Literal colors live only here and in
  * brand-tokens.css (stylelint ignores both).

@@ -4,7 +4,7 @@ import { choose, manyTasks, mockDesk, tasks } from "./fixtures";
 test("keyboard sorting survives filters, automatic refresh and reload", async ({ page }) => {
   const list = tasks.map(t => ({ ...t }));
   await mockDesk(page, list);
-  await page.goto("/?taskq=http://taskq.test&state=all");
+  await page.goto("/?server=http://axe.test&state=all");
   const ids = () => page.locator("tbody tr").evaluateAll(rows => rows.map(row => Number(row.id.replace("task-", ""))));
   await expect.poll(ids).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
   await expect(page.locator('th[aria-sort="none"]')).toHaveCount(5);
@@ -15,7 +15,7 @@ test("keyboard sorting survives filters, automatic refresh and reload", async ({
   await expect(header).toHaveAttribute("aria-sort", "ascending");
   await page.keyboard.press("Space");
   await expect.poll(ids).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
-  await choose(page.getByLabel("project", { exact: true }), "harvis");
+  await choose(page.getByLabel("project", { exact: true }), "atlas");
   await expect.poll(ids).toEqual([8, 4, 3, 1]);
   list.push({ ...tasks[0], id: 99, title: "Refreshed task" });
   await expect.poll(ids, { timeout: 20000 }).toEqual([99, 8, 4, 3, 1]);
@@ -29,7 +29,7 @@ test("keyboard sorting survives filters, automatic refresh and reload", async ({
 
 test("sorting precedes pagination and retains legacy controls", async ({ page }) => {
   await mockDesk(page, manyTasks);
-  await page.goto("/?taskq=http://taskq.test&state=all&page=2");
+  await page.goto("/?server=http://axe.test&state=all&page=2");
   await page.getByRole("button", { name: "Sort by ID", exact: true }).click();
   await expect(page.locator("tbody tr").first()).toHaveAttribute("id", "task-1");
   await expect(page.getByText("38 results · Page 1 / 2")).toBeVisible();

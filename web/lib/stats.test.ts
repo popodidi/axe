@@ -19,7 +19,7 @@ const task = (id = 1, state = "done"): Task => ({
   id,
   state,
   title: "Task",
-  project: "harvis",
+  project: "atlas",
   detail: "",
   runs: 0,
   created_at: "2026-11-01T00:00:00Z",
@@ -43,7 +43,7 @@ const run = (id = 1, agent = "codex"): Run => ({
   id,
   task_id: 1,
   agent,
-  project: "harvis",
+  project: "atlas",
   mode: "dispatch",
   started_at: "2026-11-01T01:00:00Z",
   ended_at: "2026-11-01T02:00:00Z",
@@ -125,7 +125,7 @@ describe("completed task distributions", () => {
         (r) => r.task.id,
       ),
     ).toEqual([1, 2]);
-    expect(calc(ts, [], events, "project=rake").rows).toEqual([]);
+    expect(calc(ts, [], events, "project=orbit").rows).toEqual([]);
     expect(calc(ts, [], events, "q=missing").rows).toEqual([]);
   });
   it("reports unclassifiable completion separately, never assumes updated_at or zero", () => {
@@ -198,7 +198,7 @@ describe("completed task distributions", () => {
   });
   it("attributes mixed-agent tasks once and group bucket counts equal known samples", () => {
     const s = calc(
-      [task(), { ...task(2), project: "rake" }],
+      [task(), { ...task(2), project: "orbit" }],
       [run(), run(2, "claude")],
       { 1: [event(1, "done")], 2: [event(2, "done")] },
     );
@@ -220,7 +220,7 @@ describe("completed task distributions", () => {
       max: 2,
     });
     expect(
-      s.projects.find((g) => g.label === "harvis")!.metrics.runtime.median,
+      s.projects.find((g) => g.label === "atlas")!.metrics.runtime.median,
     ).toBe(7200000);
     expect(calc([task()], [run(1, "legacy")]).rows[0].agents).toBe("legacy");
   });
@@ -296,7 +296,7 @@ describe("large completed cohort", () => {
   // 75 qualifying tasks across three projects with full event history, plus
   // newer tasks completed outside the range and a reopened task.
   const DAY = 86400000;
-  const projects = ["harvis", "tn-desk", "rake"];
+  const projects = ["atlas", "tundra-desk", "orbit"];
   const inRange = Array.from({ length: 75 }, (_, i) => i + 1);
   const ts: Task[] = [];
   const events: Record<number, Event[]> = {};
@@ -375,8 +375,8 @@ describe("large completed cohort", () => {
     expect(s.total[0].metrics.runCount).toMatchObject({ n: 75, unknown: 0 });
   });
   it("filters by project and UTC range without dropping older or low-ID tasks", () => {
-    const rake = calc(ts, runs, events, "days=7&project=rake");
-    expect(rake.rows.map((r) => r.task.id).sort((a, b) => a - b)).toEqual(
+    const orbit = calc(ts, runs, events, "days=7&project=orbit");
+    expect(orbit.rows.map((r) => r.task.id).sort((a, b) => a - b)).toEqual(
       inRange.filter((id) => id % 3 === 2),
     );
     const lastDay = calc(ts, runs, events, "start=2026-11-02&end=2026-11-02");
@@ -498,7 +498,7 @@ describe("normal and routine task types", () => {
   // routine and 15 normal completions across three projects, 2 completions of
   // unknown type, plus open, unknown-completion and out-of-range tasks.
   const DAY = 86400000;
-  const projects = ["harvis", "tn-desk", "rake"];
+  const projects = ["atlas", "tundra-desk", "orbit"];
   const ts: Task[] = [];
   const events: Record<number, Event[]> = {};
   const routines: Record<number, boolean> = {};
@@ -602,10 +602,10 @@ describe("normal and routine task types", () => {
     expect(stats("days=7&type=bogus").rows).toHaveLength(77);
   });
   it("composes type with project and UTC date boundaries", () => {
-    const harvis = stats("days=7&project=harvis&type=routine");
-    expect(ids(harvis)).toEqual(range(1, 60).filter((id) => id % 3 === 0));
-    expect(harvis.open).toBe(
-      [110, 111, 112].filter((id) => projects[id % 3] === "harvis").length,
+    const atlas = stats("days=7&project=atlas&type=routine");
+    expect(ids(atlas)).toEqual(range(1, 60).filter((id) => id % 3 === 0));
+    expect(atlas.open).toBe(
+      [110, 111, 112].filter((id) => projects[id % 3] === "atlas").length,
     );
     const first = stats("start=2026-10-27&end=2026-10-27&type=routine");
     expect(ids(first)).toContain(1);
@@ -643,7 +643,7 @@ describe("metric trends", () => {
   const row = (
     completedAt: number,
     values: Partial<Record<"runCount" | "escalations" | "elapsed" | "runtime", number | null>> = {},
-    project = "harvis",
+    project = "atlas",
   ) =>
     ({
       task: { ...task(), project },
@@ -747,7 +747,7 @@ describe("metric trends", () => {
   it("per-group series split the total cohort exactly", () => {
     const tasks = Array.from({ length: 12 }, (_, i) => ({
       ...task(i + 1),
-      project: ["harvis", "rake", "amux"][i % 3],
+      project: ["atlas", "orbit", "alder"][i % 3],
       created_at: "2026-10-20T00:00:00Z",
     }));
     const events = Object.fromEntries(

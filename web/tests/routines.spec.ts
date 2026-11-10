@@ -1,6 +1,6 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { choose, mockDesk } from "./fixtures";
-const routine = { id: 9, name: "Acceptance routine", project: "harvis", cron: "0 9 * * 1-5", timezone: "Europe/London", title: "Record acceptance", detail: "## Outcome\nRecord acceptance only.", enabled: true, archived: false, next_at: 1793696400, latest_task: 3 };
+const routine = { id: 9, name: "Acceptance routine", project: "atlas", cron: "0 9 * * 1-5", timezone: "Europe/London", title: "Record acceptance", detail: "## Outcome\nRecord acceptance only.", enabled: true, archived: false, next_at: 1793696400, latest_task: 3 };
 async function inViewport(locator: Locator, page: Page, minWidth: number) {
   await expect(locator).toBeVisible();
   await expect.poll(async () => {
@@ -16,12 +16,12 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 761, 760, 390,
     test.use({ hasTouch: true });
     test(`routines navigation and history ${theme} ${width}`, async ({ page }, info) => {
       await page.setViewportSize({ width, height: 1000 });
-      await page.addInitScript(theme => localStorage.setItem("harvis-theme", theme), theme);
+      await page.addInitScript(theme => localStorage.setItem("axe-theme", theme), theme);
       if (width === 320) await page.emulateMedia({ reducedMotion: "reduce" });
       await mockDesk(page);
-      await page.route("http://taskq.test/api/routines**", route => route.fulfill({ json: route.request().url().includes("history") ? Array.from({ length: 30 }, (_, i) => ({ id: i + 1, task_id: i === 0 ? 3 : 4, identity: `scheduled:${1793696400 - i}`, title: "Record acceptance", state: "in_progress", created_at: "2026-11-03T09:00:00Z" })) : [routine] }));
-      await page.route("http://taskq.test/api/tasks/3/routine", route => route.fulfill({ json: { routine_id: 9, identity: "scheduled:1793696400" } }));
-      await page.goto("/?taskq=http://taskq.test&project=harvis&q=Acceptance");
+      await page.route("http://axe.test/api/routines**", route => route.fulfill({ json: route.request().url().includes("history") ? Array.from({ length: 30 }, (_, i) => ({ id: i + 1, task_id: i === 0 ? 3 : 4, identity: `scheduled:${1793696400 - i}`, title: "Record acceptance", state: "in_progress", created_at: "2026-11-03T09:00:00Z" })) : [routine] }));
+      await page.route("http://axe.test/api/tasks/3/routine", route => route.fulfill({ json: { routine_id: 9, identity: "scheduled:1793696400" } }));
+      await page.goto("/?server=http://axe.test&project=atlas&q=Acceptance");
       await page.getByRole("button", { name: "Routines", exact: true }).click();
       await expect(page).toHaveURL(/view=routines/);
       // A row opens the routine in a side pane.
@@ -73,7 +73,7 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 761, 760, 390,
       await page.getByRole("button", { name: /^Back to routine/ }).click();
       await expect(pane).toBeVisible();
       await expect.poll(() => pane.evaluate(el => el.scrollTop)).toBe(routineScroll);
-      await expect(page).toHaveURL(/project=harvis/);
+      await expect(page).toHaveURL(/project=atlas/);
       await expect(page).toHaveURL(/q=Acceptance/);
       await page.goBack();
       await assertPanels();
@@ -98,11 +98,11 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 761, 760, 390,
 test("routine loading empty and error states", async ({ page }) => {
   await mockDesk(page);
   let mode = "loading";
-  await page.route("http://taskq.test/api/routines", async route => {
+  await page.route("http://axe.test/api/routines", async route => {
     await new Promise(r => setTimeout(r, 300));
     await route.fulfill(mode === "error" ? { status: 503, body: "unavailable" } : { json: [] });
   });
-  await page.goto("/?taskq=http://taskq.test&view=routines");
+  await page.goto("/?server=http://axe.test&view=routines");
   await expect(page.getByLabel("Loading routines…")).toBeVisible();
   await expect(page.getByText("No matching routines")).toBeVisible();
   mode = "error";
@@ -111,13 +111,13 @@ test("routine loading empty and error states", async ({ page }) => {
 });
 test("routine history loading empty and error", async ({ page }) => {
   await mockDesk(page);
-  await page.route("http://taskq.test/api/routines", route => route.fulfill({ json: [routine] }));
+  await page.route("http://axe.test/api/routines", route => route.fulfill({ json: [routine] }));
   let broken = false;
-  await page.route("http://taskq.test/api/routines/9/history", async route => {
+  await page.route("http://axe.test/api/routines/9/history", async route => {
     await new Promise(r => setTimeout(r, 400));
     await route.fulfill(broken ? { status: 503, body: "unavailable" } : { json: [] });
   });
-  await page.goto("/?taskq=http://taskq.test&view=routines&routine=9");
+  await page.goto("/?server=http://axe.test&view=routines&routine=9");
   await expect(page.getByLabel("Loading routine history…")).toBeVisible();
   await expect(page.getByText("No occurrences yet")).toBeVisible();
   broken = true;
@@ -126,17 +126,17 @@ test("routine history loading empty and error", async ({ page }) => {
 });
 test.describe("routine status filter", () => {
   const rows = [
-    { ...routine, id: 1, name: "Nightly enabled", project: "harvis" },
-    { ...routine, id: 2, name: "Nightly paused", project: "harvis", enabled: false },
-    { ...routine, id: 3, name: "Nightly archived", project: "harvis", enabled: false, archived: true },
-    { ...routine, id: 4, name: "Weekly archived", project: "rake", enabled: true, archived: true },
-    { ...routine, id: 5, name: "Weekly enabled", project: "rake" },
+    { ...routine, id: 1, name: "Nightly enabled", project: "atlas" },
+    { ...routine, id: 2, name: "Nightly paused", project: "atlas", enabled: false },
+    { ...routine, id: 3, name: "Nightly archived", project: "atlas", enabled: false, archived: true },
+    { ...routine, id: 4, name: "Weekly archived", project: "orbit", enabled: true, archived: true },
+    { ...routine, id: 5, name: "Weekly enabled", project: "orbit" },
   ];
   const shown = (page: Page) => page.locator("tbody tr td:first-child button");
   const open = async (page: Page, query = "") => {
     await mockDesk(page);
-    await page.route("http://taskq.test/api/routines", route => route.fulfill({ json: rows }));
-    await page.goto(`/?taskq=http://taskq.test&view=routines${query}`);
+    await page.route("http://axe.test/api/routines", route => route.fulfill({ json: rows }));
+    await page.goto(`/?server=http://axe.test&view=routines${query}`);
     await expect(shown(page).first()).toBeVisible();
     return page.getByLabel("status", { exact: true });
   };
@@ -162,17 +162,17 @@ test.describe("routine status filter", () => {
     await expect(page.locator('[role="listbox"] [role="option"]')).toHaveText(["All", "Enabled", "Paused", "Archived"]);
   });
   test("combines with Project and search and survives reload", async ({ page }) => {
-    const status = await open(page, "&project=rake");
+    const status = await open(page, "&project=orbit");
     await expect(shown(page)).toHaveText(["Weekly archived", "Weekly enabled"]);
     await choose(status, "archived");
     await expect(shown(page)).toHaveText(["Weekly archived"]);
-    await expect(page).toHaveURL(/project=rake/);
+    await expect(page).toHaveURL(/project=orbit/);
     await page.reload();
     await expect(page.getByLabel("status", { exact: true })).toHaveAttribute("data-value", "archived");
     await expect(shown(page)).toHaveText(["Weekly archived"]);
-    await page.goto("/?taskq=http://taskq.test&view=routines&status=archived&q=nightly");
+    await page.goto("/?server=http://axe.test&view=routines&status=archived&q=nightly");
     await expect(shown(page)).toHaveText(["Nightly archived"]);
-    await page.goto("/?taskq=http://taskq.test&view=routines&status=paused&project=rake");
+    await page.goto("/?server=http://axe.test&view=routines&status=paused&project=orbit");
     await expect(page.getByText("No matching routines")).toBeVisible();
   });
   for (const width of [390, 320]) test(`fits and filters at phone width ${width}`, async ({ page }) => {
@@ -185,7 +185,7 @@ test.describe("routine status filter", () => {
   });
   test("is only offered on Routines", async ({ page }) => {
     await mockDesk(page);
-    await page.goto("/?taskq=http://taskq.test&status=archived");
+    await page.goto("/?server=http://axe.test&status=archived");
     await expect(page.getByLabel("Search tasks")).toBeVisible();
     await expect(page.getByLabel("status", { exact: true })).toHaveCount(0);
   });

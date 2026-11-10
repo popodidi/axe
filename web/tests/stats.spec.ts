@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { statsFixture } from "./stats-fixture";
 import { choose } from "./fixtures";
-const base = "/?taskq=http://taskq.test&view=stats";
+const base = "/?server=http://axe.test&view=stats";
 test("completion ranges, custom dates and filters survive navigation", async ({
   page,
 }) => {
@@ -32,7 +32,7 @@ test("completion ranges, custom dates and filters survive navigation", async ({
   await page.getByLabel("Start date (UTC)", { exact: true }).fill("2026-10-28");
   await page.getByLabel("End date (UTC, inclusive)").fill("2026-10-28");
   await expect(scope).toContainText("3 completed cohort tasks");
-  await choose(page.getByLabel("project", { exact: true }), "harvis");
+  await choose(page.getByLabel("project", { exact: true }), "atlas");
   await expect(scope).toContainText("1 completed cohort tasks");
   await page.getByRole("button", { name: "Tasks", exact: true }).click();
   await page.getByRole("button", { name: "Stats", exact: true }).click();
@@ -63,11 +63,11 @@ for (const width of [1440, 390])
     test(`distributions ${width} ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 1600 });
       await page.addInitScript(
-        (t) => localStorage.setItem("harvis-theme", t),
+        (t) => localStorage.setItem("axe-theme", t),
         theme,
       );
       await statsFixture(page);
-      await page.goto("/?taskq=http://taskq.test");
+      await page.goto("/?server=http://axe.test");
       await expect(page.getByLabel("state", { exact: true })).toHaveAttribute("data-value", 
         "active",
       );
@@ -129,8 +129,8 @@ for (const width of [1440, 390])
       await expect(page.getByLabel("Split by", { exact: true })).toHaveAttribute("data-value", 
         "project",
       );
-      await expect(chart).toContainText("harvis: 1");
-      await expect(chart).toContainText("rake: 1");
+      await expect(chart).toContainText("atlas: 1");
+      await expect(chart).toContainText("orbit: 1");
       await page.screenshot({
         path: test.info().outputPath(`project-${width}-${theme}.png`),
       });

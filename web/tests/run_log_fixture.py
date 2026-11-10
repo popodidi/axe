@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated taskq/log fixture. Build taskq; start dashboard on 18080; run this.
+"""Isolated server/log fixture. Build axe; start the dashboard on 18080; run this.
 No live configuration or database is used. Ctrl-C cleans up the fixture server.
 """
 import json
@@ -11,25 +11,25 @@ import tempfile
 import time
 import urllib.request
 
-root = Path(__file__).resolve().parents[3]
-with tempfile.TemporaryDirectory(prefix="taskq-log-fixture-") as tmp:
+root = Path(__file__).resolve().parents[2]
+with tempfile.TemporaryDirectory(prefix="axe-log-fixture-") as tmp:
     scratch = Path(tmp)
     config = scratch / "config.toml"
     config.write_text('[server]\ncors_origins = ["http://127.0.0.1:18080"]\n')
-    env = {k: v for k, v in os.environ.items() if not k.startswith("TASKQ_")}
-    env.update(TASKQ_CONFIG=str(config), TASKQ_DB=str(scratch / "taskq.db"), TASKQ_TOKEN_FILE=str(scratch / "no-token"))
-    server = subprocess.Popen([str(root / "taskq/target/debug/taskq"), "server", "--listen", "127.0.0.1:0"], env=env, stdout=subprocess.PIPE, text=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("AXE_")}
+    env.update(AXE_CONFIG=str(config), AXE_DB=str(scratch / "axe.db"), AXE_TOKEN_FILE=str(scratch / "no-token"))
+    server = subprocess.Popen([str(root / "target/debug/axe"), "server", "--listen", "127.0.0.1:0"], env=env, stdout=subprocess.PIPE, text=True)
     try:
         url = server.stdout.readline().strip().split()[-1]
         for agent in ["claude", "codex"]:
-            body = json.dumps({"project": "harvis", "title": f"{agent.title()} viewer fixture"}).encode()
+            body = json.dumps({"project": "atlas", "title": f"{agent.title()} viewer fixture"}).encode()
             with urllib.request.urlopen(urllib.request.Request(url + "/api/tasks", body, {"Content-Type": "application/json"})) as response:
                 json.load(response)
-        db = sqlite3.connect(scratch / "taskq.db")
+        db = sqlite3.connect(scratch / "axe.db")
         def record(run_id, agent, finished=False):
             path = scratch / f"{run_id}.log"
             path.touch()
-            db.execute("INSERT INTO runs (id,task_id,project,agent,mode,claim,started_at,ended_at,exit_code,log_path) VALUES (?,?,?,?,?,?,?,?,?,?)", (run_id, 2 if agent == "codex" else 1, "harvis", agent, "fresh", f"fixture-{run_id}", "2026-10-28T00:00:00Z", "2026-10-28T00:01:00Z" if finished else None, 0 if finished else None, str(path)))
+            db.execute("INSERT INTO runs (id,task_id,project,agent,mode,claim,started_at,ended_at,exit_code,log_path) VALUES (?,?,?,?,?,?,?,?,?,?)", (run_id, 2 if agent == "codex" else 1, "atlas", agent, "fresh", f"fixture-{run_id}", "2026-10-28T00:00:00Z", "2026-10-28T00:01:00Z" if finished else None, 0 if finished else None, str(path)))
             db.commit()
             return path
         def append(path, value):
@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix="taskq-log-fixture-") as tmp:
                 append(path, message("claude", f"Historical attempt {i}, message {n}"))
         db.execute("UPDATE runs SET exit_code=7 WHERE id=4")
         db.commit()
-        print(f"http://127.0.0.1:18080/?taskq={url}", flush=True)
+        print(f"http://127.0.0.1:18080/?server={url}", flush=True)
         tick = 0
         while True:
             for agent, path in paths.items():

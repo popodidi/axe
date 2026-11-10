@@ -1,7 +1,5 @@
-/* Harvis Quiet. Canonical tokens and base styles.
- * Guide: docs/reference/brand-guide.md
+/* The neutral axe theme: canonical tokens and base styles.
  * Dark default; data-theme="light" on html selects the light palette.
- * New Harvis output uses this file. The dashboard migration is separate.
  */
 :root {
   color-scheme: dark;
