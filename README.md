@@ -25,6 +25,27 @@ The crate is `axe-os`; the binary and the library are `axe`. Cargo features:
 answer 409, and a configured `[telegram]` table is ignored with a warning.
 Stored messages and `bot tg history` work in both builds.
 
+### Releases
+
+A `vX.Y.Z[-pre]` tag whose version matches `crates/axe/Cargo.toml` runs
+`.github/workflows/release.yml` on the hlab CI VM. From one Docker build
+(`Dockerfile`, `embed-ui` on) it publishes:
+
+| Asset | Contents |
+|---|---|
+| `ghcr.io/popodidi/axe:<tag>` | `axe server` image; the digest is in the release notes |
+| `axe-<tag>-linux-x86_64.tar.gz` | The image's `axe` binary (glibc 2.36+), licences and README |
+| `axe-skills-<tag>.tar.gz` | `skills/axe` (extracts to `axe/`) |
+| `*.sha256`, `SHA256SUMS` | sha256 of each tarball |
+
+```sh
+gh release download <tag> -R popodidi/axe && sha256sum -c SHA256SUMS
+```
+
+The job also runs `cargo publish --dry-run`; crates.io publishing is not done
+from CI. Other platforms install from source with `--tag <tag>`. A failed
+release is retried with a new tag, never by moving or reusing one.
+
 ## Not a workflow engine
 
 A task has a **state** (`pending` means eligible to run) and, once dispatched,

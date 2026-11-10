@@ -1,0 +1,13 @@
+**
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!web/
+!web/**
+web/node_modules
+web/.next
+web/out
+web/test-results
+web/playwright-report
+crates/**/target
