@@ -1,0 +1,48 @@
+[package]
+name = "axe-os"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A self-hosted task queue and dispatcher for coding agents"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/popodidi/axe"
+readme = "../../README.md"
+keywords = ["agents", "task-queue", "dispatcher", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "axe"
+path = "src/lib.rs"
+
+[[bin]]
+name = "axe"
+path = "src/main.rs"
+
+[features]
+default = ["telegram"]
+# The Telegram gateway for bots (`[telegram]` in the server config).
+telegram = []
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+similar = "3.2.1"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+toml = "0.9"
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+uuid = { version = "1", features = ["v4"] }
+
+tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+fs2 = "0.4"
+libc = "0.2"
+croner = "4.0.2"
+chrono = "0.4.45"
+chrono-tz = "0.10.4"
+
+[dev-dependencies]
+tempfile = "3"
