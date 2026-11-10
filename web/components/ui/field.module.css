@@ -1,0 +1,27 @@
+/* Inputs: stable neutral inset with a 3:1 control edge and clear focus. */
+.field {
+  font-family: var(--font-body);
+  font-size: var(--text-control);
+  line-height: var(--lh-label);
+  color: var(--text-primary);
+  background: var(--card-bg);
+  border: var(--border-control);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.field::placeholder {
+  color: var(--text-tertiary);
+}
+
+.search {
+  flex: 1;
+  min-width: var(--search-min-width);
+}
+
+.compact {
+  font-size: var(--text-control);
+  min-height: var(--control-height-default);
+  padding: var(--space-compact) var(--space-snug);
+}

@@ -1,0 +1,34 @@
+@value bp-phone from "../../app/styles/breakpoints.module.css";
+
+/* Readability override (owner, 20261103): sections are neutral cards on the
+   canvas. No shadow and no colored edges; color stays in data and states. */
+.panel {
+  display: grid;
+  align-content: start;
+  gap: var(--section-head-gap);
+  min-width: 0;
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+  padding: var(--card-padding);
+}
+
+@media bp-phone {
+  .panel {
+    padding: var(--card-padding-phone);
+  }
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1);
+}
+
+.meta {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}

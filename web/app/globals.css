@@ -1,0 +1,72 @@
+@import "./styles/brand-tokens.css";
+@import "./styles/accent-tokens.css";
+@import "./styles/app-tokens.css";
+
+/* Quiet base rules (focus ring, selection, links, headings) come from
+   brand-tokens.css; only app-wide behavior lives here. */
+
+html,
+body {
+  height: 100%;
+}
+
+/* Native disclosure can animate to its measured height (no max-height clip). */
+:root {
+  interpolate-size: allow-keywords;
+}
+
+body {
+  overflow: hidden;
+}
+
+details::details-content {
+  block-size: 0;
+  overflow: clip;
+  transition:
+    block-size var(--transition-disclosure),
+    content-visibility var(--transition-disclosure) allow-discrete;
+}
+
+details[open]::details-content {
+  block-size: auto;
+}
+
+summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Chevron rotates with the disclosure state. */
+summary::before {
+  content: "›";
+  display: inline-block;
+  width: var(--space-2);
+  text-align: center;
+  color: var(--text-tertiary);
+  transition: transform var(--transition-disclosure);
+}
+
+details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+/* Theme switch: the palette changes in one frame, never crossfades. */
+:root[data-theme-switching] *,
+:root[data-theme-switching] *::before,
+:root[data-theme-switching] *::after {
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

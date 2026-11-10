@@ -1,0 +1,39 @@
+/* Sections group by space and a label, per the Quiet brand guide. */
+.section {
+  display: grid;
+  gap: var(--space-snug);
+  min-width: 0;
+}
+
+.sectionHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-snug);
+}
+
+.sectionTitle {
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--space-8) * 3)), 1fr)
+  );
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.reasons {
+  display: grid;
+  gap: var(--space-half);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-secondary);
+}

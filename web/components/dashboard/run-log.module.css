@@ -1,0 +1,120 @@
+/* Opaque dialog surface; enters with at most 4px movement (200ms). */
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text-primary);
+  animation: viewer-in var(--transition-disclosure) both;
+}
+
+@keyframes viewer-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance));
+  }
+}
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--toolbar-padding);
+  border-bottom: var(--border-subtle);
+  background: var(--bg);
+}
+.header h2 {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+  margin: 0;
+}
+.header span {
+  overflow-wrap: anywhere;
+}
+.scroll {
+  overflow: auto;
+  padding: var(--pane-padding);
+  flex: 1;
+  min-height: 0;
+  overflow-anchor: none;
+}
+/* Records group by space; no rule between every message. */
+.record {
+  padding: var(--inset-padding);
+  margin-top: var(--inset-gap);
+  min-width: 0;
+}
+.record h3,
+.record h4 {
+  font-size: var(--text-label);
+  color: var(--text-secondary);
+  margin: var(--space-half) 0;
+  overflow-wrap: anywhere;
+}
+.record pre {
+  white-space: pre;
+  overflow: auto;
+  max-height: calc(var(--space-8) * 3);
+  padding: var(--space-1);
+}
+.record summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  min-height: var(--control-min-height);
+  line-height: var(--lh-body);
+  overflow-wrap: anywhere;
+}
+.record[data-kind="message"] {
+  padding-block: var(--space-1);
+}
+.record[data-kind="tool"],
+.record[data-kind="thinking"] {
+  padding-block: var(--space-half);
+}
+.toolLabel {
+  overflow-wrap: anywhere;
+}
+.toolStatus {
+  color: var(--text-secondary);
+  margin-left: var(--space-1);
+  font-size: var(--text-label);
+  white-space: nowrap;
+}
+.record[data-error="true"] h3,
+.record[data-error="true"] .toolStatus {
+  color: var(--status-danger);
+}
+/* Run state labels use the task-state tints: running blue, completed teal,
+   unknown amber, failed danger. */
+.header [data-run-state] {
+  padding: var(--pill-padding);
+  border-radius: var(--radius-xs);
+  font-weight: var(--weight-medium);
+}
+.header [data-run-state="running"] {
+  color: var(--state-in-progress-fg);
+  background: var(--state-in-progress-bg);
+}
+.header [data-run-state="completed"] {
+  color: var(--state-done-fg);
+  background: var(--state-done-bg);
+}
+.header [data-run-state="unknown"] {
+  color: var(--state-blocked-fg);
+  background: var(--state-blocked-bg);
+}
+.header [data-run-state="failed"] {
+  color: var(--state-escalated-fg);
+  background: var(--state-escalated-bg);
+}
+
+.viewer button {
+  min-height: var(--control-min-height);
+}
+
+.record[data-error="true"] pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

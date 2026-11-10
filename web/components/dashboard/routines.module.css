@@ -1,0 +1,220 @@
+@value bp-phone, bp-list-narrow from "../../app/styles/breakpoints.module.css";
+
+.stack {
+  display: grid;
+  gap: var(--section-gap);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.rowButton {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sub {
+  margin-top: var(--space-quarter);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+/* Paused and archived are labels, not faded rows. */
+.status {
+  display: inline-block;
+  padding: var(--pill-padding);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+}
+
+.status[data-status="enabled"] {
+  color: var(--state-done-fg);
+  background: var(--state-done-bg);
+}
+
+.status[data-status="paused"] {
+  color: var(--state-blocked-fg);
+  background: var(--state-blocked-bg);
+}
+
+/* Side pane: surface-1 column beside the list, like the task pane. */
+.pane {
+  flex-shrink: 0;
+  width: var(--routine-size, var(--routine-width));
+  min-width: var(--routine-min-width);
+  max-width: var(--routine-max-width);
+  overflow: auto;
+  padding: var(--pane-padding);
+  background: var(--surface-1);
+  border-left: var(--border-subtle);
+  animation: pane-in var(--transition-feedback) both;
+}
+
+@keyframes pane-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--motion-distance));
+  }
+}
+
+.paneHeader {
+  display: grid;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.paneTop {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.paneId {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+}
+
+.close {
+  margin-left: auto;
+}
+
+.paneTitle {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-snug) var(--space-2);
+  padding: var(--space-snug) var(--space-2);
+  margin-bottom: var(--space-3);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+
+.facts dt {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.facts dd {
+  margin: 0;
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  overflow-wrap: anywhere;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.block {
+  display: grid;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+.blockTitle {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+}
+
+.note {
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+}
+
+.history {
+  display: grid;
+  gap: var(--space-half);
+  list-style: none;
+}
+
+.historyRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-quarter) var(--space-1);
+  width: 100%;
+  padding: var(--space-1) var(--space-cozy);
+  border: var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--card-bg);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--transition-hover);
+}
+
+.historyRow:hover {
+  background: var(--surface-hover);
+}
+
+.historyRow[aria-current="true"] {
+  background: var(--surface-selected);
+}
+
+.historyRow[aria-current="true"] .historyTitle {
+  font-weight: var(--weight-semibold);
+}
+
+.historyTitle {
+  font-size: var(--text-control);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyMeta {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.pager {
+  display: flex;
+  gap: var(--space-1);
+}
+
+@container bp-list-narrow {
+  .optional {
+    display: none;
+  }
+}
+
+@media bp-phone {
+  .pane {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    border: 0;
+    padding: var(--pane-padding-phone);
+  }
+
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

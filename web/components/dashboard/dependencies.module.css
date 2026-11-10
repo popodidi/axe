@@ -1,0 +1,41 @@
+.deps {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-2);
+}
+
+.reason {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.list {
+  display: grid;
+  gap: var(--space-half);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-half);
+  min-width: 0;
+}
+
+.id {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+}
+
+.title {
+  flex: 1 1 12ch;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.none {
+  color: var(--text-tertiary);
+  font-size: var(--text-caption);
+}

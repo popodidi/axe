@@ -1,0 +1,295 @@
+/* Report charts on cards; restrained categorical series (accent-tokens.css). */
+.chart {
+  display: grid;
+  gap: var(--space-snug);
+  margin: 0;
+  min-width: 0;
+}
+
+.head {
+  display: grid;
+  gap: var(--space-quarter);
+}
+
+.title {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+  font-weight: var(--weight-semibold);
+}
+
+.subtitle,
+.note {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-half) var(--space-snug);
+  list-style: none;
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+}
+
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-half);
+}
+
+.swatch {
+  width: var(--space-10px);
+  height: var(--space-10px);
+}
+
+.plot {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.yAxis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding-top: var(--lh-caption);
+  padding-bottom: calc(var(--lh-caption) + var(--space-half));
+  font-size: var(--text-caption);
+  line-height: 1;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.area {
+  flex: 1;
+  min-width: 0;
+}
+
+.totals,
+.xLabels {
+  display: flex;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.totals > span,
+.xLabels > span {
+  flex: 1;
+  min-width: 0;
+  overflow: visible;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.totals {
+  color: var(--text-secondary);
+}
+
+.xLabels {
+  margin-top: var(--space-half);
+  color: var(--text-tertiary);
+}
+
+.bars {
+  display: block;
+  width: 100%;
+  height: calc(var(--space-8) + var(--space-5));
+  border-bottom: var(--border-subtle);
+}
+
+.grid {
+  stroke: var(--border-color);
+  stroke-width: 1;
+}
+
+.scatter {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.tick {
+  fill: var(--text-tertiary);
+  font-family: var(--font-body);
+  font-variant-numeric: tabular-nums;
+}
+
+.axis {
+  fill: var(--text-secondary);
+  font-family: var(--font-body);
+}
+
+.diagonal {
+  stroke: var(--border-control-color);
+  stroke-width: 1;
+}
+
+.dot {
+  fill-opacity: 0.8;
+  stroke: var(--card-bg);
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: fill-opacity var(--transition-hover);
+}
+
+.dot:hover,
+.dot:focus-visible {
+  fill-opacity: 1;
+  stroke: var(--text-primary);
+  outline: none;
+}
+
+.s0 {
+  fill: var(--accent-teal);
+}
+
+.s1 {
+  fill: var(--accent-blue);
+}
+
+.s2 {
+  fill: var(--accent-purple);
+}
+
+.s3 {
+  fill: var(--accent-amber);
+}
+
+.s4 {
+  fill: var(--text-secondary);
+}
+
+.s5 {
+  fill: var(--text-tertiary);
+}
+
+/* A period whose figure is incomplete; never drawn as a value. */
+.gap {
+  fill: var(--text-tertiary);
+  fill-opacity: 0.16;
+}
+
+/* Exact values for assistive technology and text search. */
+.data {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Trend charts: mean line, +/-1 SD band and markers share one series color. */
+.trend {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+}
+
+.c0 {
+  color: var(--accent-teal);
+}
+
+.c1 {
+  color: var(--accent-blue);
+}
+
+.c2 {
+  color: var(--accent-purple);
+}
+
+.c3 {
+  color: var(--accent-amber);
+}
+
+.c4 {
+  color: var(--text-secondary);
+}
+
+.c5 {
+  color: var(--text-tertiary);
+}
+
+.band {
+  fill: currentcolor;
+  fill-opacity: 0.18;
+}
+
+.line {
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.bridge {
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  stroke-opacity: 0.6;
+}
+
+.marker {
+  fill: currentcolor;
+  stroke: var(--card-bg);
+  stroke-width: 1;
+}
+
+.muted {
+  opacity: 0.45;
+}
+
+.cursor {
+  stroke: var(--border-control-color);
+  stroke-width: 1;
+}
+
+.focusRing {
+  fill: none;
+  stroke: var(--text-primary);
+  stroke-width: 1.5;
+}
+
+.count {
+  fill: var(--text-secondary);
+  font-family: var(--font-body);
+  font-variant-numeric: tabular-nums;
+}
+
+.countBar {
+  fill: var(--text-tertiary);
+}
+
+.readout {
+  min-height: var(--lh-caption);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.legendButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-half);
+  min-height: var(--control-min-height);
+  padding: 0 var(--space-half);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.legendButton[aria-pressed="true"] {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}

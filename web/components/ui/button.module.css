@@ -1,0 +1,106 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  font-family: var(--font-body);
+  font-size: var(--text-control);
+  font-weight: var(--weight-medium);
+  line-height: var(--lh-label);
+  min-height: var(--control-height-default);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: left;
+  transition:
+    background-color var(--transition-hover),
+    color var(--transition-hover),
+    transform var(--transition-hover);
+}
+
+/* Native disabled state plus a disabled text color, not opacity alone. */
+.button:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+.primary {
+  background: var(--action-bg);
+  color: var(--action-fg);
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--action-hover);
+}
+
+.secondary {
+  background: var(--surface-2);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-color);
+}
+
+.secondary:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.sm {
+  min-height: var(--control-min-height);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  padding: var(--space-quarter) var(--space-1);
+  border-radius: var(--radius-xs);
+}
+
+/* Small icon-only controls may press to .98; never rows or text containers. */
+.icon:active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
+
+/* View links: neutral; the active view gains a fill and 600 weight. */
+.nav {
+  justify-content: space-between;
+  min-height: var(--control-height-default);
+  font-size: var(--text-control);
+  line-height: var(--lh-label);
+  padding: var(--space-compact) var(--space-cozy);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.nav:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.nav[aria-current="page"] {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+/* Explicit link controls are neutral and underlined. */
+.link {
+  min-height: 0;
+  background: none;
+  color: var(--link);
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.link:hover:not(:disabled) {
+  text-decoration-thickness: var(--space-quarter);
+}

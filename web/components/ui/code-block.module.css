@@ -1,0 +1,62 @@
+/* Code is a different kind of content: subtle inset fill, no border. */
+.code {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  overflow-x: auto;
+}
+
+.code code {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  padding: 0;
+}
+
+.code :global(.hljs-keyword),
+.code :global(.hljs-selector-tag),
+.code :global(.hljs-built_in),
+.code :global(.hljs-type) {
+  color: var(--syntax-keyword);
+  font-weight: var(--weight-semibold);
+}
+
+.code :global(.hljs-string),
+.code :global(.hljs-attr),
+.code :global(.hljs-regexp) {
+  color: var(--syntax-string);
+}
+
+.code :global(.hljs-number),
+.code :global(.hljs-literal) {
+  color: var(--syntax-number);
+}
+
+.code :global(.hljs-comment),
+.code :global(.hljs-meta) {
+  color: var(--syntax-comment);
+  font-style: italic;
+}
+
+.code :global(.hljs-title),
+.code :global(.hljs-function) {
+  color: var(--syntax-function);
+}
+
+/* Diffs keep semantic color plus their +/- markers. */
+.add {
+  color: var(--diff-add);
+}
+
+.remove {
+  color: var(--diff-remove);
+}
+
+.meta {
+  color: var(--text-tertiary);
+}

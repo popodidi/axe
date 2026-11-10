@@ -32,6 +32,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Format
         run: cargo fmt --check
       - name: Clippy
@@ -42,3 +47,30 @@ jobs:
         run: cargo test --locked
       - name: Test (no default features)
         run: cargo test --locked --no-default-features
+      - name: Web API types are current
+        run: cargo test --locked --features ts --test ts_bindings
+      - name: Build the dashboard for embedding
+        run: cd web && npm ci && npm run build
+      - name: Clippy (embed-ui)
+        run: cargo clippy --locked --all-targets --features embed-ui -- -D warnings
+      - name: Build and test (embed-ui)
+        run: cargo build --locked --features embed-ui && cargo test --locked --features embed-ui --test embed_ui
+
+  web:
+    # Same-repository branches only: fork pull requests get no CI.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, hlab-ci]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Lint, typecheck, unit tests and build
+        run: cd web && npm ci && npm run lint && npm run typecheck && npm test && npm run build
+      - name: Browser tests
+        run: cd web && npx playwright install chromium && npm run test:browser -- --workers=1

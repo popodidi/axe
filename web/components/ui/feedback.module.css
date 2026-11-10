@@ -1,0 +1,75 @@
+.empty {
+  padding: var(--space-3) 0;
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  color: var(--text-secondary);
+}
+
+/* First load only: static neutral blocks appear after 150ms so fast responses
+   never flash. No shimmer or pulse. */
+.skeleton {
+  display: grid;
+  gap: var(--space-1);
+  padding-block: var(--space-2);
+  animation: reveal 0ms linear var(--skeleton-delay) both;
+}
+
+.skeleton span {
+  height: var(--skeleton-line);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+}
+
+.skeleton span:nth-child(3n + 2) {
+  width: 80%;
+}
+
+.skeleton span:nth-child(3n) {
+  width: 60%;
+}
+
+@keyframes reveal {
+  from {
+    visibility: hidden;
+  }
+
+  to {
+    visibility: visible;
+  }
+}
+
+/* Errors: local danger text in a small feedback region. */
+.alert {
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-snug);
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+}
+
+.kbd {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-regular);
+  color: var(--text-tertiary);
+  background: var(--surface-2);
+  border-radius: var(--radius-xs);
+  padding: 0 var(--space-half);
+}
+
+.dot {
+  display: inline-block;
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  border: 1px solid var(--idle);
+  flex-shrink: 0;
+}
+
+.dot[data-live="true"] {
+  border-color: var(--live);
+  background: var(--live);
+}
