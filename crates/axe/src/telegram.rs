@@ -245,6 +245,8 @@ pub struct TgBot {
     alerts: Mutex<Alerts>,
     /// `getMe` username, for `/cmd@username`.
     username: Mutex<Option<String>>,
+    /// `getMe` user id, to recognise the bot's own service messages.
+    id: Mutex<Option<i64>>,
 }
 
 #[derive(Default)]
@@ -345,6 +347,16 @@ fn attachments(m: &Value) -> Vec<Value> {
     out
 }
 
+/// Whether `m` is the "pinned a message" service message Telegram creates
+/// when this bot (user id `me`) pins a message itself: nothing to store or
+/// alert. Unknown `me` (failed `getMe`) never matches, so it is still dropped.
+fn own_pin(me: Option<i64>, m: &Value) -> bool {
+    me.is_some()
+        && m["pinned_message"].is_object()
+        && m["from"]["id"].as_i64() == me
+        && m["from"]["is_bot"] == true
+}
+
 /// Why an inbound sender is refused, or `None` when it is the owner in an
 /// allowlisted chat.
 fn refuse(
@@ -409,6 +421,7 @@ impl Gateway {
                     queues: Mutex::new(HashMap::new()),
                     alerts: Mutex::new(Alerts::default()),
                     username: Mutex::new(None),
+                    id: Mutex::new(None),
                 }),
             );
         }
@@ -527,6 +540,7 @@ impl Gateway {
             Ok(me) => {
                 *b.username.lock().unwrap_or_else(|e| e.into_inner()) =
                     me["username"].as_str().map(String::from);
+                *b.id.lock().unwrap_or_else(|e| e.into_inner()) = me["id"].as_i64();
                 let groups = b.chats.iter().any(|c| *c < 0);
                 if me["can_join_groups"] == true && !groups {
                     eprintln!(
@@ -658,6 +672,9 @@ impl Gateway {
     fn inbound(&self, b: &TgBot, store: &dyn Store, uid: i64, m: &Value, edit: bool) -> Result<()> {
         let chat = m["chat"]["id"].as_i64();
         let kind = if edit { "edited_message" } else { "message" };
+        if own_pin(*b.id.lock().unwrap_or_else(|e| e.into_inner()), m) {
+            return Ok(());
+        }
         if let Some(reason) = refuse(self.owner, &b.chats, &m["from"], m, chat) {
             return self.security_drop(b, store, uid, kind, reason, m["from"]["id"].as_i64(), chat);
         }
