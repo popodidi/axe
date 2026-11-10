@@ -1,0 +1,234 @@
+@value bp-phone, bp-list-narrow from "../../app/styles/breakpoints.module.css";
+
+/* Bots: a list like Routines, and a full-width detail page with tabs. */
+.stack {
+  display: grid;
+  gap: var(--section-gap);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.rowButton {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sub {
+  margin-top: var(--space-quarter);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.activity {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Paused is a label, attention uses the escalated state colors. */
+.status {
+  display: inline-block;
+  padding: var(--pill-padding);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  color: var(--state-done-fg);
+  background: var(--state-done-bg);
+  white-space: nowrap;
+}
+
+.status[data-status="paused"] {
+  color: var(--state-blocked-fg);
+  background: var(--state-blocked-bg);
+}
+
+.status[data-status="attention"] {
+  color: var(--state-escalated-fg);
+  background: var(--state-escalated-bg);
+}
+
+.header {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.id {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+}
+
+.back {
+  margin-left: auto;
+}
+
+.title {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--space-8)), 1fr));
+  gap: var(--space-snug) var(--space-2);
+  padding: var(--space-snug) var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+
+.facts dt {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.facts dd {
+  margin: 0;
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  overflow-wrap: anywhere;
+}
+
+.block {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.blockTitle {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+}
+
+.note {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.history {
+  font-size: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.history summary {
+  min-height: var(--control-min-height);
+  cursor: pointer;
+}
+
+.history article {
+  display: grid;
+  gap: var(--space-half);
+  margin-top: var(--space-1);
+}
+
+.event {
+  display: grid;
+  gap: var(--space-half);
+  padding: var(--space-1) 0;
+  border-bottom: var(--border-subtle);
+}
+
+.eventHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+}
+
+.body {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-snug);
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--space-8) + var(--space-5))), 1fr));
+  gap: var(--space-snug);
+}
+
+.kpi {
+  display: grid;
+  gap: var(--space-half);
+  padding: var(--space-snug) var(--space-2);
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+}
+
+.kpiLabel,
+.kpiDetail {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.kpiLabel {
+  color: var(--text-secondary);
+}
+
+.kpiValue {
+  font-size: var(--text-h1);
+  line-height: var(--lh-h1);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--space-8) * 3)), 1fr)
+  );
+  gap: var(--space-2);
+}
+
+@container bp-list-narrow {
+  .optional {
+    display: none;
+  }
+}
+
+@media bp-phone {
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

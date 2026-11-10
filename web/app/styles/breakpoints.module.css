@@ -1,0 +1,13 @@
+/*
+ * Responsive breakpoints. Media and container queries cannot read custom
+ * properties, so these are CSS Modules @value tokens, substituted at build
+ * time. This is the only place query lengths may be written; the style lint
+ * rejects px in any other query. Import with
+ *   @value bp-phone from "<path>/styles/breakpoints.module.css";
+ */
+@value bp-phone: (max-width: 760px);
+@value bp-wide: (min-width: 761px);
+@value bp-list-narrow: (max-width: 640px);
+@value bp-stack: (max-width: 1599px);
+
+@value bp-artifacts-narrow: (max-width: 480px);

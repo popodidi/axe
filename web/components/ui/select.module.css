@@ -1,0 +1,134 @@
+@value bp-phone from "../../app/styles/breakpoints.module.css";
+
+/* Styled select: caption above a bordered trigger, opaque floating menu. */
+.field {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--space-half);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.caption {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.caption::first-letter {
+  text-transform: uppercase;
+}
+
+.trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-snug);
+  min-height: var(--control-height-default);
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--space-compact) var(--space-cozy) var(--space-compact)
+    var(--space-snug);
+  font-family: var(--font-body);
+  font-size: var(--text-control);
+  line-height: var(--lh-label);
+  color: var(--text-primary);
+  text-align: left;
+  white-space: nowrap;
+  background: var(--card-bg);
+  border: var(--border-control);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-hover);
+}
+
+.trigger:hover {
+  background: var(--surface-hover);
+}
+
+.trigger[aria-expanded="true"] {
+  background: var(--surface-selected);
+}
+
+.value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chevron,
+.check {
+  flex-shrink: 0;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.75;
+}
+
+.chevron {
+  color: var(--text-tertiary);
+  transition: transform var(--transition-disclosure);
+}
+
+.trigger[aria-expanded="true"] .chevron {
+  transform: rotate(180deg);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + var(--space-half));
+  left: 0;
+  z-index: var(--z-toast);
+  min-width: 100%;
+  width: max-content;
+  max-width: min(calc(var(--space-8) * 2 + var(--space-5)), 90vw);
+  max-height: calc(var(--space-8) * 2 + var(--space-4));
+  overflow-y: auto;
+  padding: var(--space-half);
+  background: var(--surface-overlay);
+  color: var(--text-primary);
+  border: var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-overlay);
+  animation: menu-in var(--transition-disclosure) both;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--motion-distance) * -1));
+  }
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-compact) var(--space-cozy);
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.option[data-active="true"] {
+  background: var(--surface-hover);
+}
+
+.option[aria-selected="true"] {
+  color: var(--option-selected-fg);
+  background: var(--option-selected-bg);
+  font-weight: var(--weight-semibold);
+}
+
+@media bp-phone {
+  .trigger,
+  .option {
+    min-height: var(--control-height-touch);
+  }
+}

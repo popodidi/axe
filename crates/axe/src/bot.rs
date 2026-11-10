@@ -244,6 +244,7 @@ fn clock(at: &str) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Bot {
     pub id: i64,
     pub name: String,
@@ -830,6 +831,7 @@ pub fn ready(conn: &Connection, now: i64) -> Result<Vec<String>> {
 
 /// A stored message, as wakes and the inbox show it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Message {
     pub id: i64,
     pub kind: String,
@@ -842,6 +844,7 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Wake {
     pub id: i64,
     pub kind: String,
@@ -1551,6 +1554,7 @@ pub fn hook_output(hook: &str, inbox: &Inbox) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct BotRun {
     pub id: i64,
     pub bot: String,
@@ -1617,6 +1621,7 @@ pub fn get_run(conn: &Connection, id: i64) -> Result<BotRun> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "BotEvent"))]
 pub struct Event {
     pub id: i64,
     pub at: String,
@@ -1651,6 +1656,7 @@ pub fn events(conn: &Connection, name: &str, limit: i64) -> Result<Vec<Event>> {
 
 /// Metadata of one stored message: never its text, attachments or chat ids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MessageMeta {
     pub id: i64,
     pub direction: String,
@@ -1663,6 +1669,7 @@ pub struct MessageMeta {
 
 /// One task event in the bot's project by `bot:<name>` or `human` (no body).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskAction {
     pub task_id: i64,
     pub at: String,
@@ -1673,6 +1680,7 @@ pub struct TaskAction {
 /// `GET /api/bots/:name/activity`: metadata only, each list the latest
 /// `limit`, oldest first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Activity {
     pub messages: Vec<MessageMeta>,
     pub task_actions: Vec<TaskAction>,

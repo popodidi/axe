@@ -1,0 +1,16 @@
+/* Sentence-case subheading; uppercase is reserved for acronyms. */
+.label {
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+/* Section title (18/24 600) for a major grouping. */
+.title {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-heading);
+  color: var(--text-primary);
+}

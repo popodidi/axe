@@ -1,0 +1,184 @@
+/* The neutral axe theme: canonical tokens and base styles.
+ * Dark default; data-theme="light" on html selects the light palette.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces describe purpose, not nested card elevations. */
+  --bg: #181818;
+  --surface-nav: #141414;
+  --surface-1: #1b1b1b;
+  --surface-2: #242424;
+  --surface-3: #303030;
+  --surface-hover: #222222;
+  --surface-selected: #2b2b2b;
+  --surface-overlay: #242424;
+
+  --text-primary: #ededed;
+  --text-secondary: #b0b0b0;
+  --text-tertiary: #a0a0a0;
+  --text-disabled: #777777;
+  --action-bg: #ededed;
+  --action-fg: #181818;
+  --action-hover: #d6d6d6;
+  --link: var(--text-primary);
+  --focus-color: var(--text-primary);
+  --border-color: #383838;
+  --border-control-color: #858585;
+  --selection-bg: #414141;
+  --selection-fg: #ffffff;
+
+  /* Reserved semantic colors. Never use these as the brand accent. */
+  --status-warning: #e2bd7e;
+  --status-danger: #eda5a0;
+  --status-success: #9bc6ac;
+  --status-info: #a6bfe1;
+  --status-warning-bg: #30291f;
+  --status-danger-bg: #352322;
+  --status-success-bg: #233027;
+  --status-info-bg: #242d39;
+
+  /* Existing consumers: color names remain semantic compatibility aliases.
+     New components use purpose-based names; gold is never a primary action. */
+  --gold: var(--status-warning);
+  --blue: var(--status-info);
+  --red: var(--status-danger);
+  --green: var(--status-success);
+  --gold-bg: var(--status-warning-bg);
+  --blue-bg: var(--status-info-bg);
+  --red-bg: var(--status-danger-bg);
+  --green-bg: var(--status-success-bg);
+
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --text-h1: 24px;
+  --text-h2: 18px;
+  --text-h3: 16px;
+  --text-body: 14px;
+  --text-control: 13px;
+  --text-label: 12px;
+  --text-caption: 11px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --lh-h1: 32px;
+  --lh-h2: 24px;
+  --lh-h3: 22px;
+  --lh-body: 21px;
+  --lh-control: 20px;
+  --lh-label: 16px;
+  --lh-caption: 15px;
+  --tracking-heading: -0.025em;
+  --tracking-label: 0;
+
+  /* Explicit micro-spacing; retain the old numbered scale for consumers. */
+  --space-2px: 2px;
+  --space-4px: 4px;
+  --space-6px: 6px;
+  --space-10px: 10px;
+  --space-12px: 12px;
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 32px;
+  --space-5: 48px;
+  --space-6: 64px;
+  --space-7: 80px;
+  --space-8: 120px;
+  --control-height-compact: 28px;
+  --control-height-default: 32px;
+  --control-height-touch: 44px;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --border-subtle: 1px solid var(--border-color);
+  --border-control: 1px solid var(--border-control-color);
+  --focus-ring: 2px solid var(--focus-color);
+  --focus-offset: 2px;
+  --shadow-overlay: 0 8px 32px #00000040;
+  --backdrop: #00000066;
+
+  --duration-instant: 0ms;
+  --duration-fast: 120ms;
+  --duration-feedback: 160ms;
+  --duration-disclosure: 200ms;
+  --duration-layout: 275ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-layout: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --motion-distance: 4px;
+  --press-scale: 0.98;
+
+  /* Code is neutral by default. Diffs retain separate semantic meaning. */
+  --syntax-keyword: var(--text-primary);
+  --syntax-string: var(--text-secondary);
+  --syntax-number: var(--text-primary);
+  --syntax-comment: var(--text-tertiary);
+  --syntax-function: var(--text-primary);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface-nav: #f8f8f8;
+  --surface-1: #ffffff;
+  --surface-2: #f4f4f4;
+  --surface-3: #e8e8e8;
+  --surface-hover: #f5f5f5;
+  --surface-selected: #ededed;
+  --surface-overlay: #ffffff;
+  --text-primary: #202020;
+  --text-secondary: #606060;
+  --text-tertiary: #666666;
+  --text-disabled: #929292;
+  --action-bg: #202020;
+  --action-fg: #ffffff;
+  --action-hover: #3a3a3a;
+  --border-color: #e5e5e5;
+  --border-control-color: #858585;
+  --selection-bg: #d9d9d9;
+  --selection-fg: #202020;
+  --status-warning: #775616;
+  --status-danger: #a23f38;
+  --status-success: #35664b;
+  --status-info: #405f89;
+  --status-warning-bg: #f6f0e4;
+  --status-danger-bg: #f9eeec;
+  --status-success-bg: #edf4ef;
+  --status-info-bg: #edf1f7;
+  --shadow-overlay: 0 8px 32px #00000014;
+  --backdrop: #00000033;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-feedback: 0ms;
+    --duration-disclosure: 0ms;
+    --duration-layout: 0ms;
+    --motion-distance: 0px;
+    --press-scale: 1;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+h1 { font-size: var(--text-h1); line-height: var(--lh-h1); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-heading); }
+h2 { font-size: var(--text-h2); line-height: var(--lh-h2); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-heading); }
+h3 { font-size: var(--text-h3); line-height: var(--lh-h3); font-weight: var(--weight-semibold); }
+a { color: var(--link); text-decoration: underline; text-underline-offset: 0.18em; }
+a:hover { text-decoration-thickness: 2px; }
+code, pre { font-family: var(--font-mono); font-size: var(--text-control); }
+pre { background: var(--surface-2); border: 0; border-radius: var(--radius-md); padding: var(--space-2); overflow-x: auto; }
+:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+::selection { background: var(--selection-bg); color: var(--selection-fg); }

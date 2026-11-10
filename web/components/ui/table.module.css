@@ -1,0 +1,119 @@
+.scroll {
+  overflow-x: auto;
+  min-width: 0;
+  /* Room for the inset focus ring and selected-row radius. */
+  padding-block: var(--space-quarter);
+}
+
+/* Semantic table: a filled header row and one hairline per row (owner
+   readability override), neutral hover and selected fills. */
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  text-align: left;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+}
+
+.table th {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+.table th:first-child {
+  border-start-start-radius: var(--radius-sm);
+  border-end-start-radius: var(--radius-sm);
+}
+
+.table th:last-child {
+  border-start-end-radius: var(--radius-sm);
+  border-end-end-radius: var(--radius-sm);
+}
+
+.table th,
+.table td {
+  padding: var(--cell-padding);
+  vertical-align: top;
+}
+
+.table td {
+  color: var(--text-secondary);
+  border-bottom: var(--border-subtle);
+  transition: background-color var(--transition-hover);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table tbody tr[data-interactive] {
+  cursor: pointer;
+}
+
+.table tbody tr[data-interactive]:hover td {
+  background: var(--row-hover-bg);
+}
+
+/* Hover never overrides selection. */
+.table tbody tr[aria-selected="true"] td,
+.table tbody tr[aria-selected="true"]:hover td {
+  background: var(--row-selected-bg);
+}
+
+.table tbody tr[aria-selected="true"] :is(button, a) {
+  font-weight: var(--weight-semibold);
+}
+
+/* Keyboard focus is a separate row ring, so focus and selection can differ. */
+.table tbody tr[data-focused="true"] {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--space-quarter) * -1);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.table th.num {
+  text-align: right;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  white-space: nowrap;
+}
+
+.table td.primary {
+  color: var(--text-primary);
+}
+
+.table td.zero {
+  color: var(--text-tertiary);
+}
+
+/* Totals keep one subtle separator. */
+.table tfoot td {
+  border-top: var(--border-subtle);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.truncate,
+.truncate > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.truncate {
+  width: 100%;
+  max-width: 0;
+}

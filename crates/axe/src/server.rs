@@ -613,6 +613,15 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
         w.write_all(body.as_bytes())?;
         return Ok(w.flush()?);
     }
+    #[cfg(feature = "embed-ui")]
+    if read && crate::web::is_ui_path(&req.path) {
+        if let Some((mime, body)) = crate::web::asset(&req.path) {
+            observe(200);
+            write_head(&mut w, 200, mime, Some(body.len()), None, "")?;
+            w.write_all(&body)?;
+            return Ok(w.flush()?);
+        }
+    }
     if read && req.path == ["api", "stream"] {
         observe(200);
         return Ok(stream_events(st, &mut w, cors)?);

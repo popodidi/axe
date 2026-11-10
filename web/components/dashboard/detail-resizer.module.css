@@ -1,0 +1,51 @@
+@value bp-phone from "../../app/styles/breakpoints.module.css";
+
+/* Hit area overlapping a pane edge. The pane's own hairline marks the
+   boundary at rest; the line strengthens on hover, focus and drag. */
+.resizer {
+  position: relative;
+  flex-shrink: 0;
+  width: var(--resizer-width);
+  margin-right: calc(var(--resizer-width) * -1);
+  z-index: var(--z-sticky);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resizer[data-side="prev"] {
+  margin-right: 0;
+  margin-left: calc(var(--resizer-width) * -1);
+}
+
+.resizer::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--space-quarter);
+  background: transparent;
+  transition: background-color var(--transition-hover);
+}
+
+.resizer[data-side="prev"]::after {
+  inset: 0 0 0 auto;
+}
+
+.resizer:hover::after,
+.resizer[data-dragging="true"]::after {
+  background: var(--border-control-color);
+}
+
+.resizer:focus-visible {
+  outline: none;
+}
+
+.resizer:focus-visible::after {
+  background: var(--focus-color);
+}
+
+/* Phones stack panes full-width instead */
+@media bp-phone {
+  .resizer {
+    display: none;
+  }
+}

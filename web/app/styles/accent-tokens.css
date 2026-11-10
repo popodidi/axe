@@ -1,0 +1,27 @@
+/*
+ * Restrained accents on top of the neutral axe theme. Color marks state and data only: status
+ * labels, live dot, chart bars and the selected menu option. Chrome, cards,
+ * navigation and focus stay neutral. Literal colors live only here and in
+ * brand-tokens.css (stylelint ignores both).
+ */
+:root {
+  --accent-teal: #67d4ba;
+  --accent-blue: #8bb8ff;
+  --accent-purple: #c4a4f5;
+  --accent-amber: #edbf79;
+  --accent-teal-bg: #19352f;
+  --accent-blue-bg: #203149;
+  --accent-purple-bg: #30283f;
+  --accent-amber-bg: #3b301f;
+}
+
+:root[data-theme="light"] {
+  --accent-teal: #147762;
+  --accent-blue: #315fba;
+  --accent-purple: #7950af;
+  --accent-amber: #95600c;
+  --accent-teal-bg: #e5f4ee;
+  --accent-blue-bg: #e9f0fc;
+  --accent-purple-bg: #f1ebfa;
+  --accent-amber-bg: #fcf2df;
+}

@@ -1,0 +1,582 @@
+@value bp-phone, bp-wide, bp-list-narrow, bp-stack from "./styles/breakpoints.module.css";
+
+.app {
+  height: 100dvh;
+  display: flex;
+  background: var(--canvas);
+  color: var(--text-primary);
+}
+
+/* Navigation rail: a surface-1 sidebar with one hairline against the canvas */
+/* The rail yields on narrow desktops (22vw) so list and detail keep their
+   minimums; min-width still holds 168px. */
+.nav {
+  width: min(var(--nav-size, var(--nav-width)), 22vw);
+  min-width: var(--nav-min-width);
+  max-width: var(--nav-max-width);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-1);
+  background: var(--surface-1);
+  border-right: var(--border-subtle);
+  overflow: hidden;
+}
+
+/* Only the collapse/expand toggle animates the rail width (lib/layout.ts sets
+   data-nav-motion for its duration); stored widths, viewport changes and
+   drags apply immediately. */
+:root[data-motion="ready"][data-nav-motion] .nav {
+  transition: width var(--transition-layout);
+}
+
+/* Dragging a resizer follows the pointer exactly. */
+:root[data-resizing] .nav {
+  transition: none;
+}
+
+/* Brand tile, name and the collapse toggle: one aligned row with room
+   between them; the text truncates rather than crowding the toggle. */
+.brandRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-half) var(--space-half) var(--space-half) var(--space-1);
+}
+
+.brand {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-snug);
+  min-width: 0;
+}
+
+.brandText {
+  display: grid;
+  gap: var(--space-quarter);
+  min-width: 0;
+}
+
+/* Neutral brand tile */
+.brandMark {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-selected);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+}
+
+.navGlyph {
+  display: none;
+}
+
+.brandName,
+.brandMeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brandName {
+  font-size: var(--text-body);
+  line-height: var(--lh-label);
+  font-weight: var(--weight-semibold);
+}
+
+.brandMeta {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.collapse {
+  flex-shrink: 0;
+  width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  padding: 0;
+  color: var(--text-tertiary);
+}
+
+.collapseIcon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.75;
+}
+
+.navList {
+  display: grid;
+  gap: var(--space-quarter);
+}
+
+.hint {
+  display: flex;
+}
+
+.navFoot {
+  margin-top: auto;
+  display: grid;
+  gap: var(--space-half);
+  padding: 0 var(--space-1);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-half);
+}
+
+/* Healthy connectivity is neutral; reconnecting warns with text. */
+.connection {
+  color: var(--warn);
+}
+
+.connection[data-live="true"] {
+  color: var(--live);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  /* Panes scroll internally; the resizer and an animating pane never widen
+     the page. */
+  overflow: hidden;
+}
+
+.listPane {
+  flex: 1;
+  min-width: var(--list-min-width);
+  overflow: auto;
+  padding: var(--pane-padding);
+  container-type: inline-size;
+}
+
+/* Wraps rather than squeezing selects when the list is narrow; captions sit
+   above their controls, so controls align on the bottom edge. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-snug);
+  margin-bottom: var(--space-2);
+}
+
+.alert {
+  margin-bottom: var(--space-1);
+}
+
+/* Task table */
+.idCell {
+  width: 1%;
+}
+
+.taskButton {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The focused row draws the ring (tables: data-focused), so focus and
+   selection stay distinguishable without a second ring on the title. */
+.taskButton:focus-visible {
+  outline: none;
+}
+
+@container bp-list-narrow {
+  .optional {
+    display: none;
+  }
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--section-head-gap);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.pagination span {
+  margin-right: auto;
+}
+
+/* Detail sits on the canvas; the resizer hairline marks the boundary. */
+.detailPane {
+  --cell-padding: var(--cell-padding-compact);
+
+  /* A saved width, clamped so the list keeps its minimum at any viewport */
+  flex-shrink: 0;
+  width: var(--detail-size, var(--detail-width));
+  min-width: var(--detail-min-width);
+  max-width: calc(100% - var(--list-min-width));
+  overflow: auto;
+  padding: var(--pane-padding);
+  background: var(--surface-1);
+  border-left: var(--border-subtle);
+}
+
+/* Desktop open/close: the workspace boundary moves (275ms) and content enters
+   by at most 4px (160ms). Only during a transition, never while resizing.
+   Content keeps its minimum width so text does not reflow every frame. */
+@media bp-wide {
+  .detailPane[data-phase] {
+    overflow: hidden;
+    transition:
+      width var(--transition-layout),
+      min-width var(--transition-layout),
+      padding var(--transition-layout);
+  }
+
+  .detailPane[data-phase] .detailInner {
+    min-width: calc(var(--detail-min-width) - var(--space-2) * 2);
+  }
+
+  .detailPane:is([data-phase="enter"], [data-phase="closing"]) {
+    width: 0;
+    min-width: 0;
+    padding-inline: 0;
+  }
+
+  .detailPane[data-phase="opening"] .detailInner {
+    animation: detail-content-in var(--transition-feedback) both;
+  }
+
+  .detailPane[data-phase="closing"] .detailInner {
+    opacity: 0;
+    transition: opacity var(--transition-feedback);
+  }
+}
+
+@keyframes detail-content-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--motion-distance));
+  }
+}
+
+.detailTitle:focus-visible {
+  outline-offset: var(--space-quarter);
+}
+
+/* Detail header: id and state, then the title. */
+.detailHeader {
+  display: grid;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.detailTop {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.detailId {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+}
+
+.back {
+  margin-left: auto;
+}
+
+.detailTitle {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+}
+
+/* Key facts in one inset grid: label above value. */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(calc(var(--space-8) + var(--space-3)), 1fr));
+  gap: var(--space-snug) var(--space-2);
+  padding: var(--space-snug) var(--space-2);
+  margin-bottom: var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+
+.facts dt {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.facts dd {
+  margin: 0;
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  overflow-wrap: anywhere;
+}
+
+/* Copyable commands in one bordered well. */
+.terminal {
+  padding: var(--space-1) var(--space-snug);
+  margin-bottom: var(--space-1);
+  border: var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+/* Sticky tabs stay opaque and match the canvas. */
+.tabs {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  margin: var(--space-2) 0 var(--space-snug);
+  background: var(--surface-1);
+}
+
+/* The spec is a document on the canvas, not a card. */
+.spec {
+  min-width: 0;
+}
+
+.event {
+  padding: var(--space-snug) 0;
+}
+
+.event:first-child {
+  padding-top: 0;
+}
+
+.eventHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-half);
+  margin-bottom: var(--space-1);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.theme {
+  justify-self: start;
+}
+
+.theme[aria-pressed="true"] {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+}
+
+/* Copy feedback: success is the button's own "Copied" state and a polite
+   announcement; a failure is also shown, on an opaque floating surface. */
+.toast {
+  position: fixed;
+  right: var(--space-2);
+  bottom: var(--space-2);
+  z-index: var(--z-toast);
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  color: var(--text-primary);
+}
+
+.toast[data-failed="false"] {
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.toast[data-failed="true"]:not(:empty) {
+  padding: var(--space-1) var(--space-snug);
+  background: var(--surface-overlay);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-overlay);
+}
+
+/* Collapsed rail: view initials, connection dot, refresh, and theme glyph.
+   Labels stay in the accessibility tree, visually hidden. */
+@media bp-wide {
+  :root[data-nav="collapsed"] .nav {
+    width: var(--nav-collapsed-width);
+    min-width: 0;
+    align-items: center;
+    padding-inline: var(--space-half);
+  }
+
+  :root[data-nav="collapsed"] .brandRow {
+    justify-content: center;
+  }
+
+  :root[data-nav="collapsed"] .brand,
+  :root[data-nav="collapsed"] .navLabel {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  :root[data-nav="collapsed"] .navList {
+    justify-items: center;
+  }
+
+  :root[data-nav="collapsed"] .navList button,
+  :root[data-nav="collapsed"] .theme {
+    justify-content: center;
+    width: 100%;
+  }
+
+  :root[data-nav="collapsed"] .navGlyph {
+    display: inline;
+  }
+
+  :root[data-nav="collapsed"] .hint,
+  :root[data-nav="collapsed"] .hideNarrow {
+    display: none;
+  }
+
+  :root[data-nav="collapsed"] .navFoot {
+    justify-items: center;
+    padding: 0;
+  }
+
+  :root[data-nav="collapsed"] .status {
+    flex-direction: column;
+  }
+
+  :root[data-nav="collapsed"] .connection::before {
+    content: "";
+    display: block;
+    width: var(--dot-size);
+    height: var(--dot-size);
+    border-radius: 50%;
+    background: currentcolor;
+  }
+}
+
+@media bp-phone {
+  .app {
+    flex-direction: column;
+  }
+
+  .nav {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    border-right: 0;
+    border-bottom: var(--border-subtle);
+  }
+
+  .brand {
+    padding: 0;
+  }
+
+  .brandMeta,
+  .collapse,
+  .hint,
+  .hideNarrow {
+    display: none;
+  }
+
+  .navList {
+    display: flex;
+    flex-wrap: wrap;
+    order: 3;
+    width: 100%;
+  }
+
+  .navFoot {
+    margin: 0 0 0 auto;
+    padding: 0;
+  }
+
+  .hasDetail .listPane {
+    display: none;
+  }
+
+  .listPane {
+    min-width: 0;
+    padding: var(--pane-padding-phone);
+  }
+
+  .search {
+    flex-basis: 100%;
+  }
+
+  .detailPane {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    border: 0;
+    padding: var(--pane-padding-phone);
+  }
+
+  .pagination {
+    flex-wrap: wrap;
+  }
+}
+
+/* Routines: list | routine pane | task pane. A stacked task pane leaves room
+   for the routine pane; narrower screens hide the list behind both panes. */
+.stacked .detailPane {
+  max-width: calc(
+    100% - var(--list-min-width) - var(--routine-size, var(--routine-width))
+  );
+}
+
+@media bp-stack {
+  .stacked .listPane {
+    display: none;
+  }
+
+  .stacked .detailPane {
+    flex: 1;
+    max-width: calc(100% - var(--routine-size, var(--routine-width)));
+  }
+}
+
+/* Attribute matching keeps the cross-module literal ID unscoped. */
+@media bp-phone {
+  .hasRoutine .listPane,
+  .stacked [id="routine-detail"] {
+    display: none;
+  }
+
+  .stacked .detailPane {
+    max-width: none;
+  }
+}
