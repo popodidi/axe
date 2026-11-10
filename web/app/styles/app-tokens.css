@@ -1,0 +1,120 @@
+/*
+ * Dashboard app tokens. Every value is derived from a brand token in
+ * brand-tokens.css, a verbatim copy of docs/quiet-design-tokens.css
+ * (lib/tokens.test.ts fails on drift). Quiet roles: docs/reference/brand-guide.md
+ * and docs/reference/taskq-design.md. Documented in README.md.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Fractions of the 8px base for dense chrome */
+  --space-half: var(--space-4px);
+  --space-quarter: var(--space-2px);
+
+  /* Density: cells 8px 10px (rows about 32px) */
+  --space-compact: var(--space-6px);
+  --space-cozy: var(--space-10px);
+  --space-snug: var(--space-12px);
+  --cell-padding: var(--space-1) var(--space-cozy);
+
+  /* Cards (owner readability override to Quiet's borderless sections):
+     sections sit on a surface-1 card over the surface-nav canvas. */
+  --canvas: var(--surface-nav);
+  --card-bg: var(--surface-1);
+  --card-border: var(--border-subtle);
+  --card-radius: var(--radius-lg);
+  --card-padding: var(--space-2);
+  --card-padding-phone: var(--space-snug);
+  --pill-padding: var(--space-quarter) var(--space-1);
+
+  /* Compact layout contract (README "Compact defaults"; tests/density.spec.ts).
+     Pane gutters 12px 16px; sections are borderless, so they carry no padding
+     and group with a heading and 8px/24px gaps; toolbars 8px 12px; controls
+     at least 24px tall (WCAG 2.5.8 target size) */
+  --pane-padding: var(--space-snug) var(--space-2) var(--space-2);
+  --pane-padding-phone: var(--space-1);
+  --section-head-gap: var(--space-1);
+  --section-gap: var(--space-3);
+  --inset-padding: var(--space-1) var(--space-snug);
+  --inset-gap: var(--space-1);
+  --toolbar-padding: var(--space-1) var(--space-snug);
+  --control-min-height: var(--space-3);
+
+  /* Detail side pane keeps the compact density and Markdown:
+     13px body, tighter headings, paragraphs, lists, and code blocks */
+  --cell-padding-compact: var(--space-compact) var(--space-1);
+  --prose-compact-size: var(--text-control);
+  --prose-compact-lh: var(--lh-control);
+  --prose-compact-gap: var(--space-1);
+  --prose-compact-heading-gap: var(--space-2);
+  --prose-compact-code-padding: var(--space-1) var(--space-cozy);
+
+  /* Layout: nav rail 216px by default, resizable 168-320px (--nav-size holds
+     a saved width), 48px collapsed. Detail defaults to 48%
+     (--detail-size holds a saved width) between 360px and the space left
+     after a 224px list. */
+  --nav-width: calc(var(--space-8) + var(--space-7) + var(--space-2));
+  --nav-min-width: calc(var(--space-8) + var(--space-5));
+  --nav-max-width: calc(var(--space-8) * 2 + var(--space-7));
+  --nav-collapsed-width: var(--space-5);
+  --detail-width: 48%;
+  --detail-min-width: calc(var(--space-8) * 3);
+  --list-min-width: calc(var(--space-8) * 2 - var(--space-2));
+  /* Routine pane: 392px by default, resizable 320-560px (--routine-size holds
+     a saved width); a task pane may stack to its right. */
+  --routine-width: calc(var(--space-8) * 3 + var(--space-4));
+  --routine-min-width: calc(var(--space-8) * 2 + var(--space-7));
+  --routine-max-width: calc(var(--space-8) * 4 + var(--space-7));
+  --resizer-width: var(--space-1);
+  --resizer-line: 1px;
+  --search-min-width: calc(var(--space-8) + var(--space-4) + var(--space-1));
+  --cmd-label-width: calc(var(--space-5) - var(--space-half));
+  --dot-size: var(--space-1);
+  --icon-size: var(--space-12px);
+  --skeleton-line: var(--lh-body);
+
+  /* Neutral interaction roles: hover, selection and keyboard focus are
+     separate, so focus and selection can sit on different rows */
+  --row-hover-bg: var(--surface-hover);
+  --row-selected-bg: var(--surface-selected);
+
+  /* Layers */
+  --z-sticky: 1;
+  --z-toast: 10;
+
+  /* Motion: shared Quiet timing tokens; reduced motion zeroes them */
+  --transition-hover: var(--duration-fast) var(--ease-standard);
+  --transition-feedback: var(--duration-feedback) var(--ease-standard);
+  --transition-disclosure: var(--duration-disclosure) var(--ease-standard);
+  --transition-layout: var(--duration-layout) var(--ease-layout);
+  --skeleton-delay: 150ms;
+
+  /* Task states: restrained tinted labels (accent-tokens.css); escalated
+     keeps the Quiet danger role. Symbol and text always carry the meaning. */
+  --state-pending-fg: var(--accent-purple);
+  --state-pending-bg: var(--accent-purple-bg);
+  --state-in-progress-fg: var(--accent-blue);
+  --state-in-progress-bg: var(--accent-blue-bg);
+  --state-blocked-fg: var(--accent-amber);
+  --state-blocked-bg: var(--accent-amber-bg);
+  --state-escalated-fg: var(--status-danger);
+  --state-escalated-bg: var(--status-danger-bg);
+  --state-done-fg: var(--accent-teal);
+  --state-done-bg: var(--accent-teal-bg);
+
+  /* Data and selection accents */
+  --chart-fill: var(--accent-teal);
+  --option-selected-fg: var(--accent-blue);
+  --option-selected-bg: var(--accent-blue-bg);
+
+  /* Connection, run liveness, and diffs: live is teal, stale warns amber */
+  --live: var(--accent-teal);
+  --idle: var(--text-disabled);
+  --warn: var(--accent-amber);
+  --diff-add: var(--status-success);
+  --diff-remove: var(--status-danger);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}

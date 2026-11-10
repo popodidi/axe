@@ -1,0 +1,54 @@
+.commands {
+  display: grid;
+  gap: var(--space-half);
+  min-width: 0;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+
+.command {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.label {
+  width: var(--cmd-label-width);
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Copy/Copied share one cell so the button width never changes. */
+.copy {
+  display: inline-grid;
+}
+
+.copy > span {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-half);
+  transition: opacity var(--transition-feedback);
+}
+
+.copy > span[data-hidden="true"] {
+  opacity: 0;
+}
+
+.check {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.75;
+}

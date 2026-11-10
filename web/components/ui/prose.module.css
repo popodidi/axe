@@ -1,0 +1,135 @@
+.prose {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+/* Inline prose links: neutral and underlined. */
+.prose a {
+  color: var(--link);
+  text-decoration: underline;
+}
+
+.prose > * + * {
+  margin-top: var(--space-2);
+}
+
+.prose h1 {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+}
+
+.prose h2 {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+}
+
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+.prose h1,
+.prose h2,
+.prose h3 {
+  font-weight: var(--weight-semibold);
+  letter-spacing: normal;
+}
+
+.prose * + h1,
+.prose * + h2 {
+  margin-top: var(--space-3);
+}
+
+.prose ul,
+.prose ol {
+  padding-left: var(--space-3);
+}
+
+.prose li + li,
+.prose li > ul,
+.prose li > ol {
+  margin-top: var(--space-half);
+}
+
+.prose :global(.contains-task-list) {
+  list-style: none;
+  padding-left: 0;
+}
+
+.prose input[type="checkbox"] {
+  margin-right: var(--space-1);
+  accent-color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.prose :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  background: var(--surface-2);
+  border-radius: var(--radius-xs);
+  padding: 0 var(--space-half);
+}
+
+.prose blockquote {
+  border-left: var(--space-quarter) solid var(--border-color);
+  padding-left: var(--space-2);
+  color: var(--text-secondary);
+}
+
+.prose hr {
+  border: 0;
+  border-top: var(--border-subtle);
+}
+
+.prose img {
+  max-width: 100%;
+}
+
+/* Detail side pane: smaller body, headings, and gaps */
+.compact {
+  font-size: var(--prose-compact-size);
+  line-height: var(--prose-compact-lh);
+}
+
+.compact > * + * {
+  margin-top: var(--prose-compact-gap);
+}
+
+.compact h1 {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+}
+
+.compact h2 {
+  font-size: var(--text-body);
+  line-height: var(--lh-body);
+}
+
+.compact * + h1,
+.compact * + h2 {
+  margin-top: var(--prose-compact-heading-gap);
+}
+
+.compact ul,
+.compact ol {
+  padding-left: var(--space-2);
+}
+
+.compact li + li,
+.compact li > ul,
+.compact li > ol {
+  margin-top: var(--space-quarter);
+}
+
+.compact pre {
+  padding: var(--prose-compact-code-padding);
+}
+
+.compact :not(pre) > code {
+  font-size: var(--text-caption);
+}

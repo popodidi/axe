@@ -1,0 +1,89 @@
+@value bp-artifacts-narrow from "../../app/styles/breakpoints.module.css";
+.section {
+  min-width: 0;
+  container-type: inline-size;
+}
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1);
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+}
+.toolbar > span {
+  flex-basis: 100%;
+}
+.toolbar input {
+  min-width: 0;
+  flex: 1;
+}
+.table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+}
+.table th {
+  text-align: left;
+  font-weight: var(--weight-medium);
+  background: var(--surface-2);
+}
+.table th,
+.table td {
+  padding: var(--space-cozy) var(--space-half);
+  border-bottom: var(--border-subtle);
+  vertical-align: top;
+}
+.table th:first-child {
+  width: var(--space-6);
+}
+.table th:last-child {
+  width: var(--space-7);
+}
+.table .source {
+  width: 22%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.table td {
+  position: relative;
+}
+.name {
+  padding-right: var(--space-6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.name a {
+  text-decoration: underline;
+  text-underline-offset: var(--space-quarter);
+}
+.disclosure {
+  position: absolute;
+  top: var(--space-compact);
+  right: var(--space-half);
+  cursor: pointer;
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+  min-height: var(--control-min-height);
+}
+.full {
+  display: grid;
+  gap: var(--space-half);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  padding: var(--space-1) 0;
+}
+.full > button {
+  justify-self: start;
+}
+@container bp-artifacts-narrow {
+  .table .source {
+    display: none;
+  }
+}

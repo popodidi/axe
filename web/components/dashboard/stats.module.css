@@ -1,0 +1,193 @@
+@value bp-phone from "../../app/styles/breakpoints.module.css";
+
+/* One-page report: header card with the filters, then figures and charts. */
+.desk {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.header {
+  gap: var(--space-2);
+}
+
+.titleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.title {
+  font-size: var(--text-h1);
+  line-height: var(--lh-h1);
+  letter-spacing: var(--tracking-heading);
+}
+
+.lede {
+  margin-top: var(--space-half);
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  color: var(--text-secondary);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-snug);
+}
+
+.dateField {
+  display: grid;
+  gap: var(--space-half);
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+}
+
+.dateField input {
+  min-height: var(--control-height-default);
+  padding: var(--space-half) var(--space-1);
+  background: var(--card-bg);
+  color: var(--text-primary);
+  border: var(--border-control);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-control);
+}
+
+.scope {
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.details {
+  font-size: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.details summary {
+  min-height: var(--control-min-height);
+}
+
+.details p {
+  margin-top: var(--space-half);
+}
+
+/* Key figures */
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--space-8) + var(--space-5))), 1fr));
+  gap: var(--space-snug);
+}
+
+.kpi {
+  display: grid;
+  gap: var(--space-half);
+  padding: var(--space-snug) var(--space-2);
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+}
+
+.kpiLabel,
+.kpiDetail {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.kpiLabel {
+  color: var(--text-secondary);
+}
+
+.kpiValue {
+  font-size: var(--text-h1);
+  line-height: var(--lh-h1);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--space-8) * 3)), 1fr)
+  );
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+@media bp-phone {
+  .kpiValue {
+    font-size: var(--text-h2);
+    line-height: var(--lh-h2);
+  }
+}
+
+/* Completed-by-type split: always visible so All is never read as normal work. */
+.types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.type {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-half);
+  padding: var(--space-half) var(--space-1);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  color: var(--text-secondary);
+}
+
+.type dd {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.type[data-active] {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+}
+
+.active {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+/* Trends: four mean ± SD time series below completions per day. */
+.trends {
+  display: grid;
+  gap: var(--space-snug);
+  min-width: 0;
+}
+
+.sectionTitle {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+  font-weight: var(--weight-semibold);
+}
+
+.sectionLede {
+  margin-top: var(--space-quarter);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.trendGrid {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--space-8) * 4)), 1fr)
+  );
+  gap: var(--space-2);
+  min-width: 0;
+}

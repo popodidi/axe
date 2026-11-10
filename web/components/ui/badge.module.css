@@ -1,0 +1,66 @@
+/* Tags are neutral text; task states are restrained tinted labels. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-half);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  white-space: nowrap;
+}
+
+.tag {
+  color: var(--text-secondary);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* Task states (docs/reference/taskq-design.md): symbol plus readable text. */
+.status {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  padding: var(--pill-padding);
+  border-radius: var(--radius-xs);
+}
+
+.icon {
+  flex-shrink: 0;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+}
+
+.pending {
+  color: var(--state-pending-fg);
+  background: var(--state-pending-bg);
+}
+
+.in_progress {
+  color: var(--state-in-progress-fg);
+  background: var(--state-in-progress-bg);
+}
+
+.blocked {
+  color: var(--state-blocked-fg);
+  background: var(--state-blocked-bg);
+}
+
+.escalated {
+  color: var(--state-escalated-fg);
+  background: var(--state-escalated-bg);
+}
+
+.done {
+  color: var(--state-done-fg);
+  background: var(--state-done-bg);
+}
+
+/* Timed wait: queued like pending, distinguished by its "waiting until" text. */
+.waiting {
+  color: var(--state-pending-fg);
+  background: var(--state-pending-bg);
+}
