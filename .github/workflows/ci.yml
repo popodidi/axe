@@ -56,14 +56,14 @@ jobs:
       - name: Build and test (embed-ui)
         run: cargo build --locked --features embed-ui && cargo test --locked --features embed-ui --test embed_ui
 
-      # The hlab-ci PR VM is persistent and each runner slot keeps its work
-      # directory, so build outputs would stay on the guest's 30 GiB root
-      # until the next checkout in that slot. Remove them after every job
-      # (also on failure or cancellation) so later jobs keep the job-start
-      # hook's 15 GiB free-space floor.
+      # The hlab-ci PR VM is persistent and each runner slot keeps one work
+      # directory for both jobs, so build outputs would stay on the guest's
+      # 30 GiB root until the next checkout in that slot. Remove every job's
+      # outputs after each job (also on failure, cancellation or a refused
+      # start) so later jobs keep the job-start hook's 15 GiB free-space floor.
       - name: Free the runner's disk
         if: always()
-        run: rm -rf target web/node_modules web/.next web/out && df -B1 /
+        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 /
 
   web:
     # Same-repository branches only: fork pull requests get no CI.
@@ -84,11 +84,11 @@ jobs:
       - name: Browser tests
         run: cd web && npx playwright install chromium && npm run test:browser -- --workers=1
 
-      # The hlab-ci PR VM is persistent and each runner slot keeps its work
-      # directory, so build outputs would stay on the guest's 30 GiB root
-      # until the next checkout in that slot. Remove them after every job
-      # (also on failure or cancellation) so later jobs keep the job-start
-      # hook's 15 GiB free-space floor.
+      # The hlab-ci PR VM is persistent and each runner slot keeps one work
+      # directory for both jobs, so build outputs would stay on the guest's
+      # 30 GiB root until the next checkout in that slot. Remove every job's
+      # outputs after each job (also on failure, cancellation or a refused
+      # start) so later jobs keep the job-start hook's 15 GiB free-space floor.
       - name: Free the runner's disk
         if: always()
-        run: rm -rf web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 /
+        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 /
