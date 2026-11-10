@@ -257,6 +257,16 @@ enum Cmd {
         /// audit note and exit without dispatching
         #[arg(long)]
         reconcile_note: Option<String>,
+        /// Housekeeping tick, overriding `[dispatcher] housekeep`; a bare
+        /// `--housekeep` means dry-run
+        #[arg(long, value_enum, num_args = 0..=1, require_equals = true, default_missing_value = "dry-run")]
+        housekeep: Option<config::Housekeep>,
+    },
+    /// One housekeeping sweep that prints each decision and deletes nothing
+    /// (removal runs only inside `axe dispatch`, `[dispatcher] housekeep`)
+    Housekeeping {
+        #[arg(long, required = true)]
+        dry_run: bool,
     },
     /// Validate and print the local config ($AXE_CONFIG)
     Config,
@@ -1507,9 +1517,17 @@ pub fn run() -> Result<()> {
                 stop,
             )?;
         }
+        Cmd::Housekeeping { dry_run: _ } => {
+            let cfg = Config::load(&config::default_path()?)?;
+            let client = crate::client::Client::from_env("housekeeper".into());
+            if !crate::housekeeping::once(&cfg, client)? {
+                std::process::exit(1);
+            }
+        }
         Cmd::Dispatch {
             once,
             reconcile_note,
+            housekeep,
         } => {
             let cfg = Config::load(&config::default_path()?)?;
             let stop = Arc::new(AtomicBool::new(false));
@@ -1523,8 +1541,23 @@ pub fn run() -> Result<()> {
             }
             signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&store.draining))?;
             store.start_control(&cfg)?;
-            let result = crate::dispatch::Dispatcher::new(cfg, store).run(*once, Arc::clone(&stop));
+            let mode = housekeep.unwrap_or(cfg.dispatcher.housekeep);
+            let keeper_client =
+                crate::client::Client::at(store.client.base().to_string(), "housekeeper".into());
+            let mut dispatcher = crate::dispatch::Dispatcher::new(cfg.clone(), store);
+            let keeper = crate::housekeeping::start(
+                &cfg,
+                mode,
+                keeper_client,
+                dispatcher.admission(),
+                Arc::clone(&stop),
+            )?;
+            let result = dispatcher.run(*once, Arc::clone(&stop));
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(keeper) = keeper {
+                // Finishes the candidate in progress, so no removal is cut short.
+                let _ = keeper.join();
+            }
             result?;
         }
         Cmd::Config => {

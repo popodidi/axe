@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod dispatch;
 pub mod flow;
+pub mod housekeeping;
 pub mod run_log;
 pub mod schedule;
 pub mod server;

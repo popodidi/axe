@@ -58,11 +58,12 @@ axe stats --project P [--since 14d] [--until T] [--workload W]   # delivery stat
 axe usage backfill [--log-dir D] [--dry-run]   # read run usage from local logs; safe to repeat
 axe wait ID (--on P,... | --until T | --for D) --note N  # resumes on its own
 axe note ID TEXT            # or --file F
+axe housekeeping --dry-run  # one housekeeping sweep: print each decision, delete nothing
 axe artifact ID https://github.com/org/repo/pull/1
 axe approve ID --sha SHA --scope TARGET [--note N]   # blocked/escalated -> pending
 axe claim [--project P] --by me                   # oldest ready task; prints id, exit 1 if none
 axe server [--listen 127.0.0.1:8790]              # API; sole database owner
-axe dispatch [--once] [--reconcile-note N]        # remote dispatcher + agent supervisor
+axe dispatch [--once] [--reconcile-note N] [--housekeep[=dry-run|apply|off]]   # remote dispatcher + agent supervisor
 axe config                  # validate and print the local $AXE_CONFIG
 axe admission [--json]      # is the dispatcher admitting new sessions (resource pressure, hold)?
 axe admission hold --until T [--reason R]   # no new task sessions until T (on the dispatcher host)
@@ -380,8 +381,9 @@ of the canonical workspace, `workspace_root/.worktrees/<project>/task-<id>--work
 (`cwd` and `AXE_WORKTREE`), on branch `<branch_prefix>task-<id>--work`
 (`[worktrees] branch_prefix`, default `axe/`), reused across runs. The
 dispatcher sees only the workspace; agents put sub-repository worktrees under
-its `_repo/`. axe does not delete worktrees: remove a done task's directory
-with your own cleanup job.
+its `_repo/`. The dispatcher removes them only with housekeeping on (see
+[Housekeeping](#housekeeping)); otherwise remove a done task's directory with
+your own cleanup job.
 
 - **Readiness, before claiming.** The canonical clone `workspace_root/<project>`
   has its own `.git` and `refs/remotes/origin/HEAD`. Otherwise the oldest ready
@@ -401,6 +403,93 @@ with your own cleanup job.
 ```
 
 Without `[worktrees]`, sessions start in the canonical workspace as before.
+
+### Housekeeping
+
+`[dispatcher] housekeep = "off" | "dry-run" | "apply"` (default `off`;
+`axe dispatch --housekeep[=dry-run|apply|off]` overrides it, a bare
+`--housekeep` meaning `dry-run`) runs a housekeeping tick in the dispatcher
+every 3 minutes, in its own thread. It removes a done task's worktrees and
+per-task build output once nothing in them could be lost, and prints one JSON
+line per decision on stdout (the dispatcher journal). `axe housekeeping
+--dry-run` runs one sweep and prints every decision without deleting; removal
+runs only inside `axe dispatch`. Task lookups use the dispatcher's server
+connection (`GET /api/tasks/<id>` and `/events`).
+
+**Worktrees.** Candidates are, for each project directory under
+`workspace_root/.worktrees/`, `<project>/task-<id>--<purpose>` and
+`<project>/<repo>/task-<id>--<purpose>`. `<id>` is a positive integer without
+leading zeros; other names are ignored and symlinks retained. A candidate is
+deleted only when all of these hold, checked again right before deleting:
+
+- the task exists, its `project` is the directory's project, and its stored
+  `state` is `done`;
+- its latest `state` event to `done` is at least the active retention old;
+- its latest `run_start` has a later `run_end`, and no readable process has
+  its working directory inside;
+- it is a registered git worktree;
+- it and every `_repo/<name>` with its own `.git` have an empty
+  `git status --porcelain --untracked-files=all` and no commit outside
+  `refs/remotes/*` (a branch deleted on merge still counts until the owning
+  repository prunes it);
+- every path inside is owned by the dispatcher's user.
+
+Any lookup failure, mismatch or other state retains the directory and says
+why. Removal runs `git worktree remove` without `--force` on each nested
+`_repo` worktree and then the candidate, then `git worktree prune` in each
+owning repository; ignored files (`target/`, `node_modules/`) go with the
+tree, branches are never deleted, and a failed removal is reported as `error`
+while the next candidate continues.
+
+**Task paths.** `task_paths` are templates with one `{id}` in the last
+component, for rebuildable per-task output kept outside the worktree (a
+`CARGO_TARGET_DIR`, a scratch directory). An entry is deleted when the task is
+`done` for the active task-path retention (`retention`, or none under
+pressure), its run has ended, no process is inside and every path is the
+dispatcher user's. There are no git or project checks: task ids are global.
+Entries that start with a template's fixed prefix but match no template are
+retained and reported with `task: null`; other entries are ignored. These
+lines carry `"kind": "cache"`.
+
+**Disk pressure.** With `[housekeeping.pressure]`, free space on `path`
+strictly below `free_below_gib` shortens worktree retention to its
+`retention` and task-path retention to zero, and runs each `cache_trim`
+command (absolute argv, rebuildable caches only) at most hourly. Without
+pressure a sweep runs at most hourly, so the frequent tick only costs a
+`statvfs`. Without the table every tick sweeps.
+
+**No silent stall.** With `[housekeeping.alert]`, a dispatcher admission
+pause with the `disk` signal `constrained` starts an episode
+(`housekeeping-disk-pause` next to the admission hold file). After `after`,
+the dispatcher wakes `bot` once (`POST /api/bots/<bot>/wakes`, key derived
+from the episode start, so a failed wake is retried by the next tick). A
+non-disk pause or open admission ends the episode; a status not yet sampled
+leaves it alone.
+
+In `dry-run` nothing is deleted, trimmed or woken; decisions say
+`would_delete` and trims `would_run`. Lines: `path`, `project`, `task`,
+`decision` (`retain`, `would_delete`, `deleted`, `error`) and `reason`; event
+lines (`pressure`, `cache_trim`, `disk_pause_alert`) have an `event` key.
+`axe housekeeping --dry-run` exits 1 if any step failed.
+
+```toml
+[dispatcher]
+housekeep = "dry-run"            # off (default) | dry-run | apply
+
+[housekeeping]
+retention = "6h"                 # default 6h
+task_paths = ["~/.cache/axe/task-{id}-target"]
+
+[housekeeping.pressure]          # optional
+# path = "~/workspace"           # default workspace_root
+free_below_gib = 30
+retention = "1h"                 # default 1h; at most retention
+cache_trim = [["/usr/local/go/bin/go", "clean", "-cache"]]
+
+[housekeeping.alert]             # optional
+bot = "ops"
+after = "15m"                    # default 15m
+```
 
 ### Admission pool
 

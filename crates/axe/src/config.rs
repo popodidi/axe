@@ -136,6 +136,97 @@ pub struct Config {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub prompts: Prompts,
+    #[serde(default)]
+    pub dispatcher: DispatcherSection,
+    /// Worktree and task-path cleanup rules; used when `[dispatcher]
+    /// housekeep` is not `off` (see `housekeeping.rs`).
+    #[serde(default)]
+    pub housekeeping: Housekeeping,
+}
+
+/// `[dispatcher]`: switches of `axe dispatch`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatcherSection {
+    /// Housekeeping tick inside the dispatcher; `axe dispatch --housekeep`
+    /// overrides it.
+    #[serde(default)]
+    pub housekeep: Housekeep,
+}
+
+/// Whether the dispatcher's housekeeping tick reports or removes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Housekeep {
+    #[default]
+    Off,
+    /// Print each decision, delete nothing.
+    DryRun,
+    /// Delete what the rules allow.
+    Apply,
+}
+
+/// `[housekeeping]`: when a done task's worktrees and task paths go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Housekeeping {
+    /// How long a task stays done before its worktrees and task paths go.
+    #[serde(default = "default_housekeeping_retention")]
+    pub retention: String,
+    /// Per-task paths holding only rebuildable output, each with one `{id}`
+    /// in its last component, e.g. `~/.cache/axe/task-{id}-target`.
+    #[serde(default)]
+    pub task_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<HousekeepingPressure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<HousekeepingAlert>,
+}
+
+impl Default for Housekeeping {
+    fn default() -> Self {
+        Housekeeping {
+            retention: default_housekeeping_retention(),
+            task_paths: Vec::new(),
+            pressure: None,
+            alert: None,
+        }
+    }
+}
+
+/// `[housekeeping.pressure]`: low free space shortens retention and trims caches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HousekeepingPressure {
+    /// A path on the filesystem to watch; omitted means `workspace_root`.
+    pub path: Option<String>,
+    /// Under pressure while free space is strictly below this.
+    pub free_below_gib: u64,
+    /// Worktree retention while under pressure; task paths go at once.
+    #[serde(default = "default_pressure_retention")]
+    pub retention: String,
+    /// Commands (absolute argv) that trim rebuildable caches under pressure.
+    #[serde(default)]
+    pub cache_trim: Vec<Vec<String>>,
+}
+
+/// `[housekeeping.alert]`: wake a bot once per long admission pause on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HousekeepingAlert {
+    pub bot: String,
+    #[serde(default = "default_alert_after")]
+    pub after: String,
+}
+
+fn default_housekeeping_retention() -> String {
+    "6h".into()
+}
+fn default_pressure_retention() -> String {
+    "1h".into()
+}
+fn default_alert_after() -> String {
+    "15m".into()
 }
 
 /// `[otel]`: `OTEL_RESOURCE_ATTRIBUTES` the dispatcher passes to each agent
@@ -670,6 +761,7 @@ impl Config {
         if let Some(r) = &self.resources {
             r.validate()?;
         }
+        crate::housekeeping::Rules::new(self).context("housekeeping")?;
         if let Some(t) = &self.telegram {
             if t.owner_user_id <= 0 {
                 bail!("telegram.owner_user_id must be the owner's numeric user id");
