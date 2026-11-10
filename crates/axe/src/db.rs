@@ -998,32 +998,53 @@ pub fn set_task(conn: &mut Connection, actor: &Actor, id: i64, c: &Changes) -> R
     Ok(changed)
 }
 
-/// Corrects a task's latest escalation class and/or its workload; latest wins.
+/// Corrects a task's escalation class and/or its workload; latest wins. The class
+/// applies to the latest escalation episode, or to the 1-based `episode` (in
+/// event order; see `axe log`), which is recorded as `episode=N`.
 pub fn classify(
     conn: &mut Connection,
     actor: &Actor,
     id: i64,
     escalation: Option<&str>,
     workload: Option<&str>,
+    episode: Option<i64>,
 ) -> Result<()> {
     if escalation.is_none() && workload.is_none() {
         bail!("classify needs an escalation class or a workload");
+    }
+    if episode.is_some() && escalation.is_none() {
+        bail!("an episode needs an escalation class");
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     get_task_in(&tx, id)?.with_context(|| format!("task {id} not found"))?;
     if let Some(class) = escalation {
         validate_escalation_class(class)?;
-        let escalated: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM events WHERE task_id = ?1 AND (
-               (kind = 'state' AND to_value = 'escalated')
-               OR (kind = 'created' AND body LIKE 'state=escalated%')))",
+        let episodes: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM events WHERE task_id = ?1 AND (
+               (kind = 'state' AND to_value = 'escalated' AND from_value IS NOT 'escalated')
+               OR (kind = 'created' AND body LIKE 'state=escalated%'))",
             [id],
             |r| r.get(0),
         )?;
-        if !escalated {
+        if episodes == 0 {
             bail!("task {id} has never been escalated");
         }
-        write_event(&tx, actor, id, "escalation_class", None, Some(class), None)?;
+        let body = match episode {
+            Some(n) if !(1..=episodes).contains(&n) => {
+                bail!("task {id} has escalation episodes 1..={episodes}, not {n}")
+            }
+            Some(n) => Some(format!("episode={n}")),
+            None => None,
+        };
+        write_event(
+            &tx,
+            actor,
+            id,
+            "escalation_class",
+            None,
+            Some(class),
+            body.as_deref(),
+        )?;
     }
     if let Some(w) = workload {
         validate_workload(w)?;

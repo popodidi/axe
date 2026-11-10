@@ -55,7 +55,7 @@ axe log ID [--json] [--full]
 axe set ID [--state S] [--title T] [--detail D|--detail-file F] [--note N] [--reset-runs] [--not-before T]
 axe abort ID [--run RUN_ID] [--timeout 60]  # force-stop remotely; wait for confirmation
 axe escalate ID --blocked B --resolver R --resume C --class CLASS   # escalated with a block note
-axe classify ID [--escalation CLASS] [--workload W]   # correct the latest class or workload
+axe classify ID [--escalation CLASS [--episode N]] [--workload W]   # correct a class (latest episode, or the Nth) or workload
 axe stats --project P [--since 14d] [--until T] [--workload W]   # delivery statistics, JSON
 axe usage backfill [--log-dir D] [--dry-run]   # read run usage from local logs; safe to repeat
 axe wait ID (--on P,... | --until T | --for D) --note N  # resumes on its own
@@ -741,6 +741,9 @@ delivery figures from the event log and runs, overall and per workload, with no
 run cap. Two facts are recorded rather than derived, as append-only events where
 the latest wins: `escalation_class` (`axe escalate --class`; the dispatcher
 records `runtime`) and `workload` (`axe add --workload`, a routine's `workload`).
+Each entry into `escalated` starts an escalation episode, numbered from 1 in
+`axe log` order. `axe classify --escalation` corrects the latest episode;
+`--episode N` corrects an earlier one, closed or not (recorded as `episode=N`).
 
 | Class | Meaning |
 |---|---|

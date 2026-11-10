@@ -95,12 +95,91 @@ fn bot_resolution_is_autonomous_and_classification_latest_wins() {
     let id = add(&mut c, &[], None);
     escalate(&mut c, "agent", id, BOT_NOTE, Some("capability"));
     state(&mut c, "bot:axe-os", id, "pending");
-    db::classify(&mut c, &who("bot:axe-os"), id, Some("coordination"), None).unwrap();
+    db::classify(
+        &mut c,
+        &who("bot:axe-os"),
+        id,
+        Some("coordination"),
+        None,
+        None,
+    )
+    .unwrap();
     let o = &stats(&c, None)["overall"];
     assert_eq!(o["interventions"], 0);
     assert_eq!(o["escalations"]["autonomous_rate"], 1.0);
     assert!(o["escalations_by_class"].get("capability").is_none());
     assert_eq!(o["escalations_by_class"]["coordination"]["resolved"], 1);
+}
+
+#[test]
+fn classify_reaches_an_earlier_closed_episode_and_still_the_latest() {
+    let (_d, mut c) = open();
+    let id = add(&mut c, &[], None);
+    // Two closed episodes, both escalated without a class.
+    for _ in 0..2 {
+        escalate(&mut c, "agent", id, BOT_NOTE, None);
+        state(&mut c, "bot:axe-os", id, "pending");
+    }
+    let by_class = |c: &Connection| stats(c, None)["overall"]["escalations_by_class"].clone();
+    assert_eq!(by_class(&c)["unclassified"]["resolved"], 2);
+
+    // Without an episode the latest closed episode is classified, as before.
+    db::classify(&mut c, &who("bot:axe-os"), id, Some("decision"), None, None).unwrap();
+    let b = by_class(&c);
+    assert_eq!(b["decision"]["resolved"], 1);
+    assert_eq!(b["unclassified"]["resolved"], 1);
+
+    // The earlier episode can be classified explicitly.
+    db::classify(
+        &mut c,
+        &who("bot:axe-os"),
+        id,
+        Some("runtime"),
+        None,
+        Some(1),
+    )
+    .unwrap();
+    let b = by_class(&c);
+    assert!(b.get("unclassified").is_none());
+    assert_eq!(b["runtime"]["resolved"], 1);
+    assert_eq!(b["decision"]["resolved"], 1);
+
+    // Naming the latest episode explicitly works too; the latest event wins.
+    db::classify(
+        &mut c,
+        &who("bot:axe-os"),
+        id,
+        Some("capability"),
+        None,
+        Some(2),
+    )
+    .unwrap();
+    let b = by_class(&c);
+    assert_eq!(b["capability"]["resolved"], 1);
+    assert_eq!(b["runtime"]["resolved"], 1);
+    assert!(b.get("decision").is_none());
+
+    // A third, open episode: the default targets it, not the closed ones.
+    escalate(&mut c, "agent", id, BOT_NOTE, None);
+    db::classify(
+        &mut c,
+        &who("bot:axe-os"),
+        id,
+        Some("coordination"),
+        None,
+        None,
+    )
+    .unwrap();
+    let b = by_class(&c);
+    assert_eq!(b["coordination"]["opened"], 1);
+    assert_eq!(b["capability"]["resolved"], 1);
+    assert_eq!(b["runtime"]["resolved"], 1);
+
+    // Out-of-range episodes and an episode without a class are rejected.
+    for bad in [0, 4] {
+        assert!(db::classify(&mut c, &who("agent"), id, Some("runtime"), None, Some(bad)).is_err());
+    }
+    assert!(db::classify(&mut c, &who("agent"), id, None, Some("ops"), Some(1)).is_err());
 }
 
 #[test]
@@ -205,7 +284,15 @@ fn run_effort_has_no_read_cap() {
 fn workloads_group_and_filter() {
     let (_d, mut c) = open();
     let bug = add(&mut c, &[], Some("infra"));
-    db::classify(&mut c, &who("bot:axe-os"), bug, None, Some("prod-bug")).unwrap();
+    db::classify(
+        &mut c,
+        &who("bot:axe-os"),
+        bug,
+        None,
+        Some("prod-bug"),
+        None,
+    )
+    .unwrap();
     ship(&mut c, bug);
     let other = add(&mut c, &[], None);
     ship(&mut c, other);
@@ -238,7 +325,7 @@ fn the_dispatcher_records_runtime_and_classes_are_validated() {
         ..Default::default()
     };
     assert!(db::set_task(&mut c, &who("agent"), id, &not_escalating).is_err());
-    assert!(db::classify(&mut c, &who("agent"), id, Some("runtime"), None).is_err());
+    assert!(db::classify(&mut c, &who("agent"), id, Some("runtime"), None, None).is_err());
 }
 
 #[test]
