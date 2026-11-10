@@ -1138,6 +1138,12 @@ the old config, data and state directories are used when the axe ones are
 missing; both request and file-name header names are accepted and sent; and
 the binary runs unchanged through a symlink with the old name.
 
+## Docs
+
+References and design records are in [`docs/`](docs/README.md): the
+[configuration reference](docs/config.md), the [HTTP API v1](docs/api-v1.md)
+and the design docs. Agents use the [`axe` skill](skills/axe/SKILL.md).
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
