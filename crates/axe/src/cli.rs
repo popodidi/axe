@@ -159,11 +159,15 @@ enum Cmd {
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::ESCALATION_CLASSES))]
         class: String,
     },
-    /// Correct a task's latest escalation class and/or its workload
+    /// Correct a task's escalation class (latest episode unless --episode) and/or its workload
     Classify {
         id: i64,
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::ESCALATION_CLASSES))]
         escalation: Option<String>,
+        /// Which escalation episode to classify, 1-based in `axe log` order
+        /// (each entry into escalated starts one). Default: the latest
+        #[arg(long, requires = "escalation", value_parser = clap::value_parser!(i64).range(1..))]
+        episode: Option<i64>,
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::WORKLOADS))]
         workload: Option<String>,
     },
@@ -1787,12 +1791,13 @@ pub fn run() -> Result<()> {
         Cmd::Classify {
             id,
             escalation,
+            episode,
             workload,
         } => {
             let _: Value = client().send(
                 "POST",
                 &format!("/api/tasks/{id}/classify"),
-                json!({ "escalation": escalation, "workload": workload }),
+                json!({ "escalation": escalation, "episode": episode, "workload": workload }),
             )?;
         }
         Cmd::Usage { command } => run_usage(&client(), command)?,

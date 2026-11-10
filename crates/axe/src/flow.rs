@@ -97,6 +97,16 @@ fn resolver_of(body: &str) -> Option<String> {
     Some(who)
 }
 
+/// The 1-based episode an `escalation_class` event names (`episode=N`), if any.
+fn episode_of(body: Option<&str>) -> Option<usize> {
+    body?
+        .strip_prefix("episode=")?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+}
+
 fn analyze(evs: &[Ev], since: i64, until: i64) -> Facts {
     let mut f = Facts::default();
     let in_window = |at: i64| at >= since && at < until;
@@ -171,7 +181,13 @@ fn analyze(evs: &[Ev], since: i64, until: i64) -> Facts {
                 }
             }
             "escalation_class" => {
-                if let Some(ep) = open.as_mut().or(f.episodes.last_mut()) {
+                let target = match episode_of(e.body.as_deref()) {
+                    Some(n) if n <= f.episodes.len() => f.episodes.get_mut(n - 1),
+                    Some(n) if n == f.episodes.len() + 1 => open.as_mut(),
+                    Some(_) => None,
+                    None => open.as_mut().or(f.episodes.last_mut()),
+                };
+                if let Some(ep) = target {
                     ep.class = e.to.clone();
                 }
             }
