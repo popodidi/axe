@@ -897,6 +897,7 @@ struct PatchBody {
 #[derive(Deserialize)]
 struct ClassifyBody {
     escalation: Option<String>,
+    episode: Option<i64>,
     workload: Option<String>,
     #[serde(flatten)]
     who: Who,
@@ -1348,6 +1349,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 id,
                 b.escalation.as_deref(),
                 b.workload.as_deref(),
+                b.episode,
             )?;
             ok(200, &json!({ "task": db::get_task(&conn, id)? }))
         }
