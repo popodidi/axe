@@ -1557,7 +1557,8 @@ fn edit_replaces_or_clears_buttons() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("can't be edited"));
     let h: Vec<Value> = serde_json::from_str(&rig.tg_ok(&["history", "--json"])).unwrap();
-    assert_eq!(h[0]["flags"]["buttons"], json!([]));
+    // Still none: the last successful edit was text only, which drops them.
+    assert!(h[0]["flags"]["buttons"].is_null(), "{}", h[0]["flags"]);
 }
 
 #[test]
@@ -1610,4 +1611,233 @@ fn pin_and_edit_refuse_messages_that_are_not_the_bots_own() {
     ] {
         assert!(rig.stub.calls(m).is_empty(), "{m}");
     }
+}
+
+/// Board edits (editMessageText on `board`) so far, as texts.
+fn board_edits(rig: &Rig, board: i64) -> Vec<String> {
+    rig.stub
+        .calls("editMessageText")
+        .into_iter()
+        .filter(|c| c.params["message_id"] == board)
+        .map(|c| c.params["text"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+/// Waits for a board edit after the first `after` ones that satisfies `f`;
+/// returns its text.
+fn wait_board(rig: &Rig, board: i64, after: usize, what: &str, f: impl Fn(&str) -> bool) -> String {
+    let mut found = String::new();
+    wait_for(what, 20, || {
+        let edits = board_edits(rig, board);
+        match edits.iter().skip(after).find(|t| f(t)) {
+            Some(t) => {
+                found = t.clone();
+                true
+            }
+            None => false,
+        }
+    });
+    found
+}
+
+/// A board message: the local id and the Telegram message id.
+fn make_board(rig: &Rig) -> (i64, i64) {
+    let out = rig.tg_ok(&["send", "--silent", "board"]);
+    let local: i64 = out.trim().trim_start_matches("sent #").parse().unwrap();
+    let tg = rig.stub.calls("sendMessage").pop().unwrap();
+    let tg_id = rig
+        .db()
+        .query_row(
+            "SELECT message_id FROM bot_messages WHERE id=?1",
+            [local],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tg.params["text"], "board");
+    let out = rig.tg_ok(&["board", "set-message", &local.to_string()]);
+    assert_eq!(out, format!("board is #{local}\n"));
+    (local, tg_id)
+}
+
+fn escalate(rig: &Rig, id: &str) {
+    rig.srv().ok(&[
+        "escalate",
+        id,
+        "--blocked",
+        "needs a call",
+        "--resolver",
+        "owner: decide",
+        "--resume",
+        "decided",
+        "--class",
+        "decision",
+    ]);
+}
+
+#[test]
+fn board_renders_escalations_and_open_cards() {
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    let (_, board) = make_board(&rig);
+    let t = wait_board(&rig, board, 0, "empty board", |t| {
+        t.contains("Nothing waiting on you")
+    });
+    assert!(t.starts_with("<b>Waiting on you</b>"), "{t}");
+    assert!(t.contains("<i>Updated "), "{t}");
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    assert_eq!(edit.params["parse_mode"], "HTML");
+
+    // An escalation adds a line; approve, set pending and done remove it.
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
+    rig.srv()
+        .ok(&["add", "--project", "other", "--title", "Not subscribed"]);
+    escalate(&rig, "2");
+    let resolutions: [&[&str]; 3] = [
+        &["approve", "1", "--sha", "abc", "--scope", "prod"],
+        &["set", "1", "--state", "pending", "--note", "resolved"],
+        &["set", "1", "--state", "done", "--note", "resolved"],
+    ];
+    for resolve in resolutions {
+        let n = board_edits(&rig, board).len();
+        escalate(&rig, "1");
+        let t = wait_board(&rig, board, n, "task line", |t| t.contains("task #1"));
+        assert!(t.contains("• task #1 Pick a colour <i>(p, "), "{t}");
+        assert!(!t.contains("Not subscribed"), "{t}");
+        let n = board_edits(&rig, board).len();
+        rig.srv().ok(resolve);
+        let t = wait_board(&rig, board, n, "task line removed", |t| {
+            !t.contains("task #1")
+        });
+        assert!(t.contains("Nothing waiting on you"), "{resolve:?}: {t}");
+    }
+
+    // A card with buttons adds a line; a text edit that keeps --buttons
+    // keeps it (with the new title); a press removes it.
+    let n = board_edits(&rig, board).len();
+    let card = rig.tg_ok(&["send", "--buttons", "A=a,B=b", "Which one?\nmore detail"]);
+    let card = card.trim().trim_start_matches("sent #").to_string();
+    let t = wait_board(&rig, board, n, "card line", |t| {
+        t.contains(&format!("card #{card}"))
+    });
+    assert!(
+        t.contains(&format!("• card #{card} Which one? <i>(")),
+        "{t}"
+    );
+    let n = board_edits(&rig, board).len();
+    rig.tg_ok(&["edit", &card, "--buttons", "A=a,B=b", "Which one now?"]);
+    let t = wait_board(&rig, board, n, "card retitled", |t| {
+        t.contains("Which one now?")
+    });
+    assert!(t.contains(&format!("card #{card}")), "{t}");
+    let tg_card: i64 = rig
+        .db()
+        .query_row(
+            "SELECT message_id FROM bot_messages WHERE id=?1",
+            [&card],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let n = board_edits(&rig, board).len();
+    rig.stub.push(
+        json!({"update_id": 90, "callback_query": {"id": "q", "from": user(OWNER),
+        "chat_instance": "ci", "data": "a", "message": {"message_id": tg_card, "date": 0,
+        "chat": {"id": OWNER, "type": "private"}}}}),
+    );
+    let t = wait_board(&rig, board, n, "pressed card removed", |t| {
+        !t.contains("card #")
+    });
+    assert!(t.contains("Nothing waiting on you"), "{t}");
+
+    // A button-clearing edit, and a text edit without --buttons, close cards.
+    for edit in [&["--clear-buttons", "Decided: A"][..], &["Decided: B"][..]] {
+        let n = board_edits(&rig, board).len();
+        let card = rig.tg_ok(&["send", "--buttons", "A=a", "Again?"]);
+        let card = card.trim().trim_start_matches("sent #").to_string();
+        wait_board(&rig, board, n, "card line", |t| {
+            t.contains(&format!("card #{card}"))
+        });
+        let n = board_edits(&rig, board).len();
+        let mut args = vec!["edit", card.as_str()];
+        args.extend_from_slice(edit);
+        rig.tg_ok(&args);
+        let t = wait_board(&rig, board, n, "card closed", |t| !t.contains("card #"));
+        assert!(t.contains("Nothing waiting on you"), "{edit:?}: {t}");
+    }
+
+    // Unrelated changes leave the board alone.
+    let n = board_edits(&rig, board).len();
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Not escalated"]);
+    rig.tg_ok(&["send", "plain message"]);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        board_edits(&rig, board).len(),
+        n,
+        "no edit without an input change"
+    );
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(show.contains("(current)"), "{show}");
+    assert_eq!(rig.events("board_render").len(), n);
+
+    // A hand edit of the board is rendered over.
+    let board_local = rig.tg_ok(&["board", "show", "--json"]);
+    let v: Value = serde_json::from_str(&board_local).unwrap();
+    let local = v["message"].as_i64().unwrap().to_string();
+    rig.tg_ok(&["edit", &local, "hand-kept list"]);
+    let t = wait_board(&rig, board, n + 1, "re-render", |t| {
+        t.contains("Waiting on you")
+    });
+    assert!(t.contains("Nothing waiting on you"), "{t}");
+}
+
+#[test]
+fn board_edit_failures_are_logged_and_retried() {
+    let rig = Rig::new();
+    rig.stub
+        .state
+        .lock()
+        .unwrap()
+        .fail
+        .insert("editMessageText".into(), "Bad Request: chat is busy".into());
+    let (_, board) = make_board(&rig);
+    // The first edit fails, is logged as a bot event, and is retried.
+    wait_for("board_error event", 20, || {
+        !rig.events("board_error").is_empty()
+    });
+    let err: Value = serde_json::from_str(&rig.events("board_error")[0]).unwrap();
+    assert!(
+        err["error"].as_str().unwrap().contains("chat is busy"),
+        "{err}"
+    );
+    assert_eq!(err["retry_seconds"], 5);
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(show.contains("(render pending)"), "{show}");
+    wait_for("board_render event", 20, || {
+        rig.events("board_render").len() == 1
+    });
+    let edits = board_edits(&rig, board);
+    assert_eq!(edits.len(), 2, "one failure, one success");
+    assert!(edits[1].contains("Nothing waiting on you"), "{edits:?}");
+    assert!(rig.tg_ok(&["board", "show"]).contains("(current)"));
+
+    // Clearing the board stops rendering; set-message refuses other kinds.
+    rig.tg_ok(&["board", "clear"]);
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(show.contains("no board message"), "{show}");
+    assert!(!rig.tg(&["board", "set-message", "999"]).status.success());
+}
+
+#[test]
+fn clearing_buttons_telegram_already_dropped_closes_the_card() {
+    let rig = Rig::new();
+    rig.tg_ok(&["send", "--buttons", "A=a", "Old card"]);
+    rig.stub.state.lock().unwrap().fail.insert(
+        "editMessageReplyMarkup".into(),
+        "Bad Request: message is not modified: specified new message content and reply markup are exactly the same".into(),
+    );
+    rig.tg_ok(&["edit", "1", "--clear-buttons"]);
+    let show = rig.tg_ok(&["board", "show", "--json"]);
+    let v: Value = serde_json::from_str(&show).unwrap();
+    assert_eq!(v["lines"], json!([]), "{v}");
 }

@@ -109,6 +109,12 @@ pub const TELEGRAM_PROTOCOL: &str = r#"## Talking to the owner (Telegram)
   press arrives as a button wake). Download an attachment with
   `axe bot tg file <id>`; read the conversation with `axe bot tg history`.
 - The server already reacted 👀 to each message; still answer it.
+- Anything that waits on the owner is an escalated task or a card (a
+  message with `--buttons`). The server renders the pinned "Waiting on you"
+  board from both (`axe bot tg board show`); never edit or resend it by hand.
+  A press closes a card; close one answered another way with
+  `axe bot tg edit <id> --clear-buttons "Decided: X"`. A text edit keeps a
+  card open only with `--buttons`.
 - Plain text by default; `--html` for Telegram HTML. `axe bot tg --help` has
   the details.
 "#;
