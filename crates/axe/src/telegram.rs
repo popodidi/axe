@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use crate::board;
 use crate::bot::{self, NewMessage};
-use crate::config;
+use crate::config::{self, BoardMode};
 use crate::db::{Actor, Forbidden};
 
 use crate::channel::bot_id;
@@ -247,6 +247,8 @@ pub struct TgBot {
     username: Mutex<Option<String>>,
     /// `getMe` user id, to recognise the bot's own service messages.
     id: Mutex<Option<i64>>,
+    /// How a changed board reaches the chat.
+    board: BoardMode,
 }
 
 #[derive(Default)]
@@ -422,6 +424,7 @@ impl Gateway {
                     alerts: Mutex::new(Alerts::default()),
                     username: Mutex::new(None),
                     id: Mutex::new(None),
+                    board: cfg.board,
                 }),
             );
         }
@@ -1510,8 +1513,8 @@ fn board_loop(b: &TgBot, store: &dyn Store) {
     }
 }
 
-/// One board pass: edits the board message when its lines changed. Returns
-/// whether it edited.
+/// One board pass: finishes an unfinished move, then renders the board when
+/// its lines changed. Returns whether it rendered.
 fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
     let conn = store.conn();
     let Ok(id) = bot_id(&conn, &b.name) else {
@@ -1520,6 +1523,11 @@ fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
     let Some(m) = board::message(&conn, &b.name)? else {
         return Ok(false);
     };
+    drop(conn);
+    if m.flags["board_from"].is_i64() {
+        finish_move(b, store, &m)?;
+    }
+    let conn = store.conn();
     let lines = board::lines(&conn, &b.name)?;
     let key = board::key(&lines);
     if m.flags["board_key"].as_str() == Some(key.as_str()) {
@@ -1528,25 +1536,122 @@ fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
     drop(conn);
     b.allowed(m.chat_id)?;
     let text = board::render(&lines, now());
-    let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text, "parse_mode": "HTML"});
-    match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
-        Ok(_) => {}
-        // The text already matches (for example after a lost reply).
-        Err(e) if e.description.contains("message is not modified") => {}
-        Err(e) => return Err(e.into()),
-    }
+    // A message just made the board (or hand-edited) has no key yet: it is
+    // where the owner put it, so it is rendered in place.
+    let repost = b.board == BoardMode::Repost && m.flags["board_key"].is_string();
+    let shown = if repost {
+        let mut p = json!({"chat_id": m.chat_id, "text": text, "parse_mode": "HTML",
+            "disable_notification": true});
+        if let Some(t) = m.thread_id {
+            p["message_thread_id"] = json!(t);
+        }
+        let sent = b.paced(m.chat_id, || b.api.call("sendMessage", &p))?;
+        let new = record_out(
+            store,
+            &b.name,
+            &sent,
+            "text",
+            &text,
+            None,
+            json!([]),
+            json!({"html": true}),
+        )?;
+        board::reposted(&mut store.conn(), m.id, new, &key)?;
+        let nm = get_message(&store.conn(), &b.name, new)?;
+        finish_move(b, store, &nm)?;
+        new
+    } else {
+        let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text, "parse_mode": "HTML"});
+        match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
+            Ok(_) => {}
+            // The text already matches (for example after a lost reply).
+            Err(e) if e.description.contains("message is not modified") => {}
+            Err(e) => return Err(e.into()),
+        }
+        board::rendered(&store.conn(), m.id, &key, &text)?;
+        m.id
+    };
     let conn = store.conn();
-    board::rendered(&conn, m.id, &key, &text)?;
+    let mut body = json!({"message": shown, "lines": lines.len()});
+    if repost {
+        body["from"] = json!(m.id);
+    }
     bot::event(
         &conn,
         id,
         &Actor::new("telegram"),
         "board_render",
-        &json!({"message": m.id, "lines": lines.len()}).to_string(),
+        &body.to_string(),
     )?;
     drop(conn);
     store.changed();
     Ok(true)
+}
+
+/// Finishes moving the board to `m` (which has `flags.board_from`): pins it
+/// silently, unpins the old board and edits it to "Moved below (#new)". Each
+/// step is recorded, so a retry after a failure repeats only what is left.
+/// Telegram refusing a step on the old board (400, for example a message
+/// deleted in the chat) is logged as a `board_error` event and skipped, so an
+/// old message never holds up the board; other failures are retried.
+fn finish_move(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
+    let old_id = m.flags["board_from"].as_i64().unwrap_or(0);
+    let old = get_message(&store.conn(), &b.name, old_id)?;
+    if m.flags["pinned"] != true {
+        let p =
+            json!({"chat_id": m.chat_id, "message_id": m.message_id, "disable_notification": true});
+        b.paced(m.chat_id, || b.api.call("pinChatMessage", &p))?;
+        set_flag(store, m.id, "$.pinned", json!(true))?;
+    }
+    let skip = |step: &str, e: ApiError| -> Result<()> {
+        if e.code != Some(400) {
+            return Err(e.into());
+        }
+        let conn = store.conn();
+        let body =
+            json!({"error": e.to_string(), "step": step, "message": old_id, "skipped": true});
+        bot::event(
+            &conn,
+            bot_id(&conn, &b.name)?,
+            &Actor::new("telegram"),
+            "board_error",
+            &body.to_string(),
+        )?;
+        Ok(())
+    };
+    let live = old.flags["deleted"] != true;
+    if live && old.flags["pinned"] != false {
+        let p = json!({"chat_id": old.chat_id, "message_id": old.message_id});
+        if let Err(e) = b.paced(old.chat_id, || b.api.call("unpinChatMessage", &p)) {
+            skip("unpin", e)?;
+        }
+        set_flag(store, old.id, "$.pinned", json!(false))?;
+    }
+    let text = board::moved_text(m.id);
+    if live && old.text != text {
+        let p = json!({"chat_id": old.chat_id, "message_id": old.message_id, "text": text});
+        match b.paced(old.chat_id, || b.api.call("editMessageText", &p)) {
+            Ok(_) => {}
+            Err(e) if e.description.contains("message is not modified") => {}
+            Err(e) => skip("edit", e)?,
+        }
+        // Recorded either way, so a refused edit is not retried.
+        store.conn().execute(
+            "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.edited',json('true')) WHERE id=?2",
+            params![text, old.id],
+        )?;
+    }
+    board::moved(&store.conn(), m.id)?;
+    store.changed();
+    Ok(())
+}
+
+fn set_flag(store: &dyn Store, msg: i64, path: &str, v: Value) -> Result<()> {
+    store.conn().execute(
+        "UPDATE bot_messages SET flags=json_set(flags,?1,json(?2)) WHERE id=?3",
+        params![path, v.to_string(), msg],
+    )?;
+    Ok(())
 }
 
 /// (chat, thread) of the messages whose wakes the bot's live run took.

@@ -7,8 +7,13 @@
 //!   or a delete closes a card.
 //!
 //! The board message is the bot's own text message with `flags.board`; the
-//! key of its last successful render is `flags.board_key`. The Telegram
-//! gateway re-renders and edits the message when the key changes.
+//! key of its last successful render is `flags.board_key`. When the key
+//! changes, the Telegram gateway re-posts the board: it sends the new text
+//! silently at the bottom of the chat and makes that message the board, with
+//! `flags.board_from` naming the previous one until the move is finished
+//! (new pinned, old unpinned and edited to "Moved below (#new)"). The first
+//! render of a message just chosen with `set_message`, and every render with
+//! `telegram.board = "edit"`, edits the message in place instead.
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -80,7 +85,7 @@ pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Resul
     }
     let tx = conn.transaction()?;
     tx.execute(
-        "UPDATE bot_messages SET flags=json_remove(flags,'$.board','$.board_key')
+        "UPDATE bot_messages SET flags=json_remove(flags,'$.board','$.board_key','$.board_from')
          WHERE bot_id=?1 AND json_extract(flags,'$.board') IS NOT NULL",
         [b],
     )?;
@@ -102,6 +107,36 @@ pub fn rendered(conn: &Connection, msg: i64, key: &str, text: &str) -> Result<()
         "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.board_key',?2,'$.edited',json('true'))
          WHERE id=?3",
         params![text, key, msg],
+    )?;
+    Ok(())
+}
+
+/// Makes the freshly sent message `new` the board in place of `old`, with
+/// `key` rendered; `flags.board_from` keeps `old` until [`moved`] runs.
+pub fn reposted(conn: &mut Connection, old: i64, new: i64, key: &str) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE bot_messages SET flags=json_remove(flags,'$.board','$.board_key','$.board_from') WHERE id=?1",
+        [old],
+    )?;
+    tx.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,'$.board',json('true'),'$.board_key',?1,'$.board_from',?2) WHERE id=?3",
+        params![key, old, new],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The text a replaced board is edited to.
+pub fn moved_text(new: i64) -> String {
+    format!("Moved below (#{new}).")
+}
+
+/// Records that the move of the board to `msg` is finished.
+pub fn moved(conn: &Connection, msg: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_remove(flags,'$.board_from') WHERE id=?1",
+        [msg],
     )?;
     Ok(())
 }

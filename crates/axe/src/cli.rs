@@ -855,8 +855,9 @@ enum BoardCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Make one of the bot's own text messages the board; the server edits
-    /// it in place from then on (pin it with `axe bot tg pin MSG --silent`)
+    /// Make one of the bot's own text messages the board; the server renders
+    /// it in place, then re-posts the board at the bottom of the chat on each
+    /// change (`[telegram] board`; pin the first one with `axe bot tg pin MSG --silent`)
     SetMessage { msg: i64 },
     /// Stop rendering a board for this bot
     Clear,

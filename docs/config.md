@@ -225,6 +225,7 @@ default); a server built without it logs a warning and ignores the table.
 | `owner_user_id` | integer | required | Numeric Telegram user id of the only person who may control the bots. Must be > 0. |
 | `api_base` | string | `"https://api.telegram.org"` | Bot API base URL (tests point it at a stub). |
 | `poll_timeout` | integer | `30` | `getUpdates` long-poll timeout in seconds. Must be 1..=50. |
+| `board` | `"repost"` \| `"edit"` | `"repost"` | How a changed "Waiting on you" board reaches the chat. `repost` sends it silently at the bottom of the chat, pins it, unpins the old board and edits that to "Moved below (#new)". `edit` edits the board message in place. |
 
 ### `[[telegram.bot]]`
 
@@ -306,6 +307,7 @@ projects = ["web"]                      # own label on /metrics; others are "oth
 owner_user_id = 123456789
 # api_base = "https://api.telegram.org"
 # poll_timeout = 30                     # 1..=50
+# board = "repost"                      # or "edit": update the board in place
 
 [[telegram.bot]]
 name = "assistant"

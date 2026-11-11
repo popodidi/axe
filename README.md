@@ -1076,13 +1076,22 @@ its text messages that still have buttons. A press (`flags.answered`), a
 keyboard) or a delete closes a card. Each line shows the task id or card
 `#id`, a short title and its age, in Telegram HTML with an "Updated <time>"
 footer; lines that do not fit 4096 characters become "+N more". A per-bot
-thread re-renders after every committed change (and every 60 s) and calls
-`editMessageText` only when the set of lines or titles changed
-(`flags.board_key`), recording a `board_render` bot event. A failed edit is
-logged to stderr and as a `board_error` event and retried with backoff (5 s
-doubling to 5 min, at least `retry_after`). A hand edit of the board is
-rendered over. `board show` prints the current text and whether the message
-shows it.
+thread re-renders after every committed change (and every 60 s), only when
+the set of lines or titles changed (`flags.board_key`), recording a
+`board_render` bot event. The first render of a message just made the board
+edits it in place. After that, so the board never sits far up the chat, each
+change re-posts it (`[telegram] board = "repost"`, the default): the new board
+is sent silently at the bottom of the chat and becomes the board message, is
+pinned silently, and the old board is unpinned and edited to "Moved below
+(#new)". The new message keeps `flags.board_from` until all three steps are
+done, so a retry repeats only what is left; Telegram refusing a step on the
+old board (400) is logged as a skipped `board_error` and does not hold the
+board up. `board = "edit"` keeps the old behaviour: every render is an
+`editMessageText` of the one board message. A failed render is logged to
+stderr and as a `board_error` event and retried with backoff (5 s doubling to
+5 min, at least `retry_after`). A hand edit of the board is rendered over in
+place. `board show` prints the current board message, its text and whether
+the message shows it.
 
 **Read privacy.** `GET /api/bots/:name/tg/history`, `/api/bots/:name/tg/board` and
 `/api/bots/:name/tg/file/:msg[/:n]` need the bearer token. Public:
