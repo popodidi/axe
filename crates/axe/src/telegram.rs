@@ -804,10 +804,12 @@ impl Gateway {
                 None => None,
             };
             let stored = target.map(|t| get_message(&conn, &b.name, t)).transpose()?;
-            // A later press on an answered keyboard is not a new wake.
+            // A later press on an answered keyboard is not a new wake. The
+            // board is never answered: every press on it is a wake.
             let answered = stored.as_ref().is_some_and(|m| {
                 !m.flags["answered"].is_null() && m.flags["answered"]["update"] != uid
             });
+            let board = stored.as_ref().is_some_and(on_board);
             if !answered {
                 bot::record_message(
                     &mut conn,
@@ -825,7 +827,7 @@ impl Gateway {
                     },
                     now(),
                 )?;
-                if let Some(m) = &stored {
+                if let Some(m) = stored.as_ref().filter(|_| !board) {
                     let label = button_label(&m.flags, &data);
                     conn.execute(
                         "UPDATE bot_messages SET flags=json_set(flags,'$.answered',json(?1)) WHERE id=?2",
@@ -860,7 +862,8 @@ impl Gateway {
         if answered {
             return Ok(());
         }
-        if let Some(t) = tg_msg {
+        // The board keeps its keyboard, so its other items stay pressable.
+        if let (Some(t), false) = (tg_msg, target.as_ref().is_some_and(on_board)) {
             self.mark_selected(b, chat, t, target.as_ref(), &label);
         }
         b.typing(chat, thread);
@@ -1547,13 +1550,14 @@ fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
     }
     drop(conn);
     b.allowed(m.chat_id)?;
-    let text = board::render(&lines, now());
+    let (text, buttons) = board::render(&lines, now());
+    let markup = keyboard(&buttons, &vec![1; buttons.len()]);
     // A message just made the board (or hand-edited) has no key yet: it is
     // where the owner put it, so it is rendered in place.
     let repost = b.board == BoardMode::Repost && m.flags["board_key"].is_string();
     let shown = if repost {
         let mut p = json!({"chat_id": m.chat_id, "text": text, "parse_mode": "HTML",
-            "disable_notification": true});
+            "disable_notification": true, "reply_markup": markup});
         if let Some(t) = m.thread_id {
             p["message_thread_id"] = json!(t);
         }
@@ -1566,21 +1570,22 @@ fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
             &text,
             None,
             json!([]),
-            json!({"html": true}),
+            json!({"html": true, "board_buttons": buttons}),
         )?;
         board::reposted(&mut store.conn(), m.id, new, &key)?;
         let nm = get_message(&store.conn(), &b.name, new)?;
         finish_move(b, store, &nm)?;
         new
     } else {
-        let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text, "parse_mode": "HTML"});
+        let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text,
+            "parse_mode": "HTML", "reply_markup": markup});
         match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
             Ok(_) => {}
             // The text already matches (for example after a lost reply).
             Err(e) if e.description.contains("message is not modified") => {}
             Err(e) => return Err(e.into()),
         }
-        board::rendered(&store.conn(), m.id, &key, &text)?;
+        board::rendered(&store.conn(), m.id, &key, &text, &buttons)?;
         m.id
     };
     let conn = store.conn();
@@ -1688,9 +1693,10 @@ fn finish_move(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
             Err(e) if e.description.contains("message is not modified") => {}
             Err(e) => skip("edit", e)?,
         }
-        // Recorded either way, so a refused edit is not retried.
+        // Recorded either way, so a refused edit is not retried. The edit
+        // sends no keyboard, so Telegram drops the old board's buttons.
         store.conn().execute(
-            "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.edited',json('true')) WHERE id=?2",
+            "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_buttons') WHERE id=?2",
             params![text, old.id],
         )?;
     }
@@ -1743,10 +1749,16 @@ fn keyboard(buttons: &[(String, String)], rows: &[usize]) -> Value {
     json!({ "inline_keyboard": keyboard })
 }
 
+/// Whether `m` shows board buttons: a press on it picks a board item.
+fn on_board(m: &StoredMessage) -> bool {
+    m.flags["board_buttons"].is_array()
+}
+
 fn button_label(flags: &Value, data: &str) -> String {
     flags["buttons"]
         .as_array()
         .into_iter()
+        .chain(flags["board_buttons"].as_array())
         .flatten()
         .find(|b| b[1] == data)
         .and_then(|b| b[0].as_str())

@@ -114,7 +114,9 @@ pub const TELEGRAM_PROTOCOL: &str = r#"## Talking to the owner (Telegram)
   message with `--buttons`). The server renders the pinned "Waiting on you"
   board from both (`axe bot tg board show`), and a separate pinned goal
   board from your goals (`axe bot tg goal-board show`); never edit or resend
-  either by hand.
+  either by hand. Each board item has a pick button: a press arrives as a
+  button wake on the board, `board task #N` or `board card #N`; open a
+  discussion on that item.
   A press closes a card; close one answered another way with
   `axe bot tg edit <id> --clear-buttons "Decided: X"`. A text edit keeps a
   card open only with `--buttons`.
