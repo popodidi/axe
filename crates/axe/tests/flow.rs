@@ -53,6 +53,7 @@ fn stats(c: &Connection, workload: Option<&str>) -> Value {
             since: now - 3600,
             until: now + 60,
             workload,
+            origin: None,
         },
     )
     .unwrap()

@@ -91,6 +91,10 @@ pub struct Goal {
     /// Attached bot names.
     #[serde(default)]
     pub bots: Vec<String>,
+    /// Spend over the last 7 days against the weekly budgets; set by `list`
+    /// and `detail` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
 }
 
 const GOAL_COLS: &str = "g.*, (SELECT group_concat(name, ',') FROM
@@ -113,6 +117,7 @@ fn from_row(r: &Row) -> rusqlite::Result<Goal> {
         bots: bots
             .map(|b| b.split(',').map(str::to_owned).collect())
             .unwrap_or_default(),
+        budget: None,
     })
 }
 
@@ -134,7 +139,7 @@ pub fn list(conn: &Connection, bot_name: Option<&str>, state: Option<&str>) -> R
     let bot_id = bot_name
         .map(|b| bot::get(conn, b).map(|b| b.id))
         .transpose()?;
-    Ok(conn
+    let mut goals: Vec<Goal> = conn
         .prepare(&format!(
             "SELECT {GOAL_COLS} FROM goals g
              WHERE (?1 IS NULL OR EXISTS(SELECT 1 FROM goal_bots gb WHERE gb.goal_id=g.id AND gb.bot_id=?1))
@@ -142,7 +147,12 @@ pub fn list(conn: &Connection, bot_name: Option<&str>, state: Option<&str>) -> R
              ORDER BY g.id"
         ))?
         .query_map(params![bot_id, state], from_row)?
-        .collect::<rusqlite::Result<_>>()?)
+        .collect::<rusqlite::Result<_>>()?;
+    let spend = Spend::load(conn, crate::remote::epoch())?;
+    for g in &mut goals {
+        g.budget = Some(spend.budget(g));
+    }
+    Ok(goals)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,8 +237,10 @@ pub struct Detail {
 }
 
 pub fn detail(conn: &Connection, name: &str) -> Result<Detail> {
+    let mut goal = get(conn, name)?;
+    goal.budget = Some(budget(conn, &goal, crate::remote::epoch())?);
     Ok(Detail {
-        goal: get(conn, name)?,
+        goal,
         tasks: tasks(conn, name)?,
         trajectory: events(conn, name, SHOW_TRAJECTORY, true)?,
     })
@@ -730,4 +742,192 @@ pub fn resolve(conn: &Connection, name: &str) -> Result<Option<Goal>> {
 /// A wake body labeled with its goal.
 pub fn label(goal: &str, body: &str) -> String {
     format!("[goal {goal}] {body}")
+}
+
+/// The goal a wake body is labeled with by [`label`], if any.
+pub fn wake_goal(body: &str) -> Option<&str> {
+    body.strip_prefix("[goal ")?
+        .split_once(']')
+        .map(|(g, _)| g)
+        .filter(|g| !g.is_empty())
+}
+
+/// The rolling window budgets are spent over.
+pub const BUDGET_WINDOW_DAYS: i64 = 7;
+/// Owner goal actions that each cost one attention unit.
+pub const ATTENTION_KINDS: [&str; 3] = ["activated", "budget", "intent"];
+
+/// The window a [`Budget`] covers, `[since, until)` in RFC3339.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Window {
+    pub since: String,
+    pub until: String,
+    pub days: i64,
+}
+
+/// A goal's spend over the last 7 days against its weekly budgets. A budget of
+/// `None` is unlimited and never gates.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Budget {
+    pub cost_week: Option<f64>,
+    /// Estimated USD of the runs attributed to the goal.
+    pub cost_spent: f64,
+    pub attention_week: Option<i64>,
+    /// Escalation episodes and approvals on linked tasks, plus owner goal
+    /// actions (activate, budget, intent): one unit each.
+    pub attention_spent: i64,
+    /// Bot runs whose wakes mix this goal with other work; not in `cost_spent`.
+    pub unattributed_runs: i64,
+    /// Attributed runs with unknown usage; not in `cost_spent`.
+    pub unknown_runs: i64,
+    /// Cost of linked task runs.
+    pub cost_tasks: f64,
+    /// Cost of goal-tagged bot runs, per bot.
+    pub cost_bots: std::collections::BTreeMap<String, f64>,
+    pub window: Window,
+}
+
+impl Budget {
+    /// Why the goal takes no new linked tasks: a weekly budget that is spent.
+    pub fn exhausted(&self) -> Option<String> {
+        let mut out = Vec::new();
+        if let Some(limit) = self.cost_week.filter(|l| self.cost_spent >= *l) {
+            out.push(format!("cost ${:.2} of ${limit:.2}", self.cost_spent));
+        }
+        if let Some(limit) = self.attention_week.filter(|l| self.attention_spent >= *l) {
+            out.push(format!("attention {} of {limit}", self.attention_spent));
+        }
+        (!out.is_empty()).then(|| out.join(", "))
+    }
+
+    /// `spent/limit` for `goal list`, `-` for no limit.
+    pub fn compact(&self) -> String {
+        let cost = self
+            .cost_week
+            .map_or("-".into(), |l| format!("${:.2}/${l:.2}", self.cost_spent));
+        let attention = self
+            .attention_week
+            .map_or("-".into(), |l| format!("{}/{l}", self.attention_spent));
+        format!("cost={cost}  attention={attention}")
+    }
+}
+
+/// Spend over one window for every goal, read once.
+struct Spend {
+    window: Window,
+    costs: std::collections::HashMap<String, crate::usage::GoalCost>,
+    attention: std::collections::HashMap<String, i64>,
+}
+
+impl Spend {
+    fn load(conn: &Connection, now: i64) -> Result<Spend> {
+        let since = now - BUDGET_WINDOW_DAYS * 86_400;
+        Ok(Spend {
+            window: Window {
+                since: ts(since),
+                until: ts(now),
+                days: BUDGET_WINDOW_DAYS,
+            },
+            costs: crate::usage::goal_costs(conn, since, now + 1)?,
+            attention: attention(conn, since, now + 1)?,
+        })
+    }
+
+    fn budget(&self, g: &Goal) -> Budget {
+        let c = self.costs.get(&g.name).cloned().unwrap_or_default();
+        Budget {
+            cost_week: g.budget_cost_week,
+            cost_spent: c.cost,
+            attention_week: g.budget_attention_week,
+            attention_spent: self.attention.get(&g.name).copied().unwrap_or(0),
+            unattributed_runs: c.unattributed_runs,
+            unknown_runs: c.unknown_runs,
+            cost_tasks: c.tasks,
+            cost_bots: c.bots,
+            window: self.window.clone(),
+        }
+    }
+}
+
+/// One goal's [`Budget`] over the 7 days before `now`.
+pub fn budget(conn: &Connection, g: &Goal, now: i64) -> Result<Budget> {
+    Ok(Spend::load(conn, now)?.budget(g))
+}
+
+/// Owner attention per goal in `[since, until)`: each escalation episode and
+/// approval on a task linked to the goal at the time, and each owner goal
+/// action ([`ATTENTION_KINDS`]).
+pub fn attention(
+    conn: &Connection,
+    since: i64,
+    until: i64,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let mut out: std::collections::HashMap<String, i64> = Default::default();
+    let in_window = |at: &str| -> Result<bool> {
+        let t = crate::usage::epoch(at)?;
+        Ok(t >= since && t < until)
+    };
+    let mut stmt = conn.prepare(
+        "SELECT task_id, at, kind, from_value, to_value, body FROM events
+         WHERE kind IN ('goal','created','state','approval') ORDER BY task_id, id",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut task = None;
+    let mut goal: Option<String> = None;
+    while let Some(r) = rows.next()? {
+        let id: i64 = r.get(0)?;
+        if task != Some(id) {
+            task = Some(id);
+            goal = None;
+        }
+        let kind: String = r.get(2)?;
+        let from: Option<String> = r.get(3)?;
+        let to: Option<String> = r.get(4)?;
+        if kind == "goal" {
+            goal = to;
+            continue;
+        }
+        let Some(g) = &goal else { continue };
+        let body: Option<String> = r.get(5)?;
+        let counts = match kind.as_str() {
+            "created" => body.unwrap_or_default().starts_with("state=escalated"),
+            "state" => to.as_deref() == Some("escalated") && from != to,
+            _ => true,
+        };
+        if counts && in_window(&r.get::<_, String>(1)?)? {
+            *out.entry(g.clone()).or_default() += 1;
+        }
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT g.name, e.at FROM goal_events e JOIN goals g ON g.id=e.goal_id
+         WHERE e.kind IN ({})",
+        ATTENTION_KINDS.map(|k| format!("'{k}'")).join(",")
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        if in_window(&r.get::<_, String>(1)?)? {
+            *out.entry(r.get(0)?).or_default() += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// The one hard gate: refuses linking a new task to a goal whose weekly cost
+/// or attention budget is spent. A goal with no budget never gates.
+pub fn check_budget(conn: &Connection, g: &Goal) -> Result<()> {
+    if g.budget_cost_week.is_none() && g.budget_attention_week.is_none() {
+        return Ok(());
+    }
+    let b = budget(conn, g, crate::remote::epoch())?;
+    if let Some(why) = b.exhausted() {
+        bail!(
+            "goal {} is over its weekly budget ({why}, last {} days); \
+             the owner can raise it with `axe goal edit {} --budget-cost-week N` \
+             or `--budget-attention-week N`",
+            g.name,
+            BUDGET_WINDOW_DAYS,
+            g.name
+        );
+    }
+    Ok(())
 }

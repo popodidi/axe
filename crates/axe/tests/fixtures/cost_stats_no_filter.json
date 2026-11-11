@@ -154,6 +154,20 @@
         "unknown_runs": 2
       }
     ],
+    "goal": [
+      {
+        "cache_read": 540,
+        "cache_write": 162,
+        "cost": 31.5,
+        "input": 54,
+        "key": "no goal",
+        "known_runs": 5,
+        "output": 108,
+        "runs": 8,
+        "thinking": 25,
+        "unknown_runs": 3
+      }
+    ],
     "kind": [
       {
         "cache_read": 90,

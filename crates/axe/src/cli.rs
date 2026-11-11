@@ -202,6 +202,9 @@ enum Cmd {
         /// One workload, or "unset"
         #[arg(long)]
         workload: Option<String>,
+        /// Only tasks that came from a routine occurrence (routine) or not (task)
+        #[arg(long, value_parser = PossibleValuesParser::new(crate::flow::ORIGINS))]
+        origin: Option<String>,
     },
     /// Wait without a human: on other tasks (--on) or until a time (--until/--for).
     /// The task keeps its session and resumes automatically
@@ -966,7 +969,11 @@ fn run_goal(c: &Client, command: &GoalCmd) -> Result<()> {
                 return print_json(&goals);
             }
             for g in &goals {
-                println!("{}", format_goal_line(g));
+                let budget = g
+                    .budget
+                    .as_ref()
+                    .map_or(String::new(), |b| format!("  {}", b.compact()));
+                println!("{}{budget}", format_goal_line(g));
             }
         }
         GoalCmd::Show { name, json } => {
@@ -982,6 +989,24 @@ fn run_goal(c: &Client, command: &GoalCmd) -> Result<()> {
                 opt(g.budget_cost_week.map(|v| v.to_string())),
                 opt(g.budget_attention_week.map(|v| v.to_string()))
             );
+            if let Some(b) = &g.budget {
+                println!(
+                    "spent (last {} days): cost ${:.2}  attention {}",
+                    b.window.days, b.cost_spent, b.attention_spent
+                );
+                let mut split = vec![format!("tasks ${:.2}", b.cost_tasks)];
+                split.extend(b.cost_bots.iter().map(|(n, c)| format!("bot {n} ${c:.2}")));
+                println!("  by: {}", split.join("  "));
+                if b.unattributed_runs > 0 || b.unknown_runs > 0 {
+                    println!(
+                        "  not counted: {} unattributed bot runs (mixed wakes), {} runs with unknown usage",
+                        b.unattributed_runs, b.unknown_runs
+                    );
+                }
+                if let Some(why) = b.exhausted() {
+                    println!("  over budget: {why}; new linked tasks are refused");
+                }
+            }
             println!("updated: {}", g.updated_at);
             println!("\n# Intent\n");
             println!(
@@ -2304,6 +2329,7 @@ pub fn run() -> Result<()> {
             since,
             until,
             workload,
+            origin,
         } => {
             let mut q = vec![
                 ("project", project.as_str()),
@@ -2312,6 +2338,9 @@ pub fn run() -> Result<()> {
             ];
             if let Some(w) = workload {
                 q.push(("workload", w.as_str()));
+            }
+            if let Some(o) = origin {
+                q.push(("origin", o.as_str()));
             }
             let v: Value = client().get("/api/stats/flow", &q)?;
             println!("{}", serde_json::to_string_pretty(&v)?);
