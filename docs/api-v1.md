@@ -176,8 +176,8 @@ no data beyond the counter: clients refetch what they display.
 | GET | `/api/tasks/{id}` | | Task |
 | GET | `/api/tasks/{id}/events` | | Event log of the task |
 | GET | `/api/tasks/{id}/routine` | | Routine backlink/snapshot, or `null` |
-| POST | `/api/tasks` | `{project, title, detail? = "", agent?, state? = "pending", blocked_by? = [], workload?}` + `Who` | `201 {id, task}`; task and dependency edges commit together. `agent` must be configured |
-| PATCH | `/api/tasks/{id}` | `{state?, title?, detail?, note?, reset_runs? = false, not_before?, escalation_class?}` + `Who` | `{changed, task}` |
+| POST | `/api/tasks` | `{project, title, detail? = "", agent?, state? = "pending", blocked_by? = [], workload?, goal?}` + `Who` | `201 {id, task}`; task, dependency edges and the goal link commit together. `agent` must be configured; `goal` must exist |
+| PATCH | `/api/tasks/{id}` | `{state?, title?, detail?, note?, reset_runs? = false, not_before?, escalation_class?, goal?}` + `Who` | `{changed, task}`. `goal` is a goal name or `"none"` (unlink), written as a `goal` event |
 | POST | `/api/tasks/{id}/deps` | `{add? = [ids], remove? = [ids]}` + `Who` | `{changed, task}`; one transaction |
 | POST | `/api/tasks/{id}/notes` | `{body}` + `Who` | `201 {task}` |
 | POST | `/api/tasks/{id}/artifacts` | `{value}` + `Who` | `201 {task}` |
@@ -279,7 +279,7 @@ writes require a `why` audit string.
 | POST | `/api/bots` | `{bot: {name, project, agent? = "claude", identity?, conduct?, notes?, nudge_after?}}` + `Who` | `201` created bot. `heartbeat` is retired and refused |
 | PATCH | `/api/bots/{name}` | `{identity?, conduct?, nudge_after?, why}` + `Who` | Edited bot |
 | PUT | `/api/bots/{name}/notes` | `{notes, why}` + `Who` | Result of `bot::set_notes` |
-| POST | `/api/bots/{name}/wakes` | exactly one of `in_seconds` (> 0), `at`, `now: true`; plus `{note, key?}` + `Who` | `201 {wake, due_at}` |
+| POST | `/api/bots/{name}/wakes` | exactly one of `in_seconds` (> 0), `at`, `now: true`; plus `{note, key?, goal?}` + `Who` | `201 {wake, due_at}`; `goal` stores the body as `[goal NAME] note` |
 | POST | `/api/bots/{name}/inbox` | `{run?, take? = false, hook? ("post-tool" \| "stop"), stop_hook_active?}` + `Who` | Inbox result (`bot::inbox`); `hook` implies `take`. Used by the bot's agent hooks |
 | POST | `/api/bots/{name}/pause` \| `resume` \| `stop` \| `reset` | `Who` | Bot after the change |
 
@@ -288,7 +288,8 @@ writes require a `why` audit string.
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/bots/{name}/schedules` | | Schedules |
-| POST | `/api/bots/{name}/schedules` | `{name, cron, timezone? = "UTC", objective, why}` + `Who` | `201` schedule |
+| POST | `/api/bots/{name}/schedules` | `{name, cron, timezone? = "UTC", objective, goal?, why}` + `Who` | `201` schedule |
+| PATCH | `/api/bots/{name}/schedules/{schedule}` | `{goal, why}` + `Who` (`goal` a name or `"none"`) | Schedule |
 | POST | `/api/bots/{name}/schedules/{schedule}/pause` \| `resume` \| `remove` | `{why}` + `Who` | `{schedule, action}` |
 
 ### Bot subscriptions
@@ -298,6 +299,24 @@ writes require a `why` audit string.
 | GET | `/api/bots/{name}/subscriptions` | | Subscriptions |
 | POST | `/api/bots/{name}/subscriptions` | `{project?, wake?: [..], ride?: [..], batch_seconds?, why}` + `Who` | `200` subscription (creates or changes) |
 | POST | `/api/bots/{name}/subscriptions/remove` | `{project?, why}` + `Who` | `{removed: true}` |
+
+## Goals
+
+Design: [goals](design/goals.md). Reads are public; writes need the token and
+take `Who`. Owner decisions (activate; edits of intent, deadline or budget;
+join/leave of another bot; attaching another bot at proposal) by an actor
+other than `human` need a non-empty `owner_ref`, else `403`.
+
+| Method | Path | Query / body | Response |
+|---|---|---|---|
+| GET | `/api/goals` | `bot`, `state` | Goals with attached `bots` (names) |
+| GET | `/api/goals/{name}` | | Goal plus `tasks` (`{id, state, title}`, linked by their latest `goal` event) and `trajectory` (latest 10 trajectory events) |
+| GET | `/api/goals/{name}/events` | `limit` (default 50, max 1000), `trajectory=1` | Goal events, oldest first: `{id, at, actor, session, kind, task_id, owner_ref, body}` |
+| POST | `/api/goals` | `{goal: {name, project, intent?, deadline?, budget_cost_week?, budget_attention_week?, bots? = []}, owner_ref?}` + `Who` | `201` goal (`proposed`); a `bot:<name>` actor is attached |
+| PATCH | `/api/goals/{name}` | `{intent?, deadline?, budget_cost_week?, budget_attention_week?, why, owner_ref?}` + `Who`; values are strings, `"none"` clears | Goal |
+| POST | `/api/goals/{name}/activate` \| `pause` \| `resume` \| `done` \| `drop` | `{why, owner_ref?}` + `Who` | Goal |
+| POST | `/api/goals/{name}/join` \| `leave` | `{bot, why, owner_ref?}` + `Who` | Goal |
+| POST | `/api/goals/{name}/events` | `{kind (hypothesis\|test\|verdict\|observation\|note), task_id?, body}` + `Who` | `201 {event}` |
 
 ## Bot runs
 

@@ -211,8 +211,8 @@ fn create_then_first_run_gets_system_prompt_and_only_wakes() {
     assert!(lines[1].ends_with("] bot created"), "{prompt}");
     assert_eq!(
         lines[2],
-        "Fresh session: read `axe bot notes`, `axe bot log --limit 50` and \
-         `axe bot tg history --limit 20` first."
+        "Fresh session: read `axe bot notes`, `axe bot log --limit 50`, \
+         `axe bot tg history --limit 20` and `axe goal list --bot $AXE_BOT` first."
     );
     assert_eq!(lines.len(), 3, "{prompt}");
     for text in ["IDENTITY-TEXT", "CONDUCT-TEXT", "NOTES-TEXT"] {

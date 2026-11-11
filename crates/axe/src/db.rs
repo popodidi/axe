@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -115,10 +115,11 @@ pub fn default_path() -> Result<PathBuf> {
     crate::compat::home_path(".local/share/axe/axe.db").context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v15 schema, or migrates v8-v14 to v15. Older
+/// Opens the database: creates a fresh v16 schema, or migrates v8-v15 to v16. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
-/// v12, v13 and v15 only add bot tables (`bot::SCHEMA`) and v14 only adds usage
-/// tables (`usage::SCHEMA`), so a database lowered to `user_version` 14, 13, 12 or
+/// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
+/// tables (`usage::SCHEMA`) and v16 only adds goal tables and a nullable column
+/// (`goal::migrate`), so a database lowered to `user_version` 15, 14, 13, 12 or
 /// 11 still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -146,14 +147,16 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::routine::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
+        crate::goal::migrate(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=14).contains(&version) {
+    if (11..=15).contains(&version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
+        crate::goal::migrate(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -172,6 +175,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::routine::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
+        crate::goal::migrate(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -193,6 +197,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     tx.execute_batch(crate::routine::SCHEMA)?;
     tx.execute_batch(crate::bot::SCHEMA)?;
     tx.execute_batch(crate::usage::SCHEMA)?;
+    crate::goal::migrate(&tx)?;
     let violations: i64 =
         tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
@@ -546,6 +551,42 @@ pub fn add_classified_task(
     blocked_by: &[i64],
     workload: Option<&str>,
 ) -> Result<i64> {
+    add_linked_task(conn, actor, t, blocked_by, workload, None)
+}
+
+/// Writes a `goal` event linking a task to a goal (`none` unlinks); the goal
+/// must exist. The value is the goal name; the latest event wins.
+fn link_goal(tx: &Transaction, actor: &Actor, id: i64, goal: &str) -> Result<bool> {
+    let to = crate::goal::resolve(tx, goal)?.map(|g| g.name);
+    let from = current_goal(tx, id)?;
+    if from == to {
+        return Ok(false);
+    }
+    write_event(tx, actor, id, "goal", from.as_deref(), to.as_deref(), None)?;
+    Ok(true)
+}
+
+/// The goal a task is linked to: the latest `goal` event's value.
+pub fn current_goal(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT to_value FROM events WHERE task_id=?1 AND kind='goal' ORDER BY id DESC LIMIT 1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// [`add_classified_task`] that also links the task to a goal.
+pub fn add_linked_task(
+    conn: &mut Connection,
+    actor: &Actor,
+    t: &NewTask,
+    blocked_by: &[i64],
+    workload: Option<&str>,
+    goal: Option<&str>,
+) -> Result<i64> {
     validate_state(t.state)?;
     if let Some(w) = workload {
         validate_workload(w)?;
@@ -562,6 +603,9 @@ pub fn add_classified_task(
     write_event(&tx, actor, id, "created", None, Some(t.title), Some(&body))?;
     if let Some(w) = workload {
         write_event(&tx, actor, id, "workload", None, Some(w), None)?;
+    }
+    if let Some(g) = goal {
+        link_goal(&tx, actor, id, g)?;
     }
     for p in dedup(blocked_by) {
         add_dep_in(&tx, actor, id, p)?;
@@ -823,6 +867,8 @@ pub struct Changes {
     pub not_before: Option<String>,
     /// Why the task is being escalated; only valid when it ends up escalated.
     pub escalation_class: Option<String>,
+    /// Link the task to a goal by name, or `none` to unlink; latest wins.
+    pub goal: Option<String>,
 }
 
 /// Applies changes inside an existing transaction. When `expect_claim` is set the
@@ -969,6 +1015,9 @@ pub fn apply_changes(
             .to_string();
         write_event(tx, actor, id, "edit", None, None, Some(&diff))?;
         changed = true;
+    }
+    if let Some(g) = &c.goal {
+        changed |= link_goal(tx, actor, id, g)?;
     }
     if let Some(n) = &c.note {
         write_event(tx, actor, id, "note", None, None, Some(n))?;

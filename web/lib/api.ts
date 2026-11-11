@@ -78,6 +78,10 @@ export type TaskAction = { task_id: number, at: string, actor: string, kind: str
 
 export type Activity = { messages: Array<MessageMeta>, task_actions: Array<TaskAction>, };
 
-export type BotSchedule = { id: number, name: string, cron: string, timezone: string, objective: string, enabled: boolean, next_at: string, last_fired_at: string | null, created_at: string, updated_at: string, };
+export type BotSchedule = { id: number, name: string, cron: string, timezone: string, objective: string, enabled: boolean, next_at: string, last_fired_at: string | null, created_at: string, updated_at: string, 
+/**
+ * The goal each firing is labeled with (`[goal NAME]`).
+ */
+goal: string | null, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;

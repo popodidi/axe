@@ -44,6 +44,12 @@ enum Cmd {
         #[command(subcommand)]
         command: BotCmd,
     },
+    /// Manage goals: durable outcomes (intent, budget, trajectory) bots share.
+    /// Bots propose; the owner activates and edits (non-human actors need --owner-ref)
+    Goal {
+        #[command(subcommand)]
+        command: GoalCmd,
+    },
     /// Force-stop a run and hold its task; succeeds only after confirmation
     Abort {
         id: i64,
@@ -66,6 +72,9 @@ enum Cmd {
         /// Kind of work, so statistics compare like with like
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::WORKLOADS))]
         workload: Option<String>,
+        /// Link the task to a goal (by name)
+        #[arg(long)]
+        goal: Option<String>,
         #[arg(long, conflicts_with = "detail_file")]
         detail: Option<String>,
         #[arg(long)]
@@ -139,6 +148,9 @@ enum Cmd {
         /// Wake time for a pending task (RFC3339 or +<n>[smhd]); cleared by any state change
         #[arg(long)]
         not_before: Option<String>,
+        /// Link the task to a goal (by name), or "none" to unlink; latest wins
+        #[arg(long)]
+        goal: Option<String>,
     },
     /// Escalate for ops/owner with a block note; the task's session resumes later
     Escalate {
@@ -576,6 +588,9 @@ enum BotCmd {
         /// Retry key: the same key returns the same wake
         #[arg(long)]
         key: Option<String>,
+        /// Label the wake `[goal NAME]`
+        #[arg(long)]
+        goal: Option<String>,
     },
     /// Undelivered wakes; --take delivers the due ones to the live run.
     /// --hook prints Claude Code hook JSON and never fails the hook
@@ -714,6 +729,17 @@ enum ScheduleCmd {
         /// What each firing asks the bot to do
         #[arg(long)]
         objective: String,
+        /// Label each firing `[goal NAME]`
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long)]
+        why: String,
+    },
+    /// Change a schedule's goal ("none" clears it)
+    Edit {
+        name: String,
+        #[arg(long)]
+        goal: String,
         #[arg(long)]
         why: String,
     },
@@ -740,6 +766,348 @@ enum ScheduleCmd {
         #[arg(long)]
         why: String,
     },
+}
+
+#[derive(Subcommand)]
+enum GoalCmd {
+    /// Propose a goal from JSON: name, project, intent, deadline,
+    /// budget_cost_week, budget_attention_week, bots. The proposing bot
+    /// ($AXE_BOT) is attached
+    Propose {
+        #[arg(long)]
+        file: PathBuf,
+        /// Owner decision this rests on, needed to attach another bot
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// List goals
+    List {
+        /// Only goals this bot is attached to
+        #[arg(long)]
+        bot: Option<String>,
+        #[arg(long, value_parser = PossibleValuesParser::new(crate::goal::STATES))]
+        state: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a goal: intent, budget, bots, linked tasks, latest trajectory
+    Show {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// A goal's events (audit and trajectory), oldest first
+    Log {
+        name: String,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        #[arg(long)]
+        full: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change intent, deadline or budget (an owner decision); "none" clears a value
+    Edit {
+        name: String,
+        #[arg(long)]
+        intent_file: Option<PathBuf>,
+        /// YYYY-MM-DD, RFC3339 or +<n>[smhd]
+        #[arg(long)]
+        deadline: Option<String>,
+        /// Weekly cost budget (USD)
+        #[arg(long)]
+        budget_cost_week: Option<String>,
+        /// Weekly owner-attention budget (interventions)
+        #[arg(long)]
+        budget_attention_week: Option<String>,
+        #[arg(long)]
+        why: String,
+        /// Owner decision this rests on (e.g. "msg #873"); required unless human
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// proposed -> active (an owner decision)
+    Activate {
+        name: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// active -> paused
+    Pause {
+        name: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// paused -> active
+    Resume {
+        name: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// active or paused -> done
+    Done {
+        name: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// proposed, active or paused -> dropped
+    Drop {
+        name: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// Attach a bot to the goal
+    Join {
+        name: String,
+        #[arg(long)]
+        bot: String,
+        #[arg(long)]
+        why: String,
+        /// Required unless human or the bot itself
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// Detach a bot; its events stay
+    Leave {
+        name: String,
+        #[arg(long)]
+        bot: String,
+        #[arg(long)]
+        why: String,
+        /// Required unless human or the bot itself
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
+    /// Append a trajectory event
+    Record {
+        name: String,
+        #[arg(long, value_parser = PossibleValuesParser::new(crate::goal::TRAJECTORY_KINDS))]
+        kind: String,
+        /// Task the event is about
+        #[arg(long)]
+        task: Option<i64>,
+        text: String,
+    },
+}
+
+fn format_goal_line(g: &crate::goal::Goal) -> String {
+    let mut s = format!("{}  {}  {}", g.name, g.state, g.project);
+    s.push_str(&format!(
+        "  bots={}",
+        if g.bots.is_empty() {
+            "-".into()
+        } else {
+            g.bots.join(",")
+        }
+    ));
+    if let Some(d) = &g.deadline {
+        s.push_str(&format!("  deadline={d}"));
+    }
+    s
+}
+
+fn format_goal_event(e: &crate::goal::Event, full: bool) -> String {
+    let mut s = format!("{} {} {}", e.at, e.actor, e.kind);
+    if let Some(t) = e.task_id {
+        s.push_str(&format!(" task=#{t}"));
+    }
+    if let Some(r) = &e.owner_ref {
+        s.push_str(&format!(" owner_ref={r:?}"));
+    }
+    if !e.body.is_empty() {
+        let body = if full {
+            e.body.clone()
+        } else {
+            dispatch::truncate_lines(&e.body, LOG_LINE_MAX)
+        };
+        s.push_str(&format!(": {body}"));
+    }
+    s
+}
+
+fn run_goal(c: &Client, command: &GoalCmd) -> Result<()> {
+    use crate::goal::{Detail, Event, Goal};
+    let action = |name: &str, action: &str, body: Value| -> Result<()> {
+        let g: Goal = c.send("POST", &format!("/api/goals/{name}/{action}"), body)?;
+        println!("{}", format_goal_line(&g));
+        Ok(())
+    };
+    match command {
+        GoalCmd::Propose { file, owner_ref } => {
+            let goal: crate::goal::NewGoal = serde_json::from_str(&read_file(file)?)
+                .with_context(|| format!("parse {}", file.display()))?;
+            let g: Goal = c.send(
+                "POST",
+                "/api/goals",
+                json!({"goal": goal, "owner_ref": owner_ref}),
+            )?;
+            println!("{}", format_goal_line(&g));
+        }
+        GoalCmd::List { bot, state, json } => {
+            let mut q: Vec<(&str, &str)> = Vec::new();
+            if let Some(b) = bot {
+                q.push(("bot", b));
+            }
+            if let Some(s) = state {
+                q.push(("state", s));
+            }
+            let goals: Vec<Goal> = c.get("/api/goals", &q)?;
+            if *json {
+                return print_json(&goals);
+            }
+            for g in &goals {
+                println!("{}", format_goal_line(g));
+            }
+        }
+        GoalCmd::Show { name, json } => {
+            let d: Detail = c.get(&format!("/api/goals/{name}"), &[])?;
+            if *json {
+                return print_json(&d);
+            }
+            let g = &d.goal;
+            println!("{}", format_goal_line(g));
+            let opt = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+            println!(
+                "budget: cost/week {}  attention/week {}",
+                opt(g.budget_cost_week.map(|v| v.to_string())),
+                opt(g.budget_attention_week.map(|v| v.to_string()))
+            );
+            println!("updated: {}", g.updated_at);
+            println!("\n# Intent\n");
+            println!(
+                "{}",
+                if g.intent.trim().is_empty() {
+                    "(none)"
+                } else {
+                    g.intent.trim_end()
+                }
+            );
+            println!("\n# Tasks\n");
+            if d.tasks.is_empty() {
+                println!("(none)");
+            }
+            for t in &d.tasks {
+                println!("#{} {} {}", t.id, t.state, t.title);
+            }
+            println!("\n# Trajectory (latest {})\n", crate::goal::SHOW_TRAJECTORY);
+            if d.trajectory.is_empty() {
+                println!("(none)");
+            }
+            for e in &d.trajectory {
+                println!("{}", format_goal_event(e, false));
+            }
+        }
+        GoalCmd::Log {
+            name,
+            limit,
+            full,
+            json,
+        } => {
+            let events: Vec<Event> = c.get(
+                &format!("/api/goals/{name}/events"),
+                &[("limit", &limit.to_string())],
+            )?;
+            if *json {
+                return print_json(&events);
+            }
+            for e in &events {
+                println!("{}", format_goal_event(e, *full));
+            }
+        }
+        GoalCmd::Edit {
+            name,
+            intent_file,
+            deadline,
+            budget_cost_week,
+            budget_attention_week,
+            why,
+            owner_ref,
+        } => {
+            let intent = intent_file.as_ref().map(read_file).transpose()?;
+            let g: Goal = c.send(
+                "PATCH",
+                &format!("/api/goals/{name}"),
+                json!({"intent": intent, "deadline": deadline,
+                    "budget_cost_week": budget_cost_week,
+                    "budget_attention_week": budget_attention_week,
+                    "why": why, "owner_ref": owner_ref}),
+            )?;
+            println!("{}", format_goal_line(&g));
+        }
+        GoalCmd::Activate {
+            name,
+            why,
+            owner_ref,
+        } => action(
+            name,
+            "activate",
+            json!({"why": why, "owner_ref": owner_ref}),
+        )?,
+        GoalCmd::Pause {
+            name,
+            why,
+            owner_ref,
+        } => action(name, "pause", json!({"why": why, "owner_ref": owner_ref}))?,
+        GoalCmd::Resume {
+            name,
+            why,
+            owner_ref,
+        } => action(name, "resume", json!({"why": why, "owner_ref": owner_ref}))?,
+        GoalCmd::Done {
+            name,
+            why,
+            owner_ref,
+        } => action(name, "done", json!({"why": why, "owner_ref": owner_ref}))?,
+        GoalCmd::Drop {
+            name,
+            why,
+            owner_ref,
+        } => action(name, "drop", json!({"why": why, "owner_ref": owner_ref}))?,
+        GoalCmd::Join {
+            name,
+            bot,
+            why,
+            owner_ref,
+        } => action(
+            name,
+            "join",
+            json!({"bot": bot, "why": why, "owner_ref": owner_ref}),
+        )?,
+        GoalCmd::Leave {
+            name,
+            bot,
+            why,
+            owner_ref,
+        } => action(
+            name,
+            "leave",
+            json!({"bot": bot, "why": why, "owner_ref": owner_ref}),
+        )?,
+        GoalCmd::Record {
+            name,
+            kind,
+            task,
+            text,
+        } => {
+            let v: Value = c.send(
+                "POST",
+                &format!("/api/goals/{name}/events"),
+                json!({"kind": kind, "task_id": task, "body": text}),
+            )?;
+            println!("event {}", v["event"]);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -1131,8 +1499,12 @@ fn format_schedule(s: &crate::schedule::Schedule) -> String {
     } else {
         "paused".to_owned()
     };
+    let goal = s
+        .goal
+        .as_ref()
+        .map_or(String::new(), |g| format!("[goal {g}] "));
     format!(
-        "{}  {} ({})  {next}  {}",
+        "{}  {} ({})  {next}  {goal}{}",
         s.name, s.cron, s.timezone, s.objective
     )
 }
@@ -1146,12 +1518,23 @@ fn run_schedule(c: &Client, bot: &str, command: &ScheduleCmd) -> Result<()> {
             cron,
             timezone,
             objective,
+            goal,
             why,
         } => {
             let s: Schedule = c.send(
                 "POST",
                 &base,
-                json!({"name":name,"cron":cron,"timezone":timezone,"objective":objective,"why":why}),
+                json!({"name":name,"cron":cron,"timezone":timezone,"objective":objective,
+                    "goal":goal,"why":why}),
+            )?;
+            println!("{}", format_schedule(&s));
+            return Ok(());
+        }
+        ScheduleCmd::Edit { name, goal, why } => {
+            let s: Schedule = c.send(
+                "PATCH",
+                &format!("{base}/{name}"),
+                json!({"goal":goal,"why":why}),
             )?;
             println!("{}", format_schedule(&s));
             return Ok(());
@@ -1385,12 +1768,14 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
             now,
             note,
             key,
+            goal,
         } => {
             let in_seconds = in_.as_deref().map(crate::bot::parse_duration).transpose()?;
             let v: Value = c.send(
                 "POST",
                 &format!("/api/bots/{name}/wakes"),
-                json!({"in_seconds":in_seconds,"at":at,"now":now,"note":note,"key":key}),
+                json!({"in_seconds":in_seconds,"at":at,"now":now,"note":note,"key":key,
+                    "goal":goal}),
             )?;
             println!(
                 "wake {} due {}",
@@ -1532,6 +1917,7 @@ pub fn run() -> Result<()> {
 
     match &cli.cmd {
         Cmd::Bot { command } => run_bot(&client(), command)?,
+        Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Routine { command } => {
             let c = client();
             let value: Value = match command {
@@ -1689,6 +2075,7 @@ pub fn run() -> Result<()> {
             state,
             blocked_by,
             workload,
+            goal,
         } => {
             let detail = detail_arg(detail.clone(), detail_file.clone())?.unwrap_or_default();
             let v: Value = client().send(
@@ -1702,6 +2089,7 @@ pub fn run() -> Result<()> {
                     "blocked_by": blocked_by,
                     "agent": agent,
                     "workload": workload,
+                    "goal": goal,
                 }),
             )?;
             println!("{}", v["id"]);
@@ -1857,6 +2245,7 @@ pub fn run() -> Result<()> {
             detail_file,
             note,
             not_before,
+            goal,
         } => {
             let detail = detail_arg(detail.clone(), detail_file.clone())?;
             let not_before = not_before.as_deref().map(db::parse_wake).transpose()?;
@@ -1870,6 +2259,7 @@ pub fn run() -> Result<()> {
                     "note": note,
                     "reset_runs": reset_runs,
                     "not_before": not_before,
+                    "goal": goal,
                 }),
             )?;
         }

@@ -259,7 +259,7 @@ fn tables(conn: &rusqlite::Connection) -> Vec<String> {
 fn fresh_database_is_created_at_v14() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open(&dir.path().join("t.db")).unwrap();
-    assert_eq!(user_version(&conn), 15);
+    assert_eq!(user_version(&conn), 16);
     assert!(!tables(&conn).contains(&"dream_attempts".to_string()));
     assert!(!columns(&conn, "tasks").contains(&"owner".to_string()));
     assert!(!columns(&conn, "runs").contains(&"persona".to_string()));
@@ -304,7 +304,7 @@ fn migrates_v8_to_one_session_per_task() {
     drop(conn);
 
     let mut conn = db::open(&path).unwrap();
-    assert_eq!(user_version(&conn), 15);
+    assert_eq!(user_version(&conn), 16);
     assert!(!tables(&conn).contains(&"dream_attempts".to_string()));
     assert!(!columns(&conn, "tasks").contains(&"owner".to_string()));
     assert!(!columns(&conn, "runs").contains(&"persona".to_string()));
@@ -604,7 +604,7 @@ fn migrates_v10_agent_column_and_retains_it_after_compatibility_downgrade() {
         .unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 15);
+    assert_eq!(user_version(&c), 16);
     assert_eq!(db::get_task(&c, id).unwrap().title, before);
     assert_eq!(db::get_task(&c, id).unwrap().agent, None);
     c.execute("UPDATE tasks SET agent='claude' WHERE id=?1", [id])
@@ -612,7 +612,7 @@ fn migrates_v10_agent_column_and_retains_it_after_compatibility_downgrade() {
     c.pragma_update(None, "user_version", 10).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 15);
+    assert_eq!(user_version(&c), 16);
     assert_eq!(
         db::get_task(&c, id).unwrap().agent.as_deref(),
         Some("claude")
@@ -629,7 +629,7 @@ fn migrates_v12_to_v14_subscription_tables_and_keeps_rows_after_downgrade() {
         .unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 15);
+    assert_eq!(user_version(&c), 16);
     for t in ["bot_feed", "bot_subscriptions"] {
         assert!(tables(&c).contains(&t.to_string()), "{t}");
     }
@@ -637,7 +637,7 @@ fn migrates_v12_to_v14_subscription_tables_and_keeps_rows_after_downgrade() {
     c.pragma_update(None, "user_version", 12).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 15);
+    assert_eq!(user_version(&c), 16);
     assert_eq!(db::get_task(&c, id).unwrap().title, "t");
 }
 
@@ -654,7 +654,7 @@ fn migrates_v11_to_v12_bot_tables_and_retains_them_after_compatibility_downgrade
     .unwrap();
     drop(c);
     let mut c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 15);
+    assert_eq!(user_version(&c), 16);
     for t in [
         "bots",
         "bot_messages",
@@ -681,7 +681,7 @@ fn migrates_v11_to_v12_bot_tables_and_retains_them_after_compatibility_downgrade
     c.pragma_update(None, "user_version", 11).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 15);
+    assert_eq!(user_version(&c), 16);
     assert_eq!(count(&c, "bots"), 1);
     assert_eq!(count(&c, "bot_wakes"), 1);
 }
