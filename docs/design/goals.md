@@ -89,6 +89,38 @@ rather than a security boundary.
   `[wake by <actor> HH:MMZ] [goal G] <note or objective>` and a dispatcher on
   an older binary still delivers it.
 
+## Budget
+
+G2, owner decision 2026-11-11: soft accounting plus exactly one hard gate.
+Spend is computed on read over a rolling window of the last 7 days; nothing is
+stored.
+
+- **Cost** (USD, from `run_usage` / `run_usage_models`, known usage only): a
+  task run counts for the goal its task was linked to when the run ended (the
+  latest `goal` event at or before then). A bot run counts only when every wake
+  it delivered carries the same `[goal NAME]` label; ride-along digests are
+  ignored. A bot run whose wakes mix the goal with another goal or untagged
+  work is not attributed: it is reported as `unattributed_runs`. Attributed
+  runs with unknown usage are reported as `unknown_runs`, never as zero.
+  `goal show` splits cost into linked tasks and per bot.
+- **Attention** (units): on tasks linked to the goal at the time, each entry
+  into `escalated` (an escalation episode) and each `approval` event; plus each
+  owner goal action (`activated`, `budget`, `intent` events). Each counts 1.
+  Telegram chat about a goal is not counted in v1.
+- **The gate**: linking a task to a goal (`axe add --goal`, `axe set --goal`)
+  is refused, naming spent and limit, while either weekly budget is spent
+  (`spent >= limit`). Raising the budget (`axe goal edit --budget-...`)
+  reopens it. Keeping, clearing or moving a link, and everything else, is never
+  refused. A goal with no budget never gates.
+- **Reads**: `goal show` and `GET /api/goals/{name}` carry
+  `budget: {cost_week, cost_spent, attention_week, attention_spent,
+  unattributed_runs, unknown_runs, cost_tasks, cost_bots, window}`; `goal list`
+  shows `cost=spent/limit attention=spent/limit`. `goal` is a breakdown and
+  filter of `GET /api/stats/cost`.
+- `axe stats --origin task|routine` separates tasks created by a routine
+  occurrence from the others, so a goal on owner attention can count normal
+  tasks only.
+
 ## Bot protocol
 
 The protocol gains a short "Goals" section: a bot's goals are

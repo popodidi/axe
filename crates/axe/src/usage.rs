@@ -432,7 +432,7 @@ pub fn ingest(conn: &mut Connection, items: &[IngestItem]) -> Result<usize> {
     Ok(changed)
 }
 
-fn epoch(s: &str) -> Result<i64> {
+pub(crate) fn epoch(s: &str) -> Result<i64> {
     Ok(OffsetDateTime::parse(s, &Rfc3339)
         .with_context(|| format!("bad timestamp {s:?}"))?
         .unix_timestamp())
@@ -669,16 +669,163 @@ fn routine_names(conn: &Connection) -> Result<HashMap<i64, String>> {
         .collect())
 }
 
+/// The goal a run's spend belongs to.
+#[derive(Debug, Clone, PartialEq)]
+enum RunGoal {
+    None,
+    One(String),
+    /// A bot run whose wakes name several goals, or a goal and untagged work:
+    /// its spend cannot be split, so it belongs to no goal.
+    Mixed(BTreeSet<String>),
+}
+
+/// Goal links, read once: each task's `goal` events (latest wins at run time)
+/// and the goal tags of the wakes each bot run delivered.
+struct GoalLinks {
+    tasks: HashMap<i64, Vec<(i64, Option<String>)>>,
+    bot_runs: HashMap<i64, RunGoal>,
+}
+
+impl GoalLinks {
+    fn load(conn: &Connection) -> Result<GoalLinks> {
+        let mut tasks: HashMap<i64, Vec<(i64, Option<String>)>> = HashMap::new();
+        let mut stmt =
+            conn.prepare("SELECT task_id, at, to_value FROM events WHERE kind='goal' ORDER BY id")?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            tasks
+                .entry(r.get(0)?)
+                .or_default()
+                .push((epoch(&r.get::<_, String>(1)?)?, r.get(2)?));
+        }
+        let mut wakes: HashMap<i64, Vec<Option<String>>> = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, key, body FROM bot_wakes WHERE run_id IS NOT NULL ORDER BY id",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let key: String = r.get(1)?;
+            // A ride-along digest never caused a run, so it does not split one.
+            if key.starts_with(crate::subscription::RIDE_PREFIX) {
+                continue;
+            }
+            let body: String = r.get(2)?;
+            wakes
+                .entry(r.get(0)?)
+                .or_default()
+                .push(crate::goal::wake_goal(&body).map(str::to_owned));
+        }
+        let bot_runs = wakes
+            .into_iter()
+            .map(|(run, tags)| {
+                let named: BTreeSet<String> = tags.iter().flatten().cloned().collect();
+                let goal = match named.len() {
+                    0 => RunGoal::None,
+                    1 if tags.iter().all(Option::is_some) => {
+                        RunGoal::One(named.into_iter().next().unwrap_or_default())
+                    }
+                    _ => RunGoal::Mixed(named),
+                };
+                (run, goal)
+            })
+            .collect();
+        Ok(GoalLinks { tasks, bot_runs })
+    }
+
+    /// A task's goal at `at`: its latest `goal` event at or before then.
+    fn task_goal(&self, task: i64, at: i64) -> Option<&str> {
+        self.tasks
+            .get(&task)?
+            .iter()
+            .rev()
+            .find(|(t, _)| *t <= at)?
+            .1
+            .as_deref()
+    }
+
+    fn of(&self, run: &RunFacts) -> RunGoal {
+        match (run.kind, run.task) {
+            ("task", Some(t)) => self
+                .task_goal(t, run.ended)
+                .map_or(RunGoal::None, |g| RunGoal::One(g.to_owned())),
+            _ => self.bot_runs.get(&run.id).cloned().unwrap_or(RunGoal::None),
+        }
+    }
+}
+
+/// One goal's spend over a window: the runs attributed to it, and the runs
+/// that touched it but cannot be attributed (mixed wakes).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GoalCost {
+    /// Estimated USD of attributed runs with known usage.
+    pub cost: f64,
+    /// Attributed runs, known or not.
+    pub runs: i64,
+    /// Attributed runs whose usage is unknown (not in `cost`).
+    pub unknown_runs: i64,
+    /// Bot runs whose wakes mix this goal with other goals or untagged work.
+    pub unattributed_runs: i64,
+    /// Cost of task runs.
+    pub tasks: f64,
+    /// Cost of bot runs, per bot.
+    pub bots: BTreeMap<String, f64>,
+}
+
+/// Every goal's spend over ended runs in `[since, until)`. A task run belongs to
+/// the goal its task was linked to when the run ended; a bot run belongs to a
+/// goal only when every wake it delivered is tagged with that goal.
+pub fn goal_costs(conn: &Connection, since: i64, until: i64) -> Result<HashMap<String, GoalCost>> {
+    let usage = load_usage(conn)?;
+    let models = load_models(conn)?;
+    let links = GoalLinks::load(conn)?;
+    let mut out: HashMap<String, GoalCost> = HashMap::new();
+    for run in load_runs(conn, since, until)? {
+        match links.of(&run) {
+            RunGoal::None => {}
+            RunGoal::Mixed(goals) => {
+                for g in goals {
+                    out.entry(g).or_default().unattributed_runs += 1;
+                }
+            }
+            RunGoal::One(g) => {
+                let key = (run.kind.to_owned(), run.id);
+                let known = usage.get(&key).is_some_and(|r| r.0 == "known");
+                let cost: f64 = if known {
+                    models
+                        .get(&key)
+                        .map_or(0.0, |m| m.iter().map(|(_, t)| t.cost).sum())
+                } else {
+                    0.0
+                };
+                let c = out.entry(g).or_default();
+                c.runs += 1;
+                if !known {
+                    c.unknown_runs += 1;
+                }
+                c.cost += cost;
+                match &run.bot {
+                    Some(b) => *c.bots.entry(b.clone()).or_default() += cost,
+                    None => c.tasks += cost,
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Every dimension the Cost view breaks down by; each is a valid `breakdown`.
-pub const BREAKDOWNS: [&str; 15] = [
+pub const BREAKDOWNS: [&str; 16] = [
     "project", "source", "bot", "routine", "workload", "wake", "agent", "model", "mode", "cache",
-    "context", "outcome", "day", "week", "kind",
+    "context", "outcome", "day", "week", "kind", "goal",
 ];
 
 /// Splits every series bucket always carries; `breakdown` adds one more.
 const SERIES_SPLITS: [&str; 3] = ["project", "source", "model"];
 const NOT_A_BOT: &str = "not a bot";
 const NOT_A_ROUTINE: &str = "not a routine";
+const NO_GOAL: &str = "no goal";
+/// A bot run whose wakes mix goals: its spend belongs to no goal.
+const MIXED_GOALS: &str = "mixed goals";
 
 /// Narrows and shapes a Cost report. The default is the unfiltered report.
 #[derive(Default, Clone, Copy)]
@@ -689,6 +836,8 @@ pub struct CostQuery<'a> {
     pub routine: Option<&'a str>,
     pub agent: Option<&'a str>,
     pub workload: Option<&'a str>,
+    /// Keeps only runs attributed to this goal.
+    pub goal: Option<&'a str>,
     /// Keeps only this model's spend. A run with unknown usage stays, as unknown:
     /// nothing says it did not use this model.
     pub model: Option<&'a str>,
@@ -700,7 +849,7 @@ pub struct CostQuery<'a> {
 
 impl<'a> CostQuery<'a> {
     /// The filters that compare against one dimension of a run.
-    fn dimensions(&self) -> [(&'static str, Option<&'a str>); 6] {
+    fn dimensions(&self) -> [(&'static str, Option<&'a str>); 7] {
         [
             ("project", self.project),
             ("source", self.source),
@@ -708,6 +857,7 @@ impl<'a> CostQuery<'a> {
             ("routine", self.routine),
             ("agent", self.agent),
             ("workload", self.workload),
+            ("goal", self.goal),
         ]
     }
 }
@@ -727,6 +877,7 @@ pub fn cost_stats(
     let models = load_models(conn)?;
     let wakes = wake_reasons(conn)?;
     let routines = routine_names(conn)?;
+    let links = GoalLinks::load(conn)?;
     let states = id_labels(conn, "SELECT id, state FROM tasks")?;
     let workloads = id_labels(
         conn,
@@ -781,7 +932,12 @@ pub fn cost_stats(
             .and_then(|r| r.3.clone())
             .unwrap_or_else(|| "unknown".to_owned());
         let context = context_bucket(row.filter(|_| known).and_then(|r| r.2));
-        let dims: [(&'static str, String); 14] = [
+        let goal = match links.of(&run) {
+            RunGoal::None => NO_GOAL.to_owned(),
+            RunGoal::One(g) => g,
+            RunGoal::Mixed(_) => MIXED_GOALS.to_owned(),
+        };
+        let dims: [(&'static str, String); 15] = [
             ("project", run.project.clone()),
             ("source", source.to_owned()),
             (
@@ -802,6 +958,7 @@ pub fn cost_stats(
             ("day", day),
             ("week", week),
             ("kind", run.kind.to_owned()),
+            ("goal", goal),
         ];
         let dim = |name: &str| {
             dims.iter()
@@ -810,7 +967,9 @@ pub fn cost_stats(
         };
         if query.options {
             for (name, _) in query.dimensions() {
-                if let Some(value) = dim(name).filter(|v| ![NOT_A_BOT, NOT_A_ROUTINE].contains(v)) {
+                if let Some(value) = dim(name)
+                    .filter(|v| ![NOT_A_BOT, NOT_A_ROUTINE, NO_GOAL, MIXED_GOALS].contains(v))
+                {
                     options.entry(name).or_default().insert(value.to_owned());
                 }
             }

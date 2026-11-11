@@ -1,5 +1,5 @@
 //! Delivery statistics computed from the task event log and runs. Read-only.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
@@ -17,7 +17,13 @@ pub struct Query<'a> {
     pub since: i64,
     pub until: i64,
     pub workload: Option<&'a str>,
+    /// `task` or `routine`: only tasks that did (not) come from a routine
+    /// occurrence. `None` keeps every task.
+    pub origin: Option<&'a str>,
 }
+
+/// Values of [`Query::origin`].
+pub const ORIGINS: [&str; 2] = ["task", "routine"];
 
 /// A window bound: RFC3339, or an age such as `14d`, `12h`, `30m`, `90s`.
 pub fn parse_bound(s: &str, now: i64) -> Result<i64> {
@@ -352,6 +358,16 @@ pub fn stats(conn: &Connection, q: &Query) -> Result<Value> {
         .into_iter()
         .map(|(id, evs)| (id, analyze(&evs, q.since, q.until)))
         .collect();
+    if let Some(origin) = q.origin {
+        if !ORIGINS.contains(&origin) {
+            bail!("invalid origin {origin:?} (expected task or routine)");
+        }
+        let routine: HashSet<i64> = conn
+            .prepare("SELECT task_id FROM routine_occurrences")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        facts.retain(|id, _| routine.contains(id) == (origin == "routine"));
+    }
     let mut stmt = conn.prepare(
         "SELECT task_id, COUNT(*),
            COALESCE(SUM(MAX(0, strftime('%s', ended_at) - strftime('%s', started_at))), 0)
@@ -401,12 +417,16 @@ pub fn stats(conn: &Connection, q: &Query) -> Result<Value> {
         rusqlite::params![q.project, q.since, q.until],
         |r| r.get(0),
     )?;
-    Ok(json!({
+    let mut out = json!({
         "project": q.project,
         "since": iso(q.since)?,
         "until": iso(q.until)?,
         "overall": overall,
         "workloads": workloads,
         "owner_messages": owner_messages,
-    }))
+    });
+    if let Some(o) = q.origin {
+        out["origin"] = json!(o);
+    }
+    Ok(out)
 }

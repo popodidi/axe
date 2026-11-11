@@ -1094,6 +1094,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 routine: req.query("routine"),
                 agent: req.query("agent"),
                 workload: req.query("workload"),
+                goal: req.query("goal"),
                 model: req.query("model"),
                 breakdown,
                 options: req.flag("options"),
@@ -1128,7 +1129,11 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 since: bound("since", "14d")?,
                 until: bound("until", "0s")?,
                 workload: req.query("workload"),
+                origin: req.query("origin"),
             };
+            if let Some(o) = q.origin.filter(|o| !crate::flow::ORIGINS.contains(o)) {
+                return Err(HttpError(400, format!("invalid origin: {o}")).into());
+            }
             ok(200, &crate::flow::stats(&st.conn(), &q)?)
         }
         ("GET", ["api", "runs"]) => {

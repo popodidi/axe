@@ -234,9 +234,9 @@ dispatcher's WebSocket and waits up to 5 s. Responses are always `200`:
 | GET | `/api/overview` | | `counts` (`{project, state, count}`, `state` is the derived status), `admission` (as `/api/admission`), `ops_queue` (holds and dependency waits: task plus `kind` `hold`/`dependency`, `actionable`, `blocked_by`, `blocked_at`, `blocker`), `running` (live runs), `bots` (bot summaries) |
 | GET | `/api/admission` | | Last dispatcher admission report: `enabled`, `admitting` (null when unknown), `reason`, `checked_at`, `age_seconds`, `report_age_seconds`, `signals`, `thresholds`, `hold` (when a dispatcher reports one), `bots_admitting` |
 | GET | `/api/config` | | `{config_path, db_path, auth, config}`; `auth` is whether a token is set; `config.telegram` is reduced to `{bots: [names]}` |
-| GET | `/api/stats/flow` | `project` (required), `since` (default `14d`), `until` (default `0s`), `workload` | Delivery figures for the project |
+| GET | `/api/stats/flow` | `project` (required), `since` (default `14d`), `until` (default `0s`), `workload`, `origin` (`task` or `routine`) | Delivery figures for the project. `origin` keeps only tasks that did not (`task`) or did (`routine`) come from a routine occurrence, and adds `origin` to the reply; without it the reply is unchanged |
 | GET | `/api/stats/history` | | `{events, routines, runs}` for the dashboard Stats view, uncapped |
-| GET | `/api/stats/cost` | `since` (default `30d`), `until` (default `0s`), `step_days`, `breakdown`, `project`, `source`, `bot`, `routine`, `agent`, `workload`, `model`, `options=1` | Cost report (`usage::cost_stats`). `breakdown` is one of `project, source, bot, routine, workload, wake, agent, model, mode, cache, context, outcome, day, week, kind`; `step_days` must be > 0 and yield fewer than 400 buckets |
+| GET | `/api/stats/cost` | `since` (default `30d`), `until` (default `0s`), `step_days`, `breakdown`, `project`, `source`, `bot`, `routine`, `agent`, `workload`, `goal`, `model`, `options=1` | Cost report (`usage::cost_stats`). `breakdown` is one of `project, source, bot, routine, workload, wake, agent, model, mode, cache, context, outcome, day, week, kind, goal`; the `goal` key is the goal a run is attributed to ([goals](design/goals.md#budget)), `no goal`, or `mixed goals` for a bot run whose wakes mix a goal with other work; `step_days` must be > 0 and yield fewer than 400 buckets |
 | GET | `/api/usage/catalog` | | Runs with usage records, used by the CLI to backfill usage |
 | POST | `/api/usage/ingest` | `{items: [{kind, run, usage}]}` | `{changed}`; token required, no `Who` |
 
@@ -309,14 +309,21 @@ other than `human` need a non-empty `owner_ref`, else `403`.
 
 | Method | Path | Query / body | Response |
 |---|---|---|---|
-| GET | `/api/goals` | `bot`, `state` | Goals with attached `bots` (names) |
-| GET | `/api/goals/{name}` | | Goal plus `tasks` (`{id, state, title}`, linked by their latest `goal` event) and `trajectory` (latest 10 trajectory events) |
+| GET | `/api/goals` | `bot`, `state` | Goals with attached `bots` (names) and `budget` |
+| GET | `/api/goals/{name}` | | Goal plus `budget`, `tasks` (`{id, state, title}`, linked by their latest `goal` event) and `trajectory` (latest 10 trajectory events) |
 | GET | `/api/goals/{name}/events` | `limit` (default 50, max 1000), `trajectory=1` | Goal events, oldest first: `{id, at, actor, session, kind, task_id, owner_ref, body}` |
 | POST | `/api/goals` | `{goal: {name, project, intent?, deadline?, budget_cost_week?, budget_attention_week?, bots? = []}, owner_ref?}` + `Who` | `201` goal (`proposed`); a `bot:<name>` actor is attached |
 | PATCH | `/api/goals/{name}` | `{intent?, deadline?, budget_cost_week?, budget_attention_week?, why, owner_ref?}` + `Who`; values are strings, `"none"` clears | Goal |
 | POST | `/api/goals/{name}/activate` \| `pause` \| `resume` \| `done` \| `drop` | `{why, owner_ref?}` + `Who` | Goal |
 | POST | `/api/goals/{name}/join` \| `leave` | `{bot, why, owner_ref?}` + `Who` | Goal |
 | POST | `/api/goals/{name}/events` | `{kind (hypothesis\|test\|verdict\|observation\|note), task_id?, body}` + `Who` | `201 {event}` |
+
+`budget` is the spend over the last 7 days ([Budget](design/goals.md#budget)):
+`{cost_week, cost_spent, attention_week, attention_spent, unattributed_runs,
+unknown_runs, cost_tasks, cost_bots: {bot: usd}, window: {since, until, days}}`.
+`cost_week` and `attention_week` are the limits (`null` is unlimited). Linking
+a task to a goal (`POST /api/tasks` or `PATCH /api/tasks/{id}` with `goal`)
+answers `400` when either weekly budget is spent, naming spent and limit.
 
 ## Bot runs
 

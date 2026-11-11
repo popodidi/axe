@@ -93,7 +93,7 @@ axe set ID [--state S] [--title T] [--detail D|--detail-file F] [--note N] [--re
 axe abort ID [--run RUN_ID] [--timeout 60]  # force-stop remotely; wait for confirmation
 axe escalate ID --blocked B --resolver R --resume C --class CLASS   # escalated with a block note
 axe classify ID [--escalation CLASS [--episode N]] [--workload W]   # correct a class (latest episode, or the Nth) or workload
-axe stats --project P [--since 14d] [--until T] [--workload W]   # delivery statistics, JSON
+axe stats --project P [--since 14d] [--until T] [--workload W] [--origin task|routine]   # delivery statistics, JSON
 axe usage backfill [--log-dir D] [--dry-run]   # read run usage from local logs; safe to repeat
 axe wait ID (--on P,... | --until T | --for D) --note N  # resumes on its own
 axe note ID TEXT            # or --file F
@@ -862,9 +862,10 @@ use `?before=<last id>` for the next page. GET `/api/tasks/:id/routine` returns
 the backlink/snapshot, or null. Lists include archived routines.
 ## Delivery statistics
 
-`axe stats` and `GET /api/stats/flow?project=&since=&until=&workload=` compute
+`axe stats` and `GET /api/stats/flow?project=&since=&until=&workload=&origin=` compute
 delivery figures from the event log and runs, overall and per workload, with no
-run cap. Two facts are recorded rather than derived, as append-only events where
+run cap. `--origin routine` keeps only tasks created by a routine occurrence,
+`--origin task` only the others. Two facts are recorded rather than derived, as append-only events where
 the latest wins: `escalation_class` (`axe escalate --class`; the dispatcher
 records `runtime`) and `workload` (`axe add --workload`, a routine's `workload`).
 Each entry into `escalated` starts an escalation episode, numbered from 1 in
@@ -1211,8 +1212,8 @@ decisions: [docs/design/goals.md](docs/design/goals.md).
 ```sh
 # JSON: name, project, intent, deadline, budget_cost_week, budget_attention_week, bots
 axe goal propose --file goal.json [--owner-ref R]
-axe goal list [--bot B] [--state S] [--json]
-axe goal show NAME [--json]                # bots, linked tasks, latest 10 trajectory events
+axe goal list [--bot B] [--state S] [--json]   # with spent/limit per weekly budget
+axe goal show NAME [--json]                # budget spend, bots, linked tasks, latest 10 trajectory events
 axe goal log NAME [--limit 50] [--full] [--json]
 axe goal edit NAME [--intent-file F] [--deadline T] [--budget-cost-week X] [--budget-attention-week N] --why W [--owner-ref R]
 axe goal activate|pause|resume|done|drop NAME --why W [--owner-ref R]
@@ -1229,7 +1230,16 @@ attaches the proposing bot (`$AXE_BOT`); a bot may join or leave itself.
 Every change is a `goal_events` audit row with its `--why`; `record` appends a
 trajectory event. A task links with `axe add --goal` or `axe set --goal`
 (task event `goal`, latest wins), and a wake with `--goal`, which labels it
-`[goal NAME]` in the bot's prompt. Schema v16 only adds `goals`, `goal_bots`,
+`[goal NAME]` in the bot's prompt.
+
+Budgets are weekly and rolling (the last 7 days). Cost is the estimated spend
+of runs of linked tasks and of bot runs whose wakes are all tagged with the
+goal; a bot run mixing the goal with other work is shown as unattributed.
+Attention counts escalation episodes and approvals on linked tasks, plus the
+owner's activate, budget and intent decisions, one each. Once either budget is
+spent, `axe add --goal` and `axe set --goal` refuse to link more tasks until
+the owner raises it (`axe goal edit --budget-...`); nothing else is refused,
+and a goal with no budget never gates. Schema v16 only adds `goals`, `goal_bots`,
 `goal_events` and `bot_schedules.goal_id`; a v16 database with
 `user_version` lowered to 15 opens with a v15 binary and upgrades again in
 place.

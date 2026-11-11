@@ -557,10 +557,14 @@ pub fn add_classified_task(
 /// Writes a `goal` event linking a task to a goal (`none` unlinks); the goal
 /// must exist. The value is the goal name; the latest event wins.
 fn link_goal(tx: &Transaction, actor: &Actor, id: i64, goal: &str) -> Result<bool> {
-    let to = crate::goal::resolve(tx, goal)?.map(|g| g.name);
+    let goal = crate::goal::resolve(tx, goal)?;
+    let to = goal.as_ref().map(|g| g.name.clone());
     let from = current_goal(tx, id)?;
     if from == to {
         return Ok(false);
+    }
+    if let Some(g) = &goal {
+        crate::goal::check_budget(tx, g)?;
     }
     write_event(tx, actor, id, "goal", from.as_deref(), to.as_deref(), None)?;
     Ok(true)
