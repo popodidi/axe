@@ -52,3 +52,4 @@ rust-embed = { version = "8", features = ["debug-embed"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# CI probe
