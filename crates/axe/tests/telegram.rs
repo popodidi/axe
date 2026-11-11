@@ -552,6 +552,54 @@ fn sender_filter_matrix_drops_everything_but_the_owner() {
 }
 
 #[test]
+fn own_pin_service_message_is_ignored_but_other_senders_still_drop() {
+    let rig = Rig::new();
+    // pinChatMessage makes Telegram post a "pinned a message" service
+    // message whose sender is the bot itself (getMe id 999).
+    let pin = |update: i64, message: i64, from: Value| {
+        json!({"update_id": update, "message": {
+            "message_id": message, "date": 0, "from": from,
+            "chat": {"id": OWNER, "type": "private"},
+            "pinned_message": {"message_id": 5, "date": 0,
+                "chat": {"id": OWNER, "type": "private"}, "text": "board"}}})
+    };
+    rig.stub.push(pin(
+        1,
+        10,
+        json!({"id": 999, "is_bot": true, "first_name": "Cos"}),
+    ));
+    rig.stub
+        .push(text_msg(2, 11, STRANGER, OWNER, "who is this"));
+    rig.stub.push(pin(
+        3,
+        12,
+        json!({"id": 555, "is_bot": true, "first_name": "x"}),
+    ));
+    rig.stub.wait_confirmed(3);
+
+    assert!(rig.inbound().is_empty());
+    let from: Vec<Value> = rig
+        .events("security_drop")
+        .iter()
+        .map(|d| serde_json::from_str::<Value>(d).unwrap()["from_id"].clone())
+        .collect();
+    assert_eq!(from, [json!(STRANGER), json!(555)], "own pin is not a drop");
+
+    // The one (rate-limited) alert names the real stranger, not the bot.
+    wait_for("alert", 10, || !rig.sent_to(OWNER).is_empty());
+    std::thread::sleep(Duration::from_millis(500));
+    let alerts = rig.sent_to(OWNER);
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    let text = alerts[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(
+            "dropped a Telegram message from user 222 in chat 111 (sender is not the owner)"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn callback_queries_are_authorized_answered_and_become_button_wakes() {
     let rig = Rig::new();
     let out = rig.tg_ok(&[
