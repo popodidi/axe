@@ -2126,3 +2126,225 @@ fn board_reposts_at_the_bottom_on_change() {
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(rig.stub.calls("sendMessage").len(), sends + 2);
 }
+
+/// Goal board edits so far (editMessageText on `msg`), as texts.
+fn goal_edits(rig: &Rig, msg: i64) -> Vec<String> {
+    board_edits(rig, msg)
+}
+
+/// Proposes goal `name` from a JSON spec.
+fn propose_goal(rig: &Rig, spec: Value) {
+    let f = rig
+        .dir
+        .path()
+        .join(format!("{}.json", spec["name"].as_str().unwrap()));
+    std::fs::write(&f, spec.to_string()).unwrap();
+    rig.srv()
+        .ok(&["goal", "propose", "--file", f.to_str().unwrap()]);
+}
+
+#[test]
+fn goal_board_renders_goals_in_place_beside_the_board() {
+    // The default `board = "repost"`: the goal board must still only edit.
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    let f = rig.dir.path().join("scout.json");
+    std::fs::write(&f, json!({"name":"scout","project":"p"}).to_string()).unwrap();
+    rig.srv()
+        .ok(&["bot", "create", "--file", f.to_str().unwrap()]);
+    let (board_local, board_tg) = make_board(&rig);
+    wait_board(&rig, board_tg, 0, "first board render", |t| {
+        t.contains("Nothing waiting on you")
+    });
+
+    // The goal board is set like the board and renders "No active goals.".
+    let out = rig.tg_ok(&["send", "--silent", "goals"]);
+    let gb: i64 = out.trim().trim_start_matches("sent #").parse().unwrap();
+    let gb_tg: i64 = rig
+        .db()
+        .query_row(
+            "SELECT message_id FROM bot_messages WHERE id=?1",
+            [gb],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // One message is never both boards.
+    let refused = rig.tg(&["goal-board", "set", &board_local.to_string()]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(
+        rig.tg_ok(&["goal-board", "set", &gb.to_string()]),
+        format!("goal board is #{gb}\n")
+    );
+    let refused = rig.tg(&["board", "set-message", &gb.to_string()]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let t = wait_board(&rig, gb_tg, 0, "empty goal board", |t| {
+        t.contains("No active goals.")
+    });
+    assert!(t.starts_with("<b>Goals</b>"), "{t}");
+    assert!(t.contains("<i>Updated "), "{t}");
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    assert_eq!(edit.params["parse_mode"], "HTML");
+    wait_for("goal board current", 20, || {
+        rig.tg_ok(&["goal-board", "show"]).contains("(current)")
+    });
+    let show = rig.tg_ok(&["goal-board", "show"]);
+    assert!(
+        show.starts_with(&format!("goal board #{gb} (current)")),
+        "{show}"
+    );
+
+    // A proposed goal awaits the owner's Go and names the other bots; a goal
+    // the bot is not on is not shown.
+    let n = goal_edits(&rig, gb_tg).len();
+    propose_goal(
+        &rig,
+        json!({"name":"grow","project":"p","bots":["cos","scout"],
+            "budget_cost_week":10.0,"budget_attention_week":40,"deadline":"2026-12-01"}),
+    );
+    propose_goal(
+        &rig,
+        json!({"name":"theirs","project":"p","bots":["scout"]}),
+    );
+    let t = wait_board(&rig, gb_tg, n, "proposed goal", |t| t.contains("grow"));
+    assert!(
+        t.contains("<b>grow</b> · proposed · awaiting your Go · with scout"),
+        "{t}"
+    );
+    assert!(t.contains("no open tasks"), "{t}");
+    assert!(t.contains("$0.00/$10.00 · attention 0/40"), "{t}");
+    assert!(t.contains("no goal wake · deadline 2026-12-01"), "{t}");
+    assert!(!t.contains("theirs"), "{t}");
+
+    // Activation, a linked task, a verdict, and a goal wake each edit it.
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.srv().ok(&["goal", "activate", "grow", "--why", "go"]);
+    let t = wait_board(&rig, gb_tg, n, "active goal", |t| {
+        t.contains("<b>grow</b> · active")
+    });
+    assert!(!t.contains("awaiting your Go"), "{t}");
+    assert!(t.contains("attention 1/40"), "{t}");
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.srv().ok(&[
+        "add",
+        "--project",
+        "p",
+        "--title",
+        "H1: try it",
+        "--goal",
+        "grow",
+    ]);
+    let t = wait_board(&rig, gb_tg, n, "open task", |t| {
+        t.contains("open <code>#1</code>")
+    });
+    assert!(!t.contains("no open tasks"), "{t}");
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.srv().ok(&[
+        "goal",
+        "record",
+        "grow",
+        "--kind",
+        "verdict",
+        "H0 failed <badly>\nsecond line",
+    ]);
+    let t = wait_board(&rig, gb_tg, n, "verdict", |t| t.contains("verdict: "));
+    assert!(t.contains("\nverdict: H0 failed &lt;badly&gt;\n"), "{t}");
+    assert!(!t.contains("second line"), "{t}");
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.srv().ok(&[
+        "bot", "wake", "cos", "--in", "2h", "--note", "check", "--goal", "grow",
+    ]);
+    let t = wait_board(&rig, gb_tg, n, "goal wake", |t| t.contains("next wake "));
+    assert!(t.contains(" UTC · deadline 2026-12-01"), "{t}");
+
+    // A note, and attention spend within the same 10% band, do not edit.
+    // Escalating the linked task re-posts the "Waiting on you" board but
+    // leaves the goal board where it is.
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.srv()
+        .ok(&["goal", "record", "grow", "--kind", "note", "fyi"]);
+    escalate(&rig, "1");
+    let (moved, _) = wait_moved(&rig, board_local, "board re-post on escalation");
+    assert_ne!(moved, gb);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        goal_edits(&rig, gb_tg).len(),
+        n,
+        "attention 2/40 stays in the 0-10% band"
+    );
+    // Two more escalation episodes reach 4/40: the next band edits.
+    for _ in 0..2 {
+        rig.srv()
+            .ok(&["set", "1", "--state", "pending", "--note", "retry"]);
+        escalate(&rig, "1");
+    }
+    let t = wait_board(&rig, gb_tg, n, "next attention band", |t| {
+        t.contains("attention 4/40")
+    });
+    assert!(t.contains("<b>grow</b> · active"), "{t}");
+
+    // The goal board is never re-posted, pinned or unpinned by the server,
+    // and never shows on the "Waiting on you" board, nor that board on it.
+    for c in rig.stub.calls("sendMessage") {
+        let text = c.params["text"].as_str().unwrap_or("");
+        assert!(
+            !text.contains("<b>Goals</b>"),
+            "goal board re-posted: {text}"
+        );
+    }
+    for m in ["pinChatMessage", "unpinChatMessage"] {
+        for c in rig.stub.calls(m) {
+            assert_ne!(c.params["message_id"], gb_tg, "{m}");
+        }
+    }
+    for c in rig.stub.calls("editMessageText") {
+        let text = c.params["text"].as_str().unwrap_or("");
+        if c.params["message_id"] == gb_tg {
+            assert!(!text.contains("Waiting on you"), "{text}");
+        } else {
+            assert!(!text.contains("<b>Goals</b>"), "{text}");
+        }
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(&rig.tg_ok(&["goal-board", "show", "--json"])).unwrap()
+            ["message"],
+        gb
+    );
+    let renders = rig.events("goal_board_render");
+    assert_eq!(renders.len(), goal_edits(&rig, gb_tg).len());
+    let last: Value = serde_json::from_str(renders.last().unwrap()).unwrap();
+    assert_eq!(last, json!({"message": gb, "goals": 1}));
+
+    // A hand edit is rendered over in place.
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.tg_ok(&["edit", &gb.to_string(), "hand-kept goals"]);
+    wait_board(&rig, gb_tg, n + 1, "re-render after hand edit", |t| {
+        t.contains("<b>grow</b>")
+    });
+
+    // State changes edit it; done goals are omitted.
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.srv().ok(&["goal", "pause", "grow", "--why", "hold"]);
+    wait_board(&rig, gb_tg, n, "paused", |t| {
+        t.contains("<b>grow</b> · paused")
+    });
+    let n = goal_edits(&rig, gb_tg).len();
+    rig.srv().ok(&["goal", "done", "grow", "--why", "shipped"]);
+    let t = wait_board(&rig, gb_tg, n, "done goal omitted", |t| {
+        t.contains("No active goals.")
+    });
+    assert!(!t.contains("grow"), "{t}");
+
+    // unset (alias clear) stops rendering; set-message is an alias of set.
+    assert_eq!(rig.tg_ok(&["goal-board", "unset"]), "goal board cleared\n");
+    let show = rig.tg_ok(&["goal-board", "show"]);
+    assert!(show.contains("no goal board message"), "{show}");
+    assert_eq!(
+        rig.tg_ok(&["goal-board", "set-message", &gb.to_string()]),
+        format!("goal board is #{gb}\n")
+    );
+    assert_eq!(rig.tg_ok(&["goal-board", "clear"]), "goal board cleared\n");
+    assert!(!rig.tg(&["goal-board", "set", "999"]).status.success());
+    // The "Waiting on you" board is untouched by all of this.
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(show.starts_with("board #"), "{show}");
+}

@@ -112,7 +112,9 @@ pub const TELEGRAM_PROTOCOL: &str = r#"## Talking to the owner (Telegram)
 - The server already reacted 👀 to each message; still answer it.
 - Anything that waits on the owner is an escalated task or a card (a
   message with `--buttons`). The server renders the pinned "Waiting on you"
-  board from both (`axe bot tg board show`); never edit or resend it by hand.
+  board from both (`axe bot tg board show`), and a separate pinned goal
+  board from your goals (`axe bot tg goal-board show`); never edit or resend
+  either by hand.
   A press closes a card; close one answered another way with
   `axe bot tg edit <id> --clear-buttons "Decided: X"`. A text edit keeps a
   card open only with `--buttons`.

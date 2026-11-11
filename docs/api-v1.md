@@ -352,8 +352,10 @@ including reads.
 | POST | `/api/bots/{name}/tg/typing` | `{chat?}` | Result |
 | GET | `/api/bots/{name}/tg/board` | | `{message, lines: [{kind: "task" \| "card", id, title, project, since}], text, current}`: the rendered "Waiting on you" board, and whether its message shows it |
 | POST | `/api/bots/{name}/tg/board` | `{msg}` makes the bot's own text message `msg` its board; `{msg: null}` stops rendering | `{message}` |
+| GET | `/api/bots/{name}/tg/goal-board` | | `{message, goals: [{name, state, others, latest: {id, kind, text}?, open_tasks, cost_spent, cost_week, attention_spent, attention_week, next_wake, deadline}], text, current}`: the rendered goal board, and whether its message shows it |
+| POST | `/api/bots/{name}/tg/goal-board` | `{msg}` makes the bot's own text message `msg` its goal board (not its board); `{msg: null}` stops rendering | `{message}` |
 
-The `board` routes read and write only stored state, so they also work without
+The `board` and `goal-board` routes read and write only stored state, so they also work without
 the `telegram` feature; rendering the board needs the gateway. Board lines are
 escalated tasks in the bot's subscribed projects and the bot's open cards (its
 text messages that still have buttons); see the README, "The Waiting on you

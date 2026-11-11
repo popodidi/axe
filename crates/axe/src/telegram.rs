@@ -24,6 +24,7 @@ use crate::board;
 use crate::bot::{self, NewMessage};
 use crate::config::{self, BoardMode};
 use crate::db::{Actor, Forbidden};
+use crate::goal_board;
 
 use crate::channel::bot_id;
 pub use crate::channel::{
@@ -1286,7 +1287,7 @@ impl Gateway {
             // Without `buttons`, Telegram drops the keyboard: the card closes.
             conn.execute(
                 // A hand edit of the board is rendered over on the next pass.
-                "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key') WHERE id=?2",
+                "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key','$.goal_board_key') WHERE id=?2",
                 params![t, msg],
             )?;
             if buttons.is_none() {
@@ -1475,7 +1476,13 @@ fn board_loop(b: &TgBot, store: &dyn Store) {
     let mut backoff: Option<Duration> = None;
     while !store.stopping() {
         let seen = store.seq();
-        match board_pass(b, store) {
+        // Both boards render each pass; one failing never holds up the other.
+        let result = match (board_pass(b, store), goal_board_pass(b, store)) {
+            (Err(e), _) => Err(e),
+            (_, Err(e)) => Err(e.context("goal board")),
+            _ => Ok(()),
+        };
+        match result {
             Ok(_) => backoff = None,
             Err(e) => {
                 let mut d = backoff.map_or(BOARD_RETRY, |d| (d * 2).min(BOARD_RETRY_MAX));
@@ -1586,6 +1593,47 @@ fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
         id,
         &Actor::new("telegram"),
         "board_render",
+        &body.to_string(),
+    )?;
+    drop(conn);
+    store.changed();
+    Ok(true)
+}
+
+/// One goal board pass: edits the goal board in place when its key changed
+/// (never re-posts, so it does not move the "Waiting on you" board). Returns
+/// whether it rendered.
+fn goal_board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
+    let conn = store.conn();
+    let Ok(id) = bot_id(&conn, &b.name) else {
+        return Ok(false);
+    };
+    let Some(m) = goal_board::message(&conn, &b.name)? else {
+        return Ok(false);
+    };
+    let goals = goal_board::lines(&conn, &b.name)?;
+    let key = goal_board::key(&goals);
+    if m.flags["goal_board_key"].as_str() == Some(key.as_str()) {
+        return Ok(false);
+    }
+    drop(conn);
+    b.allowed(m.chat_id)?;
+    let text = goal_board::render(&goals, now());
+    let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text, "parse_mode": "HTML"});
+    match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
+        Ok(_) => {}
+        // The text already matches (for example after a lost reply).
+        Err(e) if e.description.contains("message is not modified") => {}
+        Err(e) => return Err(e.into()),
+    }
+    let conn = store.conn();
+    goal_board::rendered(&conn, m.id, &key, &text)?;
+    let body = json!({"message": m.id, "goals": goals.len()});
+    bot::event(
+        &conn,
+        id,
+        &Actor::new("telegram"),
+        "goal_board_render",
         &body.to_string(),
     )?;
     drop(conn);

@@ -24,9 +24,9 @@ use crate::channel::{bot_id, get_message, StoredMessage};
 use crate::subscription::ALL_PROJECTS;
 
 /// Telegram's text limit (UTF-16 units; the board stays well inside it).
-const TEXT_LIMIT: usize = 4096;
+pub(crate) const TEXT_LIMIT: usize = 4096;
 /// Room kept for the "+N more" line and the footer.
-const FOOTER_ROOM: usize = 120;
+pub(crate) const FOOTER_ROOM: usize = 120;
 const TITLE_CAP: usize = 60;
 pub const EMPTY: &str = "Nothing waiting on you.";
 
@@ -58,21 +58,33 @@ pub struct Board {
 
 /// The bot's board message, if one is set.
 pub fn message(conn: &Connection, name: &str) -> Result<Option<StoredMessage>> {
-    let b = bot_id(conn, name)?;
-    let id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM bot_messages WHERE bot_id=?1 AND json_extract(flags,'$.board')=1
-             ORDER BY id DESC LIMIT 1",
-            [b],
-            |r| r.get(0),
-        )
-        .optional()?;
-    id.map(|id| get_message(conn, name, id)).transpose()
+    flagged(conn, name, "board")
 }
 
 /// Makes `msg` (a local id) the bot's board message, or with `None` unsets
 /// it. The new board renders on the next pass.
 pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Result<Option<i64>> {
+    set_flagged(
+        conn,
+        name,
+        msg,
+        "board",
+        &["board", "board_key", "board_from"],
+        "goal_board",
+    )
+}
+
+/// Makes `msg` the one message of bot `name` with `flags.<flag>` (removing
+/// `clear` from the previous one), or with `None` unsets it. A board is
+/// never a card, and one message is never both boards (`other`).
+pub(crate) fn set_flagged(
+    conn: &mut Connection,
+    name: &str,
+    msg: Option<i64>,
+    flag: &str,
+    clear: &[&str],
+    other: &str,
+) -> Result<Option<i64>> {
     let b = bot_id(conn, name)?;
     if let Some(m) = msg {
         let stored = get_message(conn, name, m)?;
@@ -82,23 +94,55 @@ pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Resul
         if stored.flags["deleted"] == true {
             bail!("message {m} was deleted");
         }
+        if stored.flags[other] == true {
+            let what = if other == "board" {
+                "\"Waiting on you\" board"
+            } else {
+                "goal board"
+            };
+            bail!("message {m} is already the {what}");
+        }
     }
+    let paths = clear
+        .iter()
+        .map(|k| format!("'$.{k}'"))
+        .collect::<Vec<_>>()
+        .join(",");
     let tx = conn.transaction()?;
     tx.execute(
-        "UPDATE bot_messages SET flags=json_remove(flags,'$.board','$.board_key','$.board_from')
-         WHERE bot_id=?1 AND json_extract(flags,'$.board') IS NOT NULL",
+        &format!(
+            "UPDATE bot_messages SET flags=json_remove(flags,{paths})
+             WHERE bot_id=?1 AND json_extract(flags,'$.{flag}') IS NOT NULL"
+        ),
         [b],
     )?;
     if let Some(m) = msg {
-        // A board is never a card: drop any keyboard it was sent with.
         tx.execute(
-            "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.buttons','$.answered'),'$.board',json('true'))
-             WHERE id=?1 AND bot_id=?2",
+            &format!(
+                "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.buttons','$.answered'),'$.{flag}',json('true'))
+                 WHERE id=?1 AND bot_id=?2"
+            ),
             params![m, b],
         )?;
     }
     tx.commit()?;
     Ok(msg)
+}
+
+/// The bot's message with `flags.<flag>`, if one is set.
+pub(crate) fn flagged(conn: &Connection, name: &str, flag: &str) -> Result<Option<StoredMessage>> {
+    let b = bot_id(conn, name)?;
+    let id: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT id FROM bot_messages WHERE bot_id=?1 AND json_extract(flags,'$.{flag}')=1
+                 ORDER BY id DESC LIMIT 1"
+            ),
+            [b],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|id| get_message(conn, name, id)).transpose()
 }
 
 /// Records the key of a successful render, and the text the message now shows.
@@ -302,7 +346,7 @@ pub fn age(secs: i64) -> String {
     }
 }
 
-fn short(s: &str) -> String {
+pub(crate) fn short(s: &str) -> String {
     let s = s.trim();
     if s.chars().count() <= TITLE_CAP {
         return s.to_string();
@@ -312,14 +356,14 @@ fn short(s: &str) -> String {
     t
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
 /// Text of Telegram HTML: tags dropped, the common entities decoded.
-fn strip_html(s: &str) -> String {
+pub(crate) fn strip_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
     for c in s.chars() {
@@ -336,7 +380,7 @@ fn strip_html(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn utf16(s: &str) -> usize {
+pub(crate) fn utf16(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
