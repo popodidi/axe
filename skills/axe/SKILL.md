@@ -74,6 +74,8 @@ Bots are a separate primitive with their own commands under `axe bot`
 (and `axe bot tg` for the Telegram gateway); see `axe bot --help` and
 `axe bot tg --help`.
 
+Bots pursuing goals: see [references/goals.md](references/goals.md).
+
 ## Rollout interruptions
 
 A dispatcher rollout (a bounded drain) aborts unprotected runs after
