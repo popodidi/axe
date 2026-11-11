@@ -7,8 +7,8 @@ run-name: release ${{ github.ref_name }}
 # - axe-skills-<tag>.tar.gz: skills/axe
 # - a .sha256 file per asset and SHA256SUMS
 # Publishing to crates.io is not done here (no repository secrets); the job
-# only runs `cargo publish --dry-run`. A tag is never reused: a failed release
-# is retried with a new tag.
+# only runs `cargo publish --dry-run`. A tag is never reused: a release that
+# failed after the main CI check is retried with a new tag.
 on:
   push:
     tags: ["v*"]
@@ -32,6 +32,8 @@ jobs:
     permissions:
       contents: write
       packages: write
+      # Main CI gate below.
+      actions: read
     env:
       IMAGE: ghcr.io/popodidi/axe
       TAG: ${{ github.ref_name }}
@@ -39,6 +41,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Publish only a commit whose push to main passed ci.yml. Fails fast
+      # rather than waiting, which would hold the single runner slot that main
+      # CI needs: re-run this run once main CI is green (nothing is published
+      # before this step).
+      - name: Main CI passed on this commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_scope.py main-ci "$GITHUB_SHA"
       - uses: dtolnay/rust-toolchain@stable
       - name: Tag matches the crate version
         run: |

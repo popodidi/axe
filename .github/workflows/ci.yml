@@ -6,14 +6,23 @@ on:
     branches: [main]
     tags: ["v*"]
 
+# Pull requests run only what their changed files need; pushes to main run
+# everything; a v* tag whose commit already passed on main runs nothing (see
+# scripts/ci_scope.py). The jobs and their names stay the same either way:
+# unneeded steps are skipped.
+
 permissions:
   contents: read
+  # scripts/ci_scope.py reads this workflow's main runs for tag pushes.
+  actions: read
 
-# A new push to the same branch cancels its superseded run, so the single CI
-# runner slot only works on the latest head.
+# A new push to a pull request cancels its superseded run, so the single CI
+# runner slot only works on the latest head. A running main or tag run is never
+# cancelled (release.yml needs main CI to pass on the tagged commit); a newer
+# push to main still replaces a main run that has not started.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_BUILD_JOBS: "1"
@@ -29,32 +38,57 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # The pull_request merge commit and its base parent, for ci_scope.py.
+          fetch-depth: 2
+      - name: Select checks
+        id: scope
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_scope.py scope
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.rust == 'true'
         with:
           components: clippy, rustfmt
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.ui == 'true'
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      # Build cache on the runner's persistent cache disk (size-capped).
+      - name: Build cache
+        if: steps.scope.outputs.rust == 'true'
+        run: scripts/ci_sccache.sh setup
       - name: Format
+        if: steps.scope.outputs.rust == 'true'
         run: cargo fmt --check
       - name: Clippy
+        if: steps.scope.outputs.rust == 'true'
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Clippy (no default features)
+        if: steps.scope.outputs.telegram == 'true'
         run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
       - name: Test
+        if: steps.scope.outputs.rust == 'true'
         run: cargo test --locked
       - name: Test (no default features)
+        if: steps.scope.outputs.telegram == 'true'
         run: cargo test --locked --no-default-features
       - name: Web API types are current
+        if: steps.scope.outputs.rust == 'true'
         run: cargo test --locked --features ts --test ts_bindings
       - name: Build the dashboard for embedding
+        if: steps.scope.outputs.ui == 'true'
         run: cd web && npm ci && npm run build
       - name: Clippy (embed-ui)
+        if: steps.scope.outputs.ui == 'true'
         run: cargo clippy --locked --all-targets --features embed-ui -- -D warnings
       - name: Build and test (embed-ui)
+        if: steps.scope.outputs.ui == 'true'
         run: cargo build --locked --features embed-ui && cargo test --locked --features embed-ui --test embed_ui
+      - name: Build cache stats
+        if: always() && steps.scope.outputs.rust == 'true'
+        run: scripts/ci_sccache.sh stats
 
       # The self-hosted PR VM is persistent and each runner slot keeps one work
       # directory for both jobs, so build outputs would stay on the guest's
@@ -63,7 +97,7 @@ jobs:
       # start) so later jobs keep the job-start hook's 15 GiB free-space floor.
       - name: Free the runner's disk
         if: always()
-        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 /
+        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 / && { df -B1 /var/cache/hlab-ci/deps || true; }
 
   web:
     # Same-repository branches only: fork pull requests get no CI.
@@ -74,14 +108,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # The pull_request merge commit and its base parent, for ci_scope.py.
+          fetch-depth: 2
+      - name: Select checks
+        id: scope
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_scope.py scope
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.ui == 'true'
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Lint, typecheck, unit tests and build
+        if: steps.scope.outputs.ui == 'true'
         run: cd web && npm ci && npm run lint && npm run typecheck && npm test && npm run build
       - name: Browser tests
+        if: steps.scope.outputs.ui == 'true'
         run: cd web && npx playwright install chromium && npm run test:browser -- --workers=1
 
       # The self-hosted PR VM is persistent and each runner slot keeps one work
@@ -91,4 +135,4 @@ jobs:
       # start) so later jobs keep the job-start hook's 15 GiB free-space floor.
       - name: Free the runner's disk
         if: always()
-        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 /
+        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 / && { df -B1 /var/cache/hlab-ci/deps || true; }
