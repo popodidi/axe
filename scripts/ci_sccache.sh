@@ -16,7 +16,13 @@ asset=sccache-$version-x86_64-unknown-linux-musl
 asset_sha256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
 bin_sha256=973cb15f6a986d84ca334bbed3bbe2eb8f1ee8fd81bf9e115b8539a293bf8d59
 slot=${HLAB_RUNNER_SLOT:-0}
-bin=$root/bin/sccache-$version
+cache_dir=$root/slot-$slot
+# Two slots of 1.5 GiB plus the npm cache stay under the guest's 4 GiB.
+cache_size=1500M
+port=$((4300 + slot))
+# The file must be named `sccache`: under any other name sccache acts as the
+# compiler of that name and calls itself.
+bin=$root/bin/$version/sccache
 
 # Every step is checked explicitly: `set -e` does not apply inside `if`.
 install_sccache() {
@@ -38,7 +44,7 @@ install_sccache() {
 
 case "${1:-}" in
   setup)
-    if ! mkdir -p "$root/bin" 2>/dev/null || [ ! -w "$root/bin" ]; then
+    if ! mkdir -p "$root/bin/$version" 2>/dev/null || [ ! -w "$root/bin/$version" ]; then
       echo "::warning::no writable $root; building without sccache"
       exit 0
     fi
@@ -50,23 +56,32 @@ case "${1:-}" in
     # cached copy mid-job, so the job runs its own copy.
     touch "$bin"
     wrapper=$bin
-    if [ -n "${RUNNER_TEMP:-}" ] && cp "$bin" "$RUNNER_TEMP/sccache"; then
-      wrapper=$RUNNER_TEMP/sccache
+    # A unique directory: a running server keeps an earlier copy busy.
+    if [ -n "${RUNNER_TEMP:-}" ] && copy=$(mktemp -d "$RUNNER_TEMP/sccache.XXXXXX") &&
+        cp "$bin" "$copy/sccache"; then
+      wrapper=$copy/sccache
+    fi
+    # A server that cannot start in time would stall every rustc call.
+    if ! SCCACHE_DIR=$cache_dir SCCACHE_CACHE_SIZE=$cache_size SCCACHE_SERVER_PORT=$port \
+        timeout 60 "$wrapper" --start-server; then
+      echo "::warning::sccache server did not start; building without it"
+      SCCACHE_SERVER_PORT=$port timeout 10 "$wrapper" --stop-server >/dev/null 2>&1 || true
+      exit 0
     fi
     {
       echo "RUSTC_WRAPPER=$wrapper"
-      echo "SCCACHE_DIR=$root/slot-$slot"
-      # Two slots of 1.5 GiB plus the npm cache stay under the guest's 4 GiB.
-      echo "SCCACHE_CACHE_SIZE=1500M"
-      echo "SCCACHE_SERVER_PORT=$((4300 + slot))"
+      echo "SCCACHE_DIR=$cache_dir"
+      echo "SCCACHE_CACHE_SIZE=$cache_size"
+      echo "SCCACHE_SERVER_PORT=$port"
       # sccache cannot cache incremental builds.
       echo "CARGO_INCREMENTAL=0"
     } >> "${GITHUB_ENV:-/dev/stdout}"
     ;;
   stats)
     if [ -n "${RUSTC_WRAPPER:-}" ]; then
-      "$RUSTC_WRAPPER" --show-stats || true
-      "$RUSTC_WRAPPER" --stop-server >/dev/null 2>&1 || true
+      # Bounded: a wedged server must not hold the runner.
+      timeout 60 "$RUSTC_WRAPPER" --show-stats || true
+      timeout 30 "$RUSTC_WRAPPER" --stop-server >/dev/null 2>&1 || true
     fi
     du -sh "$root" 2>/dev/null || true
     ;;
