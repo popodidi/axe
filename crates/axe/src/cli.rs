@@ -1227,6 +1227,12 @@ enum TgCmd {
         #[command(subcommand)]
         command: BoardCmd,
     },
+    /// The pinned goal board the server renders from the goals the bot is
+    /// attached to; edited in place, never re-posted
+    GoalBoard {
+        #[command(subcommand)]
+        command: GoalBoardCmd,
+    },
     /// Conversation history, both directions, oldest first
     History {
         #[arg(long, default_value_t = 50)]
@@ -1255,6 +1261,22 @@ enum BoardCmd {
     SetMessage { msg: i64 },
     /// Stop rendering a board for this bot
     Clear,
+}
+
+#[derive(Subcommand)]
+enum GoalBoardCmd {
+    /// Show the goal board: its message, its goals and whether it is current
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make one of the bot's own text messages the goal board; the server
+    /// edits it in place on each change (pin it with `axe bot tg pin MSG --silent`)
+    #[command(visible_alias = "set-message")]
+    Set { msg: i64 },
+    /// Stop rendering a goal board for this bot
+    #[command(visible_alias = "clear")]
+    Unset,
 }
 
 /// Inline buttons and their row sizes (empty: one row), as the API takes them.
@@ -1470,6 +1492,37 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
             BoardCmd::Clear => {
                 let _: Value = c.send("POST", &format!("{base}/board"), json!({"msg":null}))?;
                 println!("board cleared");
+            }
+        },
+        TgCmd::GoalBoard { command } => match command {
+            GoalBoardCmd::Show { json } => {
+                let v: Value = c.get_private(&format!("{base}/goal-board"), &[])?;
+                if *json {
+                    return print_json(&v);
+                }
+                match v["message"].as_i64() {
+                    Some(m) => println!(
+                        "goal board #{m} ({})",
+                        if v["current"] == true {
+                            "current"
+                        } else {
+                            "render pending"
+                        }
+                    ),
+                    None => {
+                        println!("no goal board message (set one with `goal-board set MSG`)")
+                    }
+                }
+                println!("{}", v["text"].as_str().unwrap_or(""));
+            }
+            GoalBoardCmd::Set { msg } => {
+                let _: Value = c.send("POST", &format!("{base}/goal-board"), json!({"msg":msg}))?;
+                println!("goal board is #{msg}");
+            }
+            GoalBoardCmd::Unset => {
+                let _: Value =
+                    c.send("POST", &format!("{base}/goal-board"), json!({"msg":null}))?;
+                println!("goal board cleared");
             }
         },
         TgCmd::History {

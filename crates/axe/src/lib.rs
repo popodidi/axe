@@ -12,6 +12,7 @@ pub mod db;
 pub mod dispatch;
 pub mod flow;
 pub mod goal;
+pub mod goal_board;
 pub mod housekeeping;
 pub mod run_log;
 pub mod schedule;

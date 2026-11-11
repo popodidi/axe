@@ -1967,6 +1967,19 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
             let msg = crate::board::set_message(&mut st.conn(), name, b.msg)?;
             ok(200, &json!({"message": msg}))
         }
+        ("GET", ["api", "bots", name, "tg", "goal-board"]) => ok(
+            200,
+            &crate::goal_board::show(&st.conn(), name, crate::remote::epoch())?,
+        ),
+        ("POST", ["api", "bots", name, "tg", "goal-board"]) => {
+            #[derive(Deserialize)]
+            struct Board {
+                msg: Option<i64>,
+            }
+            let b: Board = req.json()?;
+            let msg = crate::goal_board::set_message(&mut st.conn(), name, b.msg)?;
+            ok(200, &json!({"message": msg}))
+        }
         ("POST", ["api", "bots", name, "tg", action]) => tg_route(st, req, name, action),
         _ => return Ok(None),
     };

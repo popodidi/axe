@@ -1063,6 +1063,7 @@ axe bot tg react MSG EMOJI | typing [--chat C] | delete MSG
 axe bot tg file MSG[/N] [--out DIR]     # default $AXE_WORKTREE/.inbox
 axe bot tg history [--limit 50] [--before MSG] [--search Q] [--json]
 axe bot tg board show [--json] | set-message MSG | clear
+axe bot tg goal-board show [--json] | set MSG | unset
 ```
 
 Targets must be allowlisted chats (403 otherwise); the default target is the
@@ -1117,12 +1118,34 @@ stderr and as a `board_error` event and retried with backoff (5 s doubling to
 place. `board show` prints the current board message, its text and whether
 the message shows it.
 
-**Read privacy.** `GET /api/bots/:name/tg/history`, `/api/bots/:name/tg/board` and
+**The goal board** is a second rendered message, beside the "Waiting on you"
+board: `goal-board set MSG` makes one of the bot's own text messages its goal
+board (`flags.goal_board`; pin it with `pin MSG --silent`), `unset` stops
+rendering it (`set-message` and `clear` are aliases) and `show` prints it. One
+message is never both boards. It lists each goal the bot is attached to in
+state proposed, active or paused (done and dropped are omitted): the name and
+state ("awaiting your Go" while proposed), the other bots on it, the latest
+verdict or observation (first line), open linked tasks (`#id`), `$spent/$limit`
+and `attention spent/limit` over the last 7 days, the next goal-tagged wake or
+schedule run of any bot, and the deadline; "No active goals." when there are
+none. It is always edited in place, never re-posted, pinned or unpinned by the
+server, so it does not move the "Waiting on you" board. The same per-bot
+thread renders it after every committed change, only when its key changed
+(`flags.goal_board_key`): the key bands spend in 10% steps of each weekly
+limit, so a small spend change does not edit it (spend toward no limit never
+does on its own), while a state change, a new verdict or observation, a
+linked task opening or closing, a wake, or a budget or deadline edit does.
+Each render records a `goal_board_render` bot event; failures are logged like
+board failures (`board_error`, prefixed "goal board"). A hand edit is rendered
+over.
+
+**Read privacy.** `GET /api/bots/:name/tg/history`, `/api/bots/:name/tg/board`,
+`/api/bots/:name/tg/goal-board` and
 `/api/bots/:name/tg/file/:msg[/:n]` need the bearer token. Public:
 `GET /api/bots/:name/activity` (message metadata only: id, direction, kind,
 time, reply/edit links, attachment count, forwarded). Writes: POST
-`/api/bots/:name/tg/{send,send-file,edit,pin,unpin,react,typing,delete,board}`
-(`board` takes `{"msg": MSG|null}`); `send-file`
+`/api/bots/:name/tg/{send,send-file,edit,pin,unpin,react,typing,delete,board,goal-board}`
+(`board` and `goal-board` take `{"msg": MSG|null}`); `send-file`
 takes the raw file as the body with `as`, `name`, `caption`, `reply_to`,
 `chat`, `thread` query parameters.
 
