@@ -1039,7 +1039,7 @@ the public wakes view.
 ```sh
 axe bot tg send [--reply-to MSG] [--chat C] [--thread T] [--html] [--buttons "Yes=yes,No=no"] [--silent] (TEXT | --file F)
 axe bot tg send-file PATH [--as photo|document|voice] [--caption C] [--reply-to MSG]
-axe bot tg edit MSG [TEXT [--html]] [--buttons "Label=data,..." | --clear-buttons]
+axe bot tg edit MSG [TEXT [--html]] [--buttons "Label=data,...;Row2=data" | --clear-buttons]
 axe bot tg pin MSG [--silent] | unpin MSG
 axe bot tg react MSG EMOJI | typing [--chat C] | delete MSG
 axe bot tg file MSG[/N] [--out DIR]     # default $AXE_WORKTREE/.inbox
@@ -1056,10 +1056,16 @@ attempts). Uploads are refused over 10 MB (photo) or 50 MB (document, voice);
 downloads over 20 MB. Files pass through the server and are not stored.
 Deleting a message keeps its record (`flags.deleted`).
 
+`--buttons` takes `Label=data` pairs: `,` separates buttons in a row and `;`
+starts a new row (`"A=a,B=b;C=c"` is rows [A, B] and [C]); without `;` all
+buttons share one row. Labels cannot contain `,`, `;` or `=`, empty labels
+and empty rows are refused, and data is 1-64 bytes. The API takes the flat
+`buttons` list plus optional `rows` (buttons per row; absent is one row).
+
 `edit` works on the bot's own text messages. TEXT alone calls
 `editMessageText` without `reply_markup`, as it always has: Telegram then
 drops an existing keyboard, so pass `--buttons` to keep or change it.
-`--buttons` replaces the keyboard (one row) and `--clear-buttons` removes it;
+`--buttons` replaces the keyboard and `--clear-buttons` removes it;
 without TEXT these call `editMessageReplyMarkup` and keep the text. A new
 keyboard clears `flags.answered`, so presses on it are new button wakes. The
 output reports the buttons Telegram says remain. `pin` and `unpin`

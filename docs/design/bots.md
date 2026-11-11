@@ -220,7 +220,7 @@ axe bot wake [NAME] (--in D | --at T | --now) --note N
 axe bot inbox [--take] [--hook post-tool|stop]   # mid-run pull of new wakes
 axe bot log [NAME] [--limit N] [--full] [--json]
 axe bot pause | resume | stop | reset NAME
-axe bot tg send [--reply-to MSG] [--thread T] [--html] [--buttons "Label=data,..."] [--silent] TEXT|--file F
+axe bot tg send [--reply-to MSG] [--thread T] [--html] [--buttons "Label=data,...;Row2=data"] [--silent] TEXT|--file F
 axe bot tg send-file PATH [--caption C] [--as photo|document|voice] [--reply-to MSG]
 axe bot tg edit MSG TEXT | react MSG EMOJI | typing | delete MSG
 axe bot tg file MSG[/N] [--out DIR]          # download an inbound attachment (default <worktree>/.inbox/)

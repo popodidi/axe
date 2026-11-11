@@ -758,8 +758,9 @@ enum TgCmd {
         /// Parse as Telegram HTML (at most 4096 characters, not split)
         #[arg(long)]
         html: bool,
-        /// Inline buttons: "Label=data,Other=data2" (data 1-64 bytes); a press
-        /// arrives as a button wake
+        /// Inline buttons: "Label=data,Other=data2" (data 1-64 bytes); `;`
+        /// starts a new row ("A=a;B=b" is two rows); a press arrives as a
+        /// button wake
         #[arg(long)]
         buttons: Option<String>,
         /// Send without a notification sound
@@ -794,8 +795,8 @@ enum TgCmd {
         text: Option<String>,
         #[arg(long, requires = "text")]
         html: bool,
-        /// Replace the inline buttons: "Label=data,Other=data2"; presses on
-        /// the new buttons arrive as new button wakes
+        /// Replace the inline buttons: "Label=data,Other=data2", `;` starts a
+        /// new row; presses on the new buttons arrive as new button wakes
         #[arg(long, conflicts_with = "clear_buttons")]
         buttons: Option<String>,
         /// Remove the inline buttons
@@ -863,16 +864,41 @@ enum BoardCmd {
     Clear,
 }
 
-/// Parses `--buttons "Label=data,Other=data2"`.
-fn parse_buttons(spec: &str) -> Result<Vec<(String, String)>> {
-    spec.split(',')
-        .filter(|b| !b.trim().is_empty())
-        .map(|b| {
-            b.split_once('=')
-                .map(|(l, d)| (l.trim().to_string(), d.trim().to_string()))
-                .with_context(|| format!("button {b:?} must be Label=data"))
-        })
-        .collect()
+/// Inline buttons and their row sizes (empty: one row), as the API takes them.
+type Buttons = (Vec<(String, String)>, Vec<usize>);
+
+/// Parses `--buttons "Label=data,Other=data2"`: `,` separates buttons in a
+/// row and `;` separates rows ("A=a,B=b;C=c" is rows [A,B] and [C]). Without
+/// `;` every button is on one row, as before.
+fn parse_buttons(spec: &str) -> Result<Buttons> {
+    let row = |r: &str| -> Result<Vec<(String, String)>> {
+        r.split(',')
+            .filter(|b| !b.trim().is_empty())
+            .map(|b| {
+                let (l, d) = b
+                    .split_once('=')
+                    .with_context(|| format!("button {b:?} must be Label=data"))?;
+                let (l, d) = (l.trim(), d.trim());
+                if l.is_empty() {
+                    anyhow::bail!("button {b:?} has an empty label");
+                }
+                Ok((l.to_string(), d.to_string()))
+            })
+            .collect()
+    };
+    if !spec.contains(';') {
+        return Ok((row(spec)?, Vec::new()));
+    }
+    let (mut buttons, mut rows) = (Vec::new(), Vec::new());
+    for (i, r) in spec.split(';').enumerate() {
+        let r = row(r)?;
+        if r.is_empty() {
+            anyhow::bail!("--buttons row {} is empty", i + 1);
+        }
+        rows.push(r.len());
+        buttons.extend(r);
+    }
+    Ok((buttons, rows))
 }
 
 fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
@@ -898,14 +924,14 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
                 Some(f) => read_file(f)?,
                 None => text.clone().unwrap_or_default(),
             };
-            let buttons = parse_buttons(buttons.as_deref().unwrap_or(""))?;
+            let (buttons, rows) = parse_buttons(buttons.as_deref().unwrap_or(""))?;
             // Parts are paced ~1 s apart and 429s wait `retry_after`: allow
             // more than the default timeout so a slow send is not retried.
             let v: Value = c.send_timeout(
                 "POST",
                 &format!("{base}/send"),
                 json!({"text":text,"reply_to":reply_to,"thread":thread,"chat":chat,
-                    "html":html,"buttons":buttons,"silent":silent}),
+                    "html":html,"buttons":buttons,"rows":rows,"silent":silent}),
                 Some(std::time::Duration::from_secs(600)),
             )?;
             print_sent(&v);
@@ -946,21 +972,21 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
             buttons,
             clear_buttons,
         } => {
-            let buttons = match (buttons, clear_buttons) {
+            let (buttons, rows) = match (buttons, clear_buttons) {
                 (Some(b), _) => {
-                    let b = parse_buttons(b)?;
+                    let (b, rows) = parse_buttons(b)?;
                     if b.is_empty() {
                         anyhow::bail!("--buttons needs at least one Label=data; use --clear-buttons to remove them");
                     }
-                    Some(b)
+                    (Some(b), rows)
                 }
-                (None, true) => Some(Vec::new()),
-                (None, false) => None,
+                (None, true) => (Some(Vec::new()), Vec::new()),
+                (None, false) => (None, Vec::new()),
             };
             let v: Value = c.send(
                 "POST",
                 &format!("{base}/edit"),
-                json!({"msg":msg,"text":text,"html":html,"buttons":buttons}),
+                json!({"msg":msg,"text":text,"html":html,"buttons":buttons,"rows":rows}),
             )?;
             match v["buttons"].as_u64() {
                 Some(0) => println!("edited #{msg} (no buttons)"),
@@ -2055,4 +2081,53 @@ fn run_usage(client: &Client, command: &UsageCmd) -> Result<()> {
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_buttons;
+
+    fn b(l: &str, d: &str) -> (String, String) {
+        (l.into(), d.into())
+    }
+
+    #[test]
+    fn parse_buttons_splits_rows_on_semicolons() {
+        // No `;`: one row, no row sizes, exactly as before.
+        assert_eq!(
+            parse_buttons("A=a,B=b").unwrap(),
+            (vec![b("A", "a"), b("B", "b")], vec![])
+        );
+        assert_eq!(parse_buttons("").unwrap(), (vec![], vec![]));
+        assert_eq!(
+            parse_buttons("A=a,B=b,").unwrap(),
+            (vec![b("A", "a"), b("B", "b")], vec![])
+        );
+        assert_eq!(
+            parse_buttons("A=a;B=b").unwrap(),
+            (vec![b("A", "a"), b("B", "b")], vec![1, 1])
+        );
+        assert_eq!(
+            parse_buttons("A=a,B=b;C=c").unwrap(),
+            (vec![b("A", "a"), b("B", "b"), b("C", "c")], vec![2, 1])
+        );
+        assert_eq!(
+            parse_buttons(" A: raise timeout = a ; B: fix staging=b").unwrap(),
+            (
+                vec![b("A: raise timeout", "a"), b("B: fix staging", "b")],
+                vec![1, 1]
+            )
+        );
+        for (spec, err) in [
+            ("A=a;;B=b", "row 2 is empty"),
+            ("A=a;", "row 2 is empty"),
+            ("A=a; , ;B=b", "row 2 is empty"),
+            ("=a", "empty label"),
+            ("A=a; =b", "empty label"),
+            ("A", "must be Label=data"),
+        ] {
+            let e = format!("{:#}", parse_buttons(spec).unwrap_err());
+            assert!(e.contains(err), "{spec}: {e}");
+        }
+    }
 }

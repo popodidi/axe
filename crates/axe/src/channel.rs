@@ -45,6 +45,9 @@ pub struct SendOpts {
     /// Inline keyboard buttons: (label, callback data).
     #[serde(default)]
     pub buttons: Vec<(String, String)>,
+    /// Buttons per keyboard row, in order; empty puts every button on one row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<usize>,
     #[serde(default)]
     pub silent: bool,
 }
@@ -178,8 +181,21 @@ pub fn pct_encode(s: &str) -> String {
         .collect()
 }
 
-/// Validates inline buttons: (label, callback data).
-pub fn check_buttons(buttons: &[(String, String)]) -> Result<()> {
+/// Validates inline buttons: (label, callback data), and `rows` (buttons
+/// per row; empty is one row), which must be non-empty and cover every button.
+pub fn check_buttons(buttons: &[(String, String)], rows: &[usize]) -> Result<()> {
+    if !rows.is_empty() {
+        if let Some(i) = rows.iter().position(|&n| n == 0) {
+            bail!("button row {} is empty", i + 1);
+        }
+        let total: usize = rows.iter().sum();
+        if total != buttons.len() {
+            bail!(
+                "button rows cover {total} buttons but {} were given",
+                buttons.len()
+            );
+        }
+    }
     for (label, data) in buttons {
         if label.trim().is_empty() || data.is_empty() || data.len() > CALLBACK_DATA_LIMIT {
             bail!(
@@ -188,4 +204,26 @@ pub fn check_buttons(buttons: &[(String, String)]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod button_tests {
+    use super::check_buttons;
+
+    #[test]
+    fn check_buttons_requires_rows_to_cover_every_button() {
+        let bs = vec![("A".to_string(), "a".to_string()), ("B".into(), "b".into())];
+        check_buttons(&bs, &[]).unwrap();
+        check_buttons(&bs, &[2]).unwrap();
+        check_buttons(&bs, &[1, 1]).unwrap();
+        for (rows, err) in [
+            (&[1, 0, 1][..], "row 2 is empty"),
+            (&[1], "cover 1 buttons but 2"),
+            (&[2, 1], "cover 3 buttons but 2"),
+        ] {
+            let e = check_buttons(&bs, rows).unwrap_err().to_string();
+            assert!(e.contains(err), "{rows:?}: {e}");
+        }
+        assert!(check_buttons(&[("A".into(), String::new())], &[]).is_err());
+    }
 }

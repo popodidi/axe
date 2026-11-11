@@ -1825,6 +1825,9 @@ fn tg_route(st: &State, req: &Request, name: &str, action: &str) -> Result<Respo
         /// Replaces the keyboard; `[]` removes it; absent keeps the old
         /// behavior (no `reply_markup` sent).
         buttons: Option<Vec<(String, String)>>,
+        /// Buttons per row; absent or `[]` is one row.
+        #[serde(default)]
+        rows: Vec<usize>,
     }
     #[derive(Deserialize)]
     struct Pin {
@@ -1887,6 +1890,7 @@ fn tg_route(st: &State, req: &Request, name: &str, action: &str) -> Result<Respo
                     b.text.as_deref(),
                     b.html,
                     b.buttons.as_deref(),
+                    &b.rows,
                 )?,
             )
         }
