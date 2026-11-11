@@ -28,7 +28,7 @@ Stored messages and `bot tg history` work in both builds.
 ### Releases
 
 A `vX.Y.Z[-pre]` tag whose version matches `crates/axe/Cargo.toml` runs
-`.github/workflows/release.yml` on the hlab CI VM. From one Docker build
+`.github/workflows/release.yml` on the self-hosted CI VM. From one Docker build
 (`Dockerfile`, `embed-ui` on) it publishes:
 
 | Asset | Contents |

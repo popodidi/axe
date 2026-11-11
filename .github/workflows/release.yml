@@ -1,7 +1,7 @@
 name: release
 run-name: release ${{ github.ref_name }}
 
-# A `vX.Y.Z[-pre]` tag publishes, from one Docker build on the hlab CI VM:
+# A `vX.Y.Z[-pre]` tag publishes, from one Docker build on the self-hosted CI VM:
 # - image ghcr.io/popodidi/axe:<tag> (its digest is in the release notes)
 # - axe-<tag>-linux-x86_64.tar.gz: the image's `axe` binary (dashboard embedded)
 # - axe-skills-<tag>.tar.gz: skills/axe
@@ -128,7 +128,7 @@ jobs:
         if: always()
         run: docker logout ghcr.io
 
-      # The hlab-ci PR VM is persistent: free this job's outputs (see ci.yml).
+      # The self-hosted PR VM is persistent: free this job's outputs (see ci.yml).
       - name: Free the runner's disk
         if: always()
         run: rm -rf target "$RUNNER_TEMP/dist" "$RUNNER_TEMP/stage" && df -B1 /

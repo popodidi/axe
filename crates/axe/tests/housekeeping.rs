@@ -189,7 +189,7 @@ fn worktree_lines(lines: &[Value]) -> HashMap<PathBuf, (String, String)> {
         .iter()
         .filter(|v| v.get("path").is_some() && v.get("kind").is_none())
         .map(|v| {
-            assert_eq!(v["project"], "harvis", "{v}");
+            assert_eq!(v["project"], "proj", "{v}");
             let s = |k: &str| v[k].as_str().unwrap().to_string();
             (PathBuf::from(s("path")), (s("decision"), s("reason")))
         })
@@ -221,10 +221,10 @@ fn removes_only_old_done(pressure: fn(&Path) -> String, retention_reason: &str) 
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
     let workspace = tmp.join("workspace");
-    let main = workspace.join("harvis");
+    let main = workspace.join("proj");
     let dep = workspace.join("dep");
     let dep2 = workspace.join("dep2");
-    let root = workspace.join(".worktrees/harvis");
+    let root = workspace.join(".worktrees/proj");
     repo(&main);
     repo(&dep);
     repo(&dep2);
@@ -259,18 +259,12 @@ fn removes_only_old_done(pressure: fn(&Path) -> String, retention_reason: &str) 
     std::os::unix::fs::symlink(&main, root.join("task-12--work")).unwrap();
 
     let mut routes = HashMap::new();
-    task(&mut routes, 7, "harvis", "done", OLD);
-    task(&mut routes, 8, "harvis", "done", OLD);
-    task(&mut routes, 9, "harvis", "pending", OLD);
-    task(
-        &mut routes,
-        10,
-        "harvis",
-        "done",
-        &ago(Duration::minutes(5)),
-    );
+    task(&mut routes, 7, "proj", "done", OLD);
+    task(&mut routes, 8, "proj", "done", OLD);
+    task(&mut routes, 9, "proj", "pending", OLD);
+    task(&mut routes, 10, "proj", "done", &ago(Duration::minutes(5)));
     task(&mut routes, 11, "other", "done", OLD);
-    task(&mut routes, 12, "harvis", "done", OLD);
+    task(&mut routes, 12, "proj", "done", OLD);
     let url = serve(routes, 200).url;
 
     let retained = |lines: &HashMap<PathBuf, (String, String)>| {
@@ -350,16 +344,16 @@ fn safety_conditions_block(pressure: fn(&Path) -> String) {
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
     let workspace = tmp.join("workspace");
-    let main = workspace.join("harvis");
+    let main = workspace.join("proj");
     let dep = workspace.join("dep");
-    let root = workspace.join(".worktrees/harvis");
+    let root = workspace.join(".worktrees/proj");
     repo(&main);
     repo(&dep);
     let mut routes = HashMap::new();
     let mut worktree = |id: u64| {
         let wt = root.join(format!("task-{id}--work"));
         add_worktree(&main, &wt, &format!("task-{id}"));
-        task(&mut routes, id, "harvis", "done", OLD);
+        task(&mut routes, id, "proj", "done", OLD);
         wt
     };
 
@@ -396,7 +390,7 @@ fn safety_conditions_block(pressure: fn(&Path) -> String) {
     );
     let not_git = root.join("task-12--work");
     fs::create_dir_all(&not_git).unwrap();
-    task(&mut routes, 12, "harvis", "done", OLD);
+    task(&mut routes, 12, "proj", "done", OLD);
 
     routes.insert(
         "/api/tasks/8/events".into(),
@@ -456,13 +450,13 @@ fn retention_is_short_only_under_pressure() {
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
     let workspace = tmp.join("workspace");
-    let main = workspace.join("harvis");
-    let root = workspace.join(".worktrees/harvis");
+    let main = workspace.join("proj");
+    let root = workspace.join(".worktrees/proj");
     repo(&main);
     let wt = root.join("task-1--work");
     add_worktree(&main, &wt, "task-1");
     let mut routes = HashMap::new();
-    task(&mut routes, 1, "harvis", "done", &ago(Duration::hours(2)));
+    task(&mut routes, 1, "proj", "done", &ago(Duration::hours(2)));
     let url = serve(routes, 200).url;
 
     let (ok, lines) = run(&tmp, &config(&workspace, &calm(&tmp)), &url, true);
@@ -487,7 +481,7 @@ fn unpressured_ticks_sweep_hourly() {
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
     let workspace = tmp.join("workspace");
-    fs::create_dir_all(workspace.join(".worktrees/harvis/task-1--work")).unwrap();
+    fs::create_dir_all(workspace.join(".worktrees/proj/task-1--work")).unwrap();
     let url = serve(HashMap::new(), 200).url;
     let stop = AtomicBool::new(false);
     let sweep = |k: &mut Keeper| worktree_lines(&k.tick(None, &stop).lines).len();
@@ -676,7 +670,7 @@ fn path_lines(lines: &[Value]) -> HashMap<PathBuf, (Value, String, String)> {
 /// two hours ago, 3 live (in progress), 4 done but its run has not ended,
 /// 5 done long ago with a scratch dir under a second template.
 fn cache_fixture(tmp: &Path) -> (PathBuf, String) {
-    let caches = tmp.join("cache/harvis");
+    let caches = tmp.join("cache/proj");
     for name in [
         "task-1-target",
         "task-2-target",
@@ -684,17 +678,17 @@ fn cache_fixture(tmp: &Path) -> (PathBuf, String) {
         "task-4-target",
         "task-5-scratch",
         "task-x-target",
-        "taskq-target",
+        "taskx-target",
     ] {
         fs::create_dir_all(caches.join(name).join("debug/deps")).unwrap();
         fs::write(caches.join(name).join("debug/deps/lib.rlib"), "x").unwrap();
     }
     let mut routes = HashMap::new();
-    task(&mut routes, 1, "harvis", "done", OLD);
-    task(&mut routes, 2, "tn-desk", "done", &ago(Duration::hours(2)));
-    task(&mut routes, 3, "harvis", "in_progress", OLD);
-    task(&mut routes, 4, "harvis", "done", OLD);
-    task(&mut routes, 5, "harvis", "done", OLD);
+    task(&mut routes, 1, "proj", "done", OLD);
+    task(&mut routes, 2, "other", "done", &ago(Duration::hours(2)));
+    task(&mut routes, 3, "proj", "in_progress", OLD);
+    task(&mut routes, 4, "proj", "done", OLD);
+    task(&mut routes, 5, "proj", "done", OLD);
     routes.insert(
         "/api/tasks/4/events".into(),
         json!([
@@ -758,13 +752,13 @@ fn done_task_caches_go_after_retention() {
     let (task, d, reason) = decision("task-x-target");
     assert_eq!((task, d.as_str()), (Value::Null, "retain"));
     assert!(reason.contains("no task id"), "{reason}");
-    assert!(!lines.contains_key(&at("taskq-target")), "not a task path");
+    assert!(!lines.contains_key(&at("taskx-target")), "not a task path");
     for name in [
         "task-2-target",
         "task-3-target",
         "task-4-target",
         "task-x-target",
-        "taskq-target",
+        "taskx-target",
     ] {
         assert!(at(name).exists(), "{name}");
     }
@@ -794,7 +788,7 @@ fn pressure_reclaims_done_task_caches_regardless_of_retention() {
         assert_eq!(lines[&at(name)].1, "retain", "{name}");
         assert!(at(name).exists(), "{name}");
     }
-    assert!(at("taskq-target").exists());
+    assert!(at("taskx-target").exists());
 }
 
 #[test]
@@ -802,12 +796,12 @@ fn dispatcher_thread_applies_and_stops() {
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
     let workspace = tmp.join("workspace");
-    let main = workspace.join("harvis");
+    let main = workspace.join("proj");
     repo(&main);
-    let wt = workspace.join(".worktrees/harvis/task-1--work");
+    let wt = workspace.join(".worktrees/proj/task-1--work");
     add_worktree(&main, &wt, "task-1");
     let mut routes = HashMap::new();
-    task(&mut routes, 1, "harvis", "done", OLD);
+    task(&mut routes, 1, "proj", "done", OLD);
     let url = serve(routes, 200).url;
     let cfg = config(&workspace, "");
     let stop = Arc::new(AtomicBool::new(false));
@@ -848,15 +842,15 @@ fn cli_dry_run_prints_decisions() {
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
     let workspace = tmp.join("workspace");
-    let main = workspace.join("harvis");
+    let main = workspace.join("proj");
     repo(&main);
-    let wt = workspace.join(".worktrees/harvis/task-1--work");
+    let wt = workspace.join(".worktrees/proj/task-1--work");
     add_worktree(&main, &wt, "task-1");
-    let recent = workspace.join(".worktrees/harvis/task-2--work");
+    let recent = workspace.join(".worktrees/proj/task-2--work");
     add_worktree(&main, &recent, "task-2");
     let mut routes = HashMap::new();
-    task(&mut routes, 1, "harvis", "done", OLD);
-    task(&mut routes, 2, "harvis", "done", &ago(Duration::minutes(1)));
+    task(&mut routes, 1, "proj", "done", OLD);
+    task(&mut routes, 2, "proj", "done", &ago(Duration::minutes(1)));
     let url = serve(routes, 200).url;
     let config = tmp.join("config.toml");
     let cli = |args: &[&str], cfg: &str| {
