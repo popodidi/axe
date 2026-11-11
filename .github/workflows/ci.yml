@@ -56,7 +56,7 @@ jobs:
       - name: Build and test (embed-ui)
         run: cargo build --locked --features embed-ui && cargo test --locked --features embed-ui --test embed_ui
 
-      # The hlab-ci PR VM is persistent and each runner slot keeps one work
+      # The self-hosted PR VM is persistent and each runner slot keeps one work
       # directory for both jobs, so build outputs would stay on the guest's
       # 30 GiB root until the next checkout in that slot. Remove every job's
       # outputs after each job (also on failure, cancellation or a refused
@@ -84,7 +84,7 @@ jobs:
       - name: Browser tests
         run: cd web && npx playwright install chromium && npm run test:browser -- --workers=1
 
-      # The hlab-ci PR VM is persistent and each runner slot keeps one work
+      # The self-hosted PR VM is persistent and each runner slot keeps one work
       # directory for both jobs, so build outputs would stay on the guest's
       # 30 GiB root until the next checkout in that slot. Remove every job's
       # outputs after each job (also on failure, cancellation or a refused

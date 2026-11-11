@@ -946,7 +946,7 @@ mod tests {
             "task-0-target",
             "task-x-target",
             "task-5",
-            "taskq-target",
+            "taskx-target",
             "task-5--work",
         ] {
             assert_eq!(p.task(name), None, "{name}");
@@ -965,7 +965,7 @@ mod tests {
             "/c/{id}/target",
             "/c/task-{id}-{id}",
             "relative/task-{id}",
-            "/w/.worktrees/harvis/task-{id}--work",
+            "/w/.worktrees/proj/task-{id}--work",
         ] {
             assert!(TaskPath::parse(bad, w).is_err(), "{bad}");
         }
