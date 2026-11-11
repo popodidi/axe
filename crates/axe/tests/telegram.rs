@@ -288,6 +288,11 @@ struct Rig {
 }
 
 fn write_config(dir: &Path, api: &str, token_file: &Path) -> PathBuf {
+    write_config_with(dir, api, token_file, "")
+}
+
+/// `extra` goes into the `[telegram]` table.
+fn write_config_with(dir: &Path, api: &str, token_file: &Path, extra: &str) -> PathBuf {
     let cfg = format!(
         r#"
 workspace_root = "{ws}"
@@ -297,7 +302,7 @@ log_dir = "{logs}"
 owner_user_id = {OWNER}
 api_base = "{api}"
 poll_timeout = 1
-
+{extra}
 [[telegram.bot]]
 name = "cos"
 token_file = "{token}"
@@ -314,11 +319,16 @@ chats = [{OWNER}, {GROUP}]
 
 impl Rig {
     fn new() -> Rig {
+        Rig::with("")
+    }
+
+    /// A rig whose `[telegram]` table also has `extra`.
+    fn with(extra: &str) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let stub = Stub::start();
         let token = dir.path().join("tg-token");
         std::fs::write(&token, format!("{TG_TOKEN}\n")).unwrap();
-        let cfg = write_config(dir.path(), &stub.url, &token);
+        let cfg = write_config_with(dir.path(), &stub.url, &token, extra);
         let mut rig = Rig {
             dir,
             stub,
@@ -1724,7 +1734,8 @@ fn escalate(rig: &Rig, id: &str) {
 
 #[test]
 fn board_renders_escalations_and_open_cards() {
-    let rig = Rig::new();
+    // In-place edits (`board = "edit"`), so every render lands on one message.
+    let rig = Rig::with("board = \"edit\"");
     rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
     let (_, board) = make_board(&rig);
     let t = wait_board(&rig, board, 0, "empty board", |t| {
@@ -1888,4 +1899,147 @@ fn clearing_buttons_telegram_already_dropped_closes_the_card() {
     let show = rig.tg_ok(&["board", "show", "--json"]);
     let v: Value = serde_json::from_str(&show).unwrap();
     assert_eq!(v["lines"], json!([]), "{v}");
+}
+
+/// Local id and Telegram message id of the current board, from `board show`.
+fn current_board(rig: &Rig) -> (i64, i64) {
+    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
+    let local = v["message"].as_i64().unwrap();
+    let tg = rig
+        .db()
+        .query_row(
+            "SELECT message_id FROM bot_messages WHERE id=?1",
+            [local],
+            |r| r.get(0),
+        )
+        .unwrap();
+    (local, tg)
+}
+
+/// Waits until the board has moved off `from` and the move is finished
+/// (the new board pinned, the old one edited); returns the new board.
+fn wait_moved(rig: &Rig, from: i64, what: &str) -> (i64, i64) {
+    let mut out = (0, 0);
+    wait_for(what, 20, || {
+        let (local, tg) = current_board(rig);
+        let done: bool = rig
+            .db()
+            .query_row(
+                "SELECT json_type(flags,'$.board_from') IS NULL FROM bot_messages WHERE id=?1",
+                [local],
+                |r| r.get(0),
+            )
+            .unwrap();
+        out = (local, tg);
+        local != from && done
+    });
+    out
+}
+
+#[test]
+fn board_reposts_at_the_bottom_on_change() {
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    let (first, first_tg) = make_board(&rig);
+    // The first render of a chosen message is in place.
+    wait_board(&rig, first_tg, 0, "first render", |t| {
+        t.contains("Nothing waiting on you")
+    });
+    assert_eq!(current_board(&rig).0, first);
+    let sends = rig.stub.calls("sendMessage").len();
+
+    // A change re-posts: a silent HTML send, the new one pinned silently,
+    // the old one unpinned and edited to point at the new one.
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
+    escalate(&rig, "1");
+    let (second, second_tg) = wait_moved(&rig, first, "re-post on escalation");
+    let sent = rig.stub.calls("sendMessage");
+    assert_eq!(sent.len(), sends + 1, "one send per change");
+    let s = &sent[sends].params;
+    assert_eq!(s["disable_notification"], true, "{s}");
+    assert_eq!(s["parse_mode"], "HTML", "{s}");
+    assert!(
+        s["text"]
+            .as_str()
+            .unwrap()
+            .contains("• task #1 Pick a colour"),
+        "{s}"
+    );
+    let pin = rig.stub.calls("pinChatMessage").pop().unwrap();
+    assert_eq!(pin.params["message_id"], second_tg);
+    assert_eq!(pin.params["disable_notification"], true);
+    let unpin = rig.stub.calls("unpinChatMessage").pop().unwrap();
+    assert_eq!(unpin.params["message_id"], first_tg);
+    assert_eq!(
+        board_edits(&rig, first_tg).last().unwrap(),
+        &format!("Moved below (#{second}).")
+    );
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(
+        show.starts_with(&format!("board #{second} (current)")),
+        "{show}"
+    );
+    let render: Value = serde_json::from_str(rig.events("board_render").last().unwrap()).unwrap();
+    assert_eq!(
+        render,
+        json!({"message": second, "lines": 1, "from": first})
+    );
+    let history = rig.tg_ok(&["history"]);
+    assert!(
+        history.contains(&format!("Moved below (#{second}).")),
+        "{history}"
+    );
+
+    // Resolving re-posts again; the pin fails once and is retried, and an
+    // unpin Telegram refuses is logged and skipped.
+    {
+        let mut st = rig.stub.state.lock().unwrap();
+        st.fail.insert(
+            "pinChatMessage".into(),
+            "Bad Request: not enough rights".into(),
+        );
+    }
+    rig.srv()
+        .ok(&["set", "1", "--state", "done", "--note", "resolved"]);
+    wait_for("failed pin", 20, || !rig.events("board_error").is_empty());
+    rig.stub.state.lock().unwrap().fail.insert(
+        "unpinChatMessage".into(),
+        "Bad Request: message to unpin not found".into(),
+    );
+    let (third, third_tg) = wait_moved(&rig, second, "re-post on resolve");
+    assert_eq!(
+        rig.stub.calls("sendMessage").len(),
+        sends + 2,
+        "a retried move sends nothing new"
+    );
+    let pins: Vec<_> = rig
+        .stub
+        .calls("pinChatMessage")
+        .into_iter()
+        .filter(|c| c.params["message_id"] == third_tg)
+        .collect();
+    assert_eq!(pins.len(), 2, "one failed pin, one retry");
+    let skipped: Vec<Value> = rig
+        .events("board_error")
+        .iter()
+        .map(|e| serde_json::from_str(e).unwrap())
+        .filter(|e: &Value| e["skipped"] == true)
+        .collect();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["step"], "unpin");
+    assert_eq!(
+        board_edits(&rig, second_tg).last().unwrap(),
+        &format!("Moved below (#{third}).")
+    );
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(
+        show.starts_with(&format!("board #{third} (current)")),
+        "{show}"
+    );
+    assert!(show.contains("Nothing waiting on you"), "{show}");
+
+    // No change, no re-post.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(rig.stub.calls("sendMessage").len(), sends + 2);
 }
