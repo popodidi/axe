@@ -1100,7 +1100,14 @@ its text messages that still have buttons. A press (`flags.answered`), a
 `--clear-buttons` edit, a text edit without `--buttons` (Telegram drops the
 keyboard) or a delete closes a card. Each line shows the task id or card
 `#id`, a short title and its age, in Telegram HTML with an "Updated <time>"
-footer; lines that do not fit 4096 characters become "+N more". A per-bot
+footer; past 25 items, or lines that do not fit 4096 characters, become "+N
+more". Each listed item has one inline button on its own row (`#349`,
+`card #1667`; data `board task #349` / `board card #1667`), stored in
+`flags.board_buttons` so the board is never a card. A press is a button wake
+for the bot whose board it is (`[button #N on #<board>] board task #349`); it
+does not answer the board or edit its keyboard, so every item stays
+pressable. A re-posted board carries the buttons and the old one loses its
+keyboard with the "Moved below" edit. A per-bot
 thread re-renders after every committed change (and every 60 s), only when
 the set of lines or titles changed (`flags.board_key`), recording a
 `board_render` bot event. The first render of a message just made the board

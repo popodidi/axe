@@ -350,7 +350,7 @@ including reads.
 | POST | `/api/bots/{name}/tg/react` | `{msg, emoji? = ""}` | Result |
 | POST | `/api/bots/{name}/tg/delete` | `{msg}` | Result |
 | POST | `/api/bots/{name}/tg/typing` | `{chat?}` | Result |
-| GET | `/api/bots/{name}/tg/board` | | `{message, lines: [{kind: "task" \| "card", id, title, project, since}], text, current}`: the rendered "Waiting on you" board, and whether its message shows it |
+| GET | `/api/bots/{name}/tg/board` | | `{message, lines: [{kind: "task" \| "card", id, title, project, since}], text, buttons: [[label, data], ...], current}`: the rendered "Waiting on you" board with one pick button per listed item, and whether its message shows it |
 | POST | `/api/bots/{name}/tg/board` | `{msg}` makes the bot's own text message `msg` its board; `{msg: null}` stops rendering | `{message}` |
 | GET | `/api/bots/{name}/tg/goal-board` | | `{message, goals: [{name, state, others, latest: {id, kind, text}?, open_tasks, cost_spent, cost_week, attention_spent, attention_week, next_wake, deadline}], text, current}`: the rendered goal board, and whether its message shows it |
 | POST | `/api/bots/{name}/tg/goal-board` | `{msg}` makes the bot's own text message `msg` its goal board (not its board); `{msg: null}` stops rendering | `{message}` |

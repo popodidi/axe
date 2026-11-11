@@ -2127,6 +2127,205 @@ fn board_reposts_at_the_bottom_on_change() {
     assert_eq!(rig.stub.calls("sendMessage").len(), sends + 2);
 }
 
+/// The inline keyboard in Telegram call `params`, as (label, data) rows.
+fn board_keyboard(params: &Value) -> Vec<Vec<(String, String)>> {
+    params["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .expect("reply_markup")
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    (
+                        b["text"].as_str().unwrap().to_string(),
+                        b["callback_data"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn board_items_have_pick_buttons_that_wake_the_bot() {
+    let rig = Rig::with("board = \"edit\"");
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    let (board_local, board) = make_board(&rig);
+    wait_board(&rig, board, 0, "empty board", |t| {
+        t.contains("Nothing waiting on you")
+    });
+    // An empty board has no buttons.
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    assert_eq!(edit.params["reply_markup"], json!({"inline_keyboard": []}));
+
+    // An escalated task and an open card: one button each, one row each.
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
+    let card = rig.tg_ok(&["send", "--buttons", "A=a,B=b", "Which one?"]);
+    let card: i64 = card.trim().trim_start_matches("sent #").parse().unwrap();
+    let n = board_edits(&rig, board).len();
+    escalate(&rig, "1");
+    wait_board(&rig, board, n, "both lines", |t| {
+        t.contains("task #1") && t.contains(&format!("card #{card}"))
+    });
+    let edit = rig
+        .stub
+        .calls("editMessageText")
+        .into_iter()
+        .rfind(|c| c.params["message_id"] == board)
+        .unwrap();
+    let want = vec![
+        vec![("#1".to_string(), "board task #1".to_string())],
+        vec![(format!("card #{card}"), format!("board card #{card}"))],
+    ];
+    assert_eq!(board_keyboard(&edit.params), want);
+    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
+    assert_eq!(
+        v["buttons"],
+        json!([
+            ["#1", "board task #1"],
+            [format!("card #{card}"), format!("board card #{card}")]
+        ])
+    );
+    // The board is not a card, and its buttons are stored apart.
+    let flags: Value = serde_json::from_str(
+        &rig.db()
+            .query_row(
+                "SELECT flags FROM bot_messages WHERE id=?1",
+                [board_local],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(flags["buttons"].is_null(), "{flags}");
+    assert_eq!(flags["board_buttons"][0], json!(["#1", "board task #1"]));
+    assert_eq!(v["lines"].as_array().unwrap().len(), 2, "{v}");
+
+    // A press on an item: a button wake for this bot naming the item, a
+    // toast with its label, and the board keeps its keyboard.
+    let edits = rig.stub.calls("editMessageText").len();
+    let press = |update: i64, data: &str| {
+        json!({"update_id": update, "callback_query": {"id": format!("q{update}"),
+            "from": user(OWNER), "chat_instance": "ci", "data": data,
+            "message": {"message_id": board, "date": 0, "chat": {"id": OWNER, "type": "private"}}}})
+    };
+    rig.stub.push(press(300, "board task #1"));
+    rig.stub.wait_confirmed(300);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "Got it: #1");
+    // A second press, on another item, is a wake too.
+    rig.stub.push(press(301, &format!("board card #{card}")));
+    rig.stub.wait_confirmed(301);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], format!("Got it: card #{card}"));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        rig.stub.calls("editMessageText").len(),
+        edits,
+        "a press does not edit the board"
+    );
+    assert!(rig.stub.calls("editMessageReplyMarkup").is_empty());
+    let conn = rig.db();
+    let wakes = bot::wakes(&conn, "cos", true, 50).unwrap();
+    let lines: Vec<String> = wakes
+        .iter()
+        .filter(|w| w.kind == "button")
+        .map(bot::wake_line)
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].contains(&format!("on #{board_local} ")) && lines[0].ends_with("board task #1"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].ends_with(&format!("board card #{card}")),
+        "{lines:?}"
+    );
+    let flags: String = conn
+        .query_row(
+            "SELECT flags FROM bot_messages WHERE id=?1",
+            [board_local],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    assert!(!flags.contains("answered"), "{flags}");
+    // Both items still wait on the owner; the board shows them unchanged.
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(show.contains("(current)"), "{show}");
+    assert!(
+        show.contains("task #1") && show.contains(&format!("card #{card}")),
+        "{show}"
+    );
+}
+
+#[test]
+fn reposted_boards_keep_their_buttons() {
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    let (first, first_tg) = make_board(&rig);
+    wait_board(&rig, first_tg, 0, "first render", |t| {
+        t.contains("Nothing waiting on you")
+    });
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
+    escalate(&rig, "1");
+    let (second, second_tg) = wait_moved(&rig, first, "re-post on escalation");
+    let sent = rig.stub.calls("sendMessage").pop().unwrap();
+    assert_eq!(
+        board_keyboard(&sent.params),
+        vec![vec![("#1".to_string(), "board task #1".to_string())]]
+    );
+    // The old board is edited without a keyboard and no longer a board.
+    let moved = rig
+        .stub
+        .calls("editMessageText")
+        .into_iter()
+        .rfind(|c| c.params["message_id"] == first_tg)
+        .unwrap();
+    assert!(moved.params["reply_markup"].is_null(), "{:?}", moved.params);
+    let flags = |id: i64| -> Value {
+        serde_json::from_str(
+            &rig.db()
+                .query_row("SELECT flags FROM bot_messages WHERE id=?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(flags(first)["board_buttons"].is_null(), "{}", flags(first));
+    assert_eq!(
+        flags(second)["board_buttons"],
+        json!([["#1", "board task #1"]])
+    );
+
+    // A press on the re-posted board wakes the bot.
+    rig.stub.push(json!({"update_id": 310, "callback_query": {"id": "q310",
+        "from": user(OWNER), "chat_instance": "ci", "data": "board task #1",
+        "message": {"message_id": second_tg, "date": 0, "chat": {"id": OWNER, "type": "private"}}}}));
+    rig.stub.wait_confirmed(310);
+    let wakes = bot::wakes(&rig.db(), "cos", true, 50).unwrap();
+    let pressed: Vec<String> = wakes
+        .iter()
+        .filter(|w| w.kind == "button")
+        .map(bot::wake_line)
+        .collect();
+    assert_eq!(pressed.len(), 1, "{pressed:?}");
+    assert!(pressed[0].ends_with("board task #1"), "{pressed:?}");
+
+    // Resolving re-posts an empty board without buttons.
+    rig.srv()
+        .ok(&["set", "1", "--state", "done", "--note", "resolved"]);
+    let (third, _) = wait_moved(&rig, second, "re-post on resolve");
+    let sent = rig.stub.calls("sendMessage").pop().unwrap();
+    assert_eq!(sent.params["reply_markup"], json!({"inline_keyboard": []}));
+    assert_eq!(flags(third)["board_buttons"], json!([]));
+}
+
 /// Goal board edits so far (editMessageText on `msg`), as texts.
 fn goal_edits(rig: &Rig, msg: i64) -> Vec<String> {
     board_edits(rig, msg)

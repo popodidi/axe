@@ -14,6 +14,12 @@
 //! (new pinned, old unpinned and edited to "Moved below (#new)"). The first
 //! render of a message just chosen with `set_message`, and every render with
 //! `telegram.board = "edit"`, edits the message in place instead.
+//!
+//! Each listed item gets one inline button on its own row (`#349`,
+//! `card #1667`), kept in `flags.board_buttons` (not `flags.buttons`, so the
+//! board is never a card). A press is a button wake for the bot whose board
+//! it is, with data naming the item (`board task #349`); it does not answer
+//! or close the board, so every item stays pressable.
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -28,6 +34,11 @@ pub(crate) const TEXT_LIMIT: usize = 4096;
 /// Room kept for the "+N more" line and the footer.
 pub(crate) const FOOTER_ROOM: usize = 120;
 const TITLE_CAP: usize = 60;
+/// At most this many items are listed (each with its button); the rest
+/// become "+N more", without buttons.
+pub const MAX_ITEMS: usize = 25;
+/// Prefix of the callback data of a board button.
+pub const BUTTON_PREFIX: &str = "board ";
 pub const EMPTY: &str = "Nothing waiting on you.";
 
 /// One thing waiting on the owner.
@@ -52,6 +63,8 @@ pub struct Board {
     pub lines: Vec<Line>,
     /// The text the next render sends.
     pub text: String,
+    /// The inline buttons (`[label, data]`, one row each) it sends.
+    pub buttons: Vec<(String, String)>,
     /// Whether the board message shows the current lines.
     pub current: bool,
 }
@@ -69,7 +82,7 @@ pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Resul
         name,
         msg,
         "board",
-        &["board", "board_key", "board_from"],
+        &["board", "board_key", "board_from", "board_buttons"],
         "goal_board",
     )
 }
@@ -145,12 +158,19 @@ pub(crate) fn flagged(conn: &Connection, name: &str, flag: &str) -> Result<Optio
     id.map(|id| get_message(conn, name, id)).transpose()
 }
 
-/// Records the key of a successful render, and the text the message now shows.
-pub fn rendered(conn: &Connection, msg: i64, key: &str, text: &str) -> Result<()> {
+/// Records the key of a successful render, and the text and buttons the
+/// message now shows.
+pub fn rendered(
+    conn: &Connection,
+    msg: i64,
+    key: &str,
+    text: &str,
+    buttons: &[(String, String)],
+) -> Result<()> {
     conn.execute(
-        "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.board_key',?2,'$.edited',json('true'))
-         WHERE id=?3",
-        params![text, key, msg],
+        "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.board_key',?2,'$.edited',json('true'),'$.board_buttons',json(?3))
+         WHERE id=?4",
+        params![text, key, json!(buttons).to_string(), msg],
     )?;
     Ok(())
 }
@@ -160,7 +180,7 @@ pub fn rendered(conn: &Connection, msg: i64, key: &str, text: &str) -> Result<()
 pub fn reposted(conn: &mut Connection, old: i64, new: i64, key: &str) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute(
-        "UPDATE bot_messages SET flags=json_remove(flags,'$.board','$.board_key','$.board_from') WHERE id=?1",
+        "UPDATE bot_messages SET flags=json_remove(flags,'$.board','$.board_key','$.board_from','$.board_buttons') WHERE id=?1",
         [old],
     )?;
     tx.execute(
@@ -270,25 +290,40 @@ pub fn lines(conn: &Connection, name: &str) -> Result<Vec<Line>> {
 }
 
 /// The render key: what the board shows, without ages or the footer time, so
-/// an unchanged input set never causes an edit.
+/// an unchanged input set never causes an edit. `v` marks the layout with
+/// buttons, so boards rendered before it are rendered again.
 pub fn key(lines: &[Line]) -> String {
     let v: Vec<_> = lines
         .iter()
         .map(|l| json!([l.kind, l.id, l.title]))
         .collect();
-    json!(v).to_string()
+    json!({"v": 2, "lines": v}).to_string()
 }
 
-/// The board as Telegram HTML: one line per item, then "Updated <time>".
-/// Lines that do not fit become "+N more".
-pub fn render(lines: &[Line], now: i64) -> String {
+/// The pick button of one item: a short label and data naming it.
+pub fn button(l: &Line) -> (String, String) {
+    let item = match l.kind {
+        "task" => format!("task #{}", l.id),
+        _ => format!("card #{}", l.id),
+    };
+    let label = match l.kind {
+        "task" => format!("#{}", l.id),
+        _ => item.clone(),
+    };
+    (label, format!("{BUTTON_PREFIX}{item}"))
+}
+
+/// The board as Telegram HTML (one line per item, then "Updated <time>") and
+/// its buttons, one per listed item. Items past [`MAX_ITEMS`] or that do not
+/// fit become "+N more", without buttons.
+pub fn render(lines: &[Line], now: i64) -> (String, Vec<(String, String)>) {
     let mut out = String::from("<b>Waiting on you</b>\n");
     if lines.is_empty() {
         out.push('\n');
         out.push_str(EMPTY);
     }
     let mut shown = 0;
-    for l in lines {
+    for l in lines.iter().take(MAX_ITEMS) {
         let line = match l.kind {
             "task" => format!(
                 "\n• task #{} {} <i>({}, {})</i>",
@@ -317,7 +352,7 @@ pub fn render(lines: &[Line], now: i64) -> String {
         "\n\n<i>Updated {} UTC</i>",
         bot::ts(now)[..16].replace('T', " ")
     ));
-    out
+    (out, lines[..shown].iter().map(button).collect())
 }
 
 /// The current board of bot `name`.
@@ -325,12 +360,14 @@ pub fn show(conn: &Connection, name: &str, now: i64) -> Result<Board> {
     let lines = lines(conn, name)?;
     let msg = message(conn, name)?;
     let k = key(&lines);
+    let (text, buttons) = render(&lines, now);
     Ok(Board {
         message: msg.as_ref().map(|m| m.id),
         current: msg
             .as_ref()
             .is_some_and(|m| m.flags["board_key"].as_str() == Some(k.as_str())),
-        text: render(&lines, now),
+        text,
+        buttons,
         lines,
     })
 }
@@ -404,12 +441,19 @@ mod tests {
 
     #[test]
     fn renders_lines_ages_and_footer() {
-        let t = render(
+        let (t, buttons) = render(
             &[
                 line("task", 7, "Ship <it> & go"),
                 line("card", 12, "Pick one"),
             ],
             3 * 3600 + 5,
+        );
+        assert_eq!(
+            buttons,
+            [
+                ("#7".to_string(), "board task #7".to_string()),
+                ("card #12".to_string(), "board card #12".to_string()),
+            ]
         );
         assert!(t.starts_with("<b>Waiting on you</b>\n"), "{t}");
         assert!(
@@ -423,20 +467,46 @@ mod tests {
         );
         assert_eq!(
             render(&[], 0),
-            format!("<b>Waiting on you</b>\n\n{EMPTY}\n\n<i>Updated 1970-01-01 00:00 UTC</i>")
+            (
+                format!("<b>Waiting on you</b>\n\n{EMPTY}\n\n<i>Updated 1970-01-01 00:00 UTC</i>"),
+                vec![]
+            )
         );
     }
 
     #[test]
     fn overflow_becomes_more_and_stays_under_the_limit() {
+        // Past MAX_ITEMS: the first MAX_ITEMS listed, each with a button.
         let many: Vec<Line> = (0..400)
-            .map(|i| line("task", i, &"x".repeat(TITLE_CAP)))
+            .map(|i| line(if i % 2 == 0 { "task" } else { "card" }, i, "x"))
             .collect();
-        let t = render(&many, 0);
+        let (t, buttons) = render(&many, 0);
+        assert_eq!(t.matches("\n• ").count(), MAX_ITEMS, "{t}");
+        assert!(t.contains(&format!("+{} more", 400 - MAX_ITEMS)), "{t}");
+        assert_eq!(buttons.len(), MAX_ITEMS);
+        assert_eq!(buttons[0], ("#0".into(), "board task #0".into()));
+        assert_eq!(buttons[1], ("card #1".into(), "board card #1".into()));
+        assert_eq!(buttons[24].1, "board task #24");
+
+        // Long escaped titles hit the text limit before MAX_ITEMS: only the
+        // lines that fit are listed and have buttons.
+        let long: Vec<Line> = (0..400)
+            .map(|i| line("task", i, &"&".repeat(TITLE_CAP)))
+            .collect();
+        let (t, buttons) = render(&long, 0);
         assert!(utf16(&t) <= TEXT_LIMIT, "{}", utf16(&t));
         let shown = t.matches("• task").count();
-        assert!(shown > 10 && shown < 400);
+        assert!(shown > 5 && shown < MAX_ITEMS, "{shown}");
+        assert_eq!(buttons.len(), shown);
         assert!(t.contains(&format!("+{} more", 400 - shown)), "{t}");
+    }
+
+    #[test]
+    fn buttons_fit_telegram_limits() {
+        // Callback data is at most 64 bytes, labels are short.
+        let (_, buttons) = render(&[line("card", i64::MAX, "x")], 0);
+        let (label, data) = &buttons[0];
+        assert!(data.len() <= 64 && label.len() <= 32, "{buttons:?}");
     }
 
     #[test]
