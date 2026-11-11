@@ -106,7 +106,8 @@ pub const HOOK_CONTEXT_CAP: usize = 10_000;
 pub const TELEGRAM_PROTOCOL: &str = r#"## Talking to the owner (Telegram)
 - Reply with `axe bot tg send --reply-to <id> "text"`; files with
   `axe bot tg send-file PATH`; buttons with `--buttons "Yes=yes,No=no"` (a
-  press arrives as a button wake). Download an attachment with
+  press arrives as a button wake); `;` starts a new row, so options longer
+  than a word get one row each: `--buttons "A: raise timeout=a;B: close=b"`. Download an attachment with
   `axe bot tg file <id>`; read the conversation with `axe bot tg history`.
 - The server already reacted 👀 to each message; still answer it.
 - Anything that waits on the owner is an escalated task or a card (a

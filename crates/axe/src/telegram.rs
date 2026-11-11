@@ -1114,7 +1114,7 @@ impl Gateway {
         if o.html && utf16_len(text) > TEXT_LIMIT {
             bail!("--html text is over {TEXT_LIMIT} characters; split it yourself so markup stays balanced");
         }
-        check_buttons(&o.buttons)?;
+        check_buttons(&o.buttons, &o.rows)?;
         let (chat, reply) = self.target(b, store, o.chat, o.reply_to)?;
         let parts = split_text(text, TEXT_LIMIT);
         if parts.len() > MAX_PARTS {
@@ -1139,7 +1139,7 @@ impl Gateway {
                 p["reply_parameters"] = json!({"message_id": r.message_id});
             }
             if i + 1 == parts.len() && !o.buttons.is_empty() {
-                p["reply_markup"] = keyboard(&o.buttons);
+                p["reply_markup"] = keyboard(&o.buttons, &o.rows);
             }
             let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
             let reply_local = if i == 0 {
@@ -1232,6 +1232,8 @@ impl Gateway {
     /// `Some(&[])` removes it. With only `buttons`, the text is kept
     /// (`editMessageReplyMarkup`). A text edit without `buttons` sends no
     /// `reply_markup`, as before; Telegram then drops an existing keyboard.
+    /// `rows` lays the buttons out as in [`SendOpts::rows`].
+    #[allow(clippy::too_many_arguments)]
     pub fn edit(
         &self,
         store: &dyn Store,
@@ -1240,6 +1242,7 @@ impl Gateway {
         text: Option<&str>,
         html: bool,
         buttons: Option<&[(String, String)]>,
+        rows: &[usize],
     ) -> Result<Value> {
         let b = self.bot(name)?;
         let m = self.own_message(b, store, msg)?;
@@ -1251,12 +1254,14 @@ impl Gateway {
                 bail!("edited text must be 1-{TEXT_LIMIT} characters");
             }
         }
-        if let Some(bs) = buttons {
-            check_buttons(bs)?;
+        match buttons {
+            Some(bs) => check_buttons(bs, rows)?,
+            None if !rows.is_empty() => bail!("button rows need buttons"),
+            None => {}
         }
         let mut p = json!({"chat_id": m.chat_id, "message_id": m.message_id});
         if let Some(bs) = buttons {
-            p["reply_markup"] = keyboard(bs);
+            p["reply_markup"] = keyboard(bs, rows);
         }
         let method = match text {
             Some(t) => {
@@ -1668,18 +1673,26 @@ fn live_chats(conn: &Connection, name: &str) -> Result<Vec<(i64, Option<i64>)>> 
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// One row of inline buttons; no buttons is an empty keyboard, which
-/// removes an existing one.
-fn keyboard(buttons: &[(String, String)]) -> Value {
-    let row: Vec<Value> = buttons
-        .iter()
-        .map(|(l, d)| json!({"text":l,"callback_data":d}))
-        .collect();
-    if row.is_empty() {
-        json!({"inline_keyboard": []})
-    } else {
-        json!({"inline_keyboard": [row]})
+/// The inline keyboard: `rows` buttons per row (checked by
+/// [`check_buttons`]), or one row when `rows` is empty. No buttons is an
+/// empty keyboard, which removes an existing one.
+fn keyboard(buttons: &[(String, String)], rows: &[usize]) -> Value {
+    let all = [buttons.len()];
+    let sizes = if rows.is_empty() { &all[..] } else { rows };
+    let mut rest = buttons;
+    let mut keyboard = Vec::new();
+    for &n in sizes {
+        let (row, tail) = rest.split_at(n.min(rest.len()));
+        rest = tail;
+        if !row.is_empty() {
+            let row: Vec<Value> = row
+                .iter()
+                .map(|(l, d)| json!({"text":l,"callback_data":d}))
+                .collect();
+            keyboard.push(row);
+        }
     }
+    json!({ "inline_keyboard": keyboard })
 }
 
 fn button_label(flags: &Value, data: &str) -> String {

@@ -1524,6 +1524,88 @@ fn pin_and_unpin_the_bots_own_messages() {
 }
 
 #[test]
+fn buttons_lay_out_in_rows_and_presses_on_any_row_wake() {
+    let rig = Rig::new();
+    let markup = |out: &Value| out["reply_markup"]["inline_keyboard"].clone();
+    let b = |t: &str, d: &str| json!({"text": t, "callback_data": d});
+
+    // `,` keeps one row (unchanged), `;` starts a new row.
+    rig.tg_ok(&["send", "--buttons", "A=a,B=b", "one row"]);
+    rig.tg_ok(&["send", "--buttons", "A=a;B=b", "two rows"]);
+    rig.tg_ok(&[
+        "send",
+        "--buttons",
+        "A: raise timeout=a, B=b ;C: close=c",
+        "mixed",
+    ]);
+    let sent = rig.stub.calls("sendMessage");
+    assert_eq!(markup(&sent[0].params), json!([[b("A", "a"), b("B", "b")]]));
+    assert_eq!(
+        markup(&sent[1].params),
+        json!([[b("A", "a")], [b("B", "b")]])
+    );
+    assert_eq!(
+        markup(&sent[2].params),
+        json!([
+            [b("A: raise timeout", "a"), b("B", "b")],
+            [b("C: close", "c")]
+        ])
+    );
+
+    // The stored card keeps every button, so a press on row 2 is a normal
+    // button wake with its label and data.
+    let tg_id = rig.messages()[2].3;
+    rig.stub
+        .push(json!({"update_id": 70, "callback_query": {"id": "q-row2",
+        "from": user(OWNER), "chat_instance": "ci", "data": "c",
+        "message": {"message_id": tg_id, "date": 0, "chat": {"id": OWNER, "type": "private"}}}}));
+    rig.stub.wait_confirmed(70);
+    assert_eq!(
+        rig.stub.calls("answerCallbackQuery")[0].params["text"],
+        "Got it: C: close"
+    );
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    assert_eq!(edit.params["text"], "mixed\n\n> C: close (selected)");
+    let wakes = bot::wakes(&rig.db(), "cos", true, 50).unwrap();
+    let press = wakes
+        .iter()
+        .find(|w| w.kind == "button")
+        .expect("button wake");
+    assert!(
+        bot::wake_line(press).ends_with(" c"),
+        "{}",
+        bot::wake_line(press)
+    );
+
+    // Edit lays out rows too and counts every button.
+    let out = rig.tg_ok(&["edit", "2", "--buttons", "X=x;Y=y,Z=z"]);
+    assert_eq!(out, "edited #2 (3 buttons)\n");
+    let m = rig.stub.calls("editMessageReplyMarkup").pop().unwrap();
+    assert_eq!(
+        markup(&m.params),
+        json!([[b("X", "x")], [b("Y", "y"), b("Z", "z")]])
+    );
+
+    // Empty rows and labels are rejected before anything is sent.
+    let calls = rig.stub.calls("sendMessage").len();
+    for (spec, err) in [
+        ("A=a;;B=b", "row 2 is empty"),
+        ("A=a;", "row 2 is empty"),
+        (";A=a", "row 1 is empty"),
+        ("A=a;=b", "empty label"),
+        ("=a,B=b", "empty label"),
+    ] {
+        let out = rig.tg(&["send", "--buttons", spec, "q"]);
+        assert!(!out.status.success(), "{spec}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(err), "{spec}: {stderr}");
+        let out = rig.tg(&["edit", "2", "--buttons", spec]);
+        assert!(!out.status.success(), "edit {spec}");
+    }
+    assert_eq!(rig.stub.calls("sendMessage").len(), calls);
+}
+
+#[test]
 fn edit_replaces_or_clears_buttons() {
     let rig = Rig::new();
     rig.tg_ok(&["send", "--buttons", "A=a,B=b", "Pick one"]);
@@ -1811,7 +1893,8 @@ fn board_renders_escalations_and_open_cards() {
     // A button-clearing edit, and a text edit without --buttons, close cards.
     for edit in [&["--clear-buttons", "Decided: A"][..], &["Decided: B"][..]] {
         let n = board_edits(&rig, board).len();
-        let card = rig.tg_ok(&["send", "--buttons", "A=a", "Again?"]);
+        // Multi-row cards open and close like single-row ones.
+        let card = rig.tg_ok(&["send", "--buttons", "A=a;B=b", "Again?"]);
         let card = card.trim().trim_start_matches("sent #").to_string();
         wait_board(&rig, board, n, "card line", |t| {
             t.contains(&format!("card #{card}"))
