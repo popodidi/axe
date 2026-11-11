@@ -25,10 +25,24 @@ The crate is `axe-os`; the binary and the library are `axe`. Cargo features:
 answer 409, and a configured `[telegram]` table is ignored with a warning.
 Stored messages and `bot tg history` work in both builds.
 
+### CI
+
+`.github/workflows/ci.yml` runs on the self-hosted CI VM. A pull request runs
+only what its changed files need (`scripts/ci_scope.py`): the default-feature
+checks always, the no-default-features checks when Telegram code changed, and
+the dashboard (`web` job, `embed-ui`) when `web/` or the code serving it
+changed; build or CI changes (`Cargo.toml`, `Cargo.lock`, `.github/`, ...) run
+everything. Pushes to `main` run everything. Rust builds use a size-capped
+sccache on the VM's cache disk (`scripts/ci_sccache.sh`).
+
 ### Releases
 
 A `vX.Y.Z[-pre]` tag whose version matches `crates/axe/Cargo.toml` runs
-`.github/workflows/release.yml` on the self-hosted CI VM. From one Docker build
+`.github/workflows/release.yml` on the self-hosted CI VM. It publishes only a
+commit whose push to `main` passed `ci.yml`, so push the tag after that run is
+green: otherwise the release fails before publishing anything, and can be
+re-run once main CI passes. The tag's own CI run is skipped when its commit
+already passed on `main`. From one Docker build
 (`Dockerfile`, `embed-ui` on) it publishes:
 
 | Asset | Contents |
@@ -43,8 +57,9 @@ gh release download <tag> -R popodidi/axe && sha256sum -c SHA256SUMS
 ```
 
 The job also runs `cargo publish --dry-run`; crates.io publishing is not done
-from CI. Other platforms install from source with `--tag <tag>`. A failed
-release is retried with a new tag, never by moving or reusing one.
+from CI. Other platforms install from source with `--tag <tag>`. A release
+that failed after the main CI check is retried with a new tag, never by moving
+or reusing one.
 
 ## Not a workflow engine
 
