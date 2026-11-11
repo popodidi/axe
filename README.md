@@ -84,11 +84,12 @@ only ordering axe knows; it is not a workflow engine.
 ```sh
 axe add --project web --title "Fix X" --detail-file spec.md [--agent claude]   # state pending
 axe add --project web --title "Ship X" --blocked-by 12,13      # waits until #12 and #13 are done
+axe add --project web --title "Try Y" --goal grow-signups     # linked to a goal (Goals)
 axe deps ID [--add P,...] [--remove P,...] [--json]  # edit edges atomically, then show blocked_by/blocks
 axe list [--state S] [--project P] [--all] [--json]
 axe show ID [--json]
 axe log ID [--json] [--full]
-axe set ID [--state S] [--title T] [--detail D|--detail-file F] [--note N] [--reset-runs] [--not-before T]
+axe set ID [--state S] [--title T] [--detail D|--detail-file F] [--note N] [--reset-runs] [--not-before T] [--goal G|none]
 axe abort ID [--run RUN_ID] [--timeout 60]  # force-stop remotely; wait for confirmation
 axe escalate ID --blocked B --resolver R --resume C --class CLASS   # escalated with a block note
 axe classify ID [--escalation CLASS [--episode N]] [--workload W]   # correct a class (latest episode, or the Nth) or workload
@@ -917,7 +918,7 @@ axe bot create --file bot.json
 axe bot list | show [NAME] [--json]
 axe bot edit [NAME] [--identity-file F] [--conduct-file F] [--nudge-after 10m] --why W
 axe bot notes [NAME]                       # print; --edit-file F --why W replaces
-axe bot wake [NAME] (--in 2h | --at T | --now) --note N [--key K]
+axe bot wake [NAME] (--in 2h | --at T | --now) --note N [--key K] [--goal G]
 axe bot inbox [NAME] [--take] [--hook post-tool|stop]
 axe bot log [NAME] [--limit 50] [--full] [--json]
 axe bot pause | resume | stop | reset [NAME]
@@ -939,7 +940,8 @@ protocol, identity and conduct) and `settings.json` (PostToolUse and Stop hooks
 calling `axe bot inbox --take --hook ...`), then runs the agent's `cmd` or
 `resume_cmd` with `bot_args` spliced in before the `{prompt}` argument. The
 prompt holds only the wakes; a fresh session adds a line to read
-`axe bot notes`, `axe bot log` and `axe bot tg history` first. A run that
+`axe bot notes`, `axe bot log`, `axe bot tg history` and
+`axe goal list --bot $AXE_BOT` first. A run that
 exits 0 with 200k or more tokens of context retires its session (event
 `shrink`; `shrink_deferred` while the owner's latest message is unanswered),
 so the next wake starts fresh instead of re-reading it from a cold cache. Logs are
@@ -1134,7 +1136,8 @@ A bot can have named cron schedules, each with an objective. Off unless
 created; the bot manages its own.
 
 ```bash
-axe bot schedule [--bot NAME] add SCHEDULE --cron "0 9 * * 1" [--timezone Asia/Taipei] --objective TEXT --why W
+axe bot schedule [--bot NAME] add SCHEDULE --cron "0 9 * * 1" [--timezone Asia/Taipei] --objective TEXT [--goal G] --why W
+axe bot schedule [--bot NAME] edit SCHEDULE --goal G|none --why W
 axe bot schedule [--bot NAME] list [--json]
 axe bot schedule [--bot NAME] pause|resume|remove SCHEDULE --why W
 ```
@@ -1147,7 +1150,8 @@ and their next fire time.
 
 The server fires schedules on its one-second tick, as an ordinary `bot_wakes`
 row: actor `schedule:<name>`, body `scheduled wake (automation, not an owner
-message). Objective: ...`. It batches with other wakes and never counts as an
+message). Objective: ...`, prefixed `[goal NAME] ` for a schedule with a
+goal (`--goal`; `edit --goal none` clears it, event `schedule_edit`). It batches with other wakes and never counts as an
 owner message. The cursor `next_at` moves in the same transaction as the wake,
 so a restart neither loses nor repeats a firing, and any slots missed during
 downtime fire once. A schedule has at most one undelivered wake: a firing while
@@ -1197,6 +1201,38 @@ creates or changes; POST `.../subscriptions/remove` deletes.
 Schema v13 only adds `bot_subscriptions`, `bot_feed` and their indexes. A v13
 database with `user_version` lowered to 12 opens with a v12 binary and upgrades
 again in place.
+
+## Goals (schema v16)
+
+A goal is a durable outcome that bots share: freeform intent (16 KiB),
+a deadline, weekly budgets and an append-only trajectory. Design and owner
+decisions: [docs/design/goals.md](docs/design/goals.md).
+
+```sh
+# JSON: name, project, intent, deadline, budget_cost_week, budget_attention_week, bots
+axe goal propose --file goal.json [--owner-ref R]
+axe goal list [--bot B] [--state S] [--json]
+axe goal show NAME [--json]                # bots, linked tasks, latest 10 trajectory events
+axe goal log NAME [--limit 50] [--full] [--json]
+axe goal edit NAME [--intent-file F] [--deadline T] [--budget-cost-week X] [--budget-attention-week N] --why W [--owner-ref R]
+axe goal activate|pause|resume|done|drop NAME --why W [--owner-ref R]
+axe goal join|leave NAME --bot B --why W [--owner-ref R]
+axe goal record NAME --kind hypothesis|test|verdict|observation|note [--task ID] TEXT
+```
+
+States: `proposed` -> `active` (activate) <-> `paused` (pause, resume) ->
+`done`; `drop` ends any open goal. Bots propose; the owner activates and edits
+intent, deadline and budget (`none` clears a value). Those decisions, and
+join or leave of another bot, need `--owner-ref` (for example `msg #873`) from
+any actor but `human`; it is stored on the event, not verified. `propose`
+attaches the proposing bot (`$AXE_BOT`); a bot may join or leave itself.
+Every change is a `goal_events` audit row with its `--why`; `record` appends a
+trajectory event. A task links with `axe add --goal` or `axe set --goal`
+(task event `goal`, latest wins), and a wake with `--goal`, which labels it
+`[goal NAME]` in the bot's prompt. Schema v16 only adds `goals`, `goal_bots`,
+`goal_events` and `bot_schedules.goal_id`; a v16 database with
+`user_version` lowered to 15 opens with a v15 binary and upgrades again in
+place.
 
 ## Migrating from the old name
 

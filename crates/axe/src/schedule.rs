@@ -13,6 +13,7 @@ use serde_json::json;
 
 use crate::bot::{self, epoch_of, ts};
 use crate::db::Actor;
+use crate::goal;
 use crate::routine;
 
 /// `bot_wakes.key` prefix; `axe bot wake` keys always start with `wake:`.
@@ -20,8 +21,9 @@ pub const KEY_PREFIX: &str = "sched:";
 /// `bot_wakes.actor` prefix, followed by the schedule name.
 pub const ACTOR_PREFIX: &str = "schedule:";
 /// Audited changes, as `axe bot show` lists them (firings are excluded).
-pub const CHANGE_KINDS: [&str; 4] = [
+pub const CHANGE_KINDS: [&str; 5] = [
     "schedule_add",
+    "schedule_edit",
     "schedule_pause",
     "schedule_resume",
     "schedule_remove",
@@ -50,7 +52,13 @@ pub struct Schedule {
     pub last_fired_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// The goal each firing is labeled with (`[goal NAME]`).
+    #[serde(default)]
+    pub goal: Option<String>,
 }
+
+/// Schedule rows with their goal name, as [`from_row`] reads them.
+const COLS: &str = "s.*, (SELECT name FROM goals g WHERE g.id=s.goal_id) AS goal";
 
 fn from_row(r: &Row) -> rusqlite::Result<Schedule> {
     Ok(Schedule {
@@ -64,6 +72,7 @@ fn from_row(r: &Row) -> rusqlite::Result<Schedule> {
         last_fired_at: r.get("last_fired_at")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
+        goal: r.get("goal")?,
     })
 }
 
@@ -131,14 +140,16 @@ fn check_interval(cron: &str, timezone: &str) -> Result<()> {
 pub fn list(conn: &Connection, bot_name: &str) -> Result<Vec<Schedule>> {
     let b = bot::get(conn, bot_name)?;
     Ok(conn
-        .prepare("SELECT * FROM bot_schedules WHERE bot_id=?1 ORDER BY name")?
+        .prepare(&format!(
+            "SELECT {COLS} FROM bot_schedules s WHERE s.bot_id=?1 ORDER BY s.name"
+        ))?
         .query_map([b.id], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 
 fn find(conn: &Connection, bot_id: i64, name: &str) -> Result<Schedule> {
     conn.query_row(
-        "SELECT * FROM bot_schedules WHERE bot_id=?1 AND name=?2",
+        &format!("SELECT {COLS} FROM bot_schedules s WHERE s.bot_id=?1 AND s.name=?2"),
         params![bot_id, name],
         from_row,
     )
@@ -154,6 +165,19 @@ pub fn add(
     why: &str,
     now: i64,
 ) -> Result<Schedule> {
+    add_for_goal(conn, actor, bot_name, s, None, why, now)
+}
+
+/// [`add`] with a goal its firings are labeled with (`none` for no goal).
+pub fn add_for_goal(
+    conn: &mut Connection,
+    actor: &Actor,
+    bot_name: &str,
+    s: &NewSchedule,
+    goal: Option<&str>,
+    why: &str,
+    now: i64,
+) -> Result<Schedule> {
     check_name(&s.name)?;
     check_why(why)?;
     if s.objective.trim().is_empty() {
@@ -166,6 +190,7 @@ pub fn add(
     check_interval(&s.cron, &s.timezone)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = bot::get(&tx, bot_name)?;
+    let goal = goal.map(|g| goal::resolve(&tx, g)).transpose()?.flatten();
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM bot_schedules WHERE bot_id=?1 AND name=?2)",
         params![b.id, s.name],
@@ -177,22 +202,64 @@ pub fn add(
     let at = ts(now);
     tx.execute(
         "INSERT INTO bot_schedules (bot_id, name, cron, timezone, objective, enabled, next_at,
-           created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,1,?6,?7,?7)",
-        params![b.id, s.name, s.cron, s.timezone, s.objective, ts(next), at],
+           created_at, updated_at, goal_id)
+         VALUES (?1,?2,?3,?4,?5,1,?6,?7,?7,?8)",
+        params![
+            b.id,
+            s.name,
+            s.cron,
+            s.timezone,
+            s.objective,
+            ts(next),
+            at,
+            goal.as_ref().map(|g| g.id)
+        ],
+    )?;
+    let mut detail = json!({"schedule":s.name,"cron":s.cron,"timezone":s.timezone,
+        "objective":s.objective,"next_at":ts(next),"why":why});
+    if let Some(g) = &goal {
+        detail["goal"] = json!(g.name);
+    }
+    bot::event(&tx, b.id, actor, "schedule_add", &detail.to_string())?;
+    let created = find(&tx, b.id, &s.name)?;
+    tx.commit()?;
+    Ok(created)
+}
+
+/// `axe bot schedule edit`: sets the goal its firings are labeled with
+/// (`none` clears it). Repeating the current goal changes nothing.
+pub fn set_goal(
+    conn: &mut Connection,
+    actor: &Actor,
+    bot_name: &str,
+    name: &str,
+    goal: &str,
+    why: &str,
+    now: i64,
+) -> Result<Schedule> {
+    check_why(why)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let b = bot::get(&tx, bot_name)?;
+    let s = find(&tx, b.id, name)?;
+    let g = goal::resolve(&tx, goal)?;
+    let to = g.as_ref().map(|g| g.name.clone());
+    if to == s.goal {
+        return Ok(s);
+    }
+    tx.execute(
+        "UPDATE bot_schedules SET goal_id=?1, updated_at=?2 WHERE id=?3",
+        params![g.as_ref().map(|g| g.id), ts(now), s.id],
     )?;
     bot::event(
         &tx,
         b.id,
         actor,
-        "schedule_add",
-        &json!({"schedule":s.name,"cron":s.cron,"timezone":s.timezone,
-            "objective":s.objective,"next_at":ts(next),"why":why})
-        .to_string(),
+        "schedule_edit",
+        &json!({"schedule":name,"goal":{"from":s.goal,"to":to},"why":why}).to_string(),
     )?;
-    let created = find(&tx, b.id, &s.name)?;
+    let updated = find(&tx, b.id, name)?;
     tx.commit()?;
-    Ok(created)
+    Ok(updated)
 }
 
 /// Drops a schedule's undelivered wake, so a stopped schedule fires no more.
@@ -254,10 +321,15 @@ pub fn change(
     Ok(())
 }
 
-/// The wake text. The label is stored rather than rendered, so a dispatcher
-/// running an older binary still delivers it.
-fn wake_body(objective: &str) -> String {
-    format!("scheduled wake (automation, not an owner message). Objective: {objective}")
+/// The wake text, prefixed `[goal NAME]` for a goal's schedule. The label is
+/// stored rather than rendered, so a dispatcher running an older binary still
+/// delivers it.
+fn wake_body(objective: &str, goal: Option<&str>) -> String {
+    let body = format!("scheduled wake (automation, not an owner message). Objective: {objective}");
+    match goal {
+        Some(g) => goal::label(g, &body),
+        None => body,
+    }
 }
 
 /// Fires every due schedule once and advances its cursor; returns the number of
@@ -266,10 +338,10 @@ fn wake_body(objective: &str) -> String {
 pub fn tick(conn: &mut Connection, now: i64) -> Result<usize> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let due: Vec<(Schedule, i64, String)> = tx
-        .prepare(
-            "SELECT s.*, b.state AS bot_state FROM bot_schedules s JOIN bots b ON b.id=s.bot_id
-             WHERE s.enabled=1 AND s.next_at<=?1",
-        )?
+        .prepare(&format!(
+            "SELECT {COLS}, b.state AS bot_state FROM bot_schedules s JOIN bots b ON b.id=s.bot_id
+             WHERE s.enabled=1 AND s.next_at<=?1"
+        ))?
         .query_map([ts(now)], |r| {
             Ok((from_row(r)?, r.get("bot_id")?, r.get("bot_state")?))
         })?
@@ -304,7 +376,7 @@ pub fn tick(conn: &mut Connection, now: i64) -> Result<usize> {
                 "wake",
                 &key,
                 None,
-                &wake_body(&s.objective),
+                &wake_body(&s.objective, s.goal.as_deref()),
                 &created,
                 &created,
                 &Actor::new(&format!("{ACTOR_PREFIX}{}", s.name)),

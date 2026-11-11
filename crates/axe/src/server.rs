@@ -21,6 +21,7 @@ use crate::bot;
 use crate::channel;
 use crate::config::{self, Config};
 use crate::db::{self, Actor, Changes, Claim, Filter, NewTask, RunFilter};
+use crate::goal;
 use crate::remote;
 use crate::routine;
 use crate::schedule;
@@ -881,6 +882,8 @@ struct AddBody {
     #[serde(default)]
     blocked_by: Vec<i64>,
     workload: Option<String>,
+    /// Goal name to link the task to.
+    goal: Option<String>,
     #[serde(flatten)]
     who: Who,
 }
@@ -905,6 +908,7 @@ struct PatchBody {
     note: Option<String>,
     not_before: Option<String>,
     escalation_class: Option<String>,
+    goal: Option<String>,
     #[serde(flatten)]
     who: Who,
 }
@@ -967,6 +971,11 @@ fn route(st: &State, req: &Request) -> Result<Response> {
     let path: Vec<&str> = req.path.iter().map(String::as_str).collect();
     if matches!(path.get(1), Some(&("bots" | "bot-runs"))) && path[0] == "api" {
         if let Some(r) = bot_route(st, req, &path)? {
+            return Ok(r);
+        }
+    }
+    if path.get(1) == Some(&"goals") && path[0] == "api" {
+        if let Some(r) = goal_route(st, req, &path)? {
             return Ok(r);
         }
     }
@@ -1307,7 +1316,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             let b: AddBody = req.json()?;
             st.cfg.validate_agent(b.agent.as_deref())?;
             let mut conn = st.conn();
-            let id = db::add_classified_task(
+            let id = db::add_linked_task(
                 &mut conn,
                 &b.who.actor(),
                 &NewTask {
@@ -1319,6 +1328,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 },
                 &b.blocked_by,
                 b.workload.as_deref(),
+                b.goal.as_deref(),
             )?;
             ok(201, &json!({ "id": id, "task": db::get_task(&conn, id)? }))
         }
@@ -1333,6 +1343,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 note: b.note,
                 not_before: b.not_before,
                 escalation_class: b.escalation_class,
+                goal: b.goal,
             };
             let mut conn = st.conn();
             let changed = db::set_task(&mut conn, &b.who.actor(), id, &c)?;
@@ -1515,6 +1526,133 @@ fn limit(req: &Request, default: i64) -> Result<i64> {
     .clamp(1, MAX_RUNS_LIMIT))
 }
 
+/// `/api/goals` routes (`goal.rs`); `None` when the path is not a goal route.
+fn goal_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response>> {
+    #[derive(Deserialize)]
+    struct Propose {
+        goal: goal::NewGoal,
+        owner_ref: Option<String>,
+        #[serde(flatten)]
+        who: Who,
+    }
+    #[derive(Deserialize)]
+    struct EditBody {
+        #[serde(flatten)]
+        edit: goal::Edit,
+        why: String,
+        owner_ref: Option<String>,
+        #[serde(flatten)]
+        who: Who,
+    }
+    #[derive(Deserialize)]
+    struct ChangeBody {
+        why: String,
+        owner_ref: Option<String>,
+        /// The bot to attach or detach (`join`, `leave`).
+        bot: Option<String>,
+        #[serde(flatten)]
+        who: Who,
+    }
+    #[derive(Deserialize)]
+    struct RecordBody {
+        kind: String,
+        task_id: Option<i64>,
+        body: String,
+        #[serde(flatten)]
+        who: Who,
+    }
+    let r = match (req.method.as_str(), path) {
+        ("GET", ["api", "goals"]) => ok(
+            200,
+            &goal::list(&st.conn(), req.query("bot"), req.query("state"))?,
+        ),
+        ("GET", ["api", "goals", name]) => ok(200, &goal::detail(&st.conn(), name)?),
+        ("GET", ["api", "goals", name, "events"]) => ok(
+            200,
+            &goal::events(
+                &st.conn(),
+                name,
+                limit(req, DEFAULT_RUNS_LIMIT)?,
+                req.flag("trajectory"),
+            )?,
+        ),
+        ("POST", ["api", "goals"]) => {
+            let b: Propose = req.json()?;
+            ok(
+                201,
+                &goal::propose(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    &b.goal,
+                    b.owner_ref.as_deref(),
+                    remote::epoch(),
+                )?,
+            )
+        }
+        ("PATCH", ["api", "goals", name]) => {
+            let b: EditBody = req.json()?;
+            ok(
+                200,
+                &goal::edit(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    name,
+                    &b.edit,
+                    &b.why,
+                    b.owner_ref.as_deref(),
+                )?,
+            )
+        }
+        (
+            "POST",
+            ["api", "goals", name, action @ ("activate" | "pause" | "resume" | "done" | "drop")],
+        ) => {
+            let b: ChangeBody = req.json()?;
+            ok(
+                200,
+                &goal::change(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    name,
+                    action,
+                    &b.why,
+                    b.owner_ref.as_deref(),
+                )?,
+            )
+        }
+        ("POST", ["api", "goals", name, action @ ("join" | "leave")]) => {
+            let b: ChangeBody = req.json()?;
+            let bot = b.bot.as_deref().context("bot is required")?;
+            ok(
+                200,
+                &goal::membership(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    name,
+                    action,
+                    bot,
+                    &b.why,
+                    b.owner_ref.as_deref(),
+                )?,
+            )
+        }
+        ("POST", ["api", "goals", name, "events"]) => {
+            let b: RecordBody = req.json()?;
+            let id = goal::record(
+                &mut st.conn(),
+                &b.who.actor(),
+                name,
+                &b.kind,
+                b.task_id,
+                &b.body,
+            )?;
+            ok(201, &json!({"event": id}))
+        }
+        _ => return Ok(None),
+    };
+    r.map(Some)
+}
+
 /// `/api/bots` and `/api/bot-runs` routes; `None` when the path is not a bot route.
 fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response>> {
     #[derive(Deserialize)]
@@ -1546,6 +1684,8 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         now: bool,
         note: String,
         key: Option<String>,
+        /// Labels the wake `[goal NAME]`; the goal must exist.
+        goal: Option<String>,
         #[serde(flatten)]
         who: Who,
     }
@@ -1578,6 +1718,7 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
     struct ScheduleAdd {
         #[serde(flatten)]
         schedule: schedule::NewSchedule,
+        goal: Option<String>,
         why: String,
         #[serde(flatten)]
         who: Who,
@@ -1595,11 +1736,34 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
             let b: ScheduleAdd = req.json()?;
             ok(
                 201,
-                &schedule::add(
+                &schedule::add_for_goal(
                     &mut st.conn(),
                     &b.who.actor(),
                     name,
                     &b.schedule,
+                    b.goal.as_deref(),
+                    &b.why,
+                    now,
+                )?,
+            )
+        }
+        ("PATCH", ["api", "bots", name, "schedules", sched]) => {
+            #[derive(Deserialize)]
+            struct ScheduleEdit {
+                goal: String,
+                why: String,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: ScheduleEdit = req.json()?;
+            ok(
+                200,
+                &schedule::set_goal(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    name,
+                    sched,
+                    &b.goal,
                     &b.why,
                     now,
                 )?,
@@ -1724,12 +1888,21 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                 (None, None, true) => now,
                 _ => bail!("give exactly one of in_seconds (> 0), at or now"),
             };
+            let mut conn = st.conn();
+            let goal = match &b.goal {
+                Some(g) if !b.note.trim().is_empty() => goal::resolve(&conn, g)?,
+                _ => None,
+            };
+            let note = match goal {
+                Some(g) => goal::label(&g.name, &b.note),
+                None => b.note,
+            };
             let (id, due_at) = bot::add_wake(
-                &mut st.conn(),
+                &mut conn,
                 &b.who.actor(),
                 name,
                 due,
-                &b.note,
+                &note,
                 b.key.as_deref(),
                 now,
             )?;
