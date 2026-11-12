@@ -1315,16 +1315,16 @@ fn orphan_caches_go_once_unused() {
     let tmp = tempfile::tempdir().unwrap();
     let tmp = tmp.path().canonicalize().unwrap();
     let caches = tmp.join("cache");
-    for name in ["taskq-target", "fresh-target", "task-1-target"] {
+    for name in ["legacy-target", "fresh-target", "task-1-target"] {
         fs::create_dir_all(caches.join(name).join("debug")).unwrap();
         fs::write(caches.join(name).join("debug/x"), "x").unwrap();
     }
     fs::set_permissions(
-        caches.join("taskq-target/debug"),
+        caches.join("legacy-target/debug"),
         fs::Permissions::from_mode(0o555),
     )
     .unwrap();
-    age_tree(&caches.join("taskq-target"));
+    age_tree(&caches.join("legacy-target"));
     age_tree(&caches.join("task-1-target"));
     let mut routes = HashMap::new();
     held_task(&mut routes, 1, "in_progress", "in_progress", OLD);
@@ -1341,20 +1341,20 @@ fn orphan_caches_go_once_unused() {
 
     let dry = keeper(&cfg, &url, false, &tmp).tick(None, &AtomicBool::new(false));
     assert_eq!(
-        kind_lines(&dry.lines, "orphan_cache")[&at("taskq-target")].1,
+        kind_lines(&dry.lines, "orphan_cache")[&at("legacy-target")].1,
         "would_delete"
     );
 
     let tick = keeper(&cfg, &url, true, &tmp).tick(None, &AtomicBool::new(false));
     let lines = kind_lines(&tick.lines, "orphan_cache");
     assert!(tick.ok, "{lines:?}");
-    let (task, decision, reason) = &lines[&at("taskq-target")];
+    let (task, decision, reason) = &lines[&at("legacy-target")];
     assert_eq!(
         (task, decision.as_str()),
         (&Value::Null, "deleted"),
         "{reason}"
     );
-    assert!(!at("taskq-target").exists());
+    assert!(!at("legacy-target").exists());
     let (_, decision, reason) = &lines[&at("fresh-target")];
     assert_eq!(decision, "retain");
     assert!(reason.contains("unused 604800s"), "{reason}");
