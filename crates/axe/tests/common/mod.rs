@@ -18,19 +18,9 @@ pub struct Server {
     pub token_file: PathBuf,
 }
 
-/// Drops the old-name variables of the environment the tests run in, so
-/// the compatibility import never fills in an `AXE_*` a test left unset.
-pub fn isolate(c: &mut Command) -> &mut Command {
-    for n in axe::compat::ENV_NAMES {
-        c.env_remove(format!("{}{n}", axe::compat::OLD_ENV_PREFIX));
-    }
-    c
-}
-
 /// Base server command with an isolated db, config, and token file.
 pub fn server_cmd(db: &Path, config: &Path, token_file: &Path, args: &[&str]) -> Command {
     let mut c = Command::new(BIN);
-    isolate(&mut c);
     c.arg("server")
         .args(args)
         .env("AXE_DB", db)
@@ -114,7 +104,6 @@ impl Server {
     /// CLI command pointed at this server; writes authenticate via the token file.
     pub fn cli(&self, args: &[&str]) -> Command {
         let mut c = Command::new(BIN);
-        isolate(&mut c);
         c.args(args)
             .env("AXE_SERVER", &self.url)
             .env("AXE_TOKEN_FILE", &self.token_file)

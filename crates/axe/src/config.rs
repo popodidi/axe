@@ -650,7 +650,9 @@ pub fn default_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("AXE_CONFIG").filter(|p| !p.is_empty()) {
         return Ok(PathBuf::from(p));
     }
-    crate::compat::home_path(".config/axe/config.toml").context("cannot determine home directory")
+    dirs::home_dir()
+        .map(|h| h.join(".config/axe/config.toml"))
+        .context("cannot determine home directory")
 }
 
 /// Bearer token file: `$AXE_TOKEN_FILE`, default `~/.config/axe/token`.
@@ -658,7 +660,9 @@ pub fn token_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("AXE_TOKEN_FILE").filter(|p| !p.is_empty()) {
         return Ok(PathBuf::from(p));
     }
-    crate::compat::home_path(".config/axe/token").context("cannot determine home directory")
+    dirs::home_dir()
+        .map(|h| h.join(".config/axe/token"))
+        .context("cannot determine home directory")
 }
 
 /// Reads a token file; a missing or blank file means no token.
@@ -675,8 +679,8 @@ pub fn expand_tilde(p: &str) -> PathBuf {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from(p));
     }
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(path) = crate::compat::home_path(rest) {
-            return path;
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
         }
     }
     PathBuf::from(p)

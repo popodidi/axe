@@ -17,10 +17,7 @@ read it. When this file and the code disagree, the code wins.
 
 Precedence: an environment variable that is set and non-empty wins over the
 default path; there is no CLI flag for the config, token or database paths.
-Config values themselves have no environment overrides. Legacy names are
-accepted during migration (see `compat.rs`): old environment variables fill
-unset `AXE_*` ones (with a warning), and old config, data and state
-directories are used when the axe ones are missing.
+Config values themselves have no environment overrides.
 
 `~` and `~/...` are expanded in `workspace_root`, `log_dir`,
 `resources.path` and `telegram.bot.token_file`. Other paths are taken as given.
@@ -351,9 +348,7 @@ Empty values count as unset everywhere.
 | `OTEL_RESOURCE_ATTRIBUTES` | Inherited value plus `[otel]` attributes | Same |
 
 The token is not placed in the agent environment; agents inherit
-`AXE_TOKEN_FILE` (or its default) from the dispatcher. During migration each
-`AXE_*` variable the dispatcher sets is also set under its legacy name (see
-`compat.rs`).
+`AXE_TOKEN_FILE` (or its default) from the dispatcher.
 
 ## Validation errors worth knowing
 

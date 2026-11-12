@@ -6,7 +6,6 @@ pub mod bot;
 pub mod channel;
 pub mod cli;
 pub mod client;
-pub mod compat;
 pub mod config;
 pub mod db;
 pub mod dispatch;

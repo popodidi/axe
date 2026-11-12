@@ -45,10 +45,10 @@ pub fn command(
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    for k in crate::compat::both_names(env_remove) {
+    for k in env_remove {
         command.env_remove(k);
     }
-    for (k, v) in crate::compat::child_env(env) {
+    for (k, v) in env {
         command.env(k, v);
     }
     Ok(command)
