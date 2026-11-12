@@ -150,9 +150,7 @@ impl Client {
                 req = req.set("Authorization", &format!("Bearer {token}"));
             }
             if let Some(id) = id {
-                req = req
-                    .set(REQUEST_ID_HEADER, id)
-                    .set(crate::compat::OLD_REQUEST_ID_HEADER, id);
+                req = req.set(REQUEST_ID_HEADER, id);
             }
             self.finish(req.send_json(body.clone()))
         })
@@ -187,7 +185,6 @@ impl Client {
                 Ok(resp) => {
                     let name = resp
                         .header("X-Axe-File-Name")
-                        .or_else(|| resp.header(crate::compat::OLD_FILE_NAME_HEADER))
                         .map(|n| crate::server::pct_decode(n, false));
                     let mut bytes = Vec::new();
                     std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes)?;
@@ -222,9 +219,7 @@ impl Client {
                 req = req.set("Authorization", &format!("Bearer {token}"));
             }
             if let Some(id) = id {
-                req = req
-                    .set(REQUEST_ID_HEADER, id)
-                    .set(crate::compat::OLD_REQUEST_ID_HEADER, id);
+                req = req.set(REQUEST_ID_HEADER, id);
             }
             self.finish(req.send_bytes(bytes))
         })

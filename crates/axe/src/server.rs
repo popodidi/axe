@@ -627,11 +627,7 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
         observe(200);
         return Ok(stream_events(st, &mut w, cors)?);
     }
-    let request_id = req
-        .headers
-        .get(REQUEST_ID_HEADER)
-        .or_else(|| req.headers.get(crate::compat::OLD_REQUEST_ID_HEADER))
-        .filter(|_| !read);
+    let request_id = req.headers.get(REQUEST_ID_HEADER).filter(|_| !read);
     let resp = match request_id {
         Some(id) => replayable(st, &req, id),
         None => route(st, &req).unwrap_or_else(|e| error_response(&e)),
@@ -810,13 +806,14 @@ fn tg_file(st: &State, w: &mut TcpStream, req: &Request, observe: &dyn Fn(u16)) 
             } else {
                 "application/octet-stream".into()
             };
-            write_head(w, 200, &mime, Some(bytes.len()), None, &{
-                let name = channel::pct_encode(&name);
-                format!(
-                    "X-Axe-File-Name: {name}\r\n{}: {name}\r\n",
-                    crate::compat::OLD_FILE_NAME_HEADER
-                )
-            })?;
+            write_head(
+                w,
+                200,
+                &mime,
+                Some(bytes.len()),
+                None,
+                &format!("X-Axe-File-Name: {}\r\n", channel::pct_encode(&name)),
+            )?;
             w.write_all(&bytes)?;
             Ok(w.flush()?)
         }

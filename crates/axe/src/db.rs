@@ -112,7 +112,9 @@ pub fn default_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("AXE_DB").filter(|p| !p.is_empty()) {
         return Ok(PathBuf::from(p));
     }
-    crate::compat::home_path(".local/share/axe/axe.db").context("cannot determine home directory")
+    dirs::home_dir()
+        .map(|h| h.join(".local/share/axe/axe.db"))
+        .context("cannot determine home directory")
 }
 
 /// Opens the database: creates a fresh v16 schema, or migrates v8-v15 to v16. Older

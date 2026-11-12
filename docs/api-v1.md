@@ -110,9 +110,6 @@ use the numeric code.
 | `X-Axe-File-Name` | response | Percent-encoded file name on Telegram file downloads |
 | `Origin` | request | Checked against `server.cors_origins` |
 
-The server also accepts and sends legacy header names (see compat.rs) for the
-request id and file name; new clients should use the `X-Axe-*` names.
-
 ### Retry-safe writes (`X-Axe-Request-Id`)
 
 - Ignored on `GET`. Value: 1-64 characters of `[A-Za-z0-9-]`, else `400 invalid request id`.

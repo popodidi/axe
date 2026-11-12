@@ -856,7 +856,6 @@ fn cli_dry_run_prints_decisions() {
     let cli = |args: &[&str], cfg: &str| {
         fs::write(&config, cfg).unwrap();
         let mut c = Command::new(common::BIN);
-        common::isolate(&mut c);
         c.args(args)
             .env("AXE_CONFIG", &config)
             .env("AXE_SERVER", &url)

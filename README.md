@@ -1338,16 +1338,6 @@ and a goal with no budget never gates. Schema v16 only adds `goals`, `goal_bots`
 `user_version` lowered to 15 opens with a v15 binary and upgrades again in
 place.
 
-## Migrating from the old name
-
-axe was imported from an earlier tool under another name. Until every
-deployment has moved, one module (`crates/axe/src/compat.rs`, which lists the
-old names) keeps them working and is then deleted: the old environment
-variables fill unset `AXE_*` ones (with a warning) and child agents get both;
-the old config, data and state directories are used when the axe ones are
-missing; both request and file-name header names are accepted and sent; and
-the binary runs unchanged through a symlink with the old name.
-
 ## Docs
 
 References and design records are in [`docs/`](docs/README.md): the
