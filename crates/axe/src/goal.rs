@@ -77,6 +77,7 @@ pub fn migrate(tx: &Transaction) -> Result<()> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Goal {
     pub id: i64,
     pub name: String,
@@ -94,6 +95,7 @@ pub struct Goal {
     /// Spend over the last 7 days against the weekly budgets; set by `list`
     /// and `detail` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub budget: Option<Budget>,
 }
 
@@ -156,6 +158,7 @@ pub fn list(conn: &Connection, bot_name: Option<&str>, state: Option<&str>) -> R
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "GoalEvent"))]
 pub struct Event {
     pub id: i64,
     pub at: String,
@@ -203,6 +206,7 @@ pub fn events(conn: &Connection, name: &str, limit: i64, trajectory: bool) -> Re
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "GoalTask"))]
 pub struct LinkedTask {
     pub id: i64,
     pub state: String,
@@ -227,22 +231,42 @@ pub fn tasks(conn: &Connection, name: &str) -> Result<Vec<LinkedTask>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
+/// The next goal-tagged wake of any bot: a pending `[goal NAME]` wake, or the
+/// next run of an enabled schedule with the goal (RFC3339).
+pub fn next_wake(conn: &Connection, g: &Goal) -> Result<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT MIN(due) FROM (
+           SELECT due_at AS due FROM bot_wakes
+            WHERE run_id IS NULL AND kind='wake' AND substr(body,1,length(?1))=?1
+           UNION ALL
+           SELECT next_at FROM bot_schedules WHERE goal_id=?2 AND enabled=1)",
+        params![label(&g.name, "").trim_end(), g.id],
+        |r| r.get(0),
+    )?)
+}
+
 /// `axe goal show`: the goal, its linked tasks and the latest trajectory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "GoalDetail"))]
 pub struct Detail {
     #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
     pub goal: Goal,
     pub tasks: Vec<LinkedTask>,
     pub trajectory: Vec<Event>,
+    /// The next goal-tagged wake ([`next_wake`]).
+    #[serde(default)]
+    pub next_wake: Option<String>,
 }
 
 pub fn detail(conn: &Connection, name: &str) -> Result<Detail> {
     let mut goal = get(conn, name)?;
     goal.budget = Some(budget(conn, &goal, crate::remote::epoch())?);
     Ok(Detail {
-        goal,
+        next_wake: next_wake(conn, &goal)?,
         tasks: tasks(conn, name)?,
         trajectory: events(conn, name, SHOW_TRAJECTORY, true)?,
+        goal,
     })
 }
 
@@ -759,6 +783,7 @@ pub const ATTENTION_KINDS: [&str; 3] = ["activated", "budget", "intent"];
 
 /// The window a [`Budget`] covers, `[since, until)` in RFC3339.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "BudgetWindow"))]
 pub struct Window {
     pub since: String,
     pub until: String,
@@ -768,6 +793,7 @@ pub struct Window {
 /// A goal's spend over the last 7 days against its weekly budgets. A budget of
 /// `None` is unlimited and never gates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Budget {
     pub cost_week: Option<f64>,
     /// Estimated USD of the runs attributed to the goal.

@@ -49,7 +49,7 @@ The single `/` route uses query parameters, preserved across client navigation:
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| view | tasks | Tasks, Routines, Bots, Stats or Cost; legacy `overview`, `ops` and `live` redirect to Tasks |
+| view | tasks | Tasks, Routines, Bots, Goals, Stats or Cost; legacy `overview`, `ops` and `live` redirect to Tasks |
 | project | empty | Exact filter across views |
 | state | active | Tasks only: `active` hides done; `all` includes done, or exact server status |
 | status | empty | Routines only: empty is All; `enabled`, `paused` or `archived` |
@@ -63,6 +63,7 @@ The single `/` route uses query parameters, preserved across client navigation:
 | routine | empty | Selected routine ID in Routines (including archived) |
 | bot | empty | Selected bot name in Bots; a bare `?bot=<name>` opens the Bots view |
 | botrun | empty | Bot run ID whose log overlay is open (`/api/bot-runs/:id/log`) |
+| goal | empty | Selected goal name in Goals; a bare `?goal=<name>` opens the Goals view |
 | focus | empty | Focused task row ID |
 | tab | spec | Task: spec, events, runs, artifacts. Bot: profile (default), wakes, runs, events, stats |
 | server | serving origin | API base URL; another origin must be allowed by the server's CORS |
@@ -223,13 +224,33 @@ Detail reads (bot, wakes, events, runs, activity) reload on every server change
 `tests/bots.spec.ts` covers the list (both themes, wide and phone), the detail
 tabs, stats and the bot run log overlay; `lib/bot-stats.test.ts` the metrics.
 
+### Goals
+
+Read-only view of [goals](../docs/design/goals.md); change them with
+`axe goal`. `?view=goals` lists every goal (`/api/goals`): name and project,
+state (proposed, active, paused, done or dropped), attached bots, the 7-day
+cost as `$spent/$limit` with a bar (red once spent), attention spent/limit,
+and the deadline; a goal without a limit shows its spend and "no limit". Search
+(name, project, bots, intent) and the project filter apply. A row opens
+`?goal=<name>` in place of the list; Back or Esc returns, focusing the row.
+
+The detail page (`/api/goals/:name`) shows the facts (project, bots, budget
+and attention bars, deadline, the next goal-tagged wake of any bot, update
+time), spend by source, `axe goal show|log <name>` commands, the intent
+(Markdown), the open linked tasks and the trajectory: every hypothesis, test,
+verdict, observation and note, oldest first
+(`/api/goals/:name/events?trajectory=1&limit=1000`). A task id, in the
+trajectory or the open task list, opens that task in Tasks. Reads reload on
+every server change. `tests/goals.spec.ts` covers list (both themes, wide and
+phone), detail, task links and the empty state; `lib/goals.test.ts` the meters.
+
 List and detail are independently scrollable. Search updates the URL as typed.
 API refresh preserves scroll and stale content on temporary errors. SSE `change` reloads data, with five-second polling
 while disconnected. Running duration ticks locally every second.
 
 Clicking anywhere in a task row opens it; the title button stays the keyboard
 target. Keyboard (outside form controls): j/k focus rows, Enter opens the
-focused row (Tasks), Esc closes the topmost pane (task, then routine, then bot) and drops `tab`, / focuses search. Views are ordered Tasks, Routines, Bots, Stats, Cost: g then t/r/b/s/c; legacy g then v opens Tasks.
+focused row (Tasks), Esc closes the topmost pane (task, then routine, then bot or goal) and drops `tab`, / focuses search. Views are ordered Tasks, Routines, Bots, Goals, Stats, Cost: g then t/r/b/o/s/c; legacy g then v opens Tasks.
 Shortcut hints sit beside each view link and in its tooltip. The refresh
 button next to the connection state reloads server data immediately. On phones
 the navigation collapses into a top bar and detail occupies the full workspace.

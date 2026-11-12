@@ -168,10 +168,10 @@ intent changes.
   `GET /api/goals/{name}/events`; token writes `POST /api/goals`,
   `PATCH /api/goals/{name}`, `POST /api/goals/{name}/{action}`,
   `POST /api/goals/{name}/events` ([HTTP API](../api-v1.md#goals)).
+- Dashboard: the Goals view (`?view=goals`, [web README](../../web/README.md#goals)).
 
 ## Deferred
 
-- A dashboard goals view.
 - Cross-goal portfolio allocation (LV3).
 - Server-checked owner references.
 - Attributing chat attention (owner messages) to a goal.

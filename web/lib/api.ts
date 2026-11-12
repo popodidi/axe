@@ -84,4 +84,63 @@ export type BotSchedule = { id: number, name: string, cron: string, timezone: st
  */
 goal: string | null, };
 
+export type Goal = { id: number, name: string, project: string, state: string, intent: string, deadline: string | null, budget_cost_week: number | null, budget_attention_week: number | null, created_at: string, updated_at: string, 
+/**
+ * Attached bot names.
+ */
+bots: Array<string>, 
+/**
+ * Spend over the last 7 days against the weekly budgets; set by `list`
+ * and `detail` only.
+ */
+budget?: Budget, };
+
+export type Budget = { cost_week: number | null, 
+/**
+ * Estimated USD of the runs attributed to the goal.
+ */
+cost_spent: number, attention_week: number | null, 
+/**
+ * Escalation episodes and approvals on linked tasks, plus owner goal
+ * actions (activate, budget, intent): one unit each.
+ */
+attention_spent: number, 
+/**
+ * Bot runs whose wakes mix this goal with other work; not in `cost_spent`.
+ */
+unattributed_runs: number, 
+/**
+ * Attributed runs with unknown usage; not in `cost_spent`.
+ */
+unknown_runs: number, 
+/**
+ * Cost of linked task runs.
+ */
+cost_tasks: number, 
+/**
+ * Cost of goal-tagged bot runs, per bot.
+ */
+cost_bots: { [key in string]: number }, window: BudgetWindow, };
+
+export type BudgetWindow = { since: string, until: string, days: number, };
+
+export type GoalEvent = { id: number, at: string, actor: string, session: string | null, kind: string, task_id: number | null, owner_ref: string | null, body: string, };
+
+export type GoalTask = { id: number, state: string, title: string, };
+
+export type GoalDetail = { tasks: Array<GoalTask>, trajectory: Array<GoalEvent>, 
+/**
+ * The next goal-tagged wake ([`next_wake`]).
+ */
+next_wake: string | null, id: number, name: string, project: string, state: string, intent: string, deadline: string | null, budget_cost_week: number | null, budget_attention_week: number | null, created_at: string, updated_at: string, 
+/**
+ * Attached bot names.
+ */
+bots: Array<string>, 
+/**
+ * Spend over the last 7 days against the weekly budgets; set by `list`
+ * and `detail` only.
+ */
+budget?: Budget, };
+
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
