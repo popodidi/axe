@@ -310,7 +310,7 @@ other than `human` need a non-empty `owner_ref`, else `403`.
 | Method | Path | Query / body | Response |
 |---|---|---|---|
 | GET | `/api/goals` | `bot`, `state` | Goals with attached `bots` (names) and `budget` |
-| GET | `/api/goals/{name}` | | Goal plus `budget`, `tasks` (`{id, state, title}`, linked by their latest `goal` event) and `trajectory` (latest 10 trajectory events) |
+| GET | `/api/goals/{name}` | | Goal plus `budget`, `tasks` (`{id, state, title}`, linked by their latest `goal` event), `trajectory` (latest 10 trajectory events) and `next_wake` (the next goal-tagged wake or enabled goal schedule run of any bot, or null) |
 | GET | `/api/goals/{name}/events` | `limit` (default 50, max 1000), `trajectory=1` | Goal events, oldest first: `{id, at, actor, session, kind, task_id, owner_ref, body}` |
 | POST | `/api/goals` | `{goal: {name, project, intent?, deadline?, budget_cost_week?, budget_attention_week?, bots? = []}, owner_ref?}` + `Who` | `201` goal (`proposed`); a `bot:<name>` actor is attached |
 | PATCH | `/api/goals/{name}` | `{intent?, deadline?, budget_cost_week?, budget_attention_week?, why, owner_ref?}` + `Who`; values are strings, `"none"` clears | Goal |

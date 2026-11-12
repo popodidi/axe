@@ -1,0 +1,224 @@
+@value bp-phone, bp-list-narrow from "../../app/styles/breakpoints.module.css";
+
+/* Goals: a list like Bots, and a full-width detail page with the trajectory. */
+.stack {
+  display: grid;
+  gap: var(--section-gap);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.rowButton {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sub {
+  margin-top: var(--space-quarter);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* Goal states reuse the task state tints; the text carries the meaning. */
+.state {
+  display: inline-block;
+  padding: var(--pill-padding);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+.state[data-state="proposed"] {
+  color: var(--state-pending-fg);
+  background: var(--state-pending-bg);
+}
+
+.state[data-state="active"] {
+  color: var(--state-in-progress-fg);
+  background: var(--state-in-progress-bg);
+}
+
+.state[data-state="paused"] {
+  color: var(--state-blocked-fg);
+  background: var(--state-blocked-bg);
+}
+
+.state[data-state="done"] {
+  color: var(--state-done-fg);
+  background: var(--state-done-bg);
+}
+
+/* Spent against a weekly limit: the text, then a thin bar. */
+.meter {
+  display: grid;
+  gap: var(--space-quarter);
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.track {
+  display: block;
+  height: var(--space-half);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.bar {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.fill {
+  fill: var(--chart-fill);
+}
+
+.fill[data-over="true"] {
+  fill: var(--status-danger);
+}
+
+.header {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.id {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+}
+
+.back {
+  margin-left: auto;
+}
+
+.title {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--space-8)), 1fr));
+  gap: var(--space-snug) var(--space-2);
+  padding: var(--space-snug) var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+
+.facts dt {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.facts dd {
+  margin: 0;
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  overflow-wrap: anywhere;
+}
+
+.facts .track {
+  background: var(--surface-1);
+}
+
+.block {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.blockTitle {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+}
+
+.note {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+/* Trajectory: oldest first, one entry per hypothesis, test, verdict, observation or note. */
+.trajectory {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.event {
+  display: grid;
+  gap: var(--space-half);
+  padding: var(--space-1) 0 var(--space-1) var(--space-snug);
+  border-bottom: var(--border-subtle);
+  border-left: var(--space-quarter) solid var(--surface-2);
+}
+
+.event[data-kind="verdict"] {
+  border-left-color: var(--state-done-fg);
+}
+
+.event[data-kind="hypothesis"] {
+  border-left-color: var(--state-pending-fg);
+}
+
+.event[data-kind="test"] {
+  border-left-color: var(--state-in-progress-fg);
+}
+
+.event[data-kind="observation"] {
+  border-left-color: var(--state-blocked-fg);
+}
+
+.eventHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+}
+
+.kind {
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+@container bp-list-narrow {
+  .optional {
+    display: none;
+  }
+}
+
+@media bp-phone {
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

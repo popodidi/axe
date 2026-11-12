@@ -43,6 +43,11 @@ import {
 import { Cost } from "../components/dashboard/cost";
 import { Stats } from "../components/dashboard/stats";
 import { BotDetail, BotList, useBots } from "../components/dashboard/bots";
+import {
+  GoalDetailPage,
+  GoalList,
+  useGoals,
+} from "../components/dashboard/goals";
 import { Dependencies } from "../components/dashboard/dependencies";
 import {
   DetailResizer,
@@ -70,9 +75,9 @@ const when = (s: string) =>
     dateStyle: "medium",
     timeStyle: "short",
   });
-const views = ["tasks", "routines", "bots", "stats", "cost"];
-const labels = ["Tasks", "Routines", "Bots", "Stats", "Cost"];
-const keys = ["t", "r", "b", "s", "c"];
+const views = ["tasks", "routines", "bots", "goals", "stats", "cost"];
+const labels = ["Tasks", "Routines", "Bots", "Goals", "Stats", "Cost"];
+const keys = ["t", "r", "b", "o", "s", "c"];
 type Snapshot = {
   tasks: Task[];
 };
@@ -89,12 +94,14 @@ export default function Dashboard() {
   const search = useSearchParams();
   const query = search.toString();
   const p = new URLSearchParams(query);
-  // A bare `?bot=<name>` link opens the Bots view.
+  // A bare `?bot=<name>` or `?goal=<name>` link opens the Bots or Goals view.
   const view = views.includes(p.get("view") || "")
     ? p.get("view")!
     : p.has("bot")
       ? "bots"
-      : "tasks";
+      : p.has("goal")
+        ? "goals"
+        : "tasks";
   if (!p.has("state")) p.set("state", "active");
   const selected = p.get("task");
   const watched = p.get("run");
@@ -134,7 +141,7 @@ export default function Dashboard() {
       if (u.href !== location.href) history.replaceState(history.state, "", u);
       if ("task" in patch || "tab" in patch) u.searchParams.delete("detailY");
       if (
-        ["view", "project", "state", "status", "q", "sort", "page", "bot"].some(
+        ["view", "project", "state", "status", "q", "sort", "page", "bot", "goal"].some(
           (k) => k in patch,
         )
       )
@@ -149,7 +156,14 @@ export default function Dashboard() {
   useEffect(() => {
     const u = new URL(location.href);
     if (!views.includes(u.searchParams.get("view") || "")) {
-      u.searchParams.set("view", u.searchParams.has("bot") ? "bots" : "tasks");
+      u.searchParams.set(
+        "view",
+        u.searchParams.has("bot")
+          ? "bots"
+          : u.searchParams.has("goal")
+            ? "goals"
+            : "tasks",
+      );
       if (!u.searchParams.has("state")) u.searchParams.set("state", "active");
       window.history.replaceState(null, "", u);
     }
@@ -353,6 +367,25 @@ export default function Dashboard() {
     row.focus();
     botFocus.current = null;
   }, [botName, bots.bots]);
+  // Goals: the list, or one goal's detail page in its place.
+  const goalName = view === "goals" ? p.get("goal") : null;
+  const goals = useGoals(base, view === "goals" && !goalName, revision);
+  const goalFocus = useRef<string | null>(null);
+  const closeGoal = useCallback(() => {
+    const name = new URLSearchParams(location.search).get("goal");
+    if (!name) return;
+    goalFocus.current = name;
+    update({ goal: null });
+  }, [update]);
+  useEffect(() => {
+    if (goalName || !goalFocus.current) return;
+    const row = document.querySelector<HTMLElement>(
+      `#goal-${CSS.escape(goalFocus.current)} button`,
+    );
+    if (!row) return;
+    row.focus();
+    goalFocus.current = null;
+  }, [goalName, goals.goals]);
   // Keyboard opening moves focus to the detail heading once it is mounted.
   const focusDetail = useRef<number | null>(null);
   useEffect(() => {
@@ -380,9 +413,10 @@ export default function Dashboard() {
           c: "cost",
           r: "routines",
           b: "bots",
+          o: "goals",
         };
         if (v[e.key]) {
-          update({ view: v[e.key], task: null, focus: null, page: null, bot: null });
+          update({ view: v[e.key], task: null, focus: null, page: null, bot: null, goal: null });
           prefix.current = 0;
           return;
         }
@@ -398,6 +432,7 @@ export default function Dashboard() {
         else if (q.get("view") === "routines" && q.has("routine"))
           closeRoutine();
         else if (q.has("bot")) closeBot();
+        else if (q.has("goal")) closeGoal();
       }
       if (view === "tasks") {
         if (e.key === "j" || e.key === "k") {
@@ -426,7 +461,7 @@ export default function Dashboard() {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [rows, focus, view, update, closeTask, closeRoutine, closeBot]);
+  }, [rows, focus, view, update, closeTask, closeRoutine, closeBot, closeGoal]);
   // Polite announcement; failures are also shown, and the button stays "Copy".
   const [copied, setCopied] = useState({ text: "", failed: false });
   const announce = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -526,7 +561,7 @@ export default function Dashboard() {
               title={`${labels[i]} (g ${keys[i]})`}
               aria-current={view === v ? "page" : undefined}
               onClick={() =>
-                update({ view: v, task: null, page: null, focus: null, bot: null })
+                update({ view: v, task: null, page: null, focus: null, bot: null, goal: null })
               }
             >
               <span className={styles.navLabel}>{labels[i]}</span>
@@ -602,15 +637,15 @@ export default function Dashboard() {
             className={styles.listPane}
             aria-label="Task workspace"
           >
-            {view !== "stats" && view !== "cost" && !botName && (
+            {view !== "stats" && view !== "cost" && !botName && !goalName && (
             <div className={styles.filters}>
               <Search
                 compact
                 id="list-search"
                 ref={searchRef}
                 className={styles.search}
-                aria-label={`Search ${view === "routines" || view === "bots" ? view : "tasks"}`}
-                placeholder={`Search ${view === "routines" || view === "bots" ? view : "tasks"}…  /`}
+                aria-label={`Search ${["routines", "bots", "goals"].includes(view) ? view : "tasks"}`}
+                placeholder={`Search ${["routines", "bots", "goals"].includes(view) ? view : "tasks"}…  /`}
                 value={p.get("q") || ""}
                 onChange={(e) => changeFilter("q", e.target.value)}
               />
@@ -636,7 +671,9 @@ export default function Dashboard() {
                               new Set(
                                 view === "bots"
                                   ? (bots.bots || []).map((b) => b.project)
-                                  : (data?.tasks || []).map((t) => t.project),
+                                  : view === "goals"
+                                    ? (goals.goals || []).map((g) => g.project)
+                                    : (data?.tasks || []).map((t) => t.project),
                               ),
                             ).sort(),
                       ),
@@ -691,6 +728,24 @@ export default function Dashboard() {
                 onChange={(patch) => update(patch)}
                 onWatch={(id) => update({ botrun: String(id) })}
                 onCopy={copy}
+              />
+            ) : goalName ? (
+              <GoalDetailPage
+                key={base + goalName}
+                base={base}
+                name={goalName}
+                revision={revision}
+                onBack={closeGoal}
+                onOpenTask={(id) =>
+                  update({ view: "tasks", goal: null, task: String(id), tab: null })
+                }
+                onCopy={copy}
+              />
+            ) : view === "goals" ? (
+              <GoalList
+                state={goals}
+                params={p}
+                onOpen={(name) => update({ goal: name })}
               />
             ) : view === "bots" ? (
               <BotList

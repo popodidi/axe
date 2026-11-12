@@ -530,6 +530,7 @@ fn cli_drives_goals_through_the_api() {
     assert_eq!(show["budget_cost_week"], 20.0);
     assert_eq!(show["tasks"][0]["id"].to_string(), id);
     assert_eq!(show["trajectory"][1]["task_id"].to_string(), id);
+    assert_eq!(show["next_wake"], serde_json::Value::Null);
     let text = srv.ok(&["goal", "show", "g"]);
     assert!(text.contains("# Trajectory"), "{text}");
     assert!(text.contains(&format!("#{id} pending t")), "{text}");
@@ -581,6 +582,14 @@ fn cli_drives_goals_through_the_api() {
         .filter_map(|w| w["body"].as_str())
         .collect();
     assert!(bodies.contains(&"[goal g] look at it"), "{wakes}");
+    let due = wakes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["body"] == "[goal g] look at it")
+        .unwrap()["due_at"]
+        .clone();
+    assert_eq!(srv.get("/api/goals/g")["next_wake"], due);
     let out = srv.run(&["bot", "wake", "a", "--now", "--note", "x", "--goal", "nope"]);
     assert!(!out.status.success());
 

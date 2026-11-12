@@ -15,6 +15,7 @@ import type {
   TaskAction,
   Wake,
 } from "./bots";
+import type { Goal, GoalDetail, GoalEvent, GoalTask } from "./goals";
 type Reads<Server extends Dashboard, Dashboard> = [Server, Dashboard];
 /** `direction` is a string in Rust; the server only writes "in" or "out". */
 type Meta = Omit<MessageMeta, "direction"> & { direction: string };
@@ -32,4 +33,8 @@ export type ApiContract = [
   Reads<Api.MessageMeta, Meta>,
   Reads<Api.TaskAction, TaskAction>,
   Reads<Api.Activity, Omit<Activity, "messages"> & { messages: Meta[] }>,
+  Reads<Api.Goal, Goal>,
+  Reads<Api.GoalEvent, GoalEvent>,
+  Reads<Api.GoalTask, GoalTask>,
+  Reads<Api.GoalDetail, GoalDetail>,
 ];

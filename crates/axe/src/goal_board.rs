@@ -132,15 +132,7 @@ pub fn lines(conn: &Connection, name: &str) -> Result<Vec<GoalLine>> {
             .filter(|t| !CLOSED_TASK_STATES.contains(&t.state.as_str()))
             .map(|t| t.id)
             .collect();
-        let next_wake: Option<String> = conn.query_row(
-            "SELECT MIN(due) FROM (
-               SELECT due_at AS due FROM bot_wakes
-                WHERE run_id IS NULL AND kind='wake' AND substr(body,1,length(?1))=?1
-               UNION ALL
-               SELECT next_at FROM bot_schedules WHERE goal_id=?2 AND enabled=1)",
-            params![goal::label(&g.name, "").trim_end(), g.id],
-            |r| r.get(0),
-        )?;
+        let next_wake = goal::next_wake(conn, &g)?;
         let b = g.budget.clone().unwrap_or_default();
         out.push(GoalLine {
             others: g.bots.iter().filter(|b| *b != name).cloned().collect(),
