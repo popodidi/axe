@@ -3,7 +3,7 @@ name: ci
 # Pull requests run the fast checks: default-feature fmt, clippy and tests, the
 # TS types test, and the web job when the dashboard changed
 # (scripts/ci_scope.py). release.yml calls this workflow with `full: true` on a
-# v* tag (and its workflow_dispatch dry run): that adds the
+# v* tag (and on a release-dry-run/* branch push): that adds the
 # --no-default-features and embed-ui variants and always runs the web job.
 # Pushes to main run nothing: the pull request's run covers the merged code.
 on:

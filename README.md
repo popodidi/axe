@@ -42,8 +42,9 @@ A `vX.Y.Z[-pre]` tag whose version matches `crates/axe/Cargo.toml` runs
 `.github/workflows/release.yml` on the self-hosted CI VM. Its `gate` job runs
 `ci.yml` in full (`full: true`: the feature variants, `embed-ui` and the `web`
 job); the release publishes only when the gate passes and the tagged commit is
-on `main`. Running `release.yml` by hand (`gh workflow run release.yml --ref
-<branch>`) is a dry run of the same path that pushes and publishes nothing.
+on `main`. Pushing a `release-dry-run/<name>` branch runs the same path at
+that commit as a dry run that pushes and publishes nothing (delete the branch
+afterwards).
 From one Docker build
 (`Dockerfile`, `embed-ui` on) it publishes:
 
