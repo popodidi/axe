@@ -27,22 +27,24 @@ Stored messages and `bot tg history` work in both builds.
 
 ### CI
 
-`.github/workflows/ci.yml` runs on the self-hosted CI VM. A pull request runs
-only what its changed files need (`scripts/ci_scope.py`): the default-feature
-checks always, the no-default-features checks when Telegram code changed, and
-the dashboard (`web` job, `embed-ui`) when `web/` or the code serving it
-changed; build or CI changes (`Cargo.toml`, `Cargo.lock`, `.github/`, ...) run
-everything. Pushes to `main` run everything. Rust builds use a size-capped
-sccache on the VM's cache disk (`scripts/ci_sccache.sh`).
+`.github/workflows/ci.yml` runs on the self-hosted CI VM for pull requests
+only: default-feature fmt, clippy and tests, and the TS types test, plus the
+`web` job when `web/` or the code serving the dashboard changed
+(`scripts/ci_scope.py`; build or CI changes such as `Cargo.toml`, `Cargo.lock`
+or `.github/` run it too). Pushes to `main` run no CI: the pull request's run
+covers the merged code. The `--no-default-features` and `embed-ui` variants run
+only in the release gate. Rust builds use a size-capped sccache on the VM's
+cache disk (`scripts/ci_sccache.sh`).
 
 ### Releases
 
 A `vX.Y.Z[-pre]` tag whose version matches `crates/axe/Cargo.toml` runs
-`.github/workflows/release.yml` on the self-hosted CI VM. It publishes only a
-commit whose push to `main` passed `ci.yml`, so push the tag after that run is
-green: otherwise the release fails before publishing anything, and can be
-re-run once main CI passes. The tag's own CI run is skipped when its commit
-already passed on `main`. From one Docker build
+`.github/workflows/release.yml` on the self-hosted CI VM. Its `gate` job runs
+`ci.yml` in full (`full: true`: the feature variants, `embed-ui` and the `web`
+job); the release publishes only when the gate passes and the tagged commit is
+on `main`. Running `release.yml` by hand (`gh workflow run release.yml --ref
+<branch>`) is a dry run of the same path that pushes and publishes nothing.
+From one Docker build
 (`Dockerfile`, `embed-ui` on) it publishes:
 
 | Asset | Contents |
@@ -57,9 +59,8 @@ gh release download <tag> -R popodidi/axe && sha256sum -c SHA256SUMS
 ```
 
 The job also runs `cargo publish --dry-run`; crates.io publishing is not done
-from CI. Other platforms install from source with `--tag <tag>`. A release
-that failed after the main CI check is retried with a new tag, never by moving
-or reusing one.
+from CI. Other platforms install from source with `--tag <tag>`. A failed
+release is retried with a new tag, never by moving or reusing one.
 
 ## Not a workflow engine
 
