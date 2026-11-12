@@ -26,8 +26,8 @@ concurrency:
   group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Build parallelism (CARGO_BUILD_JOBS, MAKEFLAGS) comes from the hlab CI
-# runner's environment, sized to its guest (Harvis infra/hlab-vm/ci-vm).
+# Build parallelism (CARGO_BUILD_JOBS, MAKEFLAGS) comes from the self-hosted CI
+# runner's environment, sized to its guest VM.
 env:
   CARGO_TERM_COLOR: never
 
