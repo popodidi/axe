@@ -87,7 +87,9 @@ Self-start an H task (state `pending`) only if all hold:
 - it is not on the project's "ask the owner first" list.
 
 Otherwise create it with `--state escalated`, then `axe escalate ID --class
-decision ...` so it shows as one Go/Skip on the board. Never self-approve.
+decision ...` and post its card, so it is one pinned Go/Skip in the owner's
+inbox: `axe bot tg send --task ID --buttons "Go=go;Skip=skip" "..."`. Never
+self-approve.
 
 ## 4. Budget
 

@@ -1057,7 +1057,7 @@ the public wakes view.
 `bot_messages` id shown as `#N` in wakes):
 
 ```sh
-axe bot tg send [--reply-to MSG] [--chat C] [--thread T] [--html] [--buttons "Yes=yes,No=no"] [--silent] (TEXT | --file F)
+axe bot tg send [--reply-to MSG] [--chat C] [--thread T] [--html] [--buttons "Yes=yes,No=no"] [--task N] [--silent] (TEXT | --file F)
 axe bot tg send-file PATH [--as photo|document|voice] [--caption C] [--reply-to MSG]
 axe bot tg edit MSG [TEXT [--html]] [--buttons "Label=data,...;Row2=data" | --clear-buttons]
 axe bot tg pin MSG [--silent] | unpin MSG
@@ -1065,7 +1065,7 @@ axe bot tg react MSG EMOJI | typing [--chat C] | delete MSG
 axe bot tg file MSG[/N] [--out DIR]     # default $AXE_WORKTREE/.inbox
 axe bot tg history [--limit 50] [--before MSG] [--search Q] [--json]
 axe bot tg board show [--json] | set-message MSG | clear
-axe bot tg goal-board show [--json] | set MSG | unset
+axe bot tg goal-board show [--json] | unset
 ```
 
 Targets must be allowlisted chats (403 otherwise); the default target is the
@@ -1094,59 +1094,67 @@ output reports the buttons Telegram says remain. `pin` and `unpin`
 `flags.pinned`; `--silent` sets `disable_notification` (private chats never
 notify). Groups need the bot to be an admin with `can_pin_messages`.
 
-**The "Waiting on you" board** is a rendered view, never a hand-kept list.
-`board set-message MSG` makes one of the bot's own text messages its board
-(`flags.board`; pin it with `pin MSG --silent`). Its lines are the escalated
-tasks in the bot's subscribed projects (`*` is all) and the bot's open cards:
-its text messages that still have buttons. A press (`flags.answered`), a
-`--clear-buttons` edit, a text edit without `--buttons` (Telegram drops the
-keyboard) or a delete closes a card. Each line shows the task id or card
-`#id`, a short title and its age, in Telegram HTML with an "Updated <time>"
-footer; past 25 items, or lines that do not fit 4096 characters, become "+N
-more". Each listed item has one inline button on its own row (`#349`,
-`card #1667`; data `board task #349` / `board card #1667`), stored in
-`flags.board_buttons` so the board is never a card. A press is a button wake
-for the bot whose board it is (`[button #N on #<board>] board task #349`); it
-does not answer the board or edit its keyboard, so every item stays
-pressable. A re-posted board carries the buttons and the old one loses its
-keyboard with the "Moved below" edit. A per-bot
-thread re-renders after every committed change (and every 60 s), only when
-the set of lines or titles changed (`flags.board_key`), recording a
-`board_render` bot event. The first render of a message just made the board
-edits it in place. After that, so the board never sits far up the chat, each
-change re-posts it (`[telegram] board = "repost"`, the default): the new board
-is sent silently at the bottom of the chat and becomes the board message, is
-pinned silently, and the old board is unpinned and edited to "Moved below
-(#new)". The new message keeps `flags.board_from` until all three steps are
-done, so a retry repeats only what is left; Telegram refusing a step on the
-old board (400) is logged as a skipped `board_error` and does not hold the
-board up. `board = "edit"` keeps the old behaviour: every render is an
-`editMessageText` of the one board message. A failed render is logged to
-stderr and as a `board_error` event and retried with backoff (5 s doubling to
-5 min, at least `retry_after`). A hand edit of the board is rendered over in
-place. `board show` prints the current board message, its text and whether
-the message shows it.
+**The inbox: pinned cards and the overview.** In each bot's chat the pinned
+list is the owner's inbox, rendered by the server, never a hand-kept list.
+`board set-message MSG` makes one of the bot's own text messages its
+overview (`flags.board`) and turns the inbox on for that bot; `board clear`
+turns it off. What waits on the owner: the escalated tasks in the bot's
+subscribed projects (`*` is all) and the bot's open cards, its text messages
+that still have buttons. A press (`flags.answered`), a `--clear-buttons`
+edit, a text edit without `--buttons` (Telegram drops the keyboard) or a
+delete closes a card.
 
-**The goal board** is a second rendered message, beside the "Waiting on you"
-board: `goal-board set MSG` makes one of the bot's own text messages its goal
-board (`flags.goal_board`; pin it with `pin MSG --silent`), `unset` stops
-rendering it (`set-message` and `clear` are aliases) and `show` prints it. One
-message is never both boards. It lists each goal the bot is attached to in
-state proposed, active or paused (done and dropped are omitted): the name and
-state ("awaiting your Go" while proposed), the other bots on it, the latest
-verdict or observation (first line), open linked tasks (`#id`), `$spent/$limit`
-and `attention spent/limit` over the last 7 days, the next goal-tagged wake or
-schedule run of any bot, and the deadline; "No active goals." when there are
-none. It is always edited in place, never re-posted, pinned or unpinned by the
-server, so it does not move the "Waiting on you" board. The same per-bot
-thread renders it after every committed change, only when its key changed
-(`flags.goal_board_key`): the key bands spend in 10% steps of each weekly
-limit, so a small spend change does not edit it (spend toward no limit never
-does on its own), while a state change, a new verdict or observation, a
-linked task opening or closing, a wake, or a budget or deadline edit does.
-Each render records a `goal_board_render` bot event; failures are logged like
-board failures (`board_error`, prefixed "goal board"). A hand edit is rendered
-over.
+- **One pinned card per item.** The server pins each open card silently
+  (`disable_notification`, `flags.card_pin`) and unpins it as soon as it is
+  closed. A card sent with `send --task N --buttons ...` (`flags.task`) stands
+  for escalated task N: the overview lists the task once, and the card closes
+  (keyboard removed, `flags.closed`) when the task leaves escalated. An
+  escalated task with no card sent since its escalation gets one: the bot gets
+  one wake (key `card-task-<id>-<escalated at>`, so a restart never repeats
+  it) asking it to post the card with its real options; 10 minutes after
+  that wake without one, the server posts a minimal card itself (task id,
+  project, title, the `blocked:` and `resolver:` lines, buttons `Resolved` /
+  `Discuss` with data `task #N resolved` / `task #N discuss`) and records a
+  `card_fallback` bot event. A press on any card is an ordinary button wake.
+  A pin Telegram refuses (400) is logged as a skipped `board_error` and not
+  retried (`flags.pin_skipped`). The Bot API documents no limit on pinned
+  messages per chat (Bot API 10.4, `pinChatMessage`).
+- **The overview** is one message, always the newest pin, so it shows last
+  in the pinned list (Telegram orders pins by sending date). It carries, for
+  the bot's subscribed projects: decisions waiting (count and ids, `#N` for a
+  task, `card #N` for a card), running tasks, blocked or waiting tasks
+  (status `blocked`), tasks done since 00:00 UTC, then the goal lines of the
+  goals the bot is attached to (below), and an "Updated <time>" footer, in
+  Telegram HTML within 4096 characters (12 ids per line, then `+N`; goals that
+  do not fit become "+N more goals"). It has no buttons: each item is its own
+  pinned card. A per-bot thread re-renders it after every committed change
+  (and every 60 s), only when what it shows changed (`flags.board_key`) or a
+  pinned card is newer than it, recording a `board_render` bot event. The
+  first render of a message just made the overview edits and pins it in
+  place. After that each change re-posts it (`[telegram] board = "repost"`,
+  the default): the new overview is sent silently at the bottom of the chat,
+  pinned silently, and the old one is unpinned and deleted (edited to "Moved
+  below (#new)" when Telegram refuses the delete, for example after 48 h). The
+  new message keeps `flags.board_from` until all steps are done, so a retry
+  repeats only what is left; Telegram refusing a step on the old overview
+  (400) is logged as a skipped `board_error`. `board = "edit"` edits the
+  overview in place instead, except that a pinned card newer than it still
+  re-posts it. A failed pass is logged to stderr and as a `board_error` event
+  and retried with backoff (5 s doubling to 5 min, at least `retry_after`). A
+  hand edit is rendered over. `board show` prints the overview message, its
+  text and whether it is current; `--json` adds `lines`, `stats` and `goals`.
+
+**Goal lines.** Each goal the bot is attached to in state proposed, active or
+paused (done and dropped are omitted): the name and state ("awaiting your Go"
+while proposed), the other bots on it, the latest verdict or observation
+(first line), open linked tasks (`#id`), `$spent/$limit` and `attention
+spent/limit` over the last 7 days, the next goal-tagged wake or schedule run
+of any bot, and the deadline; "No active goals." when there are none. Spend
+counts toward a re-render only in 10% steps of each weekly limit. The
+separate goal board message is retired: on the first pass the server unpins
+an old one (`flags.goal_board`), edits it to "Goals moved into the pinned
+overview." and clears the flag. `goal-board show` prints the goal lines;
+`goal-board set` is refused and `unset` clears an old flag.
 
 **Read privacy.** `GET /api/bots/:name/tg/history`, `/api/bots/:name/tg/board`,
 `/api/bots/:name/tg/goal-board` and

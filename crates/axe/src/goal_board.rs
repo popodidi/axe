@@ -1,15 +1,12 @@
-//! The goal board: a second pinned message per bot that the server renders
-//! from the goals the bot is attached to, separate from the "Waiting on you"
-//! board (`board.rs`). Design: `docs/design/goals.md`, "Goal board".
-//!
-//! The goal board message is the bot's own text message with
-//! `flags.goal_board`; the key of its last successful render is
-//! `flags.goal_board_key`. Unlike the "Waiting on you" board it is always
-//! edited in place and never re-posted, so it does not fight that board for
-//! the top pin. The key bands budget spend in 10% steps of each weekly limit,
-//! so a small spend change does not edit the message.
-use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+//! The goal lines of a bot: the goals it is attached to, as the pinned
+//! overview (`board.rs`) shows them. Design: `docs/design/goals.md`, "Goal
+//! board". The separate goal board message (`flags.goal_board`) is retired:
+//! the Telegram gateway unpins it, edits it to a pointer and clears the flag;
+//! `set_message` only unsets it. `show` still renders the goal lines alone.
+//! The key bands budget spend in 10% steps of each weekly limit, so a small
+//! spend change does not re-render the overview.
+use anyhow::{bail, Result};
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
 
@@ -71,27 +68,20 @@ pub fn message(conn: &Connection, name: &str) -> Result<Option<StoredMessage>> {
     crate::board::flagged(conn, name, "goal_board")
 }
 
-/// Makes `msg` (a local id) the bot's goal board message, or with `None`
-/// unsets it. The new goal board renders on the next pass.
+/// With `None`, stops rendering the bot's old goal board message. A new one
+/// is refused: the goal lines are part of the pinned overview.
 pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Result<Option<i64>> {
+    if msg.is_some() {
+        bail!("the goal board is part of the pinned overview now (`axe bot tg board`); there is no separate goal board message");
+    }
     crate::board::set_flagged(
         conn,
         name,
-        msg,
+        None,
         "goal_board",
         &["goal_board", "goal_board_key"],
         "board",
     )
-}
-
-/// Records the key of a successful render, and the text the message now shows.
-pub fn rendered(conn: &Connection, msg: i64, key: &str, text: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.goal_board_key',?2,'$.edited',json('true'))
-         WHERE id=?3",
-        params![text, key, msg],
-    )?;
-    Ok(())
 }
 
 /// The goals bot `name` is attached to that are still open, oldest first.
@@ -196,7 +186,7 @@ fn when(s: &str) -> String {
 }
 
 /// One goal's block of lines.
-fn block(g: &GoalLine) -> String {
+pub(crate) fn block(g: &GoalLine) -> String {
     let mut out = format!("\n\n<b>{}</b> · {}", escape(&g.name), escape(&g.state));
     if g.state == "proposed" {
         out.push_str(" · awaiting your Go");

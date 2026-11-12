@@ -1815,20 +1815,33 @@ fn escalate(rig: &Rig, id: &str) {
 }
 
 #[test]
-fn board_renders_escalations_and_open_cards() {
-    // In-place edits (`board = "edit"`), so every render lands on one message.
+fn overview_renders_stats_and_decisions_in_place() {
+    // In-place edits (`board = "edit"`): with no cards, every render lands
+    // on one message.
     let rig = Rig::with("board = \"edit\"");
     rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
     let (_, board) = make_board(&rig);
-    let t = wait_board(&rig, board, 0, "empty board", |t| {
+    let t = wait_board(&rig, board, 0, "empty overview", |t| {
         t.contains("Nothing waiting on you")
     });
-    assert!(t.starts_with("<b>Waiting on you</b>"), "{t}");
+    assert!(
+        t.starts_with("<b>Overview</b>\n\nDecisions waiting: none\nRunning: none\nBlocked or waiting: none\nDone today: none"),
+        "{t}"
+    );
+    assert!(t.contains("<b>Goals</b>\nNo active goals."), "{t}");
     assert!(t.contains("<i>Updated "), "{t}");
     let edit = rig.stub.calls("editMessageText").pop().unwrap();
     assert_eq!(edit.params["parse_mode"], "HTML");
+    assert_eq!(edit.params["reply_markup"], json!({"inline_keyboard": []}));
+    // The first render also pins the overview, silently.
+    wait_for("overview pinned", 20, || {
+        !rig.stub.calls("pinChatMessage").is_empty()
+    });
+    let pin = rig.stub.calls("pinChatMessage").pop().unwrap();
+    assert_eq!(pin.params["message_id"], board);
+    assert_eq!(pin.params["disable_notification"], true);
 
-    // An escalation adds a line; approve, set pending and done remove it.
+    // An escalation is a decision; approve, set pending and done remove it.
     rig.srv()
         .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
     rig.srv()
@@ -1842,75 +1855,53 @@ fn board_renders_escalations_and_open_cards() {
     for resolve in resolutions {
         let n = board_edits(&rig, board).len();
         escalate(&rig, "1");
-        let t = wait_board(&rig, board, n, "task line", |t| t.contains("task #1"));
-        assert!(t.contains("• task #1 Pick a colour <i>(p, "), "{t}");
-        assert!(!t.contains("Not subscribed"), "{t}");
+        let t = wait_board(&rig, board, n, "decision", |t| {
+            t.contains("Decisions waiting: 1 · #1\n")
+        });
+        assert!(!t.contains("#2"), "{t}");
         let n = board_edits(&rig, board).len();
         rig.srv().ok(resolve);
-        let t = wait_board(&rig, board, n, "task line removed", |t| {
-            !t.contains("task #1")
+        wait_board(&rig, board, n, "decision removed", |t| {
+            t.contains("Decisions waiting: none")
         });
-        assert!(t.contains("Nothing waiting on you"), "{resolve:?}: {t}");
     }
+    let t = board_edits(&rig, board).pop().unwrap();
+    assert!(t.contains("Done today: 1 · #1"), "{t}");
 
-    // A card with buttons adds a line; a text edit that keeps --buttons
-    // keeps it (with the new title); a press removes it.
+    // Running and blocked tasks of subscribed projects are counted.
     let n = board_edits(&rig, board).len();
-    let card = rig.tg_ok(&["send", "--buttons", "A=a,B=b", "Which one?\nmore detail"]);
-    let card = card.trim().trim_start_matches("sent #").to_string();
-    let t = wait_board(&rig, board, n, "card line", |t| {
-        t.contains(&format!("card #{card}"))
+    rig.srv().ok(&["add", "--project", "p", "--title", "Runs"]);
+    rig.srv().ok(&["set", "3", "--state", "in_progress"]);
+    rig.srv().ok(&[
+        "add",
+        "--project",
+        "p",
+        "--title",
+        "Waits",
+        "--blocked-by",
+        "3",
+    ]);
+    rig.srv()
+        .ok(&["add", "--project", "other", "--title", "Elsewhere"]);
+    rig.srv().ok(&["set", "5", "--state", "in_progress"]);
+    let t = wait_board(&rig, board, n, "stats", |t| {
+        t.contains("Running: 1 · #3\n") && t.contains("Blocked or waiting: 1 · #4\n")
     });
+    assert!(!t.contains("#5"), "{t}");
+
+    // A proposed goal shows in the overview.
+    let n = board_edits(&rig, board).len();
+    propose_goal(&rig, json!({"name":"grow","project":"p","bots":["cos"]}));
+    let t = wait_board(&rig, board, n, "goal", |t| t.contains("<b>grow</b>"));
     assert!(
-        t.contains(&format!("• card #{card} Which one? <i>(")),
+        t.contains("<b>Goals</b>\n\n<b>grow</b> · proposed · awaiting your Go"),
         "{t}"
     );
-    let n = board_edits(&rig, board).len();
-    rig.tg_ok(&["edit", &card, "--buttons", "A=a,B=b", "Which one now?"]);
-    let t = wait_board(&rig, board, n, "card retitled", |t| {
-        t.contains("Which one now?")
-    });
-    assert!(t.contains(&format!("card #{card}")), "{t}");
-    let tg_card: i64 = rig
-        .db()
-        .query_row(
-            "SELECT message_id FROM bot_messages WHERE id=?1",
-            [&card],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let n = board_edits(&rig, board).len();
-    rig.stub.push(
-        json!({"update_id": 90, "callback_query": {"id": "q", "from": user(OWNER),
-        "chat_instance": "ci", "data": "a", "message": {"message_id": tg_card, "date": 0,
-        "chat": {"id": OWNER, "type": "private"}}}}),
-    );
-    let t = wait_board(&rig, board, n, "pressed card removed", |t| {
-        !t.contains("card #")
-    });
-    assert!(t.contains("Nothing waiting on you"), "{t}");
 
-    // A button-clearing edit, and a text edit without --buttons, close cards.
-    for edit in [&["--clear-buttons", "Decided: A"][..], &["Decided: B"][..]] {
-        let n = board_edits(&rig, board).len();
-        // Multi-row cards open and close like single-row ones.
-        let card = rig.tg_ok(&["send", "--buttons", "A=a;B=b", "Again?"]);
-        let card = card.trim().trim_start_matches("sent #").to_string();
-        wait_board(&rig, board, n, "card line", |t| {
-            t.contains(&format!("card #{card}"))
-        });
-        let n = board_edits(&rig, board).len();
-        let mut args = vec!["edit", card.as_str()];
-        args.extend_from_slice(edit);
-        rig.tg_ok(&args);
-        let t = wait_board(&rig, board, n, "card closed", |t| !t.contains("card #"));
-        assert!(t.contains("Nothing waiting on you"), "{edit:?}: {t}");
-    }
-
-    // Unrelated changes leave the board alone.
+    // Unrelated changes leave the overview alone.
     let n = board_edits(&rig, board).len();
     rig.srv()
-        .ok(&["add", "--project", "p", "--title", "Not escalated"]);
+        .ok(&["add", "--project", "other", "--title", "Not escalated"]);
     rig.tg_ok(&["send", "plain message"]);
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(
@@ -1922,14 +1913,12 @@ fn board_renders_escalations_and_open_cards() {
     assert!(show.contains("(current)"), "{show}");
     assert_eq!(rig.events("board_render").len(), n);
 
-    // A hand edit of the board is rendered over.
-    let board_local = rig.tg_ok(&["board", "show", "--json"]);
-    let v: Value = serde_json::from_str(&board_local).unwrap();
+    // A hand edit of the overview is rendered over.
+    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
     let local = v["message"].as_i64().unwrap().to_string();
+    assert_eq!(v["stats"]["running"], json!([3]), "{v}");
     rig.tg_ok(&["edit", &local, "hand-kept list"]);
-    let t = wait_board(&rig, board, n + 1, "re-render", |t| {
-        t.contains("Waiting on you")
-    });
+    let t = wait_board(&rig, board, n + 1, "re-render", |t| t.contains("Overview"));
     assert!(t.contains("Nothing waiting on you"), "{t}");
 }
 
@@ -1963,7 +1952,7 @@ fn board_edit_failures_are_logged_and_retried() {
     assert!(edits[1].contains("Nothing waiting on you"), "{edits:?}");
     assert!(rig.tg_ok(&["board", "show"]).contains("(current)"));
 
-    // Clearing the board stops rendering; set-message refuses other kinds.
+    // Clearing the overview stops rendering; set-message refuses other kinds.
     rig.tg_ok(&["board", "clear"]);
     let show = rig.tg_ok(&["board", "show"]);
     assert!(show.contains("no board message"), "{show}");
@@ -1984,23 +1973,38 @@ fn clearing_buttons_telegram_already_dropped_closes_the_card() {
     assert_eq!(v["lines"], json!([]), "{v}");
 }
 
-/// Local id and Telegram message id of the current board, from `board show`.
+/// Local id and Telegram message id of the current overview, from `board show`.
 fn current_board(rig: &Rig) -> (i64, i64) {
     let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
     let local = v["message"].as_i64().unwrap();
-    let tg = rig
-        .db()
+    (local, tg_id(rig, local))
+}
+
+/// Telegram message id of local message `local`.
+fn tg_id(rig: &Rig, local: i64) -> i64 {
+    rig.db()
         .query_row(
             "SELECT message_id FROM bot_messages WHERE id=?1",
             [local],
             |r| r.get(0),
         )
-        .unwrap();
-    (local, tg)
+        .unwrap()
 }
 
-/// Waits until the board has moved off `from` and the move is finished
-/// (the new board pinned, the old one edited); returns the new board.
+/// Stored flags of local message `id`.
+fn flags_of(rig: &Rig, id: i64) -> Value {
+    serde_json::from_str(
+        &rig.db()
+            .query_row("SELECT flags FROM bot_messages WHERE id=?1", [id], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Waits until the overview has moved off `from` and the move is finished
+/// (the new one pinned, the old one deleted or edited); returns the new one.
 fn wait_moved(rig: &Rig, from: i64, what: &str) -> (i64, i64) {
     let mut out = (0, 0);
     wait_for(what, 20, || {
@@ -2032,7 +2036,7 @@ fn board_reposts_at_the_bottom_on_change() {
     let sends = rig.stub.calls("sendMessage").len();
 
     // A change re-posts: a silent HTML send, the new one pinned silently,
-    // the old one unpinned and edited to point at the new one.
+    // the old one unpinned and deleted.
     rig.srv()
         .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
     escalate(&rig, "1");
@@ -2042,11 +2046,12 @@ fn board_reposts_at_the_bottom_on_change() {
     let s = &sent[sends].params;
     assert_eq!(s["disable_notification"], true, "{s}");
     assert_eq!(s["parse_mode"], "HTML", "{s}");
+    assert!(s["reply_markup"].is_null(), "no pick buttons: {s}");
     assert!(
         s["text"]
             .as_str()
             .unwrap()
-            .contains("• task #1 Pick a colour"),
+            .contains("Decisions waiting: 1 · #1\n"),
         "{s}"
     );
     let pin = rig.stub.calls("pinChatMessage").pop().unwrap();
@@ -2054,10 +2059,10 @@ fn board_reposts_at_the_bottom_on_change() {
     assert_eq!(pin.params["disable_notification"], true);
     let unpin = rig.stub.calls("unpinChatMessage").pop().unwrap();
     assert_eq!(unpin.params["message_id"], first_tg);
-    assert_eq!(
-        board_edits(&rig, first_tg).last().unwrap(),
-        &format!("Moved below (#{second}).")
-    );
+    let del = rig.stub.calls("deleteMessage").pop().unwrap();
+    assert_eq!(del.params["message_id"], first_tg);
+    assert_eq!(flags_of(&rig, first)["deleted"], true);
+    assert_eq!(flags_of(&rig, first)["pinned"], false);
     let show = rig.tg_ok(&["board", "show"]);
     assert!(
         show.starts_with(&format!("board #{second} (current)")),
@@ -2068,14 +2073,10 @@ fn board_reposts_at_the_bottom_on_change() {
         render,
         json!({"message": second, "lines": 1, "from": first})
     );
-    let history = rig.tg_ok(&["history"]);
-    assert!(
-        history.contains(&format!("Moved below (#{second}).")),
-        "{history}"
-    );
 
-    // Resolving re-posts again; the pin fails once and is retried, and an
-    // unpin Telegram refuses is logged and skipped.
+    // Resolving re-posts again; the pin fails once and is retried, an unpin
+    // Telegram refuses is logged and skipped, and a refused delete (older
+    // than 48 h) edits the old overview to point at the new one.
     {
         let mut st = rig.stub.state.lock().unwrap();
         st.fail.insert(
@@ -2086,10 +2087,17 @@ fn board_reposts_at_the_bottom_on_change() {
     rig.srv()
         .ok(&["set", "1", "--state", "done", "--note", "resolved"]);
     wait_for("failed pin", 20, || !rig.events("board_error").is_empty());
-    rig.stub.state.lock().unwrap().fail.insert(
-        "unpinChatMessage".into(),
-        "Bad Request: message to unpin not found".into(),
-    );
+    {
+        let mut st = rig.stub.state.lock().unwrap();
+        st.fail.insert(
+            "unpinChatMessage".into(),
+            "Bad Request: message to unpin not found".into(),
+        );
+        st.fail.insert(
+            "deleteMessage".into(),
+            "Bad Request: message can't be deleted".into(),
+        );
+    }
     let (third, third_tg) = wait_moved(&rig, second, "re-post on resolve");
     assert_eq!(
         rig.stub.calls("sendMessage").len(),
@@ -2109,8 +2117,11 @@ fn board_reposts_at_the_bottom_on_change() {
         .map(|e| serde_json::from_str(e).unwrap())
         .filter(|e: &Value| e["skipped"] == true)
         .collect();
-    assert_eq!(skipped.len(), 1, "{skipped:?}");
-    assert_eq!(skipped[0]["step"], "unpin");
+    let steps: Vec<&str> = skipped
+        .iter()
+        .map(|e| e["step"].as_str().unwrap())
+        .collect();
+    assert_eq!(steps, ["unpin", "delete"], "{skipped:?}");
     assert_eq!(
         board_edits(&rig, second_tg).last().unwrap(),
         &format!("Moved below (#{third}).")
@@ -2128,7 +2139,7 @@ fn board_reposts_at_the_bottom_on_change() {
 }
 
 /// The inline keyboard in Telegram call `params`, as (label, data) rows.
-fn board_keyboard(params: &Value) -> Vec<Vec<(String, String)>> {
+fn keyboard_of(params: &Value) -> Vec<Vec<(String, String)>> {
     params["reply_markup"]["inline_keyboard"]
         .as_array()
         .expect("reply_markup")
@@ -2148,166 +2159,115 @@ fn board_keyboard(params: &Value) -> Vec<Vec<(String, String)>> {
         .collect()
 }
 
-#[test]
-fn board_items_have_pick_buttons_that_wake_the_bot() {
-    let rig = Rig::with("board = \"edit\"");
-    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
-    let (board_local, board) = make_board(&rig);
-    wait_board(&rig, board, 0, "empty board", |t| {
-        t.contains("Nothing waiting on you")
-    });
-    // An empty board has no buttons.
-    let edit = rig.stub.calls("editMessageText").pop().unwrap();
-    assert_eq!(edit.params["reply_markup"], json!({"inline_keyboard": []}));
+/// A button press on Telegram message `tg` as an update.
+fn press(update: i64, tg: i64, data: &str) -> Value {
+    json!({"update_id": update, "callback_query": {"id": format!("q{update}"),
+        "from": user(OWNER), "chat_instance": "ci", "data": data,
+        "message": {"message_id": tg, "date": 0, "chat": {"id": OWNER, "type": "private"}}}})
+}
 
-    // An escalated task and an open card: one button each, one row each.
-    rig.srv()
-        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
-    let card = rig.tg_ok(&["send", "--buttons", "A=a,B=b", "Which one?"]);
-    let card: i64 = card.trim().trim_start_matches("sent #").parse().unwrap();
-    let n = board_edits(&rig, board).len();
-    escalate(&rig, "1");
-    wait_board(&rig, board, n, "both lines", |t| {
-        t.contains("task #1") && t.contains(&format!("card #{card}"))
-    });
-    let edit = rig
-        .stub
-        .calls("editMessageText")
-        .into_iter()
-        .rfind(|c| c.params["message_id"] == board)
-        .unwrap();
-    let want = vec![
-        vec![("#1".to_string(), "board task #1".to_string())],
-        vec![(format!("card #{card}"), format!("board card #{card}"))],
-    ];
-    assert_eq!(board_keyboard(&edit.params), want);
-    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
-    assert_eq!(
-        v["buttons"],
-        json!([
-            ["#1", "board task #1"],
-            [format!("card #{card}"), format!("board card #{card}")]
-        ])
-    );
-    // The board is not a card, and its buttons are stored apart.
-    let flags: Value = serde_json::from_str(
-        &rig.db()
-            .query_row(
-                "SELECT flags FROM bot_messages WHERE id=?1",
-                [board_local],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(flags["buttons"].is_null(), "{flags}");
-    assert_eq!(flags["board_buttons"][0], json!(["#1", "board task #1"]));
-    assert_eq!(v["lines"].as_array().unwrap().len(), 2, "{v}");
-
-    // A press on an item: a button wake for this bot naming the item, a
-    // toast with its label, and the board keeps its keyboard.
-    let edits = rig.stub.calls("editMessageText").len();
-    let press = |update: i64, data: &str| {
-        json!({"update_id": update, "callback_query": {"id": format!("q{update}"),
-            "from": user(OWNER), "chat_instance": "ci", "data": data,
-            "message": {"message_id": board, "date": 0, "chat": {"id": OWNER, "type": "private"}}}})
-    };
-    rig.stub.push(press(300, "board task #1"));
-    rig.stub.wait_confirmed(300);
-    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
-    assert_eq!(toast.params["text"], "Got it: #1");
-    // A second press, on another item, is a wake too.
-    rig.stub.push(press(301, &format!("board card #{card}")));
-    rig.stub.wait_confirmed(301);
-    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
-    assert_eq!(toast.params["text"], format!("Got it: card #{card}"));
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(
-        rig.stub.calls("editMessageText").len(),
-        edits,
-        "a press does not edit the board"
-    );
-    assert!(rig.stub.calls("editMessageReplyMarkup").is_empty());
-    let conn = rig.db();
-    let wakes = bot::wakes(&conn, "cos", true, 50).unwrap();
-    let lines: Vec<String> = wakes
-        .iter()
-        .filter(|w| w.kind == "button")
-        .map(bot::wake_line)
-        .collect();
-    assert_eq!(lines.len(), 2, "{lines:?}");
-    assert!(
-        lines[0].contains(&format!("on #{board_local} ")) && lines[0].ends_with("board task #1"),
-        "{lines:?}"
-    );
-    assert!(
-        lines[1].ends_with(&format!("board card #{card}")),
-        "{lines:?}"
-    );
-    let flags: String = conn
-        .query_row(
-            "SELECT flags FROM bot_messages WHERE id=?1",
-            [board_local],
-            |r| r.get(0),
+/// Pin, unpin, send and delete calls in order, with Telegram message ids
+/// replaced by names (`overview-1`, `card-1`, ...) in order of first use;
+/// `known` names messages sent earlier.
+fn inbox_calls(rig: &Rig, from: usize, known: &[(i64, &str)]) -> Value {
+    let mut all: Vec<Call> = rig.stub.state.lock().unwrap().calls[from..].to_vec();
+    all.retain(|c| {
+        matches!(
+            c.method.as_str(),
+            "sendMessage"
+                | "pinChatMessage"
+                | "unpinChatMessage"
+                | "deleteMessage"
+                | "editMessageReplyMarkup"
         )
-        .unwrap();
-    drop(conn);
-    assert!(!flags.contains("answered"), "{flags}");
-    // Both items still wait on the owner; the board shows them unchanged.
-    let show = rig.tg_ok(&["board", "show"]);
-    assert!(show.contains("(current)"), "{show}");
-    assert!(
-        show.contains("task #1") && show.contains(&format!("card #{card}")),
-        "{show}"
-    );
+    });
+    all.sort_by_key(|c| c.at);
+    let mut names: HashMap<i64, String> =
+        known.iter().map(|(id, n)| (*id, n.to_string())).collect();
+    let (mut overviews, mut cards) = (0, 0);
+    let mut out = Vec::new();
+    let mut next_sent = rig.stub.state.lock().unwrap().next_message;
+    // Sent ids are the stub's counter in order; recover them per send.
+    let sends = all.iter().filter(|c| c.method == "sendMessage").count() as i64;
+    next_sent -= sends;
+    for c in &all {
+        let p = &c.params;
+        let mut v = json!({"method": c.method});
+        let id = if c.method == "sendMessage" {
+            next_sent += 1;
+            let text = p["text"].as_str().unwrap_or("");
+            let name = if text.starts_with("<b>Overview</b>") {
+                overviews += 1;
+                format!("overview-{overviews}")
+            } else {
+                cards += 1;
+                format!("card-{cards}")
+            };
+            names.insert(next_sent, name.clone());
+            v["sent"] = json!(name);
+            next_sent
+        } else {
+            p["message_id"].as_i64().unwrap()
+        };
+        if c.method != "sendMessage" {
+            v["message"] = json!(names.get(&id).cloned().unwrap_or(format!("tg-{id}")));
+        }
+        for k in ["disable_notification", "reply_markup"] {
+            if !p[k].is_null() {
+                v[k] = p[k].clone();
+            }
+        }
+        out.push(v);
+    }
+    json!(out)
 }
 
 #[test]
-fn reposted_boards_keep_their_buttons() {
+fn cards_are_pinned_under_the_overview_and_unpinned_when_closed() {
     let rig = Rig::new();
     rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
     let (first, first_tg) = make_board(&rig);
     wait_board(&rig, first_tg, 0, "first render", |t| {
         t.contains("Nothing waiting on you")
     });
-    rig.srv()
-        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
-    escalate(&rig, "1");
-    let (second, second_tg) = wait_moved(&rig, first, "re-post on escalation");
-    let sent = rig.stub.calls("sendMessage").pop().unwrap();
+    wait_for("overview pinned", 20, || {
+        flags_of(&rig, first)["pinned"] == true
+    });
+    let from = rig.stub.state.lock().unwrap().calls.len();
+
+    // A card is pinned silently, then the overview is re-sent and pinned,
+    // so it stays the newest pin (Telegram orders pins by sending date).
+    let card = rig.tg_ok(&["send", "--buttons", "A=a;B=b", "Which one?"]);
+    let card: i64 = card.trim().trim_start_matches("sent #").parse().unwrap();
+    let card_tg = tg_id(&rig, card);
+    let (second, _) = wait_moved(&rig, first, "re-post over the card");
+    let f = flags_of(&rig, card);
     assert_eq!(
-        board_keyboard(&sent.params),
-        vec![vec![("#1".to_string(), "board task #1".to_string())]]
+        (f["pinned"].clone(), f["card_pin"].clone()),
+        (json!(true), json!(true))
     );
-    // The old board is edited without a keyboard and no longer a board.
-    let moved = rig
-        .stub
-        .calls("editMessageText")
-        .into_iter()
-        .rfind(|c| c.params["message_id"] == first_tg)
-        .unwrap();
-    assert!(moved.params["reply_markup"].is_null(), "{:?}", moved.params);
-    let flags = |id: i64| -> Value {
-        serde_json::from_str(
-            &rig.db()
-                .query_row("SELECT flags FROM bot_messages WHERE id=?1", [id], |r| {
-                    r.get::<_, String>(0)
-                })
-                .unwrap(),
-        )
-        .unwrap()
-    };
-    assert!(flags(first)["board_buttons"].is_null(), "{}", flags(first));
-    assert_eq!(
-        flags(second)["board_buttons"],
-        json!([["#1", "board task #1"]])
+    let show: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
+    assert!(
+        show["text"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("Decisions waiting: 1 · card #{card}\n")),
+        "{show}"
     );
 
-    // A press on the re-posted board wakes the bot.
-    rig.stub.push(json!({"update_id": 310, "callback_query": {"id": "q310",
-        "from": user(OWNER), "chat_instance": "ci", "data": "board task #1",
-        "message": {"message_id": second_tg, "date": 0, "chat": {"id": OWNER, "type": "private"}}}}));
-    rig.stub.wait_confirmed(310);
+    // A second card: pinned, and the overview moves below it again.
+    let card2 = rig.tg_ok(&["send", "--buttons", "Go=go", "Ship it?"]);
+    let card2: i64 = card2.trim().trim_start_matches("sent #").parse().unwrap();
+    let card2_tg = tg_id(&rig, card2);
+    let (third, _) = wait_moved(&rig, second, "re-post over the second card");
+
+    // Pressing a card closes it: a normal button wake, and it is unpinned.
+    rig.stub.push(press(400, card_tg, "a"));
+    rig.stub.wait_confirmed(400);
+    let (fourth, _) = wait_moved(&rig, third, "re-post after the press");
+    wait_for("card unpinned", 20, || {
+        flags_of(&rig, card)["pinned"] == false
+    });
     let wakes = bot::wakes(&rig.db(), "cos", true, 50).unwrap();
     let pressed: Vec<String> = wakes
         .iter()
@@ -2315,20 +2275,209 @@ fn reposted_boards_keep_their_buttons() {
         .map(bot::wake_line)
         .collect();
     assert_eq!(pressed.len(), 1, "{pressed:?}");
-    assert!(pressed[0].ends_with("board task #1"), "{pressed:?}");
+    assert!(
+        pressed[0].contains(&format!("on #{card} ")) && pressed[0].ends_with("] a"),
+        "{pressed:?}"
+    );
 
-    // Resolving re-posts an empty board without buttons.
-    rig.srv()
-        .ok(&["set", "1", "--state", "done", "--note", "resolved"]);
-    let (third, _) = wait_moved(&rig, second, "re-post on resolve");
-    let sent = rig.stub.calls("sendMessage").pop().unwrap();
-    assert_eq!(sent.params["reply_markup"], json!({"inline_keyboard": []}));
-    assert_eq!(flags(third)["board_buttons"], json!([]));
+    // Clearing the buttons closes and unpins the other one.
+    rig.tg_ok(&["edit", &card2.to_string(), "--clear-buttons"]);
+    let (fifth, fifth_tg) = wait_moved(&rig, fourth, "re-post after the clear");
+    wait_for("second card unpinned", 20, || {
+        flags_of(&rig, card2)["pinned"] == false
+    });
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(show.contains("Nothing waiting on you"), "{show}");
+    assert_eq!(current_board(&rig), (fifth, fifth_tg));
+
+    // The recorded call sequence: every pin silent, overview always pinned
+    // last, closed cards unpinned, old overviews unpinned and deleted.
+    let calls = inbox_calls(&rig, from, &[(first_tg, "overview-0")]);
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/telegram-inbox-calls.json");
+    let pretty = serde_json::to_string_pretty(&calls).unwrap() + "\n";
+    if std::env::var_os("AXE_BLESS").is_some() {
+        std::fs::write(&path, &pretty).unwrap();
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(
+        pretty, want,
+        "Bot API calls changed; review and run AXE_BLESS=1 cargo test --test telegram"
+    );
+    for c in rig.stub.calls("pinChatMessage") {
+        assert_eq!(c.params["disable_notification"], true, "{:?}", c.params);
+    }
+    // Pinning never alerts: the bot's own pin service messages are ignored
+    // (see own_pin_service_message_is_ignored_but_other_senders_still_drop).
+    assert!(rig.events("security_drop").is_empty());
+    let _ = card2_tg;
 }
 
-/// Goal board edits so far (editMessageText on `msg`), as texts.
-fn goal_edits(rig: &Rig, msg: i64) -> Vec<String> {
-    board_edits(rig, msg)
+#[test]
+fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
+    let mut rig = Rig::new();
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    let (first, first_tg) = make_board(&rig);
+    wait_board(&rig, first_tg, 0, "first render", |t| {
+        t.contains("Nothing waiting on you")
+    });
+
+    // An escalation wakes the bot to post its card, once, across a restart.
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
+    escalate(&rig, "1");
+    let card_wakes = |rig: &Rig| -> Vec<(String, String)> {
+        rig.db()
+            .prepare(
+                "SELECT key, body FROM bot_wakes WHERE key LIKE 'wake:card-task-%' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    wait_for("card wake", 20, || card_wakes(&rig).len() == 1);
+    let (key, note) = card_wakes(&rig).remove(0);
+    assert!(key.starts_with("wake:card-task-1-"), "{key}");
+    assert!(
+        note.contains("Task #1 (p) is escalated and has no card")
+            && note.contains("axe bot tg send --task 1 --buttons"),
+        "{note}"
+    );
+    let (second, _) = wait_moved(&rig, first, "re-post on escalation");
+    rig.restart();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(card_wakes(&rig).len(), 1, "no second wake after a restart");
+    assert_eq!(current_board(&rig).0, second, "no re-post after a restart");
+
+    // The bot posts the card: it stands for the task (listed once) and is
+    // pinned under the overview.
+    assert!(!rig
+        .tg(&["send", "--task", "1", "No buttons"])
+        .status
+        .success());
+    assert!(!rig
+        .tg(&["send", "--task", "99", "--buttons", "A=a", "x"])
+        .status
+        .success());
+    let card = rig.tg_ok(&[
+        "send",
+        "--task",
+        "1",
+        "--buttons",
+        "Red=red;Blue=blue",
+        "Task #1: pick a colour",
+    ]);
+    let card: i64 = card.trim().trim_start_matches("sent #").parse().unwrap();
+    let (third, _) = wait_moved(&rig, second, "re-post over the task card");
+    assert_eq!(flags_of(&rig, card)["task"], 1);
+    wait_for("task card pinned", 20, || {
+        flags_of(&rig, card)["pinned"] == true
+    });
+    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
+    assert_eq!(v["lines"].as_array().unwrap().len(), 1, "{v}");
+    assert!(
+        v["text"]
+            .as_str()
+            .unwrap()
+            .contains("Decisions waiting: 1 · #1\n"),
+        "{v}"
+    );
+
+    // Resuming the task closes its card: keyboard removed, unpinned.
+    let edits = rig.stub.calls("editMessageReplyMarkup").len();
+    rig.srv()
+        .ok(&["set", "1", "--state", "pending", "--note", "resolved"]);
+    let (fourth, _) = wait_moved(&rig, third, "re-post on resume");
+    wait_for("task card unpinned", 20, || {
+        flags_of(&rig, card)["pinned"] == false
+    });
+    let close = &rig.stub.calls("editMessageReplyMarkup")[edits];
+    assert_eq!(close.params["message_id"], tg_id(&rig, card));
+    assert_eq!(close.params["reply_markup"], json!({"inline_keyboard": []}));
+    assert_eq!(flags_of(&rig, card)["closed"], "task #1 is pending");
+
+    // Without a card in time the server posts a minimal one, once.
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Rotate the key"]);
+    escalate(&rig, "2");
+    wait_for("second card wake", 20, || card_wakes(&rig).len() == 2);
+    let sends = rig.stub.calls("sendMessage").len();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        rig.events("card_fallback").is_empty(),
+        "no fallback before the bot had its time"
+    );
+    // Ten minutes pass after the wake (its due time is when it was asked).
+    rig.db()
+        .execute(
+            "UPDATE bot_wakes SET due_at='2026-01-01T00:00:00Z' WHERE key LIKE 'wake:card-task-2-%'",
+            [],
+        )
+        .unwrap();
+    wait_for("fallback card", 20, || {
+        !rig.events("card_fallback").is_empty()
+    });
+    let fb: Value = serde_json::from_str(&rig.events("card_fallback")[0]).unwrap();
+    let fallback = fb["message"].as_i64().unwrap();
+    assert_eq!(fb["task"], 2);
+    let sent = rig
+        .stub
+        .calls("sendMessage")
+        .into_iter()
+        .skip(sends)
+        .find(|c| {
+            c.params["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("<b>Task #2</b>")
+        })
+        .unwrap();
+    assert_eq!(
+        sent.params["text"],
+        "<b>Task #2</b> · p\nRotate the key\nBlocked: needs a call\nResolver: owner: decide"
+    );
+    assert_eq!(sent.params["disable_notification"], true);
+    assert_eq!(
+        keyboard_of(&sent.params),
+        vec![
+            vec![("Resolved".to_string(), "task #2 resolved".to_string())],
+            vec![("Discuss".to_string(), "task #2 discuss".to_string())],
+        ]
+    );
+    wait_for("fallback pinned", 20, || {
+        flags_of(&rig, fallback)["pinned"] == true
+    });
+    // The overview is re-sent below the fallback card, so it stays last.
+    wait_for("overview below the fallback", 20, || {
+        let (local, _) = current_board(&rig);
+        local > fallback && flags_of(&rig, local)["board_from"].is_null()
+    });
+    assert!(current_board(&rig).0 > fourth);
+    rig.restart();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(rig.events("card_fallback").len(), 1, "no second fallback");
+
+    // A press on the fallback is an ordinary button wake and closes it.
+    let fb_tg = tg_id(&rig, fallback);
+    rig.stub.push(press(500, fb_tg, "task #2 resolved"));
+    rig.stub.wait_confirmed(500);
+    wait_for("fallback unpinned", 20, || {
+        flags_of(&rig, fallback)["pinned"] == false
+    });
+    let wakes = bot::wakes(&rig.db(), "cos", true, 50).unwrap();
+    let pressed: Vec<String> = wakes
+        .iter()
+        .filter(|w| w.kind == "button")
+        .map(bot::wake_line)
+        .collect();
+    assert_eq!(pressed.len(), 1, "{pressed:?}");
+    assert!(pressed[0].ends_with("task #2 resolved"), "{pressed:?}");
+    // Task 2 is still escalated but had its card: no new wake or fallback.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(card_wakes(&rig).len(), 2);
+    assert_eq!(rig.events("card_fallback").len(), 1);
 }
 
 /// Proposes goal `name` from a JSON spec.
@@ -2343,207 +2492,41 @@ fn propose_goal(rig: &Rig, spec: Value) {
 }
 
 #[test]
-fn goal_board_renders_goals_in_place_beside_the_board() {
-    // The default `board = "repost"`: the goal board must still only edit.
+fn the_goal_board_is_retired_into_the_overview() {
     let rig = Rig::new();
-    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
-    let f = rig.dir.path().join("scout.json");
-    std::fs::write(&f, json!({"name":"scout","project":"p"}).to_string()).unwrap();
-    rig.srv()
-        .ok(&["bot", "create", "--file", f.to_str().unwrap()]);
-    let (board_local, board_tg) = make_board(&rig);
-    wait_board(&rig, board_tg, 0, "first board render", |t| {
-        t.contains("Nothing waiting on you")
-    });
-
-    // The goal board is set like the board and renders "No active goals.".
+    // An old goal board message (set before this release), pinned.
     let out = rig.tg_ok(&["send", "--silent", "goals"]);
     let gb: i64 = out.trim().trim_start_matches("sent #").parse().unwrap();
-    let gb_tg: i64 = rig
-        .db()
-        .query_row(
-            "SELECT message_id FROM bot_messages WHERE id=?1",
+    rig.tg_ok(&["pin", &gb.to_string(), "--silent"]);
+    rig.db()
+        .execute(
+            "UPDATE bot_messages SET flags=json_set(flags,'$.goal_board',json('true'),'$.goal_board_key','k') WHERE id=?1",
             [gb],
-            |r| r.get(0),
         )
         .unwrap();
-    // One message is never both boards.
-    let refused = rig.tg(&["goal-board", "set", &board_local.to_string()]);
+    // No new goal board message can be set; unset still works.
+    let refused = rig.tg(&["goal-board", "set", &gb.to_string()]);
     assert!(!refused.status.success(), "{refused:?}");
-    assert_eq!(
-        rig.tg_ok(&["goal-board", "set", &gb.to_string()]),
-        format!("goal board is #{gb}\n")
-    );
-    let refused = rig.tg(&["board", "set-message", &gb.to_string()]);
-    assert!(!refused.status.success(), "{refused:?}");
-    let t = wait_board(&rig, gb_tg, 0, "empty goal board", |t| {
-        t.contains("No active goals.")
-    });
-    assert!(t.starts_with("<b>Goals</b>"), "{t}");
-    assert!(t.contains("<i>Updated "), "{t}");
-    let edit = rig.stub.calls("editMessageText").pop().unwrap();
-    assert_eq!(edit.params["parse_mode"], "HTML");
-    wait_for("goal board current", 20, || {
-        rig.tg_ok(&["goal-board", "show"]).contains("(current)")
-    });
-    let show = rig.tg_ok(&["goal-board", "show"]);
-    assert!(
-        show.starts_with(&format!("goal board #{gb} (current)")),
-        "{show}"
-    );
+    propose_goal(&rig, json!({"name":"grow","project":"p","bots":["cos"]}));
 
-    // A proposed goal awaits the owner's Go and names the other bots; a goal
-    // the bot is not on is not shown.
-    let n = goal_edits(&rig, gb_tg).len();
-    propose_goal(
-        &rig,
-        json!({"name":"grow","project":"p","bots":["cos","scout"],
-            "budget_cost_week":10.0,"budget_attention_week":40,"deadline":"2026-12-01"}),
-    );
-    propose_goal(
-        &rig,
-        json!({"name":"theirs","project":"p","bots":["scout"]}),
-    );
-    let t = wait_board(&rig, gb_tg, n, "proposed goal", |t| t.contains("grow"));
-    assert!(
-        t.contains("<b>grow</b> · proposed · awaiting your Go · with scout"),
-        "{t}"
-    );
-    assert!(t.contains("no open tasks"), "{t}");
-    assert!(t.contains("$0.00/$10.00 · attention 0/40"), "{t}");
-    assert!(t.contains("no goal wake · deadline 2026-12-01"), "{t}");
-    assert!(!t.contains("theirs"), "{t}");
-
-    // Activation, a linked task, a verdict, and a goal wake each edit it.
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.srv().ok(&["goal", "activate", "grow", "--why", "go"]);
-    let t = wait_board(&rig, gb_tg, n, "active goal", |t| {
-        t.contains("<b>grow</b> · active")
-    });
-    assert!(!t.contains("awaiting your Go"), "{t}");
-    assert!(t.contains("attention 1/40"), "{t}");
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.srv().ok(&[
-        "add",
-        "--project",
-        "p",
-        "--title",
-        "H1: try it",
-        "--goal",
-        "grow",
-    ]);
-    let t = wait_board(&rig, gb_tg, n, "open task", |t| {
-        t.contains("open <code>#1</code>")
-    });
-    assert!(!t.contains("no open tasks"), "{t}");
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.srv().ok(&[
-        "goal",
-        "record",
-        "grow",
-        "--kind",
-        "verdict",
-        "H0 failed <badly>\nsecond line",
-    ]);
-    let t = wait_board(&rig, gb_tg, n, "verdict", |t| t.contains("verdict: "));
-    assert!(t.contains("\nverdict: H0 failed &lt;badly&gt;\n"), "{t}");
-    assert!(!t.contains("second line"), "{t}");
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.srv().ok(&[
-        "bot", "wake", "cos", "--in", "2h", "--note", "check", "--goal", "grow",
-    ]);
-    let t = wait_board(&rig, gb_tg, n, "goal wake", |t| t.contains("next wake "));
-    assert!(t.contains(" UTC · deadline 2026-12-01"), "{t}");
-
-    // A note, and attention spend within the same 10% band, do not edit.
-    // Escalating the linked task re-posts the "Waiting on you" board but
-    // leaves the goal board where it is.
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.srv()
-        .ok(&["goal", "record", "grow", "--kind", "note", "fyi"]);
-    escalate(&rig, "1");
-    let (moved, _) = wait_moved(&rig, board_local, "board re-post on escalation");
-    assert_ne!(moved, gb);
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(
-        goal_edits(&rig, gb_tg).len(),
-        n,
-        "attention 2/40 stays in the 0-10% band"
-    );
-    // Two more escalation episodes reach 4/40: the next band edits.
-    for _ in 0..2 {
-        rig.srv()
-            .ok(&["set", "1", "--state", "pending", "--note", "retry"]);
-        escalate(&rig, "1");
-    }
-    let t = wait_board(&rig, gb_tg, n, "next attention band", |t| {
-        t.contains("attention 4/40")
-    });
-    assert!(t.contains("<b>grow</b> · active"), "{t}");
-
-    // The goal board is never re-posted, pinned or unpinned by the server,
-    // and never shows on the "Waiting on you" board, nor that board on it.
-    for c in rig.stub.calls("sendMessage") {
-        let text = c.params["text"].as_str().unwrap_or("");
-        assert!(
-            !text.contains("<b>Goals</b>"),
-            "goal board re-posted: {text}"
-        );
-    }
-    for m in ["pinChatMessage", "unpinChatMessage"] {
-        for c in rig.stub.calls(m) {
-            assert_ne!(c.params["message_id"], gb_tg, "{m}");
-        }
-    }
-    for c in rig.stub.calls("editMessageText") {
-        let text = c.params["text"].as_str().unwrap_or("");
-        if c.params["message_id"] == gb_tg {
-            assert!(!text.contains("Waiting on you"), "{text}");
-        } else {
-            assert!(!text.contains("<b>Goals</b>"), "{text}");
-        }
-    }
-    assert_eq!(
-        serde_json::from_str::<Value>(&rig.tg_ok(&["goal-board", "show", "--json"])).unwrap()
-            ["message"],
-        gb
-    );
-    let renders = rig.events("goal_board_render");
-    assert_eq!(renders.len(), goal_edits(&rig, gb_tg).len());
-    let last: Value = serde_json::from_str(renders.last().unwrap()).unwrap();
-    assert_eq!(last, json!({"message": gb, "goals": 1}));
-
-    // A hand edit is rendered over in place.
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.tg_ok(&["edit", &gb.to_string(), "hand-kept goals"]);
-    wait_board(&rig, gb_tg, n + 1, "re-render after hand edit", |t| {
+    let (_, board) = make_board(&rig);
+    let t = wait_board(&rig, board, 0, "overview with goals", |t| {
         t.contains("<b>grow</b>")
     });
-
-    // State changes edit it; done goals are omitted.
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.srv().ok(&["goal", "pause", "grow", "--why", "hold"]);
-    wait_board(&rig, gb_tg, n, "paused", |t| {
-        t.contains("<b>grow</b> · paused")
+    assert!(t.contains("<b>Goals</b>\n\n<b>grow</b> · proposed"), "{t}");
+    let gb_tg = tg_id(&rig, gb);
+    wait_for("goal board retired", 20, || {
+        flags_of(&rig, gb)["goal_board"].is_null()
     });
-    let n = goal_edits(&rig, gb_tg).len();
-    rig.srv().ok(&["goal", "done", "grow", "--why", "shipped"]);
-    let t = wait_board(&rig, gb_tg, n, "done goal omitted", |t| {
-        t.contains("No active goals.")
-    });
-    assert!(!t.contains("grow"), "{t}");
-
-    // unset (alias clear) stops rendering; set-message is an alias of set.
-    assert_eq!(rig.tg_ok(&["goal-board", "unset"]), "goal board cleared\n");
+    let unpin = rig.stub.calls("unpinChatMessage").pop().unwrap();
+    assert_eq!(unpin.params["message_id"], gb_tg);
+    assert_eq!(
+        board_edits(&rig, gb_tg).last().unwrap(),
+        "Goals moved into the pinned overview."
+    );
+    assert_eq!(flags_of(&rig, gb)["pinned"], false);
     let show = rig.tg_ok(&["goal-board", "show"]);
     assert!(show.contains("no goal board message"), "{show}");
-    assert_eq!(
-        rig.tg_ok(&["goal-board", "set-message", &gb.to_string()]),
-        format!("goal board is #{gb}\n")
-    );
-    assert_eq!(rig.tg_ok(&["goal-board", "clear"]), "goal board cleared\n");
-    assert!(!rig.tg(&["goal-board", "set", "999"]).status.success());
-    // The "Waiting on you" board is untouched by all of this.
-    let show = rig.tg_ok(&["board", "show"]);
-    assert!(show.starts_with("board #"), "{show}");
+    assert!(show.contains("<b>grow</b>"), "{show}");
+    assert_eq!(rig.tg_ok(&["goal-board", "unset"]), "goal board cleared\n");
 }

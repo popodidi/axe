@@ -1159,6 +1159,10 @@ enum TgCmd {
         /// Send without a notification sound
         #[arg(long)]
         silent: bool,
+        /// Make this card the pinned inbox item of escalated task N (needs
+        /// --buttons); it closes when the task leaves escalated
+        #[arg(long, requires = "buttons")]
+        task: Option<i64>,
         /// Read the text from a file
         #[arg(long, conflicts_with = "text")]
         file: Option<PathBuf>,
@@ -1221,14 +1225,14 @@ enum TgCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// The pinned "Waiting on you" board the server renders from escalated
-    /// tasks in subscribed projects and open cards (messages with buttons)
+    /// The pinned overview the server renders (decisions waiting, running,
+    /// blocked, done today, goals); it also pins each open card
     Board {
         #[command(subcommand)]
         command: BoardCmd,
     },
-    /// The pinned goal board the server renders from the goals the bot is
-    /// attached to; edited in place, never re-posted
+    /// The goal lines the overview shows; the separate goal board message is
+    /// retired (`unset` only)
     GoalBoard {
         #[command(subcommand)]
         command: GoalBoardCmd,
@@ -1250,31 +1254,30 @@ enum TgCmd {
 
 #[derive(Subcommand)]
 enum BoardCmd {
-    /// Show the board: its message, its lines and whether it is current
+    /// Show the overview: its message, its text and whether it is current
     Show {
         #[arg(long)]
         json: bool,
     },
-    /// Make one of the bot's own text messages the board; the server renders
-    /// it in place, then re-posts the board at the bottom of the chat on each
-    /// change (`[telegram] board`; pin the first one with `axe bot tg pin MSG --silent`)
+    /// Make one of the bot's own text messages the overview; the server
+    /// renders and pins it in place, then re-posts it at the bottom of the
+    /// chat on each change (`[telegram] board`), and pins each open card
     SetMessage { msg: i64 },
-    /// Stop rendering a board for this bot
+    /// Stop rendering an overview (and pinning cards) for this bot
     Clear,
 }
 
 #[derive(Subcommand)]
 enum GoalBoardCmd {
-    /// Show the goal board: its message, its goals and whether it is current
+    /// Show the goal lines the overview shows
     Show {
         #[arg(long)]
         json: bool,
     },
-    /// Make one of the bot's own text messages the goal board; the server
-    /// edits it in place on each change (pin it with `axe bot tg pin MSG --silent`)
+    /// Refused: the goal lines are part of the pinned overview
     #[command(visible_alias = "set-message")]
     Set { msg: i64 },
-    /// Stop rendering a goal board for this bot
+    /// Stop rendering an old goal board message
     #[command(visible_alias = "clear")]
     Unset,
 }
@@ -1332,6 +1335,7 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
             html,
             buttons,
             silent,
+            task,
             file,
             text,
         } => {
@@ -1346,7 +1350,7 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
                 "POST",
                 &format!("{base}/send"),
                 json!({"text":text,"reply_to":reply_to,"thread":thread,"chat":chat,
-                    "html":html,"buttons":buttons,"rows":rows,"silent":silent}),
+                    "html":html,"buttons":buttons,"rows":rows,"silent":silent,"task":task}),
                 Some(std::time::Duration::from_secs(600)),
             )?;
             print_sent(&v);

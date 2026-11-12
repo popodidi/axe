@@ -804,12 +804,10 @@ impl Gateway {
                 None => None,
             };
             let stored = target.map(|t| get_message(&conn, &b.name, t)).transpose()?;
-            // A later press on an answered keyboard is not a new wake. The
-            // board is never answered: every press on it is a wake.
+            // A later press on an answered keyboard is not a new wake.
             let answered = stored.as_ref().is_some_and(|m| {
                 !m.flags["answered"].is_null() && m.flags["answered"]["update"] != uid
             });
-            let board = stored.as_ref().is_some_and(on_board);
             if !answered {
                 bot::record_message(
                     &mut conn,
@@ -827,7 +825,7 @@ impl Gateway {
                     },
                     now(),
                 )?;
-                if let Some(m) = stored.as_ref().filter(|_| !board) {
+                if let Some(m) = stored.as_ref() {
                     let label = button_label(&m.flags, &data);
                     conn.execute(
                         "UPDATE bot_messages SET flags=json_set(flags,'$.answered',json(?1)) WHERE id=?2",
@@ -862,8 +860,7 @@ impl Gateway {
         if answered {
             return Ok(());
         }
-        // The board keeps its keyboard, so its other items stay pressable.
-        if let (Some(t), false) = (tg_msg, target.as_ref().is_some_and(on_board)) {
+        if let Some(t) = tg_msg {
             self.mark_selected(b, chat, t, target.as_ref(), &label);
         }
         b.typing(chat, thread);
@@ -1119,6 +1116,16 @@ impl Gateway {
             bail!("--html text is over {TEXT_LIMIT} characters; split it yourself so markup stays balanced");
         }
         check_buttons(&o.buttons, &o.rows)?;
+        if let Some(t) = o.task {
+            if o.buttons.is_empty() {
+                bail!("--task needs --buttons: a card is a message with buttons");
+            }
+            store
+                .conn()
+                .query_row("SELECT 1 FROM tasks WHERE id=?1", [t], |_| Ok(()))
+                .optional()?
+                .with_context(|| format!("task {t} not found"))?;
+        }
         let (chat, reply) = self.target(b, store, o.chat, o.reply_to)?;
         let parts = split_text(text, TEXT_LIMIT);
         if parts.len() > MAX_PARTS {
@@ -1154,6 +1161,8 @@ impl Gateway {
             // The keyboard's buttons and parse mode, for marking a press.
             let flags = if p["reply_markup"].is_null() {
                 json!({})
+            } else if let Some(t) = o.task {
+                json!({"buttons": o.buttons, "html": o.html, "task": t})
             } else {
                 json!({"buttons": o.buttons, "html": o.html})
             };
@@ -1471,21 +1480,15 @@ fn typing_loop(b: &TgBot, store: &dyn Store) {
     }
 }
 
-/// Keeps the bot's board message in step with [`board::lines`]: a pass after
-/// every committed change (at most one per [`BOARD_MIN_INTERVAL`]) and at
-/// least every [`BOARD_RESYNC`]. A failed edit is logged (stderr and a
+/// Keeps the bot's inbox in step with stored state ([`inbox_pass`]): a pass
+/// after every committed change (at most one per [`BOARD_MIN_INTERVAL`]) and
+/// at least every [`BOARD_RESYNC`]. A failed pass is logged (stderr and a
 /// `board_error` bot event) and retried with backoff.
 fn board_loop(b: &TgBot, store: &dyn Store) {
     let mut backoff: Option<Duration> = None;
     while !store.stopping() {
         let seen = store.seq();
-        // Both boards render each pass; one failing never holds up the other.
-        let result = match (board_pass(b, store), goal_board_pass(b, store)) {
-            (Err(e), _) => Err(e),
-            (_, Err(e)) => Err(e.context("goal board")),
-            _ => Ok(()),
-        };
-        match result {
+        match inbox_pass(b, store) {
             Ok(_) => backoff = None,
             Err(e) => {
                 let mut d = backoff.map_or(BOARD_RETRY, |d| (d * 2).min(BOARD_RETRY_MAX));
@@ -1528,36 +1531,237 @@ fn board_loop(b: &TgBot, store: &dyn Store) {
     }
 }
 
-/// One board pass: finishes an unfinished move, then renders the board when
-/// its lines changed. Returns whether it rendered.
-fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
+/// One inbox pass, for a bot with an overview message: retires a goal board,
+/// asks for or posts the cards of escalated tasks, closes cards of tasks no
+/// longer escalated, pins open cards and unpins closed ones, then renders the
+/// overview so it stays the newest pin. Each step is recorded in message
+/// flags, so a retry or a restart repeats only what is left.
+fn inbox_pass(b: &TgBot, store: &dyn Store) -> Result<()> {
     let conn = store.conn();
-    let Ok(id) = bot_id(&conn, &b.name) else {
-        return Ok(false);
-    };
+    if bot_id(&conn, &b.name).is_err() {
+        return Ok(());
+    }
+    let goal_board = goal_board::message(&conn, &b.name)?;
     let Some(m) = board::message(&conn, &b.name)? else {
-        return Ok(false);
+        return Ok(());
     };
     drop(conn);
     if m.flags["board_from"].is_i64() {
         finish_move(b, store, &m)?;
     }
+    if let Some(g) = goal_board {
+        retire_goal_board(b, store, &g)?;
+    }
+    task_cards(b, store, m.chat_id, m.thread_id)?;
+    sync_pins(b, store)?;
+    let m = get_message(&store.conn(), &b.name, m.id)?;
+    board_pass(b, store, &m)?;
+    Ok(())
+}
+
+/// Logs a Telegram refusal (400) of `step` on message `msg` as a skipped
+/// `board_error`, so one bad message never holds up the inbox; other errors
+/// are returned and retried.
+fn skip_refused(b: &TgBot, store: &dyn Store, step: &str, msg: i64, e: ApiError) -> Result<()> {
+    if e.code != Some(400) {
+        return Err(e.into());
+    }
     let conn = store.conn();
+    let body = json!({"error": e.to_string(), "step": step, "message": msg, "skipped": true});
+    bot::event(
+        &conn,
+        bot_id(&conn, &b.name)?,
+        &Actor::new("telegram"),
+        "board_error",
+        &body.to_string(),
+    )?;
+    Ok(())
+}
+
+/// The separate goal board is part of the overview now: unpin it, edit it to
+/// a pointer, and stop rendering it.
+fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<()> {
+    let live = g.flags["deleted"] != true && b.allowed(g.chat_id).is_ok();
+    if live && g.flags["pinned"] != false {
+        let p = json!({"chat_id": g.chat_id, "message_id": g.message_id});
+        if let Err(e) = b.paced(g.chat_id, || b.api.call("unpinChatMessage", &p)) {
+            skip_refused(b, store, "unpin goal board", g.id, e)?;
+        }
+        set_flag(store, g.id, "$.pinned", json!(false))?;
+    }
+    let text = board::merged_text();
+    if live && g.text != text {
+        let p = json!({"chat_id": g.chat_id, "message_id": g.message_id, "text": text});
+        match b.paced(g.chat_id, || b.api.call("editMessageText", &p)) {
+            Ok(_) => {}
+            Err(e) if e.description.contains("message is not modified") => {}
+            Err(e) => skip_refused(b, store, "edit goal board", g.id, e)?,
+        }
+        store.conn().execute(
+            "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.edited',json('true')) WHERE id=?2",
+            params![text, g.id],
+        )?;
+    }
+    goal_board::set_message(&mut store.conn(), &b.name, None)?;
+    store.changed();
+    Ok(())
+}
+
+/// Escalated tasks without a card since their escalation: the bot gets one
+/// wake (keyed by task and escalation, so a restart never repeats it) to post
+/// the card itself; [`board::CARD_WAIT`] after that wake the server posts
+/// [`board::fallback_card`] in the overview's chat. Open cards of tasks no
+/// longer escalated lose their keyboard (closed).
+fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Result<()> {
+    let needs = board::card_needs(&store.conn(), &b.name)?;
+    let t = now();
+    for n in needs {
+        // The wake is due at once; its due time is when the bot was asked.
+        let key = format!("card-task-{}-{}", n.task, n.since);
+        let (_, asked) = bot::add_wake(
+            &mut store.conn(),
+            &Actor::new("telegram"),
+            &b.name,
+            t,
+            &board::card_wake_note(&n, t + board::CARD_WAIT),
+            Some(&key),
+            t,
+        )?;
+        if t < bot::epoch_of(&asked).unwrap_or(t) + board::CARD_WAIT {
+            continue;
+        }
+        b.allowed(chat)?;
+        let (text, buttons) = board::fallback_card(&n);
+        let rows = vec![1; buttons.len()];
+        let mut p = json!({"chat_id": chat, "text": text, "parse_mode": "HTML",
+            "disable_notification": true, "reply_markup": keyboard(&buttons, &rows)});
+        if let Some(th) = thread {
+            p["message_thread_id"] = json!(th);
+        }
+        let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+        let id = record_out(
+            store,
+            &b.name,
+            &sent,
+            "text",
+            &text,
+            None,
+            json!([]),
+            json!({"buttons": buttons, "html": true, "task": n.task, "fallback": true}),
+        )?;
+        let conn = store.conn();
+        bot::event(
+            &conn,
+            bot_id(&conn, &b.name)?,
+            &Actor::new("telegram"),
+            "card_fallback",
+            &json!({"message": id, "task": n.task}).to_string(),
+        )?;
+    }
+    let stale = board::stale_task_cards(&store.conn(), &b.name)?;
+    for (msg, task, state) in stale {
+        let m = get_message(&store.conn(), &b.name, msg)?;
+        if b.allowed(m.chat_id).is_ok() {
+            let p = json!({"chat_id": m.chat_id, "message_id": m.message_id,
+                "reply_markup": {"inline_keyboard": []}});
+            match b.paced(m.chat_id, || b.api.call("editMessageReplyMarkup", &p)) {
+                Ok(_) => {}
+                Err(e) if e.description.contains("message is not modified") => {}
+                Err(e) => skip_refused(b, store, "close card", msg, e)?,
+            }
+        }
+        store.conn().execute(
+            "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.buttons'),'$.closed',?1) WHERE id=?2",
+            params![format!("task #{task} is {state}"), msg],
+        )?;
+        store.changed();
+    }
+    Ok(())
+}
+
+/// Pins every open card silently (oldest first, `flags.card_pin`) and unpins
+/// the cards the server pinned once they are closed. A pin Telegram refuses
+/// (400) is logged and not retried (`flags.pin_skipped`).
+fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
+    let closed = board::closed_pins(&store.conn(), &b.name)?;
+    for m in closed {
+        if m.flags["deleted"] != true && b.allowed(m.chat_id).is_ok() {
+            let p = json!({"chat_id": m.chat_id, "message_id": m.message_id});
+            if let Err(e) = b.paced(m.chat_id, || b.api.call("unpinChatMessage", &p)) {
+                skip_refused(b, store, "unpin card", m.id, e)?;
+            }
+        }
+        set_flag(store, m.id, "$.pinned", json!(false))?;
+        store.changed();
+    }
+    let lines = board::lines(&store.conn(), &b.name)?;
+    for l in lines.iter().filter(|l| l.kind == "card") {
+        let m = get_message(&store.conn(), &b.name, l.id)?;
+        if m.flags["pinned"] == true || m.flags["pin_skipped"] == true {
+            continue;
+        }
+        if b.allowed(m.chat_id).is_err() {
+            continue;
+        }
+        let p =
+            json!({"chat_id": m.chat_id, "message_id": m.message_id, "disable_notification": true});
+        match b.paced(m.chat_id, || b.api.call("pinChatMessage", &p)) {
+            Ok(_) => {
+                set_flag(store, m.id, "$.pinned", json!(true))?;
+                set_flag(store, m.id, "$.card_pin", json!(true))?;
+            }
+            Err(e) => {
+                skip_refused(b, store, "pin card", m.id, e)?;
+                set_flag(store, m.id, "$.pin_skipped", json!(true))?;
+            }
+        }
+        store.changed();
+    }
+    Ok(())
+}
+
+/// Whether a pinned card is newer than overview `m`: Telegram lists pins by
+/// sending date, so the overview must be re-sent to stay the newest pin.
+fn card_after(store: &dyn Store, m: &StoredMessage) -> Result<bool> {
+    Ok(store
+        .conn()
+        .query_row(
+            "SELECT 1 FROM bot_messages WHERE bot_id=(SELECT bot_id FROM bot_messages WHERE id=?1)
+               AND chat_id=?2 AND id>?1
+               AND json_extract(flags,'$.card_pin')=1 AND json_extract(flags,'$.pinned')=1
+             LIMIT 1",
+            params![m.id, m.chat_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Renders overview `m` when what it shows changed or a pinned card is newer
+/// than it. Returns whether it rendered.
+fn board_pass(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<bool> {
+    let conn = store.conn();
+    let id = bot_id(&conn, &b.name)?;
+    let t = now();
     let lines = board::lines(&conn, &b.name)?;
-    let key = board::key(&lines);
-    if m.flags["board_key"].as_str() == Some(key.as_str()) {
+    let stats = board::stats(&conn, &b.name, t)?;
+    let goals = goal_board::lines(&conn, &b.name)?;
+    drop(conn);
+    let key = board::key(&lines, &stats, &goals);
+    let stale = m.flags["board_key"].as_str() != Some(key.as_str());
+    let buried = m.flags["board_key"].is_string() && card_after(store, m)?;
+    if !stale && !buried {
         return Ok(false);
     }
-    drop(conn);
     b.allowed(m.chat_id)?;
-    let (text, buttons) = board::render(&lines, now());
-    let markup = keyboard(&buttons, &vec![1; buttons.len()]);
-    // A message just made the board (or hand-edited) has no key yet: it is
-    // where the owner put it, so it is rendered in place.
-    let repost = b.board == BoardMode::Repost && m.flags["board_key"].is_string();
+    let text = board::render(&lines, &stats, &goals, t);
+    // A message just made the overview (or hand-edited) has no key yet: it
+    // is where the owner put it, so it is rendered in place. A newer pinned
+    // card always re-posts it, so it stays the newest pin.
+    let repost = m.flags["board_key"].is_string() && (b.board == BoardMode::Repost || buried);
     let shown = if repost {
         let mut p = json!({"chat_id": m.chat_id, "text": text, "parse_mode": "HTML",
-            "disable_notification": true, "reply_markup": markup});
+            "disable_notification": true});
         if let Some(t) = m.thread_id {
             p["message_thread_id"] = json!(t);
         }
@@ -1570,22 +1774,29 @@ fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
             &text,
             None,
             json!([]),
-            json!({"html": true, "board_buttons": buttons}),
+            json!({"html": true}),
         )?;
         board::reposted(&mut store.conn(), m.id, new, &key)?;
         let nm = get_message(&store.conn(), &b.name, new)?;
         finish_move(b, store, &nm)?;
         new
     } else {
+        // An empty keyboard drops the pick buttons of older boards.
         let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text,
-            "parse_mode": "HTML", "reply_markup": markup});
+            "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []}});
         match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
             Ok(_) => {}
             // The text already matches (for example after a lost reply).
             Err(e) if e.description.contains("message is not modified") => {}
             Err(e) => return Err(e.into()),
         }
-        board::rendered(&store.conn(), m.id, &key, &text, &buttons)?;
+        board::rendered(&store.conn(), m.id, &key, &text)?;
+        if m.flags["pinned"] != true {
+            let p = json!({"chat_id": m.chat_id, "message_id": m.message_id,
+                "disable_notification": true});
+            b.paced(m.chat_id, || b.api.call("pinChatMessage", &p))?;
+            set_flag(store, m.id, "$.pinned", json!(true))?;
+        }
         m.id
     };
     let conn = store.conn();
@@ -1605,53 +1816,13 @@ fn board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
     Ok(true)
 }
 
-/// One goal board pass: edits the goal board in place when its key changed
-/// (never re-posts, so it does not move the "Waiting on you" board). Returns
-/// whether it rendered.
-fn goal_board_pass(b: &TgBot, store: &dyn Store) -> Result<bool> {
-    let conn = store.conn();
-    let Ok(id) = bot_id(&conn, &b.name) else {
-        return Ok(false);
-    };
-    let Some(m) = goal_board::message(&conn, &b.name)? else {
-        return Ok(false);
-    };
-    let goals = goal_board::lines(&conn, &b.name)?;
-    let key = goal_board::key(&goals);
-    if m.flags["goal_board_key"].as_str() == Some(key.as_str()) {
-        return Ok(false);
-    }
-    drop(conn);
-    b.allowed(m.chat_id)?;
-    let text = goal_board::render(&goals, now());
-    let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text, "parse_mode": "HTML"});
-    match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
-        Ok(_) => {}
-        // The text already matches (for example after a lost reply).
-        Err(e) if e.description.contains("message is not modified") => {}
-        Err(e) => return Err(e.into()),
-    }
-    let conn = store.conn();
-    goal_board::rendered(&conn, m.id, &key, &text)?;
-    let body = json!({"message": m.id, "goals": goals.len()});
-    bot::event(
-        &conn,
-        id,
-        &Actor::new("telegram"),
-        "goal_board_render",
-        &body.to_string(),
-    )?;
-    drop(conn);
-    store.changed();
-    Ok(true)
-}
-
-/// Finishes moving the board to `m` (which has `flags.board_from`): pins it
-/// silently, unpins the old board and edits it to "Moved below (#new)". Each
-/// step is recorded, so a retry after a failure repeats only what is left.
-/// Telegram refusing a step on the old board (400, for example a message
-/// deleted in the chat) is logged as a `board_error` event and skipped, so an
-/// old message never holds up the board; other failures are retried.
+/// Finishes moving the overview to `m` (which has `flags.board_from`): pins
+/// it silently, unpins the old overview and deletes it (edited to "Moved
+/// below (#new)" when Telegram refuses the delete, for example after 48 h).
+/// Each step is recorded, so a retry after a failure repeats only what is
+/// left. Telegram refusing a step on the old overview (400) is logged as a
+/// skipped `board_error`, so an old message never holds up the overview;
+/// other failures are retried.
 fn finish_move(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
     let old_id = m.flags["board_from"].as_i64().unwrap_or(0);
     let old = get_message(&store.conn(), &b.name, old_id)?;
@@ -1661,44 +1832,35 @@ fn finish_move(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
         b.paced(m.chat_id, || b.api.call("pinChatMessage", &p))?;
         set_flag(store, m.id, "$.pinned", json!(true))?;
     }
-    let skip = |step: &str, e: ApiError| -> Result<()> {
-        if e.code != Some(400) {
-            return Err(e.into());
-        }
-        let conn = store.conn();
-        let body =
-            json!({"error": e.to_string(), "step": step, "message": old_id, "skipped": true});
-        bot::event(
-            &conn,
-            bot_id(&conn, &b.name)?,
-            &Actor::new("telegram"),
-            "board_error",
-            &body.to_string(),
-        )?;
-        Ok(())
-    };
     let live = old.flags["deleted"] != true;
     if live && old.flags["pinned"] != false {
         let p = json!({"chat_id": old.chat_id, "message_id": old.message_id});
         if let Err(e) = b.paced(old.chat_id, || b.api.call("unpinChatMessage", &p)) {
-            skip("unpin", e)?;
+            skip_refused(b, store, "unpin", old_id, e)?;
         }
         set_flag(store, old.id, "$.pinned", json!(false))?;
     }
     let text = board::moved_text(m.id);
     if live && old.text != text {
-        let p = json!({"chat_id": old.chat_id, "message_id": old.message_id, "text": text});
-        match b.paced(old.chat_id, || b.api.call("editMessageText", &p)) {
-            Ok(_) => {}
-            Err(e) if e.description.contains("message is not modified") => {}
-            Err(e) => skip("edit", e)?,
+        let p = json!({"chat_id": old.chat_id, "message_id": old.message_id});
+        match b.paced(old.chat_id, || b.api.call("deleteMessage", &p)) {
+            Ok(_) => set_flag(store, old.id, "$.deleted", json!(true))?,
+            Err(e) => {
+                skip_refused(b, store, "delete", old_id, e)?;
+                let p = json!({"chat_id": old.chat_id, "message_id": old.message_id, "text": text});
+                match b.paced(old.chat_id, || b.api.call("editMessageText", &p)) {
+                    Ok(_) => {}
+                    Err(e) if e.description.contains("message is not modified") => {}
+                    Err(e) => skip_refused(b, store, "edit", old_id, e)?,
+                }
+                // Recorded either way, so a refused edit is not retried. The
+                // edit sends no keyboard, so Telegram drops any old buttons.
+                store.conn().execute(
+                    "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_buttons') WHERE id=?2",
+                    params![text, old.id],
+                )?;
+            }
         }
-        // Recorded either way, so a refused edit is not retried. The edit
-        // sends no keyboard, so Telegram drops the old board's buttons.
-        store.conn().execute(
-            "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_buttons') WHERE id=?2",
-            params![text, old.id],
-        )?;
     }
     board::moved(&store.conn(), m.id)?;
     store.changed();
@@ -1749,16 +1911,10 @@ fn keyboard(buttons: &[(String, String)], rows: &[usize]) -> Value {
     json!({ "inline_keyboard": keyboard })
 }
 
-/// Whether `m` shows board buttons: a press on it picks a board item.
-fn on_board(m: &StoredMessage) -> bool {
-    m.flags["board_buttons"].is_array()
-}
-
 fn button_label(flags: &Value, data: &str) -> String {
     flags["buttons"]
         .as_array()
         .into_iter()
-        .chain(flags["board_buttons"].as_array())
         .flatten()
         .find(|b| b[1] == data)
         .and_then(|b| b[0].as_str())

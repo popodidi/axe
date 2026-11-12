@@ -301,6 +301,14 @@ const NO_UNMET: &str = "NOT EXISTS (SELECT 1 FROM deps d JOIN tasks p ON p.id = 
 const AWAKE: &str =
     "(tasks.not_before IS NULL OR tasks.not_before <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))";
 
+/// SQL for a `tasks` row whose derived `status` is `blocked`: stored blocked,
+/// or pending on an unmet prerequisite or a wake time still ahead.
+pub(crate) fn waiting_sql() -> String {
+    format!(
+        "(tasks.state = 'blocked' OR (tasks.state = 'pending' AND NOT ({NO_UNMET} AND {AWAKE})))"
+    )
+}
+
 /// Columns for [`Task::from_row`]: the stored row plus the derived `status`.
 fn task_cols() -> String {
     format!(

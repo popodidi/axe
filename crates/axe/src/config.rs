@@ -340,7 +340,7 @@ pub struct Telegram {
     /// `getUpdates` long-poll timeout in seconds.
     #[serde(default = "default_telegram_poll")]
     pub poll_timeout: u64,
-    /// How a changed "Waiting on you" board reaches the chat.
+    /// How a changed overview reaches the chat.
     #[serde(default)]
     pub board: BoardMode,
     #[serde(rename = "bot", default)]
@@ -358,16 +358,17 @@ pub struct TelegramBot {
     pub chats: Vec<i64>,
 }
 
-/// `telegram.board`: how a changed board reaches the chat.
+/// `telegram.board`: how a changed overview reaches the chat.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BoardMode {
-    /// Send the new board silently at the bottom of the chat, pin it, unpin
-    /// the old one and edit it to "Moved below (#new)", so the board never
-    /// sits far up the chat.
+    /// Send the new overview silently at the bottom of the chat, pin it,
+    /// unpin the old one and delete it (or edit it to "Moved below (#new)"),
+    /// so the overview is always the newest pin.
     #[default]
     Repost,
-    /// Edit the board message in place (the old behaviour).
+    /// Edit the overview in place; it is still re-posted when a pinned card
+    /// is newer than it.
     Edit,
 }
 
