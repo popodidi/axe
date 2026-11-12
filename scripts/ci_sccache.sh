@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rust build cache for ci.yml on the hlab CI runner: sccache with a local disk
+# Rust build cache for ci.yml on the self-hosted CI runner: sccache with a local disk
 # cache on the PR VM's persistent cache disk (/var/cache/hlab-ci/deps), which
 # the guest keeps under 4 GiB (LRU) and outside the root's 15 GiB free-space
 # floor. Each runner slot gets its own cache and server port, so concurrent
