@@ -50,6 +50,10 @@ pub struct SendOpts {
     pub rows: Vec<usize>,
     #[serde(default)]
     pub silent: bool,
+    /// The escalated task this card stands for: the card is its pinned
+    /// inbox item and closes when the task leaves escalated. Needs buttons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<i64>,
 }
 
 /// One stored message, as `bot tg history` returns it.

@@ -1,0 +1,133 @@
+[
+  {
+    "method": "sendMessage",
+    "reply_markup": {
+      "inline_keyboard": [
+        [
+          {
+            "callback_data": "a",
+            "text": "A"
+          }
+        ],
+        [
+          {
+            "callback_data": "b",
+            "text": "B"
+          }
+        ]
+      ]
+    },
+    "sent": "card-1"
+  },
+  {
+    "disable_notification": true,
+    "message": "card-1",
+    "method": "pinChatMessage"
+  },
+  {
+    "disable_notification": true,
+    "method": "sendMessage",
+    "sent": "overview-1"
+  },
+  {
+    "disable_notification": true,
+    "message": "overview-1",
+    "method": "pinChatMessage"
+  },
+  {
+    "message": "overview-0",
+    "method": "unpinChatMessage"
+  },
+  {
+    "message": "overview-0",
+    "method": "deleteMessage"
+  },
+  {
+    "method": "sendMessage",
+    "reply_markup": {
+      "inline_keyboard": [
+        [
+          {
+            "callback_data": "go",
+            "text": "Go"
+          }
+        ]
+      ]
+    },
+    "sent": "card-2"
+  },
+  {
+    "disable_notification": true,
+    "message": "card-2",
+    "method": "pinChatMessage"
+  },
+  {
+    "disable_notification": true,
+    "method": "sendMessage",
+    "sent": "overview-2"
+  },
+  {
+    "disable_notification": true,
+    "message": "overview-2",
+    "method": "pinChatMessage"
+  },
+  {
+    "message": "overview-1",
+    "method": "unpinChatMessage"
+  },
+  {
+    "message": "overview-1",
+    "method": "deleteMessage"
+  },
+  {
+    "message": "card-1",
+    "method": "unpinChatMessage"
+  },
+  {
+    "disable_notification": true,
+    "method": "sendMessage",
+    "sent": "overview-3"
+  },
+  {
+    "disable_notification": true,
+    "message": "overview-3",
+    "method": "pinChatMessage"
+  },
+  {
+    "message": "overview-2",
+    "method": "unpinChatMessage"
+  },
+  {
+    "message": "overview-2",
+    "method": "deleteMessage"
+  },
+  {
+    "message": "card-2",
+    "method": "editMessageReplyMarkup",
+    "reply_markup": {
+      "inline_keyboard": []
+    }
+  },
+  {
+    "message": "card-2",
+    "method": "unpinChatMessage"
+  },
+  {
+    "disable_notification": true,
+    "method": "sendMessage",
+    "sent": "overview-4"
+  },
+  {
+    "disable_notification": true,
+    "message": "overview-4",
+    "method": "pinChatMessage"
+  },
+  {
+    "message": "overview-3",
+    "method": "unpinChatMessage"
+  },
+  {
+    "message": "overview-3",
+    "method": "deleteMessage"
+  }
+]

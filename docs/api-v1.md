@@ -343,23 +343,23 @@ including reads.
 |---|---|---|---|
 | GET | `/api/bots/{name}/tg/history` | `limit` (default 50, max 1000), `before` (message id), `search` | Messages, oldest first |
 | GET | `/api/bots/{name}/tg/file/{msg}[/{n}]` | | Raw attachment bytes streamed from Telegram (not stored); `Content-Type` from the file, name in `X-Axe-File-Name`. `n` selects an attachment |
-| POST | `/api/bots/{name}/tg/send` | `{text, chat?, reply_to?, thread?, html? = false, buttons? = [[label, data], ...], silent? = false}` | Send result |
+| POST | `/api/bots/{name}/tg/send` | `{text, chat?, reply_to?, thread?, html? = false, buttons? = [[label, data], ...], silent? = false, task?}`; `task` makes the card the pinned inbox item of that escalated task (needs `buttons`) | Send result |
 | POST | `/api/bots/{name}/tg/send-file` | raw file body; query `as` (`photo` \| `document` \| `voice`, default `document`), `name` (default `file`), `caption`, `chat`, `reply_to`, `thread` | Send result |
 | POST | `/api/bots/{name}/tg/edit` | `{msg, text?, html? = false, buttons?}`; `buttons: []` removes the keyboard; absent sends no keyboard, so with `text` Telegram drops it (the card closes) and without `text` it is refused | Edit result |
 | POST | `/api/bots/{name}/tg/pin` \| `unpin` | `{msg, silent? = false}` | Result |
 | POST | `/api/bots/{name}/tg/react` | `{msg, emoji? = ""}` | Result |
 | POST | `/api/bots/{name}/tg/delete` | `{msg}` | Result |
 | POST | `/api/bots/{name}/tg/typing` | `{chat?}` | Result |
-| GET | `/api/bots/{name}/tg/board` | | `{message, lines: [{kind: "task" \| "card", id, title, project, since}], text, buttons: [[label, data], ...], current}`: the rendered "Waiting on you" board with one pick button per listed item, and whether its message shows it |
-| POST | `/api/bots/{name}/tg/board` | `{msg}` makes the bot's own text message `msg` its board; `{msg: null}` stops rendering | `{message}` |
-| GET | `/api/bots/{name}/tg/goal-board` | | `{message, goals: [{name, state, others, latest: {id, kind, text}?, open_tasks, cost_spent, cost_week, attention_spent, attention_week, next_wake, deadline}], text, current}`: the rendered goal board, and whether its message shows it |
-| POST | `/api/bots/{name}/tg/goal-board` | `{msg}` makes the bot's own text message `msg` its goal board (not its board); `{msg: null}` stops rendering | `{message}` |
+| GET | `/api/bots/{name}/tg/board` | | `{message, lines: [{kind: "task" \| "card", id, title, project, since, task}], stats: {running, waiting, done_today}, goals: [...], text, current}`: the rendered overview (decisions waiting, task stats, goal lines), and whether its message shows it |
+| POST | `/api/bots/{name}/tg/board` | `{msg}` makes the bot's own text message `msg` its overview and turns on the pinned inbox; `{msg: null}` turns it off | `{message}` |
+| GET | `/api/bots/{name}/tg/goal-board` | | `{message, goals: [{name, state, others, latest: {id, kind, text}?, open_tasks, cost_spent, cost_week, attention_spent, attention_week, next_wake, deadline}], text, current}`: the goal lines the overview shows; `message` is an old goal board message not yet retired |
+| POST | `/api/bots/{name}/tg/goal-board` | `{msg: null}` clears an old goal board message; any `msg` is refused (the goal lines are part of the overview) | `{message}` |
 
 The `board` and `goal-board` routes read and write only stored state, so they also work without
-the `telegram` feature; rendering the board needs the gateway. Board lines are
-escalated tasks in the bot's subscribed projects and the bot's open cards (its
-text messages that still have buttons); see the README, "The Waiting on you
-board".
+the `telegram` feature; rendering the overview and pinning cards need the
+gateway. Decisions are escalated tasks in the bot's subscribed projects and
+the bot's open cards (its text messages that still have buttons); see the
+README, "The inbox: pinned cards and the overview".
 
 `msg` and `reply_to` are local message ids (from history), not Telegram ids.
 Default `chat`: the chat of `reply_to`, else the latest inbound chat, else the

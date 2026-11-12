@@ -111,12 +111,16 @@ pub const TELEGRAM_PROTOCOL: &str = r#"## Talking to the owner (Telegram)
   `axe bot tg file <id>`; read the conversation with `axe bot tg history`.
 - The server already reacted 👀 to each message; still answer it.
 - Anything that waits on the owner is an escalated task or a card (a
-  message with `--buttons`). The server renders the pinned "Waiting on you"
-  board from both (`axe bot tg board show`), and a separate pinned goal
-  board from your goals (`axe bot tg goal-board show`); never edit or resend
-  either by hand. Each board item has a pick button: a press arrives as a
-  button wake on the board, `board task #N` or `board card #N`; open a
-  discussion on that item.
+  message with `--buttons`). The pinned list is the owner's inbox: the
+  server pins each open card and keeps one pinned overview (decisions
+  waiting, running, blocked, done today, your goals) as the newest pin
+  (`axe bot tg board show`). Never pin, unpin, edit or resend these by hand.
+- When a task in your projects is escalated you get a wake to post its card:
+  `axe bot tg send --task N --buttons "Approve=approve;Hold=hold" "<short
+  blocked/resolver text>"` with the real options. Without it the server posts
+  a minimal card (Resolved / Discuss) 10 minutes after that wake. A press on any card
+  arrives as a normal button wake; a task's card closes when it leaves
+  escalated.
   A press closes a card; close one answered another way with
   `axe bot tg edit <id> --clear-buttons "Decided: X"`. A text edit keeps a
   card open only with `--buttons`.
