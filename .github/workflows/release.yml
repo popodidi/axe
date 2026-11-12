@@ -1,17 +1,24 @@
 name: release
-run-name: release ${{ github.ref_name }}
+run-name: release ${{ github.ref_name }}${{ github.event_name == 'workflow_dispatch' && ' (dry run)' || '' }}
 
 # A `vX.Y.Z[-pre]` tag publishes, from one Docker build on the self-hosted CI VM:
 # - image ghcr.io/popodidi/axe:<tag> (its digest is in the release notes)
 # - axe-<tag>-linux-x86_64.tar.gz: the image's `axe` binary (dashboard embedded)
 # - axe-skills-<tag>.tar.gz: skills/axe
 # - a .sha256 file per asset and SHA256SUMS
+# The `gate` job first runs ci.yml in full (feature variants, embed-ui, web);
+# nothing is published unless it passes and the tagged commit is on main.
 # Publishing to crates.io is not done here (no repository secrets); the job
-# only runs `cargo publish --dry-run`. A tag is never reused: a release that
-# failed after the main CI check is retried with a new tag.
+# only runs `cargo publish --dry-run`. A tag is never reused: a failed release
+# is retried with a new tag.
+#
+# `workflow_dispatch` is a dry run of the same path on any branch: the gate,
+# the image build and its smoke test, and the assets, with nothing pushed or
+# published.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,41 +33,51 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
+  gate:
+    if: github.repository == 'popodidi/axe' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+
   release:
-    if: github.repository == 'popodidi/axe' && startsWith(github.ref, 'refs/tags/v')
+    needs: gate
     runs-on: [self-hosted, hlab-ci]
     timeout-minutes: 120
     permissions:
       contents: write
       packages: write
-      # Main CI gate below.
-      actions: read
     env:
       IMAGE: ghcr.io/popodidi/axe
-      TAG: ${{ github.ref_name }}
+      # Push, log in and publish only for a tag push; a dispatch is a dry run.
+      PUBLISH: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Publish only a commit whose push to main passed ci.yml. Fails fast
-      # rather than waiting, which would hold the single runner slot that main
-      # CI needs: re-run this run once main CI is green (nothing is published
-      # before this step).
-      - name: Main CI passed on this commit
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_scope.py main-ci "$GITHUB_SHA"
+          # All branches, for the on-main check.
+          fetch-depth: 0
+      - name: Tagged commit is on main
+        if: env.PUBLISH == 'true'
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
       - name: Tag matches the crate version
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           version=$(cargo metadata --no-deps --format-version 1 --locked \
             | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "axe-os"))')
-          test "v$version" = "$TAG" || { echo "tag $TAG does not match axe-os $version"; exit 1; }
+          if [ "$PUBLISH" = true ]; then
+            test "v$version" = "$REF_NAME" || { echo "tag $REF_NAME does not match axe-os $version"; exit 1; }
+          fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAG=v$version" >> "$GITHUB_ENV"
       - name: cargo publish --dry-run
         run: cargo publish --dry-run --locked -p axe-os
       - name: Log in with this workflow's package token
+        if: env.PUBLISH == 'true'
         env:
           REGISTRY_TOKEN: ${{ github.token }}
           REGISTRY_USER: ${{ github.actor }}
@@ -71,6 +88,8 @@ jobs:
         # runner's parallelism-limited builder.
         run: |
           set -euo pipefail
+          # A dry run loads the image into the local daemon instead of pushing.
+          output=--push; [ "$PUBLISH" = true ] || output=--load
           docker buildx build . \
             --platform linux/amd64 --provenance=false --sbom=false \
             --build-arg "GIT_COMMIT=$GITHUB_SHA" \
@@ -78,20 +97,23 @@ jobs:
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.version=$VERSION" \
-            --tag "$IMAGE:$TAG" --push --metadata-file "$RUNNER_TEMP/build.json"
-          digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/build.json")
+            --tag "$IMAGE:$TAG" "$output" --metadata-file "$RUNNER_TEMP/build.json"
+          digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("containerimage.digest", ""))' "$RUNNER_TEMP/build.json")
           echo "IMAGE_DIGEST=$digest" >> "$GITHUB_ENV"
-      - name: Smoke-test the pushed image
+          # A loaded image has no registry digest to address it by.
+          if [ "$PUBLISH" = true ]; then ref="$IMAGE@$digest"; else ref="$IMAGE:$TAG"; fi
+          echo "IMAGE_REF=$ref" >> "$GITHUB_ENV"
+      - name: Smoke-test the image
         run: |
           set -euo pipefail
-          docker pull "$IMAGE@$IMAGE_DIGEST"
-          scripts/smoke_image.sh "$IMAGE@$IMAGE_DIGEST" "$GITHUB_SHA" "$VERSION"
+          [ "$PUBLISH" != true ] || docker pull "$IMAGE_REF"
+          scripts/smoke_image.sh "$IMAGE_REF" "$GITHUB_SHA" "$VERSION"
       - name: Package assets
         run: |
           set -euo pipefail
           dist="$RUNNER_TEMP/dist" stage="$RUNNER_TEMP/stage"
           rm -rf "$dist" "$stage" && mkdir -p "$dist" "$stage/bin"
-          cid=$(docker create "$IMAGE@$IMAGE_DIGEST")
+          cid=$(docker create "$IMAGE_REF")
           docker cp "$cid:/usr/local/bin/axe" "$stage/bin/axe"
           docker rm "$cid" >/dev/null
           test "$("$stage/bin/axe" --version)" = "axe $VERSION"
@@ -128,6 +150,7 @@ jobs:
           } > "$RUNNER_TEMP/notes.md"
           echo "DIST=$dist" >> "$GITHUB_ENV"
       - name: Publish the GitHub release
+        if: env.PUBLISH == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -137,8 +160,11 @@ jobs:
             --notes-file "$RUNNER_TEMP/notes.md" "${pre[@]}" "$DIST"/*
           echo "image: $IMAGE:$TAG@$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
       - name: Log out
-        if: always()
+        if: always() && env.PUBLISH == 'true'
         run: docker logout ghcr.io
+      - name: Remove the dry-run image
+        if: always() && env.PUBLISH != 'true'
+        run: docker image rm "$IMAGE:${TAG:-none}" || true
 
       # The self-hosted PR VM is persistent: free this job's outputs (see ci.yml).
       - name: Free the runner's disk
