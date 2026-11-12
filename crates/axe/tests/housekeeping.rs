@@ -887,3 +887,485 @@ fn cli_dry_run_prints_decisions() {
     let out = cli(&["dispatch", "--housekeep=sometimes"], &good);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
+
+/// A task row as the server derives it: stored `state`, derived `status` and
+/// `updated_at`, and events with a done event when the state is done.
+fn held_task(
+    routes: &mut HashMap<String, Value>,
+    id: u64,
+    state: &str,
+    status: &str,
+    updated: &str,
+) {
+    routes.insert(
+        format!("/api/tasks/{id}"),
+        json!({"id": id, "project": "proj", "state": state, "status": status, "updated_at": updated}),
+    );
+    let mut events = vec![json!({"at": OLD, "kind": "created", "to_value": null})];
+    if state == "done" {
+        events.push(json!({"at": updated, "kind": "state", "to_value": "done"}));
+    }
+    routes.insert(format!("/api/tasks/{id}/events"), json!(events));
+}
+
+fn live_run(routes: &mut HashMap<String, Value>, id: u64) {
+    routes.insert(
+        format!("/api/tasks/{id}/events"),
+        json!([{"at": OLD, "kind": "run_start", "to_value": null}]),
+    );
+}
+
+/// Sets every mtime and atime in the tree to 2020.
+fn age_tree(path: &Path) {
+    let out = Command::new("find")
+        .arg(path)
+        .args([
+            "-exec",
+            "touch",
+            "-h",
+            "-d",
+            "2020-01-01T00:00:00",
+            "{}",
+            "+",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn write_mib(path: &Path, mib: usize) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Random-ish bytes so no filesystem stores it sparse or compressed.
+    let data: Vec<u8> = (0..mib << 20).map(|i| (i * 7919 % 251) as u8).collect();
+    fs::write(path, data).unwrap();
+}
+
+/// Lines of one `kind`: path -> (task, decision, reason).
+fn kind_lines(lines: &[Value], kind: &str) -> HashMap<PathBuf, (Value, String, String)> {
+    lines
+        .iter()
+        .filter(|v| v["kind"] == kind)
+        .map(|v| {
+            let s = |k: &str| v[k].as_str().unwrap().to_string();
+            (
+                PathBuf::from(s("path")),
+                (v["task"].clone(), s("decision"), s("reason")),
+            )
+        })
+        .collect()
+}
+
+fn tmp_config(tmp: &Path, scratch: &Path, extra: &str) -> Config {
+    config(
+        &tmp.join("missing-workspace"),
+        &format!(
+            "[housekeeping.tmp]\ndir = {:?}\nfloor_mib = 2\nshared = [\"shared-*\"]\n{extra}",
+            scratch.to_str().unwrap()
+        ),
+    )
+}
+
+/// Rule A: task-named scratch. Tasks: 1 done long ago, 2 done just now,
+/// 3 in progress, 4 blocked (a pending task waiting) idle for hours, 5
+/// escalated but updated a minute ago, 6 done with a live run, 7 done long
+/// ago (scratch held open by a process), 8 blocked idle (small scratch).
+fn scratch_fixture(tmp: &Path) -> (PathBuf, String) {
+    let scratch = tmp.join("scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    for name in [
+        "t1",
+        "task2-ci",
+        "task-3-run",
+        "t4ci-run",
+        "5-build",
+        "t6",
+        "t7",
+        "t8",
+    ] {
+        fs::create_dir_all(scratch.join(name).join("sub")).unwrap();
+        fs::write(scratch.join(name).join("sub/f"), "x").unwrap();
+    }
+    fs::write(scratch.join("t1_list.json"), "[]").unwrap();
+    write_mib(&scratch.join("t4ci-run/big"), 3);
+    write_mib(&scratch.join("5-build/big"), 3);
+    // A read-only tree (Go module cache) still goes.
+    let ro = scratch.join("t1/sub");
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+    // Names that map to no task: a date, a leading zero, no digits.
+    for name in ["2026-11-12-notes", "t07", "tsx-1000"] {
+        fs::create_dir_all(scratch.join(name)).unwrap();
+    }
+    let mut routes = HashMap::new();
+    let hours = ago(Duration::hours(5));
+    held_task(&mut routes, 1, "done", "done", OLD);
+    held_task(&mut routes, 2, "done", "done", &ago(Duration::minutes(1)));
+    held_task(&mut routes, 3, "in_progress", "in_progress", OLD);
+    held_task(&mut routes, 4, "pending", "blocked", &hours);
+    held_task(
+        &mut routes,
+        5,
+        "escalated",
+        "escalated",
+        &ago(Duration::minutes(1)),
+    );
+    held_task(&mut routes, 6, "done", "done", OLD);
+    live_run(&mut routes, 6);
+    held_task(&mut routes, 7, "done", "done", OLD);
+    held_task(&mut routes, 8, "blocked", "blocked", &hours);
+    (scratch, serve(routes, 200).url)
+}
+
+#[test]
+fn task_scratch_follows_task_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let (scratch, url) = scratch_fixture(&tmp);
+    let at = |name: &str| scratch.join(name);
+    let cfg = tmp_config(&tmp, &scratch, "");
+    let mut holder = Command::new("sleep")
+        .arg("30")
+        .current_dir(at("t7/sub"))
+        .spawn()
+        .unwrap();
+    let stop = AtomicBool::new(false);
+
+    let tick = keeper(&cfg, &url, false, &tmp).tick(None, &stop);
+    let dry = kind_lines(&tick.lines, "tmp_task");
+    assert!(tick.ok, "{dry:?}");
+    assert_eq!(dry[&at("t1")].1, "would_delete", "{:?}", dry[&at("t1")]);
+    assert_eq!(
+        dry[&at("t4ci-run")].1,
+        "would_delete",
+        "{:?}",
+        dry[&at("t4ci-run")]
+    );
+    assert!(
+        at("t1").exists() && at("t4ci-run").exists(),
+        "dry-run keeps them"
+    );
+
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &stop);
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    let lines = kind_lines(&tick.lines, "tmp_task");
+    assert!(tick.ok, "{lines:?}");
+    let d = |name: &str| lines[&at(name)].clone();
+    for (name, task) in [("t1", 1), ("t1_list.json", 1), ("t4ci-run", 4)] {
+        assert_eq!(d(name).0, json!(task), "{name}");
+        assert_eq!(d(name).1, "deleted", "{name}: {:?}", d(name));
+        assert!(!at(name).exists(), "{name}");
+    }
+    assert!(
+        d("t4ci-run").2.contains("blocked, idle"),
+        "{:?}",
+        d("t4ci-run")
+    );
+    let retained = [
+        ("task2-ci", "done 60s ago, retention 172800s"),
+        ("task-3-run", "task status is \"in_progress\""),
+        ("5-build", "escalated, updated 60s ago, idle 3600s"),
+        ("t6", "task has a live run"),
+        ("t7", "in use by a process"),
+        ("t8", "below the floor of 2097152"),
+    ];
+    for (name, reason) in retained {
+        let (_, decision, why) = d(name);
+        assert_eq!(decision, "retain", "{name}");
+        assert!(
+            why.contains(reason) || why.starts_with(reason),
+            "{name}: {why}"
+        );
+        assert!(at(name).exists(), "{name}");
+    }
+    for name in ["2026-11-12-notes", "t07", "tsx-1000"] {
+        assert!(!lines.contains_key(&at(name)), "{name} maps to no task");
+        assert!(at(name).exists(), "{name}");
+    }
+}
+
+#[test]
+fn stale_scratch_goes_only_under_pressure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let scratch = tmp.join("scratch");
+    for name in [
+        "old",
+        "fresh",
+        "shared-read",
+        "shared-old",
+        "held",
+        "listening",
+    ] {
+        fs::create_dir_all(scratch.join(name).join("sub")).unwrap();
+        fs::write(scratch.join(name).join("sub/f"), "x").unwrap();
+    }
+    fs::write(scratch.join("old-file.log"), "x").unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(scratch.join("listening/sock")).unwrap();
+    for name in [
+        "old",
+        "shared-read",
+        "shared-old",
+        "held",
+        "listening",
+        "old-file.log",
+    ] {
+        age_tree(&scratch.join(name));
+    }
+    // A shared cache read recently (atime) counts as used.
+    let out = Command::new("touch")
+        .args(["-a"])
+        .arg(scratch.join("shared-read/sub/f"))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let mut holder = Command::new("sleep")
+        .arg("30")
+        .current_dir(scratch.join("held/sub"))
+        .spawn()
+        .unwrap();
+    let url = serve(HashMap::new(), 200).url;
+    let at = |name: &str| scratch.join(name);
+    let stop = AtomicBool::new(false);
+
+    // Calm: the dispatcher only counts stale directories.
+    let cfg = tmp_config(&tmp, &scratch, &calm(&tmp));
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &stop);
+    assert!(
+        kind_lines(&tick.lines, "tmp_stale").is_empty(),
+        "{:?}",
+        tick.lines
+    );
+    let count = tick
+        .lines
+        .iter()
+        .find(|l| l["event"] == "tmp_stale")
+        .unwrap();
+    assert_eq!(count["stale_dirs"], 4, "{count}");
+    // A one-off dry run lists them.
+    let tick = keeper(&cfg, &url, false, &tmp).one_off().tick(None, &stop);
+    let calm_lines = kind_lines(&tick.lines, "tmp_stale");
+    let (_, decision, reason) = &calm_lines[&at("old")];
+    assert_eq!(decision, "retain");
+    assert!(
+        reason.starts_with("not under pressure; would go: scratch unused"),
+        "{reason}"
+    );
+    assert!(at("old").exists());
+
+    let cfg = tmp_config(&tmp, &scratch, &always_pressure(&tmp));
+    let dry = keeper(&cfg, &url, false, &tmp).tick(None, &stop);
+    assert_eq!(
+        kind_lines(&dry.lines, "tmp_stale")[&at("old")].1,
+        "would_delete"
+    );
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &stop);
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    drop(listener);
+    let lines = kind_lines(&tick.lines, "tmp_stale");
+    assert!(tick.ok, "{lines:?}");
+    for name in ["old", "shared-old"] {
+        assert_eq!(
+            lines[&at(name)].1,
+            "deleted",
+            "{name}: {:?}",
+            lines[&at(name)]
+        );
+        assert!(!at(name).exists(), "{name}");
+    }
+    assert!(lines[&at("shared-old")]
+        .2
+        .starts_with("shared cache unused"));
+    for (name, reason) in [
+        ("held", "in use by a process"),
+        ("listening", "sock is in use"),
+    ] {
+        let (_, decision, why) = &lines[&at(name)];
+        assert_eq!(decision, "retain", "{name}");
+        assert!(why.contains(reason), "{name}: {why}");
+        assert!(at(name).exists(), "{name}");
+    }
+    for name in ["fresh", "shared-read"] {
+        assert!(!lines.contains_key(&at(name)), "{name} is in use: no line");
+        assert!(at(name).exists(), "{name}");
+    }
+    assert!(
+        at("old-file.log").exists(),
+        "only directories are stale scratch"
+    );
+}
+
+/// Rule C: build output in the worktree of an idle task.
+#[test]
+fn idle_worktrees_lose_ignored_build_output_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let workspace = tmp.join("workspace");
+    let main = workspace.join("proj");
+    let root = workspace.join(".worktrees/proj");
+    repo(&main);
+    let wt = |id: u64| root.join(format!("task-{id}--work"));
+    for id in [1, 2, 3, 4] {
+        add_worktree(&main, &wt(id), &format!("task-{id}"));
+        // Ignored build output at depth, one not ignored, one tracked.
+        write_mib(&wt(id).join("web/node_modules/pkg/index.js"), 1);
+        fs::create_dir_all(wt(id).join("target/debug")).unwrap();
+        fs::write(wt(id).join("target/debug/bin"), "x").unwrap();
+        fs::create_dir_all(wt(id).join("docs/out")).unwrap();
+        fs::write(wt(id).join("docs/out/page.md"), "tracked").unwrap();
+        git(&wt(id), &["add", "docs/out/page.md"]);
+        git(&wt(id), &["commit", "-q", "-m", "docs"]);
+        // A dependency checkout under the ignored `_repo/` with its own rules.
+        let dep = wt(id).join("_repo/dep");
+        repo(&dep);
+        fs::write(dep.join(".gitignore"), "/target/\n").unwrap();
+        fs::create_dir_all(dep.join("target/release/.fingerprint")).unwrap();
+        fs::write(dep.join("target/release/.fingerprint/x"), "x").unwrap();
+        // Go-style read-only module cache inside the output.
+        fs::set_permissions(
+            dep.join("target/release"),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+    }
+    // 1 blocked idle (unpushed commit keeps the worktree), 2 escalated just now,
+    // 3 in progress, 4 done long ago with a live run.
+    let mut routes = HashMap::new();
+    held_task(
+        &mut routes,
+        1,
+        "blocked",
+        "blocked",
+        &ago(Duration::hours(2)),
+    );
+    held_task(
+        &mut routes,
+        2,
+        "escalated",
+        "escalated",
+        &ago(Duration::minutes(5)),
+    );
+    held_task(&mut routes, 3, "in_progress", "in_progress", OLD);
+    held_task(&mut routes, 4, "done", "done", OLD);
+    live_run(&mut routes, 4);
+    let url = serve(routes, 200).url;
+    let cfg = config(
+        &workspace,
+        "[housekeeping.build_output]\nnames = [\"target\", \"node_modules\", \"out\"]\n",
+    );
+
+    let tick = keeper(&cfg, &url, false, &tmp).tick(None, &AtomicBool::new(false));
+    let dry = kind_lines(&tick.lines, "build_output");
+    assert!(tick.ok, "{dry:?}");
+    assert_eq!(dry[&wt(1).join("web/node_modules")].1, "would_delete");
+    assert!(wt(1).join("web/node_modules").exists());
+
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &AtomicBool::new(false));
+    let lines = kind_lines(&tick.lines, "build_output");
+    assert!(tick.ok, "{lines:?}");
+    for rel in ["web/node_modules", "_repo/dep/target"] {
+        let (task, decision, reason) = &lines[&wt(1).join(rel)];
+        assert_eq!(
+            (task, decision.as_str()),
+            (&json!(1), "deleted"),
+            "{rel}: {reason}"
+        );
+        assert!(reason.starts_with("blocked, idle"), "{reason}");
+        assert!(!wt(1).join(rel).exists(), "{rel}");
+    }
+    let (_, decision, reason) = &lines[&wt(1).join("target")];
+    assert_eq!(
+        (decision.as_str(), reason.as_str()),
+        ("retain", "not ignored by git")
+    );
+    let (_, decision, reason) = &lines[&wt(1).join("docs/out")];
+    assert_eq!(decision, "retain");
+    assert!(
+        reason.contains("not ignored by git") || reason.contains("tracks"),
+        "{reason}"
+    );
+    assert!(wt(1).join("docs/out/page.md").exists());
+    assert!(wt(1).join("tracked.txt").exists());
+    assert!(wt(1).join("_repo/dep/tracked.txt").exists());
+    assert!(wt(1).join("target/debug/bin").exists());
+    // The worktree itself stays: the task is not done.
+    assert!(worktree_lines(&tick.lines)[&wt(1)].0 == "retain");
+    // Not idle long enough, or in progress: silent and untouched.
+    for id in [2, 3] {
+        assert!(
+            !lines.keys().any(|p| p.starts_with(wt(id))),
+            "task {id}: {lines:?}"
+        );
+        assert!(wt(id).join("web/node_modules").exists(), "task {id}");
+    }
+    let (_, decision, reason) = &lines[&wt(4).join("web/node_modules")];
+    assert_eq!(
+        (decision.as_str(), reason.as_str()),
+        ("retain", "task has a live run")
+    );
+    assert!(wt(4).join("web/node_modules").exists());
+}
+
+/// Rule D: cache-root entries no task path claims.
+#[test]
+fn orphan_caches_go_once_unused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let caches = tmp.join("cache");
+    for name in ["taskq-target", "fresh-target", "task-1-target"] {
+        fs::create_dir_all(caches.join(name).join("debug")).unwrap();
+        fs::write(caches.join(name).join("debug/x"), "x").unwrap();
+    }
+    fs::set_permissions(
+        caches.join("taskq-target/debug"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+    age_tree(&caches.join("taskq-target"));
+    age_tree(&caches.join("task-1-target"));
+    let mut routes = HashMap::new();
+    held_task(&mut routes, 1, "in_progress", "in_progress", OLD);
+    let url = serve(routes, 200).url;
+    let cfg = config(
+        &tmp.join("missing-workspace"),
+        &format!(
+            "task_paths = [{:?}]\n[housekeeping.orphan_caches]\nroots = [{:?}]\nunused = \"7d\"\n",
+            caches.join("task-{id}-target").to_str().unwrap(),
+            caches.to_str().unwrap()
+        ),
+    );
+    let at = |name: &str| caches.join(name);
+
+    let dry = keeper(&cfg, &url, false, &tmp).tick(None, &AtomicBool::new(false));
+    assert_eq!(
+        kind_lines(&dry.lines, "orphan_cache")[&at("taskq-target")].1,
+        "would_delete"
+    );
+
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &AtomicBool::new(false));
+    let lines = kind_lines(&tick.lines, "orphan_cache");
+    assert!(tick.ok, "{lines:?}");
+    let (task, decision, reason) = &lines[&at("taskq-target")];
+    assert_eq!(
+        (task, decision.as_str()),
+        (&Value::Null, "deleted"),
+        "{reason}"
+    );
+    assert!(!at("taskq-target").exists());
+    let (_, decision, reason) = &lines[&at("fresh-target")];
+    assert_eq!(decision, "retain");
+    assert!(reason.contains("unused 604800s"), "{reason}");
+    assert!(
+        !lines.contains_key(&at("task-1-target")),
+        "a task path, not an orphan"
+    );
+    assert_eq!(
+        kind_lines(&tick.lines, "cache")[&at("task-1-target")].1,
+        "retain"
+    );
+    assert!(at("task-1-target").exists() && at("fresh-target").exists());
+}

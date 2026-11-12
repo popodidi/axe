@@ -12,11 +12,23 @@
 //! trims rebuildable caches; with `[housekeeping.alert]`, a long admission
 //! pause on disk wakes a bot once.
 //!
+//! Optional reclaim rules for what that misses:
+//! - `[housekeeping.build_output]`: git-ignored build output (`target`,
+//!   `node_modules`, ...) in the worktrees of idle done, blocked or escalated
+//!   tasks; source and commits stay.
+//! - `[housekeeping.tmp]`: task-named scratch in a temp directory once the task
+//!   is done (or held and idle, above a size floor), and under pressure other
+//!   stale scratch.
+//! - `[housekeeping.orphan_caches]`: cache-root entries no task path claims,
+//!   once unused for a while.
+//!
 //! Runs as a tick inside `axe dispatch` (`[dispatcher] housekeep`), or once
 //! with `axe housekeeping --dry-run`. Each decision is one JSON line on stdout.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +59,30 @@ pub struct Rules {
     task_paths: Vec<TaskPath>,
     pressure: Option<Pressure>,
     alert: Option<Alert>,
+    build_output: Option<BuildOutput>,
+    tmp: Option<Tmp>,
+    orphans: Option<Orphans>,
+}
+
+#[derive(Debug, Clone)]
+struct BuildOutput {
+    idle: u64,
+    names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Tmp {
+    dir: PathBuf,
+    idle: u64,
+    floor_bytes: u64,
+    stale: u64,
+    shared: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Orphans {
+    roots: Vec<PathBuf>,
+    unused: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -164,24 +200,122 @@ impl Rules {
                 })
             }
         };
+        let build_output = match &h.build_output {
+            None => None,
+            Some(b) => {
+                ensure!(
+                    !b.names.is_empty()
+                        && b.names.iter().all(|n| {
+                            !n.is_empty()
+                                && !n.contains('/')
+                                && n != "."
+                                && n != ".."
+                                && n != ".git"
+                        }),
+                    "build_output.names must be plain directory names"
+                );
+                Some(BuildOutput {
+                    idle: seconds("build_output.idle", &b.idle)?,
+                    names: b.names.clone(),
+                })
+            }
+        };
+        let tmp = match &h.tmp {
+            None => None,
+            Some(t) => {
+                let dir = expand_tilde(&t.dir);
+                ensure!(dir.is_absolute(), "tmp.dir is not absolute");
+                ensure!(
+                    !worktrees.starts_with(&dir) && !dir.starts_with(&worktrees),
+                    "tmp.dir {} overlaps {}, which holds worktrees",
+                    dir.display(),
+                    worktrees.display()
+                );
+                Some(Tmp {
+                    dir,
+                    idle: seconds("tmp.idle", &t.idle)?,
+                    floor_bytes: t.floor_mib.saturating_mul(1 << 20),
+                    stale: seconds("tmp.stale", &t.stale)?,
+                    shared: t.shared.clone(),
+                })
+            }
+        };
+        let orphans = match &h.orphan_caches {
+            None => None,
+            Some(o) => {
+                let roots = o.roots.iter().map(|r| expand_tilde(r)).collect::<Vec<_>>();
+                for root in &roots {
+                    ensure!(
+                        root.is_absolute(),
+                        "orphan_caches root {} is not absolute",
+                        root.display()
+                    );
+                    ensure!(
+                        !worktrees.starts_with(root) && !root.starts_with(&worktrees),
+                        "orphan_caches root {} overlaps {}, which holds worktrees",
+                        root.display(),
+                        worktrees.display()
+                    );
+                }
+                Some(Orphans {
+                    roots,
+                    unused: seconds("orphan_caches.unused", &o.unused)?,
+                })
+            }
+        };
         Ok(Rules {
             worktrees,
             retention,
             task_paths,
             pressure,
             alert,
+            build_output,
+            tmp,
+            orphans,
         })
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct TaskRow {
     id: u64,
     project: String,
     state: String,
+    /// Derived: `blocked` also for a pending task that waits on a
+    /// prerequisite or a wake time.
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    updated_at: String,
 }
 
-#[derive(Deserialize)]
+impl TaskRow {
+    fn status(&self) -> &str {
+        if self.status.is_empty() {
+            &self.state
+        } else {
+            &self.status
+        }
+    }
+
+    /// `Ok(reason)` when the task is done, blocked or escalated and has not
+    /// been updated for `idle` seconds: nothing runs in it soon.
+    fn idle_for(&self, idle: u64, now: i64) -> Result<String, String> {
+        let status = self.status();
+        if !matches!(status, "done" | "blocked" | "escalated") {
+            return Err(format!("task status is {status:?}"));
+        }
+        let at = OffsetDateTime::parse(&self.updated_at, &Rfc3339)
+            .map_err(|e| format!("bad updated_at {:?}: {e}", self.updated_at))?;
+        let age = (now - at.unix_timestamp()).max(0);
+        if age < idle as i64 {
+            return Err(format!("{status}, updated {age}s ago, idle {idle}s"));
+        }
+        Ok(format!("{status}, idle {age}s"))
+    }
+}
+
+#[derive(Deserialize, Clone)]
 struct Event {
     at: String,
     kind: String,
@@ -365,12 +499,219 @@ fn foreign_path(path: &Path, uid: u32) -> std::io::Result<Option<PathBuf>> {
 }
 
 fn owned(path: &Path) -> Result<(), String> {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::geteuid() };
-    match foreign_path(path, uid) {
+    match foreign_path(path, euid()) {
         Ok(None) => Ok(()),
         Ok(Some(found)) => Err(format!("{} is owned by another user", found.display())),
         Err(e) => Err(format!("cannot inspect tree: {e}")),
+    }
+}
+
+/// The task id a scratch entry name maps to: `task-<id>*`, `task<id>*`,
+/// `t<id>*`, or `<id>-<non-digit>*` (so dates like `2026-11-12` are not ids).
+fn scratch_task(name: &str) -> Option<u64> {
+    fn digits(s: &str) -> (&str, &str) {
+        let end = s
+            .bytes()
+            .position(|b| !b.is_ascii_digit())
+            .unwrap_or(s.len());
+        s.split_at(end)
+    }
+    for prefix in ["task-", "task", "t"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            let (id, _) = digits(rest);
+            if !id.is_empty() {
+                return parse_id(id);
+            }
+        }
+    }
+    let (id, rest) = digits(name);
+    let rest = rest.strip_prefix('-')?;
+    if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    parse_id(id)
+}
+
+/// `pattern` with `*` matching any run of characters.
+fn glob(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((head, tail)) => {
+            let Some(rest) = name.strip_prefix(head) else {
+                return false;
+            };
+            (0..=rest.len())
+                .filter(|&i| rest.is_char_boundary(i))
+                .any(|i| glob(tail, &rest[i..]))
+        }
+    }
+}
+
+/// What one walk of a tree (symlinks not followed) finds.
+#[derive(Debug, Default, PartialEq)]
+struct TreeStats {
+    /// Allocated bytes.
+    bytes: u64,
+    /// Newest modification time of any entry, the root included.
+    modified: i64,
+    /// Newest access time of a regular file.
+    read: i64,
+    /// The first entry not owned by the walking user.
+    foreign: Option<PathBuf>,
+}
+
+impl TreeStats {
+    /// Seconds since last use at `now`; `reads` counts file reads as use.
+    fn unused(&self, now: i64, reads: bool) -> i64 {
+        let last = if reads {
+            self.modified.max(self.read)
+        } else {
+            self.modified
+        };
+        (now - last).max(0)
+    }
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+fn tree_stats(path: &Path) -> std::io::Result<TreeStats> {
+    let uid = euid();
+    let meta = fs::symlink_metadata(path)?;
+    let mut stats = TreeStats {
+        bytes: meta.blocks() * 512,
+        modified: meta.mtime(),
+        read: if meta.is_file() { meta.atime() } else { 0 },
+        foreign: (meta.uid() != uid).then(|| path.to_path_buf()),
+    };
+    if !meta.is_dir() {
+        return Ok(stats);
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // A directory we cannot list (mode 000 or not ours) blocks removal.
+            Err(_) if stats.foreign.is_some() => continue,
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            stats.bytes += meta.blocks() * 512;
+            stats.modified = stats.modified.max(meta.mtime());
+            if meta.is_file() {
+                stats.read = stats.read.max(meta.atime());
+            }
+            if meta.uid() != uid {
+                stats.foreign.get_or_insert_with(|| entry.path());
+            } else if meta.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// Stats of a tree, Err when another user owns part of it.
+fn inspect(path: &Path) -> Result<TreeStats, String> {
+    let stats = tree_stats(path).map_err(|e| format!("cannot inspect tree: {e}"))?;
+    if let Some(found) = &stats.foreign {
+        return Err(format!("{} is owned by another user", found.display()));
+    }
+    Ok(stats)
+}
+
+/// Removes `path`: a file or symlink, or a tree after giving each directory
+/// `u+rwx` (Go module caches are read-only). Refuses a tree with an entry
+/// owned by another user.
+fn remove_tree(path: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    if !meta.is_dir() {
+        return fs::remove_file(path).with_context(|| format!("remove {}", path.display()));
+    }
+    if let Some(found) = tree_stats(path)?.foreign {
+        bail!("{} is owned by another user", found.display());
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mode = fs::symlink_metadata(&dir)?.permissions().mode();
+        if mode & 0o700 != 0o700 {
+            fs::set_permissions(&dir, fs::Permissions::from_mode(mode | 0o700))
+                .with_context(|| format!("chmod u+rwx {}", dir.display()))?;
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))
+}
+
+/// Paths in use: every readable process's working directory and open files,
+/// and every bound unix socket (a live tmux or ssh-agent listens on one).
+/// Processes of other users are unreadable and cannot use our trees.
+#[derive(Default)]
+struct OpenPaths {
+    paths: Vec<PathBuf>,
+    taken: Option<Instant>,
+}
+
+impl OpenPaths {
+    fn scan() -> OpenPaths {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .and_then(|p| p.parse::<u32>().ok())
+                .is_none()
+            {
+                continue;
+            }
+            let proc = entry.path();
+            paths.extend(fs::read_link(proc.join("cwd")));
+            for fd in fs::read_dir(proc.join("fd"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if let Ok(target) = fs::read_link(fd.path()) {
+                    if target.is_absolute() {
+                        paths.push(target);
+                    }
+                }
+            }
+        }
+        // Path is the 8th field; abstract sockets start with `@`.
+        let sockets = fs::read_to_string("/proc/net/unix").unwrap_or_default();
+        paths.extend(
+            sockets
+                .lines()
+                .skip(1)
+                .filter_map(|l| l.split_whitespace().nth(7))
+                .filter(|p| p.starts_with('/'))
+                .map(PathBuf::from),
+        );
+        paths.sort();
+        paths.dedup();
+        OpenPaths {
+            paths,
+            taken: Some(Instant::now()),
+        }
+    }
+
+    /// The first open path inside `path`.
+    fn inside(&self, path: &Path) -> Option<&Path> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.paths
+            .iter()
+            .find(|p| p.starts_with(&path))
+            .map(PathBuf::as_path)
     }
 }
 
@@ -542,6 +883,10 @@ pub struct Keeper {
     last_sweep: Option<Instant>,
     last_trim: Option<Instant>,
     episode: PathBuf,
+    /// Task rows looked up during this tick; re-checks bypass it.
+    tasks: RefCell<HashMap<u64, Result<TaskRow, String>>>,
+    task_events: RefCell<HashMap<u64, Result<Vec<Event>, String>>>,
+    open: RefCell<OpenPaths>,
 }
 
 impl Keeper {
@@ -555,6 +900,9 @@ impl Keeper {
             last_sweep: None,
             last_trim: None,
             episode: episode_path(),
+            tasks: RefCell::default(),
+            task_events: RefCell::default(),
+            open: RefCell::default(),
         }
     }
 
@@ -579,6 +927,326 @@ impl Keeper {
             return Err(format!("server returned task {}", task.id));
         }
         Ok(task)
+    }
+
+    /// The task row, cached for this tick unless `fresh`.
+    fn task_row(&self, id: u64, fresh: bool) -> Result<TaskRow, String> {
+        if !fresh {
+            if let Some(found) = self.tasks.borrow().get(&id) {
+                return found.clone();
+            }
+        }
+        let found = self.task(id);
+        self.tasks.borrow_mut().insert(id, found.clone());
+        found
+    }
+
+    /// The task's events, cached for this tick unless `fresh`.
+    fn events(&self, id: u64, fresh: bool) -> Result<Vec<Event>, String> {
+        if !fresh {
+            if let Some(found) = self.task_events.borrow().get(&id) {
+                return found.clone();
+            }
+        }
+        let found: Result<Vec<Event>, String> = self
+            .client
+            .get(&format!("/api/tasks/{id}/events"), &[])
+            .map_err(|e| format!("events lookup failed: {e:#}"));
+        self.task_events.borrow_mut().insert(id, found.clone());
+        found
+    }
+
+    /// An open path inside `path`, from a process scan of this tick, or of
+    /// the last second when `fresh`.
+    fn in_use(&self, path: &Path, fresh: bool) -> Result<(), String> {
+        let mut open = self.open.borrow_mut();
+        let max_age = if fresh { Duration::from_secs(1) } else { TICK };
+        if open.taken.is_none_or(|t| t.elapsed() >= max_age) {
+            *open = OpenPaths::scan();
+        }
+        match open.inside(path) {
+            Some(p) => Err(format!("{} is in use by a process", p.display())),
+            None => Ok(()),
+        }
+    }
+
+    /// Runs `check` (cached lookups), and in apply mode again with fresh
+    /// lookups right before `remove`.
+    fn act(
+        &self,
+        check: impl Fn(bool) -> Result<String, String>,
+        remove: impl FnOnce() -> Result<()>,
+    ) -> (&'static str, String) {
+        match check(false) {
+            Err(reason) => ("retain", reason),
+            Ok(reason) if !self.apply => ("would_delete", reason),
+            Ok(_) => match check(true) {
+                Err(reason) => ("retain", format!("re-check: {reason}")),
+                Ok(reason) => match remove() {
+                    Ok(()) => ("deleted", reason),
+                    Err(e) => ("error", format!("{e:#}")),
+                },
+            },
+        }
+    }
+
+    /// Stats of a tree we may remove: Err when another user owns part of it,
+    /// a socket lives in it or a process uses it.
+    fn removable(&self, path: &Path, fresh: bool) -> Result<TreeStats, String> {
+        let stats = inspect(path)?;
+        self.in_use(path, fresh)?;
+        Ok(stats)
+    }
+
+    /// Rule A: scratch named for `id`. A done task's goes after `retention`;
+    /// a blocked or escalated task's once idle and at least the size floor.
+    fn evaluate_scratch(
+        &self,
+        tmp: &Tmp,
+        path: &Path,
+        id: u64,
+        retention: u64,
+        fresh: bool,
+    ) -> Result<String, String> {
+        let task = self.task_row(id, fresh)?;
+        let held = if task.state == "done" {
+            None
+        } else {
+            Some(task.idle_for(tmp.idle, unix_now())?)
+        };
+        let events = self.events(id, fresh)?;
+        if run_is_live(&events) {
+            return Err("task has a live run".into());
+        }
+        let is_held = held.is_some();
+        let reason = match held {
+            None => {
+                let age = done_age(&events, unix_now())?;
+                if age < retention as i64 {
+                    return Err(format!("done {age}s ago, retention {retention}s"));
+                }
+                format!("done {age}s ago")
+            }
+            Some(reason) => reason,
+        };
+        let stats = self.removable(path, fresh)?;
+        if is_held && stats.bytes < tmp.floor_bytes {
+            return Err(format!(
+                "{reason}; {} bytes, below the floor of {}",
+                stats.bytes, tmp.floor_bytes
+            ));
+        }
+        Ok(format!(
+            "{reason}, project {:?}, {} bytes",
+            task.project, stats.bytes
+        ))
+    }
+
+    /// Rule B: a directory no task claims, unused for `stale`.
+    fn evaluate_stale(&self, tmp: &Tmp, path: &Path, fresh: bool) -> Result<String, String> {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let shared = tmp.shared.iter().any(|p| glob(p, &name));
+        let stats = tree_stats(path).map_err(|e| format!("cannot inspect tree: {e}"))?;
+        let unused = stats.unused(unix_now(), shared);
+        if unused < tmp.stale as i64 {
+            return Err(format!("used {unused}s ago, stale {}s", tmp.stale));
+        }
+        let stats = self.removable(path, fresh)?;
+        let kind = if shared { "shared cache" } else { "scratch" };
+        Ok(format!("{kind} unused {unused}s, {} bytes", stats.bytes))
+    }
+
+    /// Rules A and B over the entries of `tmp.dir` this user owns.
+    fn sweep_tmp(
+        &self,
+        tmp: &Tmp,
+        retention: u64,
+        under: bool,
+        stop: &AtomicBool,
+        out: &mut Vec<Value>,
+    ) -> bool {
+        let entries = match sorted_entries(&tmp.dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                out.push(rule_line(
+                    "tmp",
+                    &tmp.dir,
+                    None,
+                    "error",
+                    &format!("read: {e}"),
+                ));
+                return false;
+            }
+        };
+        let uid = euid();
+        let mut ok = true;
+        let mut waiting = 0;
+        for entry in entries {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let path = entry.path();
+            // Other users' entries (root's sockets, systemd) are not ours.
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.uid() != uid || meta.file_type().is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(id) = scratch_task(&name) {
+                let (decision, reason) = self.act(
+                    |fresh| self.evaluate_scratch(tmp, &path, id, retention, fresh),
+                    || remove_tree(&path),
+                );
+                ok &= decision != "error";
+                out.push(rule_line("tmp_task", &path, Some(id), decision, &reason));
+                continue;
+            }
+            if !meta.is_dir() {
+                continue;
+            }
+            // Recently used directories say nothing; only stale ones get a line.
+            let first = self.evaluate_stale(tmp, &path, false);
+            if first.as_ref().is_err_and(|r| r.starts_with("used ")) {
+                continue;
+            }
+            let (decision, reason) = if under {
+                self.act(
+                    |fresh| self.evaluate_stale(tmp, &path, fresh),
+                    || remove_tree(&path),
+                )
+            } else if !self.one_off {
+                // The dispatcher counts them instead of a line each hour.
+                waiting += 1;
+                continue;
+            } else {
+                match first {
+                    Ok(r) => ("retain", format!("not under pressure; would go: {r}")),
+                    Err(r) => ("retain", format!("not under pressure; {r}")),
+                }
+            };
+            ok &= decision != "error";
+            out.push(rule_line("tmp_stale", &path, None, decision, &reason));
+        }
+        if waiting > 0 {
+            out.push(json!({"event": "tmp_stale", "under_pressure": false, "stale_dirs": waiting}));
+        }
+        ok
+    }
+
+    /// Rule C check for one build-output directory of task `id`'s worktree.
+    fn evaluate_build(
+        &self,
+        bo: &BuildOutput,
+        project: &str,
+        id: u64,
+        dir: &Path,
+        fresh: bool,
+    ) -> Result<String, String> {
+        let task = self.task_row(id, fresh)?;
+        if task.project != project {
+            return Err(format!("task belongs to project {:?}", task.project));
+        }
+        let reason = task.idle_for(bo.idle, unix_now())?;
+        if run_is_live(&self.events(id, fresh)?) {
+            return Err("task has a live run".into());
+        }
+        git_ignored_untracked(dir)?;
+        let stats = self.removable(dir, fresh)?;
+        Ok(format!("{reason}, git-ignored, {} bytes", stats.bytes))
+    }
+
+    /// Rule C: build output in an idle task's worktree, after its own decision
+    /// retained it. Silent unless the task is idle and output exists.
+    fn sweep_build_output(
+        &self,
+        bo: &BuildOutput,
+        project: &str,
+        c: &Candidate,
+        stop: &AtomicBool,
+        out: &mut Vec<Value>,
+    ) -> bool {
+        let idle = self
+            .task_row(c.task, false)
+            .is_ok_and(|t| t.project == project && t.idle_for(bo.idle, unix_now()).is_ok());
+        if !idle {
+            return true;
+        }
+        let mut ok = true;
+        for dir in build_dirs(&c.path, &bo.names) {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let (decision, reason) = self.act(
+                |fresh| self.evaluate_build(bo, project, c.task, &dir, fresh),
+                || remove_tree(&dir),
+            );
+            ok &= decision != "error";
+            let mut l = rule_line("build_output", &dir, Some(c.task), decision, &reason);
+            l["project"] = json!(project);
+            out.push(l);
+        }
+        ok
+    }
+
+    /// Rule D check: an entry of a cache root, unused for `unused`.
+    fn evaluate_orphan(&self, o: &Orphans, path: &Path, fresh: bool) -> Result<String, String> {
+        let stats = tree_stats(path).map_err(|e| format!("cannot inspect tree: {e}"))?;
+        let unused = stats.unused(unix_now(), true);
+        if unused < o.unused as i64 {
+            return Err(format!("used {unused}s ago, unused {}s", o.unused));
+        }
+        let stats = self.removable(path, fresh)?;
+        Ok(format!("unused {unused}s, {} bytes", stats.bytes))
+    }
+
+    /// Rule D: cache-root entries that no `task_paths` template claims.
+    fn sweep_orphans(&self, o: &Orphans, stop: &AtomicBool, out: &mut Vec<Value>) -> bool {
+        let uid = euid();
+        let mut ok = true;
+        for root in &o.roots {
+            let entries = match sorted_entries(root) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    out.push(rule_line(
+                        "orphan_cache",
+                        root,
+                        None,
+                        "error",
+                        &format!("read: {e}"),
+                    ));
+                    ok = false;
+                    continue;
+                }
+            };
+            for entry in entries {
+                if stop.load(Ordering::SeqCst) {
+                    return ok;
+                }
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let claimed = self
+                    .rules
+                    .task_paths
+                    .iter()
+                    .any(|t| t.dir == *root && t.task(&name).is_some());
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if claimed || meta.uid() != uid || meta.file_type().is_symlink() {
+                    continue;
+                }
+                let (decision, reason) = self.act(
+                    |fresh| self.evaluate_orphan(o, &path, fresh),
+                    || remove_tree(&path),
+                );
+                ok &= decision != "error";
+                out.push(rule_line("orphan_cache", &path, None, decision, &reason));
+            }
+        }
+        ok
     }
 
     /// The done task's events and done age, Err unless done for `retention`.
@@ -688,6 +1356,15 @@ impl Keeper {
             }
             let path = entry.path();
             let Some(task) = paths.iter().find_map(|p| p.task(&name)) else {
+                // An orphan-cache root reports these under its own rule.
+                if self
+                    .rules
+                    .orphans
+                    .as_ref()
+                    .is_some_and(|o| o.roots.iter().any(|r| r == dir))
+                {
+                    continue;
+                }
                 let expected: Vec<&str> = paths.iter().map(|p| p.template.as_str()).collect();
                 let reason = format!("no task id: expected {}", expected.join(" or "));
                 out.push(path_line(&path, None, "retain", &reason));
@@ -738,6 +1415,10 @@ impl Keeper {
             lines: Vec::new(),
         };
         let rules = self.rules.clone();
+        self.tasks.borrow_mut().clear();
+        self.task_events.borrow_mut().clear();
+        *self.open.borrow_mut() = OpenPaths::default();
+        let mut under = false;
         let mut retention = rules.retention;
         // Task paths are rebuildable: under pressure they go as soon as the task is done.
         let mut path_retention = rules.retention;
@@ -750,7 +1431,7 @@ impl Keeper {
                         .push(json!({"event": "pressure", "error": format!("{e:#}")}));
                 }
                 Ok(free) => {
-                    let under = under_pressure(free, p.free_below_gib);
+                    under = under_pressure(free, p.free_below_gib);
                     if under {
                         retention = p.retention;
                         path_retention = 0;
@@ -824,6 +1505,15 @@ impl Keeper {
                                     decision,
                                     &reason,
                                 ));
+                                if let (Some(bo), "retain") = (&rules.build_output, decision) {
+                                    out.ok &= self.sweep_build_output(
+                                        bo,
+                                        &project,
+                                        &c,
+                                        stop,
+                                        &mut out.lines,
+                                    );
+                                }
                             }
                         }
                     }
@@ -844,8 +1534,72 @@ impl Keeper {
                 Ok(ok) => out.ok &= ok,
             }
         }
+        if let Some(tmp) = &rules.tmp {
+            out.ok &= self.sweep_tmp(tmp, path_retention, under, stop, &mut out.lines);
+        }
+        if let Some(o) = &rules.orphans {
+            out.ok &= self.sweep_orphans(o, stop, &mut out.lines);
+        }
         out
     }
+}
+
+/// Directories named one of `names` under `root` (not `root` itself), not
+/// descending into them, `.git` or symlinks.
+fn build_dirs(root: &Path, names: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in sorted_entries(&dir).unwrap_or_default() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            if !kind.is_dir() || name == ".git" {
+                continue;
+            }
+            if names.iter().any(|n| name == n.as_str()) {
+                out.push(entry.path());
+            } else {
+                stack.push(entry.path());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Ok when git ignores `dir` and tracks nothing inside it.
+fn git_ignored_untracked(dir: &Path) -> Result<(), String> {
+    let parent = dir.parent().ok_or("no parent")?;
+    let name = dir.file_name().ok_or("no name")?;
+    let out = Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(parent)
+        .args(["check-ignore", "-q", "--"])
+        .arg(name)
+        .output()
+        .map_err(|e| format!("run git: {e}"))?;
+    match out.status.code() {
+        Some(0) => {}
+        Some(1) => return Err("not ignored by git".into()),
+        _ => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("git check-ignore failed: {}", stderr.trim()));
+        }
+    }
+    let mut parent_name = PathBuf::from(name);
+    parent_name.push("");
+    let tracked = git_output(parent, &["ls-files", "--", &parent_name.to_string_lossy()])?;
+    if let Some(first) = tracked.lines().next() {
+        return Err(format!("git tracks {first}"));
+    }
+    Ok(())
+}
+
+fn rule_line(kind: &str, path: &Path, task: Option<u64>, decision: &str, reason: &str) -> Value {
+    json!({"kind": kind, "path": path, "task": task, "decision": decision, "reason": reason})
 }
 
 fn line(path: &Path, project: &str, task: Option<u64>, decision: &str, reason: &str) -> Value {
@@ -954,6 +1708,96 @@ mod tests {
         let scratch = TaskPath::parse("/tmp/axe-task-{id}", Path::new("/w/.worktrees")).unwrap();
         assert_eq!(scratch.task("axe-task-12"), Some(12));
         assert_eq!(scratch.task("axe-task-12.x"), None);
+    }
+
+    #[test]
+    fn scratch_names_map_to_tasks() {
+        for (name, id) in [
+            ("t757", 757),
+            ("t671cache2", 671),
+            ("t604-reczz28Y.eKSK", 604),
+            ("t5_list.json", 5),
+            ("task152-m2", 152),
+            ("task-12-run", 12),
+            ("task-12", 12),
+            ("502-build.log", 502),
+            ("502-lark", 502),
+        ] {
+            assert_eq!(scratch_task(name), Some(id), "{name}");
+        }
+        for name in [
+            "2026-09-26-0020-plan.html",
+            "502-",
+            "502",
+            "t07",
+            "t0",
+            "tsx-1000",
+            "tmp.KGRcEZcOfj",
+            "tmux-1000",
+            "axe-rehearsal-574",
+            "node-compile-cache",
+        ] {
+            assert_eq!(scratch_task(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn glob_star() {
+        assert!(glob("tsx-*", "tsx-1000"));
+        assert!(glob("tsx-*", "tsx-"));
+        assert!(glob("gh-cli-cache", "gh-cli-cache"));
+        assert!(glob("*-of-*", "pytest-of-harvis"));
+        assert!(!glob("tsx-*", "xtsx-1"));
+        assert!(!glob("gh-cli-cache", "gh-cli-cache2"));
+    }
+
+    #[test]
+    fn tree_stats_and_remove_read_only_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("tree");
+        fs::create_dir_all(tree.join("a/b")).unwrap();
+        fs::write(tree.join("a/b/f"), vec![1u8; 10000]).unwrap();
+        fs::set_permissions(tree.join("a/b"), fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(tree.join("a"), fs::Permissions::from_mode(0o500)).unwrap();
+        let stats = tree_stats(&tree).unwrap();
+        assert!(stats.bytes >= 10000, "{stats:?}");
+        assert_eq!(stats.foreign, None);
+        assert!(stats.modified > 0 && stats.read > 0);
+        remove_tree(&tree).unwrap();
+        assert!(!tree.exists());
+        let file = tmp.path().join("f");
+        fs::write(&file, "x").unwrap();
+        remove_tree(&file).unwrap();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn idle_needs_a_held_status_and_age() {
+        let row = |state: &str, status: &str, at: &str| TaskRow {
+            id: 1,
+            project: "p".into(),
+            state: state.into(),
+            status: status.into(),
+            updated_at: at.into(),
+        };
+        let now = OffsetDateTime::parse("2026-11-12T12:00:00Z", &Rfc3339)
+            .unwrap()
+            .unix_timestamp();
+        let two_h = "2026-11-12T10:00:00Z";
+        assert!(row("pending", "blocked", two_h).idle_for(3600, now).is_ok());
+        assert!(row("blocked", "", two_h).idle_for(3600, now).is_ok());
+        assert!(row("escalated", "escalated", two_h)
+            .idle_for(3600, now)
+            .is_ok());
+        assert!(row("done", "done", two_h).idle_for(3600, now).is_ok());
+        assert!(row("done", "done", two_h).idle_for(7201, now).is_err());
+        assert!(row("pending", "pending", two_h).idle_for(0, now).is_err());
+        assert!(row("in_progress", "in_progress", two_h)
+            .idle_for(0, now)
+            .is_err());
+        assert!(row("blocked", "blocked", "garbage")
+            .idle_for(0, now)
+            .is_err());
     }
 
     #[test]
@@ -1124,6 +1968,23 @@ mod tests {
         let p = r.pressure.unwrap();
         assert_eq!((p.path, p.retention), (PathBuf::from("/w"), 3600));
         assert_eq!(r.alert.unwrap().after, 900);
+        let cfg = Config::parse(
+            "workspace_root = \"/w\"\n[housekeeping.build_output]\n[housekeeping.tmp]\n\
+             [housekeeping.orphan_caches]\nroots = [\"/c\"]\n",
+        )
+        .unwrap();
+        let r = Rules::new(&cfg).unwrap();
+        let b = r.build_output.unwrap();
+        assert_eq!(b.idle, 3600);
+        assert_eq!(b.names, ["target", "node_modules", ".next", "out"]);
+        let t = r.tmp.unwrap();
+        assert_eq!(
+            (t.dir, t.idle, t.floor_bytes, t.stale),
+            (PathBuf::from("/tmp"), 3600, 1 << 30, 172800)
+        );
+        assert!(t.shared.iter().any(|p| p == "node-compile-cache"));
+        let o = r.orphans.unwrap();
+        assert_eq!((o.roots, o.unused), (vec![PathBuf::from("/c")], 604800));
         assert_eq!(Config::default().dispatcher.housekeep, Housekeep::Off);
         for bad in [
             "[dispatcher]\nhousekeep = \"yes\"\n",
@@ -1133,6 +1994,15 @@ mod tests {
             "[housekeeping.pressure]\nfree_below_gib = 1\ncache_trim = [[\"go\"]]\n",
             "[housekeeping]\ntask_paths = [\"/c/target\"]\n",
             "[housekeeping.alert]\nbot = \"\"\n",
+            "[housekeeping.build_output]\nnames = []\n",
+            "[housekeeping.build_output]\nnames = [\"a/b\"]\n",
+            "[housekeeping.build_output]\nnames = [\".git\"]\n",
+            "[housekeeping.tmp]\ndir = \"tmp\"\n",
+            "workspace_root = \"/w\"\n[housekeeping.tmp]\ndir = \"/w\"\n",
+            "[housekeeping.tmp]\nstale = \"soon\"\n",
+            "workspace_root = \"/w\"\n[housekeeping.orphan_caches]\nroots = [\"/w/.worktrees/p\"]\n",
+            "[housekeeping.orphan_caches]\nroots = [\"cache\"]\n",
+            "[housekeeping.orphan_caches]\n",
         ] {
             assert!(Config::parse(bad).is_err(), "{bad}");
         }
