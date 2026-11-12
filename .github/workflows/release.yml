@@ -20,8 +20,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Build parallelism (CARGO_BUILD_JOBS, MAKEFLAGS) comes from the hlab CI
+# runner's environment, sized to its guest (Harvis infra/hlab-vm/ci-vm).
 env:
-  CARGO_BUILD_JOBS: "1"
   CARGO_TERM_COLOR: never
 
 jobs:
@@ -73,6 +74,7 @@ jobs:
           docker buildx build . \
             --platform linux/amd64 --provenance=false --sbom=false \
             --build-arg "GIT_COMMIT=$GITHUB_SHA" \
+            --build-arg "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1}" \
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.version=$VERSION" \
