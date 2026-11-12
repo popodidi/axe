@@ -1,27 +1,29 @@
 name: ci
 
+# Pull requests run the fast checks: default-feature fmt, clippy and tests, the
+# TS types test, and the web job when the dashboard changed
+# (scripts/ci_scope.py). release.yml calls this workflow with `full: true` on a
+# v* tag (and its workflow_dispatch dry run): that adds the
+# --no-default-features and embed-ui variants and always runs the web job.
+# Pushes to main run nothing: the pull request's run covers the merged code.
 on:
   pull_request:
-  push:
-    branches: [main]
-    tags: ["v*"]
-
-# Pull requests run only what their changed files need; pushes to main run
-# everything; a v* tag whose commit already passed on main runs nothing (see
-# scripts/ci_scope.py). The jobs and their names stay the same either way:
-# unneeded steps are skipped.
+  workflow_call:
+    inputs:
+      full:
+        description: Also run the --no-default-features and embed-ui variants and the web job
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  # scripts/ci_scope.py reads this workflow's main runs for tag pushes.
-  actions: read
 
 # A new push to a pull request cancels its superseded run, so the single CI
-# runner slot only works on the latest head. A running main or tag run is never
-# cancelled (release.yml needs main CI to pass on the tagged commit); a newer
-# push to main still replaces a main run that has not started.
+# runner slot only works on the latest head. A release gate run is never
+# cancelled. The `ci-` prefix keeps this group apart from the calling
+# release.yml run's own group (github.workflow is the caller's name there).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Build parallelism (CARGO_BUILD_JOBS, MAKEFLAGS) comes from the hlab CI
@@ -39,56 +41,44 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          # The pull_request merge commit and its base parent, for ci_scope.py.
-          fetch-depth: 2
-      - name: Select checks
-        id: scope
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_scope.py scope
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.scope.outputs.rust == 'true'
         with:
           components: clippy, rustfmt
       - uses: actions/setup-node@v4
-        if: steps.scope.outputs.ui == 'true'
+        if: inputs.full
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
       # Build cache on the runner's persistent cache disk (size-capped).
       - name: Build cache
-        if: steps.scope.outputs.rust == 'true'
         run: scripts/ci_sccache.sh setup
       - name: Format
-        if: steps.scope.outputs.rust == 'true'
         run: cargo fmt --check
       - name: Clippy
-        if: steps.scope.outputs.rust == 'true'
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Clippy (no default features)
-        if: steps.scope.outputs.telegram == 'true'
-        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
       - name: Test
-        if: steps.scope.outputs.rust == 'true'
         run: cargo test --locked
-      - name: Test (no default features)
-        if: steps.scope.outputs.telegram == 'true'
-        run: cargo test --locked --no-default-features
       - name: Web API types are current
-        if: steps.scope.outputs.rust == 'true'
         run: cargo test --locked --features ts --test ts_bindings
+      # Release gate only (full): the feature variants.
+      - name: Clippy (no default features)
+        if: inputs.full
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: Test (no default features)
+        if: inputs.full
+        run: cargo test --locked --no-default-features
       - name: Build the dashboard for embedding
-        if: steps.scope.outputs.ui == 'true'
+        if: inputs.full
         run: cd web && npm ci && npm run build
       - name: Clippy (embed-ui)
-        if: steps.scope.outputs.ui == 'true'
+        if: inputs.full
         run: cargo clippy --locked --all-targets --features embed-ui -- -D warnings
       - name: Build and test (embed-ui)
-        if: steps.scope.outputs.ui == 'true'
+        if: inputs.full
         run: cargo build --locked --features embed-ui && cargo test --locked --features embed-ui --test embed_ui
       - name: Build cache stats
-        if: always() && steps.scope.outputs.rust == 'true'
+        if: always()
         run: scripts/ci_sccache.sh stats
 
       # The self-hosted PR VM is persistent and each runner slot keeps one work
@@ -113,20 +103,19 @@ jobs:
           fetch-depth: 2
       - name: Select checks
         id: scope
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        if: ${{ !inputs.full }}
         run: python3 scripts/ci_scope.py scope
       - uses: actions/setup-node@v4
-        if: steps.scope.outputs.ui == 'true'
+        if: inputs.full || steps.scope.outputs.ui == 'true'
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Lint, typecheck, unit tests and build
-        if: steps.scope.outputs.ui == 'true'
+        if: inputs.full || steps.scope.outputs.ui == 'true'
         run: cd web && npm ci && npm run lint && npm run typecheck && npm test && npm run build
       - name: Browser tests
-        if: steps.scope.outputs.ui == 'true'
+        if: inputs.full || steps.scope.outputs.ui == 'true'
         run: cd web && npx playwright install chromium && npm run test:browser -- --workers=1
 
       # The self-hosted PR VM is persistent and each runner slot keeps one work
