@@ -46,6 +46,21 @@ dependency wait, not an escalation. Poll in-session only for checks due within
 a few minutes; for longer waits, `axe wait` and exit, so the same session
 resumes later without holding a worker slot.
 
+Size a timed wait to what it waits on, not to a round hour. For a CI run, a
+deploy, a release step or another short external check, wake when it should
+finish: its usual duration from when it started (`gh run view`, recent runs),
+or about 15 minutes when unsure. If it is still running or queued on wake,
+re-arm for the next expected finish. Each wake costs a run against
+`max_runs`, so do not go much below 10 minutes; for something due within a few
+minutes, poll in-session instead. Keep waits of an hour or more for holds that
+really are that long: a timed review window, a scheduled time, a soak period.
+
+```bash
+# CI run 123 started 10:02Z and usually takes ~12 min
+axe wait 42 --until 2026-01-05T10:15Z --note "check run 123; green -> merge at head abc123"
+axe wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge"
+```
+
 ## Commands
 
 | Situation | Command |
@@ -57,7 +72,7 @@ resumes later without holding a worker slot.
 | A human approves shipping | `axe approve <id> --sha <head> --scope <target>` (resumes the task) |
 | Blocker resolved | `axe set <id> --state pending --note "<what changed>"` |
 | Needs another task first | `axe wait <id> --on <ids> --note "<why>"` |
-| Timed wait | `axe wait <id> --for 2h\|--until <time> --note "<what to check>"` |
+| Timed wait | `axe wait <id> --for 15m\|--until <time> --note "<what to check>"` (sized as above) |
 | Evidence | `axe note <id> "<command and key output>"`, `axe artifact <id> <url>` |
 | Before a non-repeatable step (merge, deploy, migration) | `axe protect <id> --note "<step>"`; if it fails, do not start the step. After it: `axe protect <id> --clear` |
 | Human attention queue | `axe list --state escalated` |
