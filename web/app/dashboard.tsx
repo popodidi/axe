@@ -736,9 +736,8 @@ export default function Dashboard() {
                 name={goalName}
                 revision={revision}
                 onBack={closeGoal}
-                onOpenTask={(id) =>
-                  update({ view: "tasks", goal: null, task: String(id), tab: null })
-                }
+                selectedTask={selected}
+                onOpenTask={(id) => update({ task: String(id), tab: null })}
                 onCopy={copy}
               />
             ) : view === "goals" ? (

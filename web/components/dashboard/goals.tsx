@@ -168,6 +168,7 @@ export function GoalDetailPage({
   base,
   name,
   revision,
+  selectedTask,
   onBack,
   onOpenTask,
   onCopy,
@@ -175,6 +176,8 @@ export function GoalDetailPage({
   base: string;
   name: string;
   revision: number;
+  /** The task open in the right-hand detail pane, if any. */
+  selectedTask: string | null;
   onBack: () => void;
   onOpenTask: (id: number) => void;
   onCopy: (command: string) => void;
@@ -297,10 +300,17 @@ export function GoalDetailPage({
                       key={t.id}
                       id={"goal-task-" + t.id}
                       data-interactive=""
+                      aria-selected={selectedTask === String(t.id)}
                       onClick={() => onOpenTask(t.id)}
                     >
                       <Td mono>
-                        <button type="button" className={styles.rowButton}>
+                        {/* Keyboard target; clicks bubble to the row. Closing the
+                            task pane returns focus here. */}
+                        <button
+                          type="button"
+                          className={styles.rowButton}
+                          data-open-task={t.id}
+                        >
                           #{t.id}
                         </button>
                       </Td>
@@ -337,6 +347,7 @@ export function GoalDetailPage({
                           variant="ghost"
                           size="sm"
                           aria-label={`Open task #${e.task_id}`}
+                          data-open-task={e.task_id}
                           onClick={() => onOpenTask(e.task_id!)}
                         >
                           #{e.task_id}

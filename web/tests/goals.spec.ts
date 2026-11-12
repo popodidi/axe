@@ -92,24 +92,39 @@ test("goal detail: intent, trajectory, open tasks and next wake", async ({ page 
   await expect(traj.locator("li").first()).toContainText("Caching the dependency build");
   expect(reads).toContain("GET /api/goals/faster-ci/events?trajectory=1&limit=1000");
   await page.screenshot({ path: info.outputPath("goal-detail.png"), fullPage: true });
-  // A linked task id opens that task in the Tasks view.
+  // A linked task id opens that task in the right-hand pane, in place: the
+  // goal stays on screen and the view stays Goals.
   await traj.getByRole("button", { name: "Open task #3" }).click();
-  await expect(page).toHaveURL(/view=tasks/);
   await expect(page).toHaveURL(/task=3/);
-  await expect(page).not.toHaveURL(/goal=/);
+  await expect(page).toHaveURL(/view=goals/);
+  await expect(page).toHaveURL(/goal=faster-ci/);
   await expect(page.locator("#task-detail")).toContainText(
     "Make dashboard Overview a desk page",
   );
-  // Back returns to the goal; Escape returns to the list with focus on its row.
-  await page.goBack();
   await expect(detail.getByRole("heading", { name: "faster-ci" })).toBeVisible();
+  await expect(open.locator("#goal-task-3")).toHaveAttribute("aria-selected", "true");
+  await page.screenshot({ path: info.outputPath("goal-task-pane.png"), fullPage: true });
+  // Escape closes the pane first, keeping the goal; focus inside the pane
+  // returns to the task's row.
+  await page.locator("#task-detail").getByRole("button", { name: /^Back/ }).focus();
+  await page.keyboard.press("Escape");
+  await expect(page).not.toHaveURL(/task=/);
+  await expect(page).toHaveURL(/goal=faster-ci/);
+  await expect(page.locator("#task-detail")).toHaveCount(0);
+  await expect(detail.getByRole("heading", { name: "faster-ci" })).toBeVisible();
+  await expect(page.locator('[data-open-task="3"]').first()).toBeFocused();
+  // An open task row also opens the task in place, and Back closes it.
+  await detail.locator("#goal-task-4").click();
+  await expect(page).toHaveURL(/task=4/);
+  await expect(page).toHaveURL(/view=goals/);
+  await expect(page.locator("#task-detail")).toBeVisible();
+  await page.goBack();
+  await expect(page).not.toHaveURL(/task=/);
+  await expect(detail.getByRole("heading", { name: "faster-ci" })).toBeVisible();
+  // A second Escape returns to the list with focus on its row.
   await page.keyboard.press("Escape");
   await expect(page).not.toHaveURL(/goal=/);
   await expect(page.locator("#goal-faster-ci button")).toBeFocused();
-  // An open task row also opens the task.
-  await page.getByRole("button", { name: "faster-ci", exact: true }).click();
-  await detail.locator("#goal-task-4").click();
-  await expect(page).toHaveURL(/task=4/);
   expect(reads.every((r) => r.startsWith("GET "))).toBe(true);
 });
 test("goal without trajectory or wake, and a bare goal link", async ({ page }) => {
