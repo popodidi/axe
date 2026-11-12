@@ -181,6 +181,12 @@ pub struct Housekeeping {
     pub pressure: Option<HousekeepingPressure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<HousekeepingAlert>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_output: Option<HousekeepingBuildOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmp: Option<HousekeepingTmp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphan_caches: Option<HousekeepingOrphanCaches>,
 }
 
 impl Default for Housekeeping {
@@ -190,8 +196,87 @@ impl Default for Housekeeping {
             task_paths: Vec::new(),
             pressure: None,
             alert: None,
+            build_output: None,
+            tmp: None,
+            orphan_caches: None,
         }
     }
+}
+
+/// `[housekeeping.build_output]`: strip git-ignored build output from the
+/// worktrees of idle tasks (done, blocked or escalated).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HousekeepingBuildOutput {
+    /// How long the task has not been updated first.
+    #[serde(default = "default_idle")]
+    pub idle: String,
+    /// Directory names removed at any depth when git ignores them.
+    #[serde(default = "default_build_output_names")]
+    pub names: Vec<String>,
+}
+
+/// `[housekeeping.tmp]`: per-task and stale scratch in a shared temp directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HousekeepingTmp {
+    #[serde(default = "default_tmp_dir")]
+    pub dir: String,
+    /// A held (blocked or escalated) task's scratch goes after this idle time
+    /// once it is at least `floor_mib` large.
+    #[serde(default = "default_idle")]
+    pub idle: String,
+    #[serde(default = "default_tmp_floor_mib")]
+    pub floor_mib: u64,
+    /// Under pressure, other directories unused this long go.
+    #[serde(default = "default_tmp_stale")]
+    pub stale: String,
+    /// Shared caches (name globs with `*`): file reads count as use.
+    #[serde(default = "default_tmp_shared")]
+    pub shared: Vec<String>,
+}
+
+/// `[housekeeping.orphan_caches]`: entries of cache roots that no task path
+/// template claims, removed once unused for `unused`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HousekeepingOrphanCaches {
+    pub roots: Vec<String>,
+    #[serde(default = "default_orphan_unused")]
+    pub unused: String,
+}
+
+fn default_idle() -> String {
+    "1h".into()
+}
+fn default_build_output_names() -> Vec<String> {
+    ["target", "node_modules", ".next", "out"]
+        .map(String::from)
+        .to_vec()
+}
+fn default_tmp_dir() -> String {
+    "/tmp".into()
+}
+fn default_tmp_floor_mib() -> u64 {
+    1024
+}
+fn default_tmp_stale() -> String {
+    "48h".into()
+}
+fn default_tmp_shared() -> Vec<String> {
+    [
+        "node-compile-cache",
+        "tsx-*",
+        "playwright-transform-cache-*",
+        "pytest-of-*",
+        "claude-*",
+        "gh-cli-cache",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+fn default_orphan_unused() -> String {
+    "7d".into()
 }
 
 /// `[housekeeping.pressure]`: low free space shortens retention and trims caches.

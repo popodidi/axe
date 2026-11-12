@@ -492,6 +492,43 @@ Entries that start with a template's fixed prefix but match no template are
 retained and reported with `task: null`; other entries are ignored. These
 lines carry `"kind": "cache"`.
 
+**Idle build output.** With `[housekeeping.build_output]`, a worktree
+candidate that its own decision retained is searched (not following symlinks
+or entering `.git`) for directories named one of `names` (default `target`,
+`node_modules`, `.next`, `out`), at any depth including `_repo/<name>`, when
+its task's derived status is `done`, `blocked` (a held task, or a pending one
+waiting on a prerequisite or wake time) or `escalated` and its `updated_at` is
+at least `idle` (default `1h`) old. Each such directory is deleted when the
+task's run has ended, `git check-ignore` ignores it, git tracks nothing in it,
+no process uses it and every path is the dispatcher user's. Source, untracked
+files and commits stay. Lines carry `"kind": "build_output"`; tasks that are
+not idle produce none.
+
+**Temp scratch.** With `[housekeeping.tmp]`, entries of `dir` (default
+`/tmp`) that the dispatcher's user owns are checked; other users' entries and
+symlinks are ignored. A name mapping to a task id (`task-<id>*`, `task<id>*`,
+`t<id>*`, or `<id>-` followed by a non-digit, so dates do not count) is the
+task's scratch (`"kind": "tmp_task"`): it goes when the task is `done` for the
+task-path retention, or, for a `blocked` or `escalated` task idle for `idle`,
+when it holds at least `floor_mib` (default 1024). Any other directory is
+stale scratch (`"kind": "tmp_stale"`) once nothing in it was modified for
+`stale` (default `48h`); for names matching a `shared` glob (shared caches such
+as `node-compile-cache` and `tsx-*`) file reads count as use too. Stale scratch
+goes only under pressure; otherwise the dispatcher logs a count
+(`"event": "tmp_stale"`) and `axe housekeeping --dry-run` lists each. Nothing
+goes while a run is live, a process has its working directory or an open file
+inside, a unix socket inside is bound, or another user owns any path inside.
+
+**Orphan caches.** With `[housekeeping.orphan_caches]`, each entry of `roots`
+that no `task_paths` template claims (a task-path name with a task id) goes
+once nothing in it was modified or read for `unused` (default `7d`), with the
+same process and ownership checks (`"kind": "orphan_cache"`). A task-path
+directory that is also a root reports such entries here instead of as
+`task: null`.
+
+Every removal makes each directory `u+rwx` first, so read-only trees (Go
+module caches) go too, and stops at a path another user owns.
+
 **Disk pressure.** With `[housekeeping.pressure]`, free space on `path`
 strictly below `free_below_gib` shortens worktree retention to its
 `retention` and task-path retention to zero, and runs each `cache_trim`
@@ -510,7 +547,8 @@ leaves it alone.
 In `dry-run` nothing is deleted, trimmed or woken; decisions say
 `would_delete` and trims `would_run`. Lines: `path`, `project`, `task`,
 `decision` (`retain`, `would_delete`, `deleted`, `error`) and `reason`; event
-lines (`pressure`, `cache_trim`, `disk_pause_alert`) have an `event` key.
+lines (`pressure`, `cache_trim`, `disk_pause_alert`, `tmp_stale`) have an
+`event` key.
 `axe housekeeping --dry-run` exits 1 if any step failed.
 
 ```toml
@@ -530,6 +568,22 @@ cache_trim = [["/usr/local/go/bin/go", "clean", "-cache"]]
 [housekeeping.alert]             # optional
 bot = "ops"
 after = "15m"                    # default 15m
+
+[housekeeping.build_output]      # optional
+idle = "1h"                      # default 1h
+names = ["target", "node_modules", ".next", "out"]   # the default
+
+[housekeeping.tmp]               # optional
+dir = "/tmp"                     # default /tmp
+idle = "1h"                      # default 1h
+floor_mib = 1024                 # default 1024
+stale = "48h"                    # default 48h
+shared = ["node-compile-cache", "tsx-*", "playwright-transform-cache-*",
+          "pytest-of-*", "claude-*", "gh-cli-cache"]   # the default
+
+[housekeeping.orphan_caches]     # optional
+roots = ["~/.cache/axe"]
+unused = "7d"                    # default 7d
 ```
 
 ### Admission pool
