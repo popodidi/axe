@@ -1,5 +1,5 @@
 name: release
-run-name: release ${{ github.ref_name }}${{ github.event_name == 'workflow_dispatch' && ' (dry run)' || '' }}
+run-name: release ${{ github.ref_name }}${{ !startsWith(github.ref, 'refs/tags/v') && ' (dry run)' || '' }}
 
 # A `vX.Y.Z[-pre]` tag publishes, from one Docker build on the self-hosted CI VM:
 # - image ghcr.io/popodidi/axe:<tag> (its digest is in the release notes)
@@ -12,13 +12,15 @@ run-name: release ${{ github.ref_name }}${{ github.event_name == 'workflow_dispa
 # only runs `cargo publish --dry-run`. A tag is never reused: a failed release
 # is retried with a new tag.
 #
-# `workflow_dispatch` is a dry run of the same path on any branch: the gate,
-# the image build and its smoke test, and the assets, with nothing pushed or
-# published.
+# Pushing a `release-dry-run/<name>` branch is a dry run of the same path at
+# that commit: the gate, the image build and its smoke test, and the assets,
+# with nothing pushed or published. Delete the branch afterwards. (A branch
+# push rather than workflow_dispatch: the CI VM schedules only push and
+# pull_request events for this public repository.)
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
+    branches: ["release-dry-run/**"]
 
 permissions:
   contents: read
@@ -34,7 +36,7 @@ env:
 
 jobs:
   gate:
-    if: github.repository == 'popodidi/axe' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.repository == 'popodidi/axe'
     uses: ./.github/workflows/ci.yml
     with:
       full: true
@@ -48,8 +50,8 @@ jobs:
       packages: write
     env:
       IMAGE: ghcr.io/popodidi/axe
-      # Push, log in and publish only for a tag push; a dispatch is a dry run.
-      PUBLISH: ${{ github.event_name == 'push' }}
+      # Push, log in and publish only for a v* tag; a dry-run branch publishes nothing.
+      PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v4
         with:
