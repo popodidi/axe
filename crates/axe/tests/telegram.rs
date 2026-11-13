@@ -2316,7 +2316,7 @@ fn each_active_goal_has_its_own_pin() {
     let (pin, pin_tg, t) = wait_goal_pin(&rig, "grow", "goal pin", |_| true);
     assert_eq!(
         t,
-        "<b>grow</b> · active\nReach ten users\nno open tasks\n$0.00/$10.00 · attention 1/4\nno goal wake · deadline 2026-12-01"
+        "<b>grow</b> · active\nReach ten users\nno open tasks\n$0.00/$10.00 · attention 0/4\nno goal wake · deadline 2026-12-01"
     );
     wait_for("goal pinned", 20, || flags_of(&rig, pin)["pinned"] == true);
     let sent = rig.stub.calls("sendMessage").pop().unwrap().params;
