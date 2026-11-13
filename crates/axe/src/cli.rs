@@ -1365,14 +1365,15 @@ enum TgCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// The pinned overview the server renders (decisions waiting, running,
-    /// blocked, done today, goals); it also pins each open card
+    /// The pinned inbox the server keeps: each open card and one message per
+    /// active goal (the old pinned overview is retired)
     Board {
         #[command(subcommand)]
         command: BoardCmd,
     },
-    /// The goal lines the overview shows; the separate goal board message is
-    /// retired (`unset` only)
+    /// The goal lines of the bot's open goals; each active goal has its own
+    /// pinned message (`board show`). The goal board message is retired
+    /// (`unset` only)
     GoalBoard {
         #[command(subcommand)]
         command: GoalBoardCmd,
@@ -1394,27 +1395,29 @@ enum TgCmd {
 
 #[derive(Subcommand)]
 enum BoardCmd {
-    /// Show the overview: its message, its text and whether it is current
+    /// Show the inbox: whether it is on, what waits on the owner and the
+    /// goal pins
     Show {
         #[arg(long)]
         json: bool,
     },
-    /// Make one of the bot's own text messages the overview; the server
-    /// renders and pins it in place, then re-posts it at the bottom of the
-    /// chat on each change (`[telegram] board`), and pins each open card
+    /// Turn the inbox on in the chat of one of the bot's own text messages:
+    /// the server pins each open card and keeps one pinned message per
+    /// active goal there. The message itself is not rendered or pinned (an
+    /// old overview is unpinned and edited to a pointer)
     SetMessage { msg: i64 },
-    /// Stop rendering an overview (and pinning cards) for this bot
+    /// Turn the inbox off: stop pinning cards and goals for this bot
     Clear,
 }
 
 #[derive(Subcommand)]
 enum GoalBoardCmd {
-    /// Show the goal lines the overview shows
+    /// Show the goal lines of the bot's open goals
     Show {
         #[arg(long)]
         json: bool,
     },
-    /// Refused: the goal lines are part of the pinned overview
+    /// Refused: each active goal has its own pinned message
     #[command(visible_alias = "set-message")]
     Set { msg: i64 },
     /// Stop rendering an old goal board message
@@ -1617,17 +1620,29 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
                     return print_json(&v);
                 }
                 match v["message"].as_i64() {
-                    Some(m) => println!(
-                        "board #{m} ({})",
-                        if v["current"] == true {
-                            "current"
-                        } else {
-                            "render pending"
-                        }
-                    ),
-                    None => println!("no board message (set one with `board set-message MSG`)"),
+                    Some(m) => println!("inbox on (board message #{m})"),
+                    None => println!("inbox off (turn it on with `board set-message MSG`)"),
                 }
-                println!("{}", v["text"].as_str().unwrap_or(""));
+                let lines = v["lines"].as_array().cloned().unwrap_or_default();
+                if lines.is_empty() {
+                    println!("{}", crate::board::EMPTY);
+                }
+                for l in &lines {
+                    let what = match (l["kind"].as_str(), l["task"].as_i64()) {
+                        (Some("task"), _) => format!("task #{} (no card yet)", l["id"]),
+                        (_, Some(t)) => format!("card #{} for task #{t}", l["id"]),
+                        _ => format!("card #{}", l["id"]),
+                    };
+                    println!("{what}: {}", l["title"].as_str().unwrap_or(""));
+                }
+                for g in v["goals"].as_array().cloned().unwrap_or_default() {
+                    let state = match g["message"].as_i64() {
+                        Some(m) if g["current"] == true => format!("pin #{m} (current)"),
+                        Some(m) => format!("pin #{m} (edit pending)"),
+                        None => "pin pending".to_string(),
+                    };
+                    println!("goal {}: {state}", g["goal"].as_str().unwrap_or(""));
+                }
             }
             BoardCmd::SetMessage { msg } => {
                 let _: Value = c.send("POST", &format!("{base}/board"), json!({"msg":msg}))?;
@@ -1644,18 +1659,8 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
                 if *json {
                     return print_json(&v);
                 }
-                match v["message"].as_i64() {
-                    Some(m) => println!(
-                        "goal board #{m} ({})",
-                        if v["current"] == true {
-                            "current"
-                        } else {
-                            "render pending"
-                        }
-                    ),
-                    None => {
-                        println!("no goal board message (set one with `goal-board set MSG`)")
-                    }
+                if let Some(m) = v["message"].as_i64() {
+                    println!("old goal board #{m} (retired on the next inbox pass)");
                 }
                 println!("{}", v["text"].as_str().unwrap_or(""));
             }

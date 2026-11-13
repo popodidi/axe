@@ -1,14 +1,16 @@
 # axe: Goals
 
-Design approved by the owner on 2026-11-11 and built in phases: G1 the
-primitive (this page), G2 budget accounting and the hard gate, G3 the pinned
-goal lines ([Goal board](#goal-board)), G4 the goals reference in the axe skill, G5 the release.
+Design approved by the owner on 2026-11-11. This page records why goals are
+shaped the way they are; the code is the reference for exact behavior
+(`axe goal --help`, `crates/axe/src/goal.rs`, `goal_board.rs`). The method
+bots follow is in the axe skill's goals reference
+(`skills/axe/references/goals.md`).
 
 ## Context
 
-Bots keep tasks moving, but nothing durable holds what they are working
-toward. A bot's current goal lived in its conduct: one bot, free text, no
-trajectory, no budget and no way for a second bot to share it.
+Bots keep tasks moving, but nothing durable held what they were working
+toward: a bot's current goal lived in its conduct, as free text for one bot,
+with no trajectory, no budget and no way for a second bot to share it.
 
 A **goal** is a durable outcome contract with three parts:
 
@@ -17,158 +19,58 @@ A **goal** is a durable outcome contract with three parts:
 - **Resources**: a deadline and weekly budgets (cost and owner attention).
 - **Trajectory**: what was tried and learned, as an append-only event log.
 
-Hypothesis, test and verdict are a method, written down in a skill, not a
+Hypothesis, test and verdict are a method written down in a skill, not a
 primitive. Goals reuse tasks, wakes, schedules and routines for the work
-itself; only the operational fields are structured.
-
-**Design rules** (owner, 2026-11-07, `bots.md`): own tables, API and CLI
-namespace; task code gains no branches beyond an event kind; shared logic
-through plain modules; no plugin framework; CLI verbs not confusable with task
-verbs.
+itself; only the operational fields are structured. They follow the same
+design rules as [bots](bots.md): own tables, API and CLI namespace, and no
+branches in task code beyond an event kind.
 
 ## Owner decisions (2026-11-11)
 
 - Bots propose goals and budgets; the owner activates them.
-- A goal can be worked by several bots (many-to-many). Budget and trajectory
-  belong to the goal, not to a bot.
+- A goal can be worked by several bots. Budget and trajectory belong to the
+  goal, not to a bot.
 - The per-goal autonomy tier lives in the freeform intent, not in a field.
-- Budget is soft accounting plus one hard gate (G2), shown in the pinned
-  overview (G3).
+- Budget is soft accounting plus one hard gate, shown on Telegram in each
+  active goal's own pinned message (owner decision 2026-11-13; it replaced
+  the goal lines of the pinned overview).
 
-## Data (schema v16, additive)
+## Authority
 
-```sql
-goals(id, name UNIQUE, project,           -- home project: where its tasks default
-      state CHECK(proposed|active|paused|done|dropped),
-      intent TEXT NOT NULL DEFAULT '',    -- freeform markdown, 16 KiB cap
-      deadline TEXT NULL, budget_cost_week REAL NULL, budget_attention_week INTEGER NULL,
-      created_at, updated_at)
-goal_bots(goal_id, bot_id, joined_at, PRIMARY KEY(goal_id, bot_id))
-goal_events(id, goal_id, at, actor, session, kind, task_id NULL, owner_ref NULL, body)
-bot_schedules.goal_id INTEGER NULL        -- added column
-```
+A goal moves `proposed` -> `active` <-> `paused` -> `done`, and any open goal
+can be dropped. Activation and edits to intent, deadline or budget are owner
+decisions, as is attaching or detaching a bot other than the actor itself.
+An owner decision by a non-human actor must cite the owner's instruction
+(`--owner-ref`). The reference is stored, not verified: the same model as bot
+approvals, a guardrail rather than a security boundary.
 
-`goal_events.kind` is a trajectory kind (`hypothesis`, `test`, `verdict`,
-`observation`, `note`), written with `axe goal record`, or an audit kind
-(`proposed`, `activated`, `intent`, `budget`, `deadline`, `join`, `leave`,
-`state`), written by the server on each change. Intent edits store a unified
-diff, like bot conduct edits. Audit bodies carry the `--why`.
-
-A database lowered to `user_version` 15 still opens with a v15 binary (the new
-tables and column are ignored) and upgrades again in place.
-
-## Lifecycle and authority
-
-| Action | From | To | Owner decision |
-|---|---|---|---|
-| `propose` | | proposed | Only when it attaches a bot other than the proposer |
-| `activate` | proposed | active | Yes |
-| `pause` | active | paused | No |
-| `resume` | paused | active | No |
-| `done` | active, paused | done | No |
-| `drop` | proposed, active, paused | dropped | No |
-| `edit` intent, deadline, budget | any | | Yes |
-| `join`, `leave` | any | | Yes, unless the bot acts on itself |
-
-`propose` attaches the proposing bot (actor `bot:<name>`). A goal with no bots
-is allowed; moving a goal between bots is a join plus a leave, and leaving keeps
-every event. An owner decision by a non-`human` actor (`bot:<name>`, `agent`)
-needs `--owner-ref TEXT` (for example `msg #873` or `plan 2026-11-11`), stored
-on the event; without it the server answers 403. The reference is recorded,
-not verified by the server: the same model as bot approvals, a guardrail
-rather than a security boundary.
-
-## Linkage
-
-- **Tasks**: a task event of kind `goal` whose value is the goal name;
-  `axe add --goal G` and `axe set ID --goal G|none`. The latest event wins and
-  an unknown goal is refused. There is no `tasks` column, the same pattern as
-  `workload`.
-- **Wakes**: `axe bot wake --goal G` and `axe bot schedule add|edit --goal G`.
-  The label is stored in the wake body, so the wake line reads
-  `[wake by <actor> HH:MMZ] [goal G] <note or objective>` and a dispatcher on
-  an older binary still delivers it.
+Tasks link to a goal through a task event (latest wins), not a task column,
+and wakes and schedules carry a `[goal NAME]` label in their body, so neither
+needed a change to task or wake storage.
 
 ## Budget
 
-G2, owner decision 2026-11-11: soft accounting plus exactly one hard gate.
-Spend is computed on read over a rolling window of the last 7 days; nothing is
-stored.
+Spend is computed on read over a rolling seven-day window; nothing is stored.
 
-- **Cost** (USD, from `run_usage` / `run_usage_models`, known usage only): a
-  task run counts for the goal its task was linked to when the run ended (the
-  latest `goal` event at or before then). A bot run counts only when every wake
-  it delivered carries the same `[goal NAME]` label; ride-along digests are
-  ignored. A bot run whose wakes mix the goal with another goal or untagged
-  work is not attributed: it is reported as `unattributed_runs`. Attributed
-  runs with unknown usage are reported as `unknown_runs`, never as zero.
-  `goal show` splits cost into linked tasks and per bot.
-- **Attention** (units): on tasks linked to the goal at the time, each entry
-  into `escalated` (an escalation episode) and each `approval` event; plus each
-  owner goal action (`activated`, `budget`, `intent` events). Each counts 1.
-  Telegram chat about a goal is not counted in v1.
-- **The gate**: linking a task to a goal (`axe add --goal`, `axe set --goal`)
-  is refused, naming spent and limit, while either weekly budget is spent
-  (`spent >= limit`). Raising the budget (`axe goal edit --budget-...`)
-  reopens it. Keeping, clearing or moving a link, and everything else, is never
-  refused. A goal with no budget never gates.
-- **Reads**: `goal show` and `GET /api/goals/{name}` carry
-  `budget: {cost_week, cost_spent, attention_week, attention_spent,
-  unattributed_runs, unknown_runs, cost_tasks, cost_bots, window}`; `goal list`
-  shows `cost=spent/limit attention=spent/limit`. `goal` is a breakdown and
-  filter of `GET /api/stats/cost`.
-- `axe stats --origin task|routine` separates tasks created by a routine
-  occurrence from the others, so a goal on owner attention can count normal
-  tasks only.
+- **Cost** is the estimated spend of runs of linked tasks, and of bot runs
+  whose wakes all carry the goal's label. A bot run mixing the goal with other
+  work is reported as unattributed, and runs with unknown usage as unknown,
+  never as zero.
+- **Attention** counts what the goal cost the owner: escalation episodes and
+  approvals on linked tasks, and the owner's own goal decisions.
+- **The gate.** While either weekly budget is spent, linking more tasks to the
+  goal is refused until the owner raises it. Nothing else is refused, and a
+  goal with no budget never gates.
 
-## Goal board
-
-G3, owner decision 2026-11-11: budget state is visible on Telegram in a
-pinned message. Since the pinned inbox (owner decision 2026-11-12, one
-overview instead of scattered pins) the goal lines are part of each bot's
-pinned overview (`board.rs`, README "The inbox: pinned cards and the
-overview"), rendered from `goal_board.rs`. The separate goal board message
-(`flags.goal_board`) is retired: the gateway unpins an old one, edits it to
-"Goals moved into the pinned overview." and clears the flag;
-`axe bot tg goal-board show` prints the goal lines alone, `set` is refused.
-
-- **Content**, per goal the bot is attached to in state proposed, active or
-  paused (done and dropped are omitted): the name (bold) and state, "awaiting
-  your Go" while proposed, the other bots on the goal, the latest verdict or
-  observation (first line), open linked H tasks (`<code>#id</code>`),
-  `$spent/$limit` and `attention spent/limit` from [Budget](#budget), the
-  next goal-tagged wake (a pending `[goal NAME]` wake of any bot, or the next
-  run of an enabled schedule with the goal), and the deadline. No goals:
-  "No active goals.". Goals that do not fit the overview's 4096 characters
-  become "+N more goals".
-- **Render key**: the goal lines are part of the overview's key. It bands
-  each spend in 10% steps of its weekly limit, so a small spend change does
-  not re-render the overview; spend toward no limit never does on its own. A
-  state change, a new verdict or observation, a linked task opening or
-  closing, a goal wake, a bot joining or leaving, and a budget or deadline
-  edit do.
-
-## Bot protocol
-
-The protocol gains a short "Goals" section: a bot's goals are
-`axe goal list --bot $AXE_BOT`, the method is in the axe skill's goals
-reference (`references/goals.md`, G4), and each stage records one trajectory
-event. A fresh session also runs `axe goal list --bot $AXE_BOT`. Goal intent
-is never put in the system prompt, so the prompt cache stays stable when an
-intent changes.
-
-## Interfaces
-
-- CLI: `axe goal propose|list|show|log|edit|activate|pause|resume|done|drop|join|leave|record`
-  (README, "Goals").
-- API: `GET /api/goals[?bot=&state=]`, `GET /api/goals/{name}`,
-  `GET /api/goals/{name}/events`; token writes `POST /api/goals`,
-  `PATCH /api/goals/{name}`, `POST /api/goals/{name}/{action}`,
-  `POST /api/goals/{name}/events` ([HTTP API](../api-v1.md#goals)).
-- Dashboard: the Goals view (`?view=goals`, [web README](../../web/README.md#goals)).
+Each active goal has one pinned message in its bots' chats. It shows state,
+intent, spend against limits, open linked tasks, the latest verdict or
+observation, the next goal-tagged wake and the deadline, so budget state is
+visible without asking. It is edited in place whenever its text changes.
+Edits are silent, so spend is shown to the cent, and pausing, finishing or
+dropping the goal unpins it. Goal intent never goes into a bot's system prompt, so the
+prompt cache stays stable when an intent changes.
 
 ## Deferred
 
-- Cross-goal portfolio allocation (LV3).
-- Server-checked owner references.
-- Attributing chat attention (owner messages) to a goal.
+Cross-goal portfolio allocation, server-checked owner references, and
+attributing chat attention to a goal.

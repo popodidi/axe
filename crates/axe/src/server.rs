@@ -2174,10 +2174,9 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                 )?,
             )
         }
-        ("GET", ["api", "bots", name, "tg", "board"]) => ok(
-            200,
-            &crate::board::show(&st.conn(), name, crate::remote::epoch())?,
-        ),
+        ("GET", ["api", "bots", name, "tg", "board"]) => {
+            ok(200, &crate::board::show(&st.conn(), name)?)
+        }
         ("POST", ["api", "bots", name, "tg", "board"]) => {
             #[derive(Deserialize)]
             struct Board {

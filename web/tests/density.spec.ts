@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { choose, mockDesk, runs } from "./fixtures";
-// Compact layout contract (README "Compact defaults"). These assert rendered
+// Compact layout contract (docs/design/dashboard.md "Compact defaults"). These assert rendered
 // geometry, not token use: gutters, control sizes, filter wrapping, and the
 // Watch entry staying inside the run card's activity row.
 const base = "/?server=http://axe.test";

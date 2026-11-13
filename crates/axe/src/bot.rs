@@ -1,7 +1,7 @@
 //! Bots: a persistent identity in a project, one resumed agent session, and one
 //! wake schedule (self-wakes, named schedules, task events and messages). Identity and
 //! conduct are delivered as the system prompt; wakes are the only user prompt.
-//! Design: `docs/decisions/axe-bots.md`.
+//! Design: `docs/design/bots.md`.
 //!
 //! All times are fixed-width UTC strings (`2026-11-07T10:00:00Z`), so string
 //! order is time order; functions take `now` as epoch seconds so tests control it.
@@ -112,9 +112,9 @@ pub const TELEGRAM_PROTOCOL: &str = r#"## Talking to the owner (Telegram)
 - The server already reacted 👀 to each message; still answer it.
 - Anything that waits on the owner is an escalated task or a card (a
   message with `--buttons`). The pinned list is the owner's inbox: the
-  server pins each open card and keeps one pinned overview (decisions
-  waiting, running, blocked, done today, your goals) as the newest pin
-  (`axe bot tg board show`). Never pin, unpin, edit or resend these by hand.
+  server pins each open card and keeps one pinned message per active goal
+  of yours, edited in place as the goal changes (`axe bot tg board show`).
+  Never pin, unpin, edit or resend these by hand.
 - When a task in your projects is escalated you get a wake to post its card:
   `axe bot tg send --task N --buttons "Approve=approve;Hold=hold" "<short
   blocked/resolver text>"` with the real options. Without it the server posts

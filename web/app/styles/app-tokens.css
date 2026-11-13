@@ -1,6 +1,6 @@
 /*
  * Dashboard app tokens. Every value is derived from a theme token in
- * brand-tokens.css (the neutral axe theme). Documented in README.md.
+ * brand-tokens.css (the neutral axe theme). Intent: docs/design/dashboard.md.
  */
 :root {
   color-scheme: dark;
@@ -25,7 +25,7 @@
   --card-padding-phone: var(--space-snug);
   --pill-padding: var(--space-quarter) var(--space-1);
 
-  /* Compact layout contract (README "Compact defaults"; tests/density.spec.ts).
+  /* Compact layout contract (docs/design/dashboard.md "Compact defaults"; tests/density.spec.ts).
      Pane gutters 12px 16px; sections are borderless, so they carry no padding
      and group with a heading and 8px/24px gaps; toolbars 8px 12px; controls
      at least 24px tall (WCAG 2.5.8 target size) */

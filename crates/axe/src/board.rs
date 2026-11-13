@@ -1,6 +1,7 @@
-//! The owner's inbox in a bot's chat: one pinned card per item that waits on
-//! the owner, and one pinned overview, the newest pin. The server renders
-//! both from stored state, never a hand-kept list. What waits on the owner:
+//! The owner's inbox in a bot's chat, its pinned list: one pinned card per
+//! item that waits on the owner, and one pinned message per active goal of
+//! the bot (`goal_board.rs`). The server renders both from stored state,
+//! never a hand-kept list. What waits on the owner:
 //!
 //! - escalated tasks in the bot's subscribed projects (`*` is every project);
 //! - the bot's open cards: its own text messages that still have inline
@@ -13,40 +14,35 @@
 //! the server posts a minimal card itself ([`fallback_card`]). The gateway pins each open
 //! card silently (`flags.card_pin`) and unpins it once it is closed.
 //!
-//! The overview is the bot's own text message with `flags.board`; the key of
-//! its last successful render is `flags.board_key`. It carries the overall
-//! stats (decisions waiting, running, blocked or waiting, done today) and the
-//! goal lines of the goals the bot is attached to. When the key changes, or a
-//! pinned card is newer than it (Telegram orders pins by sending date), the
-//! gateway re-posts it: it sends the new text silently at the bottom of the
-//! chat and makes that message the overview, with `flags.board_from` naming
-//! the previous one until the move is finished (new pinned, old unpinned and
-//! deleted, or edited to "Moved below (#new)" when Telegram refuses the
-//! delete). The first render of a message just chosen with `set_message`, and
-//! every other render with `telegram.board = "edit"`, edits it in place.
+//! The inbox is on for a bot with a board message: its own text message with
+//! `flags.board`, chosen with `set_message`. It names the chat (and thread)
+//! the server posts fallback cards and goal pins in; it is not rendered or
+//! pinned. The pinned overview it used to be (stats and goal lines, re-posted
+//! as the newest pin) is retired: the gateway unpins it once, edits it to
+//! [`RETIRED_TEXT`] and records `flags.board_retired`.
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use serde_json::json;
 
 use crate::bot::{self, epoch_of};
 use crate::channel::{bot_id, get_message, StoredMessage};
-use crate::goal_board::{self, GoalLine};
+use crate::goal_board::{self, Pin};
 use crate::subscription::ALL_PROJECTS;
 
-/// Telegram's text limit (UTF-16 units; the overview stays well inside it).
+/// Telegram's text limit (UTF-16 units).
 pub(crate) const TEXT_LIMIT: usize = 4096;
 /// Room kept for the "+N more" line and the footer.
 pub(crate) const FOOTER_ROOM: usize = 120;
 const TITLE_CAP: usize = 60;
-/// Ids listed per stats line before "+N".
-const IDS_CAP: usize = 12;
 /// Text of the blocked and resolver lines of a fallback card.
 const NOTE_CAP: usize = 300;
 /// How long an escalated task waits for its bot's card before the server
 /// posts a minimal one (seconds since the bot was woken to post it).
 pub const CARD_WAIT: i64 = 600;
 pub const EMPTY: &str = "Nothing waiting on you.";
+/// The text a retired overview is edited to.
+pub const RETIRED_TEXT: &str =
+    "The overview is retired: the pinned list shows each open card and each active goal.";
 
 /// One thing waiting on the owner.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -64,30 +60,15 @@ pub struct Line {
     pub task: Option<i64>,
 }
 
-/// Overall task stats of the bot's subscribed projects.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct Stats {
-    /// In-progress task ids.
-    pub running: Vec<i64>,
-    /// Task ids whose status is blocked (stored blocked, or pending on a
-    /// prerequisite or a wake time).
-    pub waiting: Vec<i64>,
-    /// Task ids done since 00:00 UTC today.
-    pub done_today: Vec<i64>,
-}
-
 /// What `bot tg board show` returns.
 #[derive(Debug, Serialize)]
 pub struct Board {
-    /// Local id of the overview message, if one is set.
+    /// Local id of the board message (the inbox is on), if one is set.
     pub message: Option<i64>,
+    /// What waits on the owner; each card is pinned.
     pub lines: Vec<Line>,
-    pub stats: Stats,
-    pub goals: Vec<GoalLine>,
-    /// The text the next render sends.
-    pub text: String,
-    /// Whether the overview message shows the current state.
-    pub current: bool,
+    /// One pinned message per active goal.
+    pub goals: Vec<Pin>,
 }
 
 /// An escalated task without a card since its escalation.
@@ -103,20 +84,26 @@ pub struct CardNeed {
     pub resolver: String,
 }
 
-/// The bot's overview message, if one is set.
+/// The bot's board message, if one is set.
 pub fn message(conn: &Connection, name: &str) -> Result<Option<StoredMessage>> {
     flagged(conn, name, "board")
 }
 
-/// Makes `msg` (a local id) the bot's overview message, or with `None`
-/// unsets it. The new overview renders on the next pass.
+/// Makes `msg` (a local id) the bot's board message, turning the inbox on in
+/// its chat, or with `None` turns it off.
 pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Result<Option<i64>> {
     set_flagged(
         conn,
         name,
         msg,
         "board",
-        &["board", "board_key", "board_from", "board_buttons"],
+        &[
+            "board",
+            "board_key",
+            "board_from",
+            "board_buttons",
+            "board_retired",
+        ],
         "goal_board",
     )
 }
@@ -143,7 +130,7 @@ pub(crate) fn set_flagged(
         }
         if stored.flags[other] == true {
             let what = if other == "board" {
-                "overview"
+                "board message"
             } else {
                 "goal board"
             };
@@ -192,49 +179,9 @@ pub(crate) fn flagged(conn: &Connection, name: &str, flag: &str) -> Result<Optio
     id.map(|id| get_message(conn, name, id)).transpose()
 }
 
-/// Records the key of a successful render and the text the message now shows.
-pub fn rendered(conn: &Connection, msg: i64, key: &str, text: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.board_key',?2,'$.edited',json('true')),'$.board_buttons')
-         WHERE id=?3",
-        params![text, key, msg],
-    )?;
-    Ok(())
-}
-
-/// Makes the freshly sent message `new` the overview in place of `old`, with
-/// `key` rendered; `flags.board_from` keeps `old` until [`moved`] runs.
-pub fn reposted(conn: &mut Connection, old: i64, new: i64, key: &str) -> Result<()> {
-    let tx = conn.transaction()?;
-    tx.execute(
-        "UPDATE bot_messages SET flags=json_remove(flags,'$.board','$.board_key','$.board_from','$.board_buttons') WHERE id=?1",
-        [old],
-    )?;
-    tx.execute(
-        "UPDATE bot_messages SET flags=json_set(flags,'$.board',json('true'),'$.board_key',?1,'$.board_from',?2) WHERE id=?3",
-        params![key, old, new],
-    )?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// The text a replaced overview is edited to when it cannot be deleted.
-pub fn moved_text(new: i64) -> String {
-    format!("Moved below (#{new}).")
-}
-
 /// The text a retired goal board is edited to.
 pub fn merged_text() -> &'static str {
-    "Goals moved into the pinned overview."
-}
-
-/// Records that the move of the overview to `msg` is finished.
-pub fn moved(conn: &Connection, msg: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE bot_messages SET flags=json_remove(flags,'$.board_from') WHERE id=?1",
-        [msg],
-    )?;
-    Ok(())
+    "Goals moved into their own pinned messages."
 }
 
 /// The bot's subscribed projects: (every project, the named ones).
@@ -244,28 +191,6 @@ fn projects(conn: &Connection, bot: i64) -> Result<(bool, Vec<String>)> {
         .query_map([bot], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok((projects.iter().any(|p| p == ALL_PROJECTS), projects))
-}
-
-/// Ids of the tasks in the bot's projects matching SQL `cond` on `tasks`.
-fn task_ids(conn: &Connection, bot: i64, cond: &str, arg: &str) -> Result<Vec<i64>> {
-    let (all, projects) = projects(conn, bot)?;
-    if !all && projects.is_empty() {
-        return Ok(vec![]);
-    }
-    let rows: Vec<(i64, String)> = conn
-        .prepare(&format!(
-            "SELECT tasks.id, tasks.project FROM tasks WHERE {cond} ORDER BY tasks.id"
-        ))?
-        .query_map(
-            rusqlite::params_from_iter(Some(arg).filter(|a| !a.is_empty())),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(rows
-        .into_iter()
-        .filter(|(_, p)| all || projects.contains(p))
-        .map(|(id, _)| id)
-        .collect())
 }
 
 /// Escalated tasks in the bot's projects: (id, project, title, escalated at).
@@ -452,107 +377,6 @@ pub fn closed_pins(conn: &Connection, name: &str) -> Result<Vec<StoredMessage>> 
         .collect()
 }
 
-/// Overall stats of bot `name`'s projects at `now`.
-pub fn stats(conn: &Connection, name: &str, now: i64) -> Result<Stats> {
-    let b = bot_id(conn, name)?;
-    let today = format!("{}T00:00:00", &bot::ts(now)[..10]);
-    Ok(Stats {
-        running: task_ids(conn, b, "tasks.state='in_progress'", "")?,
-        waiting: task_ids(conn, b, &crate::db::waiting_sql(), "")?,
-        done_today: task_ids(
-            conn,
-            b,
-            "tasks.state='done' AND EXISTS (SELECT 1 FROM events e WHERE e.task_id=tasks.id
-               AND e.kind='state' AND e.to_value='done' AND e.at>=?1)",
-            &today,
-        )?,
-    })
-}
-
-/// The render key: what the overview shows, without ages or the footer time,
-/// so an unchanged input set never causes a render. `v` marks the layout.
-pub fn key(lines: &[Line], stats: &Stats, goals: &[GoalLine]) -> String {
-    let v: Vec<_> = lines
-        .iter()
-        .map(|l| json!([l.kind, l.id, l.task]))
-        .collect();
-    json!({"v": 3, "lines": v, "stats": stats, "goals": goal_board::key(goals)}).to_string()
-}
-
-/// How an item is named on the overview: `#N` for a task (or a card that
-/// stands for one), `card #N` for a card.
-fn item(l: &Line) -> String {
-    match (l.kind, l.task) {
-        ("task", _) => format!("#{}", l.id),
-        (_, Some(t)) => format!("#{t}"),
-        _ => format!("card #{}", l.id),
-    }
-}
-
-/// `Label: N · a b c +K`, or `Label: none`.
-fn count_line(label: &str, items: &[String]) -> String {
-    if items.is_empty() {
-        return format!("\n{label}: none");
-    }
-    let mut s = format!(
-        "\n{label}: {} · {}",
-        items.len(),
-        items
-            .iter()
-            .take(IDS_CAP)
-            .map(|i| escape(i))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    if items.len() > IDS_CAP {
-        s.push_str(&format!(" +{}", items.len() - IDS_CAP));
-    }
-    s
-}
-
-fn ids(v: &[i64]) -> Vec<String> {
-    v.iter().map(|i| format!("#{i}")).collect()
-}
-
-/// The overview as Telegram HTML: the stats, the goal blocks, then "Updated
-/// <time>". Goals that do not fit become "+N more".
-pub fn render(lines: &[Line], stats: &Stats, goals: &[GoalLine], now: i64) -> String {
-    let mut out = String::from("<b>Overview</b>\n");
-    let decisions: Vec<String> = lines.iter().map(item).collect();
-    out.push_str(&count_line("Decisions waiting", &decisions));
-    out.push_str(&count_line("Running", &ids(&stats.running)));
-    out.push_str(&count_line("Blocked or waiting", &ids(&stats.waiting)));
-    out.push_str(&count_line("Done today", &ids(&stats.done_today)));
-    if lines.is_empty() {
-        out.push_str("\n\n");
-        out.push_str(EMPTY);
-    } else {
-        out.push_str("\n\n<i>Each decision is a pinned card above.</i>");
-    }
-    out.push_str("\n\n<b>Goals</b>");
-    if goals.is_empty() {
-        out.push('\n');
-        out.push_str(goal_board::EMPTY);
-    }
-    let mut shown = 0;
-    for g in goals {
-        let b = goal_board::block(g);
-        if utf16(&out) + utf16(&b) > TEXT_LIMIT - FOOTER_ROOM {
-            break;
-        }
-        out.push_str(&b);
-        shown += 1;
-    }
-    if shown < goals.len() {
-        out.push_str(&format!("\n\n+{} more goals", goals.len() - shown));
-    }
-    out.push_str(&format!(
-        "\n\n<i>Updated {} UTC</i>",
-        bot::ts(now)[..16].replace('T', " ")
-    ));
-    out
-}
-
 /// The minimal card the server posts for an escalated task whose bot did not
 /// post one in time: Telegram HTML and its buttons, one row each. A press is
 /// an ordinary button wake for the bot (`task #N resolved` / `task #N discuss`).
@@ -590,22 +414,13 @@ pub fn card_wake_note(n: &CardNeed, fallback: i64) -> String {
     )
 }
 
-/// The current overview of bot `name`.
-pub fn show(conn: &Connection, name: &str, now: i64) -> Result<Board> {
-    let lines = lines(conn, name)?;
-    let stats = stats(conn, name, now)?;
-    let goals = goal_board::lines(conn, name)?;
-    let msg = message(conn, name)?;
-    let k = key(&lines, &stats, &goals);
+/// The inbox of bot `name`: its board message, what waits on the owner
+/// and its goal pins.
+pub fn show(conn: &Connection, name: &str) -> Result<Board> {
     Ok(Board {
-        message: msg.as_ref().map(|m| m.id),
-        current: msg
-            .as_ref()
-            .is_some_and(|m| m.flags["board_key"].as_str() == Some(k.as_str())),
-        text: render(&lines, &stats, &goals, now),
-        lines,
-        stats,
-        goals,
+        message: message(conn, name)?.map(|m| m.id),
+        lines: lines(conn, name)?,
+        goals: goal_board::pin_views(conn, name)?,
     })
 }
 
@@ -625,7 +440,7 @@ pub(crate) fn short(s: &str) -> String {
 }
 
 /// At most `limit` characters.
-fn cap(s: &str, limit: usize) -> String {
+pub(crate) fn cap(s: &str, limit: usize) -> String {
     if s.chars().count() <= limit {
         return s.to_string();
     }
@@ -665,99 +480,6 @@ pub(crate) fn utf16(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn line(kind: &'static str, id: i64, title: &str) -> Line {
-        Line {
-            kind,
-            id,
-            title: title.into(),
-            project: if kind == "task" {
-                "p".into()
-            } else {
-                "".into()
-            },
-            since: 0,
-            task: None,
-        }
-    }
-
-    fn goal(name: &str) -> GoalLine {
-        GoalLine {
-            name: name.into(),
-            state: "active".into(),
-            others: vec![],
-            latest: None,
-            open_tasks: vec![],
-            cost_spent: 0.0,
-            cost_week: None,
-            attention_spent: 0,
-            attention_week: None,
-            next_wake: None,
-            deadline: None,
-        }
-    }
-
-    #[test]
-    fn renders_stats_goals_and_footer() {
-        let mut task_card = line("card", 40, "Ship?");
-        task_card.task = Some(9);
-        let stats = Stats {
-            running: vec![3, 4],
-            waiting: vec![],
-            done_today: (100..115).collect(),
-        };
-        let t = render(
-            &[
-                line("task", 7, "x"),
-                line("card", 12, "Pick one"),
-                task_card,
-            ],
-            &stats,
-            &[goal("grow <it>")],
-            3 * 3600 + 5,
-        );
-        assert!(t.starts_with("<b>Overview</b>\n\nDecisions waiting: 3 · #7 card #12 #9\nRunning: 2 · #3 #4\nBlocked or waiting: none\nDone today: 15 · #100 #101 #102 #103 #104 #105 #106 #107 #108 #109 #110 #111 +3\n\n<i>Each decision is a pinned card above.</i>\n\n<b>Goals</b>\n\n<b>grow &lt;it&gt;</b> · active"), "{t}");
-        assert!(
-            t.ends_with("\n\n<i>Updated 1970-01-01 03:00 UTC</i>"),
-            "{t}"
-        );
-        let empty = render(&[], &Stats::default(), &[], 0);
-        assert_eq!(
-            empty,
-            format!("<b>Overview</b>\n\nDecisions waiting: none\nRunning: none\nBlocked or waiting: none\nDone today: none\n\n{EMPTY}\n\n<b>Goals</b>\n{}\n\n<i>Updated 1970-01-01 00:00 UTC</i>", goal_board::EMPTY)
-        );
-    }
-
-    #[test]
-    fn many_goals_stay_under_the_limit() {
-        let goals: Vec<GoalLine> = (0..200)
-            .map(|i| goal(&format!("goal-{i:03}-{}", "x".repeat(40))))
-            .collect();
-        let many: Vec<Line> = (0..400).map(|i| line("task", i, "x")).collect();
-        let t = render(&many, &Stats::default(), &goals, 0);
-        assert!(utf16(&t) <= TEXT_LIMIT, "{}", utf16(&t));
-        let shown = t.matches(" · active").count();
-        assert!(shown > 5 && shown < 200, "{shown}");
-        assert!(t.contains(&format!("+{} more goals", 200 - shown)), "{t}");
-        assert!(t.contains("Decisions waiting: 400 · #0 "), "{t}");
-        assert!(t.contains(&format!(" +{}\n", 400 - IDS_CAP)), "{t}");
-    }
-
-    #[test]
-    fn key_ignores_age_titles_and_time() {
-        let mut a = line("card", 1, "Q");
-        let s = Stats::default();
-        let k = key(std::slice::from_ref(&a), &s, &[]);
-        a.since = 999;
-        a.title = "R".into();
-        assert_eq!(k, key(std::slice::from_ref(&a), &s, &[]));
-        let more = Stats {
-            running: vec![5],
-            ..Stats::default()
-        };
-        assert_ne!(k, key(&[a.clone()], &more, &[]));
-        assert_ne!(k, key(&[a], &s, &[goal("g")]));
-    }
 
     #[test]
     fn fallback_cards_fit_telegram_limits() {

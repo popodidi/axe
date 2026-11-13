@@ -1,11 +1,16 @@
 # axe
 
-A self-hosted task queue for coding agents: `axe server` owns a SQLite
+A self-hosted task queue for coding agents. `axe server` owns a SQLite
 database and serves an HTTP JSON API; `axe dispatch` is a separate process
 (optionally on another machine) that starts one headless coding-agent session
 (Claude Code, Codex, or any command you configure) per ready task. Every
 command other than `server`, including `dispatch`, is an HTTP client of the
 server.
+
+This README explains the concepts and where each lives in the code. The code
+is the source of truth: `axe --help` and `axe <command> --help` list every
+command and flag, `axe config` prints the resolved configuration, and the
+modules named below hold the exact rules.
 
 ## Install
 
@@ -13,1340 +18,200 @@ server.
 cargo install --locked --git https://github.com/popodidi/axe axe-os   # binary `axe`
 ```
 
-The crate is `axe-os`; the binary and the library are `axe`. Cargo features:
+The crate is `axe-os`; the binary and the library are `axe`. Cargo features
+(`crates/axe/Cargo.toml`): `telegram` (default on) adds the Telegram gateway
+for bots; `embed-ui` serves the dashboard from `web/` at `/` (build `web/`
+first, see [web/README.md](web/README.md)); `ts` generates the dashboard's
+TypeScript API types.
 
-| Feature | Default | What it adds |
-|---|---|---|
-| `telegram` | on | The Telegram gateway for bots (`[telegram]`, `axe bot tg`) |
-| `embed-ui` | off | The read-only dashboard from `web/`, served by `axe server` at `/`. Needs `web/out`: run `npm ci && npm run build` in `web/` first ([web/README.md](web/README.md)) |
-| `ts` | off | TypeScript bindings of the API types, checked against `web/lib/api.ts` by `tests/ts_bindings.rs` |
-
-`--no-default-features` builds a server without the gateway: `bot tg` calls
-answer 409, and a configured `[telegram]` table is ignored with a warning.
-Stored messages and `bot tg history` work in both builds.
-
-### CI
-
-`.github/workflows/ci.yml` runs on the self-hosted CI VM for pull requests
-only: default-feature fmt, clippy and tests, and the TS types test, plus the
-`web` job when `web/` or the code serving the dashboard changed
-(`scripts/ci_scope.py`; build or CI changes such as `Cargo.toml`, `Cargo.lock`
-or `.github/` run it too). Pushes to `main` run no CI: the pull request's run
-covers the merged code. The `--no-default-features` and `embed-ui` variants run
-only in the release gate. Rust builds use a size-capped sccache on the VM's
-cache disk (`scripts/ci_sccache.sh`).
-
-### Releases
-
-A `vX.Y.Z[-pre]` tag whose version matches `crates/axe/Cargo.toml` runs
-`.github/workflows/release.yml` on the self-hosted CI VM. Its `gate` job runs
-`ci.yml` in full (`full: true`: the feature variants, `embed-ui` and the `web`
-job); the release publishes only when the gate passes and the tagged commit is
-on `main`. Pushing a `release-dry-run/<name>` branch runs the same path at
-that commit as a dry run that pushes and publishes nothing (delete the branch
-afterwards).
-From one Docker build
-(`Dockerfile`, `embed-ui` on) it publishes:
-
-| Asset | Contents |
-|---|---|
-| `ghcr.io/popodidi/axe:<tag>` | `axe server` image; the digest is in the release notes |
-| `axe-<tag>-linux-x86_64.tar.gz` | The image's `axe` binary (glibc 2.36+), licences and README |
-| `axe-skills-<tag>.tar.gz` | `skills/axe` (extracts to `axe/`) |
-| `*.sha256`, `SHA256SUMS` | sha256 of each tarball |
-
-```sh
-gh release download <tag> -R popodidi/axe && sha256sum -c SHA256SUMS
-```
-
-The job also runs `cargo publish --dry-run`; crates.io publishing is not done
-from CI. Other platforms install from source with `--tag <tag>`. A failed
-release is retried with a new tag, never by moving or reusing one.
+Releases (`.github/workflows/release.yml`) publish a server image, a Linux
+binary tarball and the `skills/axe` tarball from a `vX.Y.Z` tag, with sha256
+sums; verify with `gh release download <tag> -R popodidi/axe && sha256sum -c
+SHA256SUMS`. Other platforms install from source with `--tag <tag>`.
 
 ## Not a workflow engine
 
-A task has a **state** (`pending` means eligible to run) and, once dispatched,
-one agent session that carries it from start to `done`, resumed on every later
-run. There are no owners, pipelines, stages, or transitions defined in code.
-Every mutation appends to an event log (`axe log ID`) so a resumed session
-can see what changed.
+A task has a project, a spec (`detail`) and a **state**. Once dispatched, one
+agent session carries it from start to `done` and is resumed on every later
+run ([one agent per task](docs/design/one-agent-per-task.md)). There are no
+owners, pipelines or transitions in code: the spec is the workflow, and the
+agent's own instructions (skills, `AGENTS.md`) say how to work a task. Every
+mutation appends to an event log (`axe log ID`), so a resumed session can see
+what changed.
 
-`ops` is an actor (intake, triage, approvals, queue cleanup). Human attention is
-`axe list --state escalated`; setting the task `pending` resumes its session.
-Stored `blocked` means an external wait; pending tasks with unfinished
-dependencies also display blocked. Neither belongs in human attention. The
-`/api/overview` `ops_queue` includes all three; only escalated entries have
-`actionable: true`.
-
-Tasks may declare prerequisites (`blocked_by`, see Dependencies). That is the
-only ordering axe knows; it is not a workflow engine.
-
-## Commands
-
-```sh
-axe add --project web --title "Fix X" --detail-file spec.md [--agent claude]   # state pending
-axe add --project web --title "Ship X" --blocked-by 12,13      # waits until #12 and #13 are done
-axe add --project web --title "Try Y" --goal grow-signups     # linked to a goal (Goals)
-axe deps ID [--add P,...] [--remove P,...] [--json]  # edit edges atomically, then show blocked_by/blocks
-axe list [--state S] [--project P] [--all] [--json]
-axe show ID [--json]
-axe log ID [--json] [--full]
-axe set ID [--state S] [--title T] [--detail D|--detail-file F] [--note N] [--reset-runs] [--not-before T] [--goal G|none]
-axe abort ID [--run RUN_ID] [--timeout 60]  # force-stop remotely; wait for confirmation
-axe escalate ID --blocked B --resolver R --resume C --class CLASS   # escalated with a block note
-axe classify ID [--escalation CLASS [--episode N]] [--workload W]   # correct a class (latest episode, or the Nth) or workload
-axe stats --project P [--since 14d] [--until T] [--workload W] [--origin task|routine]   # delivery statistics, JSON
-axe usage backfill [--log-dir D] [--dry-run]   # read run usage from local logs; safe to repeat
-axe wait ID (--on P,... | --until T | --for D) --note N  # resumes on its own
-axe note ID TEXT            # or --file F
-axe housekeeping --dry-run  # one housekeeping sweep: print each decision, delete nothing
-axe artifact ID https://github.com/org/repo/pull/1
-axe approve ID --sha SHA --scope TARGET [--note N]   # blocked/escalated -> pending
-axe claim [--project P] --by me                   # oldest ready task; prints id, exit 1 if none
-axe server [--listen 127.0.0.1:8790]              # API; sole database owner
-axe dispatch [--once] [--reconcile-note N] [--housekeep[=dry-run|apply|off]]   # remote dispatcher + agent supervisor
-axe config                  # validate and print the local $AXE_CONFIG
-axe admission [--json]      # is the dispatcher admitting new sessions (resource pressure, hold)?
-axe admission hold --until T [--reason R]   # no new task sessions until T (on the dispatcher host)
-axe admission release       # end the hold now
-axe backup PATH             # download a consistent server snapshot (WAL included) to a new file
-axe blob put FILE [--type T] [--link 1h] [--json]   # store a file; prints its sha256 (and a signed link)
-axe blob get SHA [-o FILE]  # bytes to a file or stdout
-axe blob ls [--json]
-axe blob link SHA [--ttl 24h] [--name N]   # signed URL that opens without the token until it expires (max 7d)
-```
-
-`add` defaults to `--state pending`. Create work `pending` only when its spec
-and authorization are complete; otherwise create it `--state escalated` and add
-a block note.
-
-`approve` records an `approval` event (body `sha=<sha> scope=<scope> by=<actor>`,
-then the note on the next line) and moves a `blocked` or `escalated` task to
-`pending` in one transaction; any other state is refused. Approval only records
-the owner's decision and resumes the task: the agent re-checks the approved sha
-and scope and every invariant. The actors `agent` and `dispatcher`, a
-`$AXE_SESSION` starting with `dispatch:`, and a session belonging to a run
-that has not ended are refused with `403`. All agents share one token, so this
-is a guardrail, not a security boundary.
-
-Block notes follow one format so the ops queue is actionable:
-
-```
-blocked: <what stops the next step>
-resolver: <who>: <action>
-resume: <condition or command, e.g. axe set ID --state pending>
-```
-
-States: `pending`, `in_progress`, `blocked`, `escalated`, `done` (stored). Each task also
-has a derived `status`, which the CLI, list filter, counts, and dashboard show:
-`blocked` for a pending task waiting on prerequisites, otherwise the state. The actor on events is
-`--actor`, else `$AXE_ACTOR`, else `human`; `$AXE_SESSION` is recorded too.
-The CLI sends both with each write and the server records them.
-
-The event log stays compact: a `detail` edit stores a unified diff of the
-spec as its body (`from_value`/`to_value` empty) rather than both versions;
-other edits record the old and new value. `axe log` cuts each body line to
-300 characters with a trailing `…`; `--full` prints bodies whole, and `--json`
-is always complete.
-
-Paths (server side): database `$AXE_DB` (default
-`~/.local/share/axe/axe.db`), config `$AXE_CONFIG` (default
-`~/.config/axe/config.toml`; built-in defaults if missing), token
-`$AXE_TOKEN_FILE` (default `~/.config/axe/token`). Client side: server
-`$AXE_SERVER` (default `http://127.0.0.1:8790`), token `$AXE_TOKEN`, else
-the token file. `axe config` reads only the local config file.
-
-The CLI rides out a server restart: a call that gets no response, a plain
-ingress 404 (a Recreate Deployment with no endpoints) or a 5xx is retried with
-backoff (0.5 s doubling to 8 s) for up to `$AXE_RETRY_SECS` (default 120;
-`0` disables), then fails as before. A semantic axe error (a 4xx with a JSON
-`error`) or a 401 fails at once. Each write carries one client-generated
-`X-Axe-Request-Id` on all its attempts. The server reserves the id in
-`dispatch_ops` (rows `cli:<id>`, the dispatcher's replay table; no schema
-change) before running the write and stores the response after it, for an
-hour. A repeat returns the stored response, so a write whose reply was lost is
-applied once. A repeat while the reservation has no response (still running,
-or the server stopped mid-write) gets a 503 and is never re-run; if that lasts
-past the bound the CLI fails and the outcome must be checked by hand. A
-stored server error replays as a 409. Reusing an id for a different request
-is a 409. The dispatcher keeps its own journaled retry (`remote.rs`).
-
-## Server mode
-
-`axe server --listen <addr>` is the only process that opens the database,
-including for `backup`. It binds the API, prints `axe server
-listening on http://<addr>`, and never launches workers. A `PRAGMA
-data_version` watcher notices every commit and wakes `/api/stream` subscribers.
-
-## Dispatcher
-
-`axe dispatch` is an HTTP client and worker supervisor (`--once`: one pass,
-wait for its sessions, exit). Execution config (agents, workspace root, pool,
-`log_dir`) lives on the dispatcher machine; it reaches the server through
-`$AXE_SERVER` and the token, and agents inherit both.
-
-- **Single owner.** The server grants one dispatcher a lease (renewed every
-  10 s, expiring after 60 s) under a server-issued generation. A second
-  dispatcher cannot register while the lease is active or runs are unresolved;
-  operations carrying a stale generation are rejected.
-- **Retry-safe operations.** Claims, run preparation and start, activity,
-  completion, and blocks go through `POST /api/dispatcher/operation` with a
-  stable operation id; a replayed id returns the original result. The
-  dispatcher journals the pending operation and its local logs under
-  `<log_dir>/.dispatcher/` before sending.
-- **Outages.** While the server is unreachable the dispatcher stops admitting,
-  keeps existing workers running, and retries the pending operation with
-  backoff. A lost lease never requeues live work automatically.
-- **Recovery.** A dispatcher that finds an unresolved journal or server-side
-  runs refuses to start. After stopping the old workers, run
-  `axe dispatch --reconcile-note "<why>"`: it escalates the interrupted
-  tasks with that note, ends their open runs, releases ownership, and exits.
-- **Logs.** Worker output stays in the dispatcher's `log_dir`. The dispatcher
-  holds an outbound WebSocket (`/api/dispatcher/connect`) and the server relays
-  `/api/runs/{id}/log` reads over it without storing log content. While the
-  dispatcher is disconnected the endpoint answers `unavailable` with
-  `retryable: true` and the web viewer keeps polling.
-
-### Remote abort
-
-`axe abort TASK_ID` selects the latest run once, sends an authenticated request
-through the server, and waits up to 60 seconds for the owning dispatcher to
-confirm termination. Exit zero means **confirmed**, never merely accepted. A
-nonzero timeout says `abort requested, termination NOT confirmed`; the request
-remains durable. Retry with the printed `--run RUN_ID` to keep targeting the
-same run even if somebody later resumes the task. A repeated confirmed request
-returns that run's historical result and the task's current state.
-
-The server holds the task `escalated` immediately and prevents reopening it
-until the run closes. It persists the request in the existing dispatcher run
-phase, forwards run IDs on the generation-fenced WebSocket control channel
-(within the 10-second heartbeat interval), and redelivers after reconnect.
-The Linux dispatcher freezes the selected process tree, including detached
-children retained by a worker subreaper, then force-kills it using pidfds and
-waits for exit (bounded to five seconds per freeze/termination stage). This
-requires Linux with pidfd support (kernel 5.3+). An error remains unconfirmed;
-unrelated runs continue. There is no automatic fresh-session retry.
-
-`abort_requested` records acceptance; `run_aborted` records confirmed termination
-and the run closes. If normal completion wins, `abort_raced_completion` records
-that no termination was confirmed; the CLI fails honestly. Missing runs, already
-completed runs and stale dispatcher ownership are rejected. Logs and sessions
-are retained. Explicitly resume with `axe set TASK_ID --state pending` after
-review. Abort stops further execution; it cannot undo external side effects.
-
-The CLI, server and dispatcher must all include this feature. An older CLI has
-no `abort` command; an older server rejects the endpoint; an older dispatcher
-cannot confirm termination. Upgrade all three before use.
-
-### Auth
-
-- `GET` requests are unauthenticated.
-- Every other method needs `Authorization: Bearer <token>`, compared with the
-  trimmed contents of `$AXE_TOKEN_FILE`; a missing or wrong token gets `401`
-  and changes nothing.
-- With no token file the server refuses to start on a non-loopback address. On
-  loopback without a token, writes are open (local development only; a warning
-  is printed).
-- CORS: `GET` responses carry `Access-Control-Allow-Origin` only for origins
-  listed in `server.cors_origins` (default none); preflights
-  allow `GET` only, so browsers cannot write.
-
-### API
-
-All bodies are JSON. Errors are `{"error": "..."}` with `400` (validation),
-`401`, `403` (approval from a live dispatcher session), `404` (unknown task/session/route), or `500`.
-
-| Method and path | Purpose |
+| State | Meaning |
 |---|---|
-| `GET /healthz` | `{"ok": true}` |
-| `GET /api/tasks?state=&project=&all=1` | Tasks, like `axe list` (done hidden unless `all` or `state=done`; `state` matches the derived `status`) |
-| `GET /api/tasks/{id}` | One task, with derived `status`, `waiting_on` (unfinished prerequisite ids), and `deps` `{blocked_by, blocks}` (each `{id, project, title, state, status}`) |
-| `GET /api/tasks/{id}/events` | Event log |
-| `GET /api/runs?task=&live=1&limit=` | Dispatcher runs, newest first (`limit` default 50, max 1000) |
-| `GET /api/overview` | `counts` (`{project, state, count}`, `state` is the derived status), `admission` (as `/api/admission`), `ops_queue` (stored `blocked`/`escalated` holds and dependency waits; each is the task plus `kind`, `actionable`, `blocked_by` (the actor who held it), `blocked_at`, and `blocker`, the latest hold note), `running` (live runs). `kind` is `hold` (stored `blocked` or `escalated`; only `escalated` is actionable) or `dependency` (pending, only waiting on `waiting_on`; `actionable: false`, no hold context). Overview attention lists/counts only escalated tasks |
-| `GET /api/sessions/{session_id}` | `{session_id, task_id, project, agent, run}` for an agent session id (or a `dispatch:` claim); `run` is the latest run or null |
-| `GET /api/stream` | Server-sent events: `event: change` with `{"seq": N}` on connect and after every task/event/run change |
-| `GET /api/config` | `config_path`, `db_path`, `auth` (bool), resolved `config`; never the token |
-| `GET /api/admission` | Resource admission as last reported by the dispatcher: `enabled`, `admitting` (null when unknown), `reason`, `checked_at`, `age_seconds`, `report_age_seconds`, `signals` (`name`, `level` clear/constrained/unknown, `value`, `reading`, `pause`, `resume`), `thresholds` |
-| `POST /api/tasks` | `{project, title, detail?, agent?, state? = pending, blocked_by? = []}` -> `201 {id, task}`; the task and its edges commit together or not at all |
-| `POST /api/tasks/{id}/deps` | `{add?: [ids], remove?: [ids]}` -> `{changed, task}`; one transaction |
-| `PATCH /api/tasks/{id}` | `{state?, title?, detail?, note?, reset_runs?, not_before?}` -> `{changed, task}` |
-| `POST /api/tasks/{id}/notes` | `{body}` -> `201 {task}` |
-| `POST /api/tasks/{id}/artifacts` | `{value}` -> `201 {task}` |
-| `POST /api/tasks/{id}/abort` | `{run: RUN_ID, actor?, session?}` -> `202 {run, status:"requested"}` or `200 {run, status:"confirmed", task_state}`; repeat the same run to poll safely; authentication required |
-| `POST /api/tasks/{id}/approve` | `{sha, scope, note?}` -> `{task}`; `blocked`/`escalated` only, resumes `pending` |
-| `POST /api/claim` | `{project?, by}` -> `{task}`, the oldest ready task (`null` when nothing is ready) |
-
-Writes also take `actor` (default `human`) and `session`, recorded on events.
-
-A task is `{id, project, title, detail, state, claimed_by, runs, created_at,
-updated_at, not_before, agent, status, waiting_on, deps}`. A run is `{id, task_id,
-project, agent, mode, session_id, claim, started_at, ended_at, exit_code,
-log_path, current_activity, last_activity_at, live}`.
-
-### Runs and live activity
-
-The `runs` table has one row per spawned agent with task, project, agent, mode
-(`fresh`/`resume`),
-session id, claim, `started_at`/`ended_at`, exit code, log path,
-`current_activity`, and `last_activity_at`. While a run is live the dispatcher
-reads the tail of its log every tick and stores a short (<= 120 chars)
-description of the latest JSONL item: a tool call name plus its main argument
-(`Bash: cargo test`), an assistant message prefix (`says: ...`), or a result.
-Claude `--output-format stream-json` and codex `exec --json` are recognized;
-other output leaves the activity unchanged. Runs still open when the server
-starts are closed (their tasks are escalated as orphans).
-
-### Agent environment
-
-Each agent gets `AXE_ACTOR=agent`, `AXE_SESSION` (its session id, or the
-claim until a JSONL id is known), `AXE_TASK`, `AXE_SERVER`
-(the server's own address; loopback when listening on all interfaces),
-`AXE_WORKTREE` (with [`[worktrees]`](#task-worktrees)), and
-`OTEL_RESOURCE_ATTRIBUTES` with the `[otel] resource` attributes, then
-`axe.task_id=<id>,axe.project=<p>,axe.agent=<agent>,axe.mode=<fresh|resume>,axe.run=<claim>`
-(prefix `[otel] prefix`, default `axe`) appended to any inherited value (values percent-encoded where needed). The
-token reaches agents through the inherited `AXE_TOKEN_FILE` default, not the
-environment. Telemetry export itself is the agents' job; axe only tags it.
-
-## Conventions
-
-| Situation | Set |
-|---|---|
-| finished | `--state done` |
-| stuck, missing access, or human decision | `axe escalate ID ...` (block note) |
-| non-human external wait | `--state blocked` (block note), or `axe wait` for a task or time |
-| blocker resolved | `--state pending` (the task's session resumes) |
-| ops approve | `axe approve ID --sha S --scope T`: `blocked`/`escalated` -> `pending` |
-| real prerequisite | `axe add ... --blocked-by P` or `axe deps ID --add P` (stays `pending`) |
-| prerequisite abandoned | `axe deps ID --remove P` (and re-scope the spec); never mark P `done` to dismiss it |
-
-## Dependencies
-
-A task can be `blocked_by` any number of other tasks, in any project, named by
-explicit id. Nothing is inferred from creation order, title, or project.
-
-- **Stored vs derived.** Edges are the only stored dependency state (`deps`
-  table: `task_id`, `prereq_id`, `created_at`). A dependency wait is never
-  stored: a task is *ready* when its state is `pending` and every prerequisite
-  is `done`. Readiness is computed inside each claim transaction, so it is
-  correct across restarts, repeated completions, and concurrent claims, and
-  needs no ops step: when the last prerequisite is done the task is claimable.
-- **Holds stay separate.** Stored `escalated` is a human hold (approval, access,
-  failure, or manual intervention); stored `blocked` is a non-human external
-  wait. Completing or removing prerequisites never
-  changes either state; a held task keeps its state until someone
-  resolves the hold (`set --state pending`, `approve`). Resolving a hold while
-  prerequisites remain leaves a dependency wait, never ready work.
-- **Shown as blocked.** A pending task with unfinished prerequisites has
-  `status` `blocked`; `axe list` prints `blocked (deps #1, #2)` (or
-  `blocked (hold+deps ...)` for a hold with prerequisites); `axe show` and
-  `axe deps` list prerequisites and dependents with their status and say why
-  the task cannot start.
-- **Claims.** `claim` and the dispatcher take the oldest *ready* task. Waiting
-  tasks are skipped: no `runs` increment, no `max_runs` block, no pool
-  slot, and they never hold back newer ready work. `set --state in_progress` is
-  refused while prerequisites are unfinished.
-- **Edits.** Adding is idempotent (an existing edge is a no-op, duplicate ids
-  collapse); removing a missing edge is a no-op. Missing ids, self edges, and
-  cycles (direct, transitive, cross-project) are refused with `400`. Adding an
-  unfinished prerequisite to an `in_progress` or `done` task is refused rather
-  than stranding a live agent or reopening finished work; block or finish it
-  first, or add the edge once the prerequisite is done. Every edge change
-  writes a `dep_add`/`dep_remove` event on both tasks (`to_value` = the other
-  id, body `blocked_by #P` / `blocks #T`) with actor and session.
-- **Reopening a prerequisite** (moving it out of `done`): pending dependents
-  stop being ready again; `in_progress` dependents keep running and `done`
-  dependents stay done. Every dependent gets a `dep_reopened` event so the
-  change is not silent; decide explicitly whether they need rework.
-- **`done` is the completion contract.** A rejected or abandoned prerequisite
-  must not be marked `done` to release dependents; remove the edge and
-  re-scope instead. Only mark a prerequisite done when its own Outcome is met
-  (for deploy outcomes that means deployed, not a PR, review, or merge).
-
-## Dispatcher
-
-Every `poll_seconds`, the dispatcher admits ready tasks (pending,
-prerequisites done, awake) one at a time through the [admission pool](#admission-pool)
-until the pool is full or no ready work is left, always claiming the oldest
-ready task across projects. It spawns the configured agent with
-`cwd = workspace_root/<project>` (or the [task worktree](#task-worktrees)) and
-the [agent environment](#agent-environment). Output goes to
-`log_dir/<task>-<run>.log`; `run_start` and `run_end` events record agent,
-session id, and exit code (and a `runs` row tracks the run, see above). The
-prompt is written to `log_dir/<task>-<run>.prompt.md` (recorded as
-`prompt_file`), and the `cmd` in `run_start` replaces any argument longer than
-200 characters with `@<prompt file>`. There is no system prompt; the agent's
-own instructions (skills, `AGENTS.md`) say how to work a task.
-
-The dispatcher sets a task `escalated` with a block note (resume with
-`axe set ID --state pending`) when:
-
-- the session exits while the task is still `in_progress` under its claim;
-- the task already has `runs >= max_runs` (resume with `--reset-runs --state pending`);
-- the project directory is missing, or spawning fails;
-- the project has no task worktree base (before any claim, so no run is
-  counted), or its task worktree cannot be allocated;
-- the dispatcher restarts and finds an orphaned `dispatch:` claim;
-- the dispatcher receives SIGTERM/SIGINT (running sessions are killed).
-
-### Bounded drain
-
-SIGUSR1 starts a drain, used to restart the dispatcher for a rollout. SIGTERM is
-unchanged: it kills every session and escalates their tasks.
-
-1. No new task is admitted. Runs that finish inside the window are untouched.
-2. After `drain_abort_seconds` (default 900) every unprotected task run is
-   killed. The task returns to `pending` under the same session, the run is
-   refunded (`max_runs`) and costs no resume (`max_resumes`). A `run_interrupted`
-   event records it, and the next prompt tells the session it was interrupted
-   by a rollout and must re-check real state before repeating any step.
-3. A protected run is waited for and never aborted. The deadline for protected
-   runs belongs to the caller: a rollout script typically gives up after a long
-   deadline and leaves the dispatcher draining.
-4. Bots keep being admitted while task runs remain, so a long drain does not
-   starve them. Once the last task run ends, no bot starts; live bot runs get
-   60 s, then are stopped as on SIGTERM (their wakes return to the queue). The
-   dispatcher exits 0 and whoever signalled it starts it again; tasks resume then.
-
-`axe protect <id> [--note <what>]` marks the task's live run as inside a
-non-repeatable step (merge, deploy, migration); `axe protect <id> --clear`
-ends it. It is stored as `protected`/`unprotected` events keyed by run id, so it
-ends with the run (no schema change). Protect only around the step. Once the
-drain has decided to abort a run the call fails: do not start the step. The
-server decides and records the abort in one operation, so the two cannot race.
-
-Roll out the server before a dispatcher that uses `drain_abort`: an older server
-rejects that operation.
-
-### Task worktrees
-
-With a `[worktrees]` table, every session of a task runs in one Git worktree
-of the canonical workspace, `workspace_root/.worktrees/<project>/task-<id>--work`
-(`cwd` and `AXE_WORKTREE`), on branch `<branch_prefix>task-<id>--work`
-(`[worktrees] branch_prefix`, default `axe/`), reused across runs. The
-dispatcher sees only the workspace; agents put sub-repository worktrees under
-its `_repo/`. The dispatcher removes them only with housekeeping on (see
-[Housekeeping](#housekeeping)); otherwise remove a done task's directory with
-your own cleanup job.
-
-- **Readiness, before claiming.** The canonical clone `workspace_root/<project>`
-  has its own `.git` and `refs/remotes/origin/HEAD`. Otherwise the oldest ready
-  task of that project is escalated without a claim or run, with a
-  note naming the gap.
-- **Allocation.** A missing checkout (or an empty directory) is created after
-  `git fetch origin` from `origin/HEAD`; if the task branch already exists (a
-  reopened task whose directory was cleaned up) it is checked out instead. An
-  existing worktree of the canonical clone is reused and never reset, checked
-  out or cleaned. Anything else at the path escalates for manual
-  reconciliation.
-- **One session at a time.** A task is claimed by at most one run, so its
-  worktree has one session at a time.
-
-```toml
-[worktrees]
-```
-
-Without `[worktrees]`, sessions start in the canonical workspace as before.
-
-### Housekeeping
-
-`[dispatcher] housekeep = "off" | "dry-run" | "apply"` (default `off`;
-`axe dispatch --housekeep[=dry-run|apply|off]` overrides it, a bare
-`--housekeep` meaning `dry-run`) runs a housekeeping tick in the dispatcher
-every 3 minutes, in its own thread. It removes a done task's worktrees and
-per-task build output once nothing in them could be lost, and prints one JSON
-line per decision on stdout (the dispatcher journal). `axe housekeeping
---dry-run` runs one sweep and prints every decision without deleting; removal
-runs only inside `axe dispatch`. Task lookups use the dispatcher's server
-connection (`GET /api/tasks/<id>` and `/events`).
-
-**Worktrees.** Candidates are, for each project directory under
-`workspace_root/.worktrees/`, `<project>/task-<id>--<purpose>` and
-`<project>/<repo>/task-<id>--<purpose>`. `<id>` is a positive integer without
-leading zeros; other names are ignored and symlinks retained. A candidate is
-deleted only when all of these hold, checked again right before deleting:
-
-- the task exists, its `project` is the directory's project, and its stored
-  `state` is `done`;
-- its latest `state` event to `done` is at least the active retention old;
-- its latest `run_start` has a later `run_end`, and no readable process has
-  its working directory inside;
-- it is a registered git worktree;
-- it and every `_repo/<name>` with its own `.git` have an empty
-  `git status --porcelain --untracked-files=all` and no commit outside
-  `refs/remotes/*` (a branch deleted on merge still counts until the owning
-  repository prunes it);
-- every path inside is owned by the dispatcher's user.
-
-Any lookup failure, mismatch or other state retains the directory and says
-why. Removal runs `git worktree remove` without `--force` on each nested
-`_repo` worktree and then the candidate, then `git worktree prune` in each
-owning repository; ignored files (`target/`, `node_modules/`) go with the
-tree, branches are never deleted, and a failed removal is reported as `error`
-while the next candidate continues.
-
-**Task paths.** `task_paths` are templates with one `{id}` in the last
-component, for rebuildable per-task output kept outside the worktree (a
-`CARGO_TARGET_DIR`, a scratch directory). An entry is deleted when the task is
-`done` for the active task-path retention (`retention`, or none under
-pressure), its run has ended, no process is inside and every path is the
-dispatcher user's. There are no git or project checks: task ids are global.
-Entries that start with a template's fixed prefix but match no template are
-retained and reported with `task: null`; other entries are ignored. These
-lines carry `"kind": "cache"`.
-
-**Idle build output.** With `[housekeeping.build_output]`, a worktree
-candidate that its own decision retained is searched (not following symlinks
-or entering `.git`) for directories named one of `names` (default `target`,
-`node_modules`, `.next`, `out`), at any depth including `_repo/<name>`, when
-its task's derived status is `done`, `blocked` (a held task, or a pending one
-waiting on a prerequisite or wake time) or `escalated` and its `updated_at` is
-at least `idle` (default `1h`) old. Each such directory is deleted when the
-task's run has ended, `git check-ignore` ignores it, git tracks nothing in it,
-no process uses it and every path is the dispatcher user's. Source, untracked
-files and commits stay. Lines carry `"kind": "build_output"`; tasks that are
-not idle produce none.
-
-**Temp scratch.** With `[housekeeping.tmp]`, entries of `dir` (default
-`/tmp`) that the dispatcher's user owns are checked; other users' entries and
-symlinks are ignored. A name mapping to a task id (`task-<id>*`, `task<id>*`,
-`t<id>*`, or `<id>-` followed by a non-digit, so dates do not count) is the
-task's scratch (`"kind": "tmp_task"`): it goes when the task is `done` for the
-task-path retention, or, for a `blocked` or `escalated` task idle for `idle`,
-when it holds at least `floor_mib` (default 1024). Any other directory is
-stale scratch (`"kind": "tmp_stale"`) once nothing in it was modified for
-`stale` (default `48h`); for names matching a `shared` glob (shared caches such
-as `node-compile-cache` and `tsx-*`) file reads count as use too. Stale scratch
-goes only under pressure; otherwise the dispatcher logs a count
-(`"event": "tmp_stale"`) and `axe housekeeping --dry-run` lists each. Nothing
-goes while a run is live, a process has its working directory or an open file
-inside, a unix socket inside is bound, or another user owns any path inside.
-
-**Orphan caches.** With `[housekeeping.orphan_caches]`, each entry of `roots`
-that no `task_paths` template claims (a task-path name with a task id) goes
-once nothing in it was modified or read for `unused` (default `7d`), with the
-same process and ownership checks (`"kind": "orphan_cache"`). A task-path
-directory that is also a root reports such entries here instead of as
-`task: null`.
-
-Every removal makes each directory `u+rwx` first, so read-only trees (Go
-module caches) go too, and stops at a path another user owns.
-
-**Disk pressure.** With `[housekeeping.pressure]`, free space on `path`
-strictly below `free_below_gib` shortens worktree retention to its
-`retention` and task-path retention to zero, and runs each `cache_trim`
-command (absolute argv, rebuildable caches only) at most hourly. Without
-pressure a sweep runs at most hourly, so the frequent tick only costs a
-`statvfs`. Without the table every tick sweeps.
-
-**No silent stall.** With `[housekeeping.alert]`, a dispatcher admission
-pause with the `disk` signal `constrained` starts an episode
-(`housekeeping-disk-pause` next to the admission hold file). After `after`,
-the dispatcher wakes `bot` once (`POST /api/bots/<bot>/wakes`, key derived
-from the episode start, so a failed wake is retried by the next tick). A
-non-disk pause or open admission ends the episode; a status not yet sampled
-leaves it alone.
-
-In `dry-run` nothing is deleted, trimmed or woken; decisions say
-`would_delete` and trims `would_run`. Lines: `path`, `project`, `task`,
-`decision` (`retain`, `would_delete`, `deleted`, `error`) and `reason`; event
-lines (`pressure`, `cache_trim`, `disk_pause_alert`, `tmp_stale`) have an
-`event` key.
-`axe housekeeping --dry-run` exits 1 if any step failed.
-
-```toml
-[dispatcher]
-housekeep = "dry-run"            # off (default) | dry-run | apply
-
-[housekeeping]
-retention = "6h"                 # default 6h
-task_paths = ["~/.cache/axe/task-{id}-target"]
-
-[housekeeping.pressure]          # optional
-# path = "~/workspace"           # default workspace_root
-free_below_gib = 30
-retention = "1h"                 # default 1h; at most retention
-cache_trim = [["/usr/local/go/bin/go", "clean", "-cache"]]
-
-[housekeeping.alert]             # optional
-bot = "ops"
-after = "15m"                    # default 15m
-
-[housekeeping.build_output]      # optional
-idle = "1h"                      # default 1h
-names = ["target", "node_modules", ".next", "out"]   # the default
-
-[housekeeping.tmp]               # optional
-dir = "/tmp"                     # default /tmp
-idle = "1h"                      # default 1h
-floor_mib = 1024                 # default 1024
-stale = "48h"                    # default 48h
-shared = ["node-compile-cache", "tsx-*", "playwright-transform-cache-*",
-          "pytest-of-*", "claude-*", "gh-cli-cache"]   # the default
-
-[housekeeping.orphan_caches]     # optional
-roots = ["~/.cache/axe"]
-unused = "7d"                    # default 7d
-```
-
-### Admission pool
-
-`[pool] total` (default 1, at least 1) caps concurrent task agents. Each
-running agent holds one slot for one task; a free slot goes to the oldest ready
-task.
-
-`[pool] bots` (at least 1) caps concurrent bot runs in a separate pool: bot
-runs never take a task slot and task runs never take a bot slot, so a full task
-queue cannot delay a bot's reply. Omitted, every active bot gets a slot (a bot
-has at most one live run), so bots are never starved.
-
-- Running agents are never preempted. A slot frees when its agent exits and is
-  refilled on the next poll.
-- Held tasks (`blocked` or `escalated`), sleeping tasks, and tasks waiting on
-  prerequisites are not ready and take no slot.
-- A fresh retry after a failed resume, including one deferred by resource
-  admission, keeps its slot.
-
-The dispatcher logs `axe dispatcher: pool total=N bots=M` at startup (`bots=one
-per active bot` when omitted). `axe admission` shows both pools as
-`used/total` slots (`pools` in `--json`).
-
-### Resource admission
-
-With a `[resources]` table in the dispatcher's config, `axe dispatch` starts
-no new agent session while
-guest disk, memory or CPU is tight. It is a global admission pause, not a task
-state: waiting tasks stay `pending` and unclaimed, spend no run budget, get no
-events, and start on their own once pressure clears. Running sessions, holds,
-prerequisites and the pool are unchanged; nothing is killed,
-throttled or cleaned up. Without the table nothing is gated.
-
-**Bots and the hard floor.** The pause holds task sessions only. Bot runs stop
-only at a hard floor: disk or memory strictly below half its pause threshold
-(7.5 GiB free, 7.5% available with the defaults below), or unreadable. CPU never
-holds bots, and the floor has no hysteresis. Each bot claim gets its own fresh
-sample. `axe admission` adds `bots: admitting bot runs` or `bots: held at the
-hard floor (...)` (`bots_admitting`, `bots_reason`); the journal logs one line
-at startup and on each floor transition.
-
-| Signal | Reading | Pauses | Recovers |
-|---|---|---|---|
-| disk | `statvfs` `f_bavail * f_frsize` of `path` (default `workspace_root`), as `df` "Avail" | `< 15 GiB` free | `> 20 GiB` free |
-| memory | `MemAvailable / MemTotal` from `/proc/meminfo` | `< 15%` | `> 20%` |
-| cpu | busy share of the `/proc/stat` `cpu` line over a 60 s monotonic window (busy = all fields but `idle` and `iowait`; `guest` is already in `user`) | `> 90%` | `< 80%` |
-
-- **Sampling.** Every `sample_seconds` (10), and again immediately before each
-  claim, so every slot gets its own fresh decision and a pass stops at the
-  first refusal. The dispatcher is single-threaded: one decision per spawn.
-  A gate that reopens triggers a dispatch pass at once instead of waiting for
-  `poll_seconds`. A resume that fails and would retry fresh in the same pass
-  is a new process too: it gets its own check, and while paused it is
-  deferred, keeping its claim, slot and run count (one `fresh session fallback
-  deferred` note), then starts fresh before any new claim once admission
-  reopens. If ops changes the task meanwhile, the deferral is dropped; a
-  dispatcher stop or drain escalates it like a stopped session.
-- **Hysteresis and equality.** A clear signal pauses only strictly past its
-  pause threshold; a paused one clears only strictly past its resume
-  threshold. A value equal to a threshold does not cross it.
-- **Unknown is not healthy.** At startup, until the CPU window spans 60 s, on a
-  read error, or when the CPU window has a gap longer than
-  `cpu_window_seconds + stale_seconds` (sampling stalled), the signal is
-  `unknown` and admission pauses. A signal leaves `unknown` as if paused: it
-  must reach its resume threshold. `dispatch --once` waits for a full CPU
-  window before its single pass.
-- **Status.** The dispatcher reports its decision to the server
-  (`POST /api/dispatcher/admission`, lease-checked like other dispatcher
-  calls) after every sample and at least every 10 s. `axe admission
-  [--json]` (`GET /api/admission`, also `admission` in `/api/overview`) shows
-  whether new sessions are admitted, the reason, each signal's level, reading
-  and thresholds, plus `report_age_seconds`. Readings older than
-  `stale_seconds` report `admitting: false` ("status stale"). With no report
-  since the server started, or none for 60 s (the dispatcher lease),
-  `admitting` is null ("unknown"), never healthy. `axe show` adds
-  `waiting: resource admission paused (...)` to ready pending tasks, distinct
-  from prerequisite waits. `axe config` prints the thresholds. The
-  dispatcher journal gets one line at startup and one per signal or admission
-  transition, never per sample; a failed report logs once per failure streak.
-
-```toml
-[resources]               # omit to disable; every key is optional
-# path = "~/workspace"    # filesystem to watch; default workspace_root
-sample_seconds = 10
-stale_seconds = 30
-cpu_window_seconds = 60
-disk_pause_below_gib = 15
-disk_resume_above_gib = 20
-memory_pause_below_percent = 15
-memory_resume_above_percent = 20
-cpu_pause_above_percent = 90
-cpu_resume_below_percent = 80
-```
-
-Validation requires resume thresholds strictly on the healthy side of pause,
-percents in `0..=100`, and `cpu_window_seconds`, `stale_seconds >=
-sample_seconds >= 1`. Older binaries reject the table: install the binary
-first.
-
-### Admission hold
-
-`axe admission hold --until <T> [--reason R]` stops the dispatcher from
-claiming any task for a new session until `T` (RFC3339 such as
-`2026-11-10T23:00Z`, or `+<n>[smhd]`); `axe admission release` ends it
-early. It gives a maintenance window (for example a cutover that needs no
-`in_progress` task) a quiet queue without killing workers, and unlike the
-bounded drain it never aborts a run and can be undone.
-
-- **Scope.** Only new task claims stop. Running task sessions continue,
-  fresh-session fallbacks of already claimed tasks still start, and bot runs
-  are admitted as usual. Waiting tasks stay `pending` and unclaimed, spend no
-  run budget and get no events, as under a resource pause.
-- **Expiry.** The dispatcher reads the hold before every claim, so it ends by
-  itself at `T` on the next dispatch pass (within `poll_seconds`), with no
-  restart. A new `hold` replaces the current one.
-- **Where it lives.** A JSON file on the dispatcher host:
-  `$AXE_ADMISSION_HOLD`, default `~/.local/state/axe/admission-hold.json`.
-  Run `hold` and `release` there, as the dispatcher's user. The file survives
-  restarts of either process and needs no server or schema change; a file that
-  cannot be read or parsed holds admission (fail closed) until it is released.
-- **Status.** The dispatcher adds the hold to its admission report:
-  `GET /api/admission` has `hold` (`until`, `reason`, `set_at`, `set_by`, or
-  `error`; null when none), `admitting: false` and the hold first in `reason`;
-  `bots_admitting` is unchanged. `axe admission` prints a `hold:` line and
-  `axe show` adds `waiting: admission hold until ...` to ready pending tasks.
-  `hold` and `release` return only once the server reports the change, and
-  fail after 20 s otherwise (not on the dispatcher host, or a dispatcher
-  binary without hold support). The journal logs each set, release and expiry.
-
-### Session continuity
-
-A task has one session. Its first run starts fresh with an agent chosen by the
-task’s optional `agent` pin, otherwise the matching rule (`fixed` or
-`round_robin`); every later run, whether after an
-escalation, a hold, a `wait`, or a crash, resumes that session with the agent's
-`resume_cmd`, pinned to the same agent without advancing round-robin. The
-`sessions` table stores agent, session id, and resume count per task. Preset
-ids are saved at spawn; JSONL ids are saved after exit. `run_start` records
-`mode` (`fresh` or `resume`) and `session_id` (null until known for a fresh
-JSONL agent).
-
-Prompts are short; the agent reads the task itself:
-
-- fresh: `Work axe task {id} in project {project}: run axe show {id} and axe log {id}, then carry it to done. Around a merge or deploy: axe protect {id}, then --clear.`
-- resume: `Task {id} resumed; run axe log {id} for what changed.`
-
-A missing stored agent, an agent without `resume_cmd`, or reaching
-`max_resumes` starts fresh with a reason note. A resume that exits non-zero
-without any axe change since it started retries fresh **in the same pass**,
-including `dispatch --once`; this retry uses the same claim and the task pin (or the stored agent when
-unpinned), with
-`.fresh.log` and `.fresh.prompt.md` files to preserve the failed attempt. A
-fresh session replaces the stored one and resets its resume count. Normal run
-limits still apply. Codex resume supports config overrides but no explicit
-cwd/sandbox flags: the template sets `sandbox_mode` via `-c`, and the
-dispatcher sets the process working directory.
-
-## Config
-
-`axe add --agent NAME` pins the agent for fresh sessions, overriding both
-project and catch-all rule agents and strategy without advancing their
-round-robin cursor. Limits still come from the matching rule. Omit the pin
-for existing rule behavior. The server validates pins against its configured
-agents on task creation and routine save; keep agent names aligned with the
-dispatcher config. If a pinned agent later disappears from dispatcher config,
-fresh dispatch escalates the task with an unknown-agent note, never falls back.
-Resumable sessions retain their stored agent. `show` and the API expose `agent`
-(null for unpinned tasks). Pins are creation-time fields, not `set` options.
-
-
-Give a reworked task a fresh run budget with
-`axe set ID --reset-runs --state pending --note "<reason>"`. Resetting runs
-alone does not resume a blocked or escalated task and is never an approval. It
-leaves the task's session intact. It is an authenticated write, logs the old
-and new count with actor/session, and refuses live dispatcher claims (400).
-
-```toml
-workspace_root = "~/workspace"
-log_dir = "~/.local/state/axe/logs"
-poll_seconds = 60
-
-[server]
-cors_origins = ["http://dashboard.example"]   # origins allowed to GET the API (default none)
-
-[pool]
-total = 5                 # concurrent task agents (default 1)
-# bots = 2                # concurrent bot runs, separate from total; default one per active bot
-
-[defaults]
-agents = ["claude"]
-strategy = "fixed"        # fixed | round_robin; picks a new session's agent
-max_runs = 6              # runs per task
-# max_resumes = 3         # omitted: unlimited, 0: always fresh
-
-[agents.claude]           # built in; override here if needed
-cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--session-id", "{session_id}", "--permission-mode", "bypassPermissions", "{prompt}"]
-resume_cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--resume", "{session_id}", "--permission-mode", "bypassPermissions", "{prompt}"]
-session = "preset"
-
-[agents.codex]
-cmd = ["codex", "exec", "--json", "--sandbox", "danger-full-access", "-C", "{cwd}", "{prompt}"]
-resume_cmd = ["codex", "exec", "resume", "--json", "-c", 'sandbox_mode="danger-full-access"', "{session_id}", "{prompt}"]
-session = "jsonl:thread_id"
-
-[[rule]]                  # no match: every project
-agents = ["claude", "codex"]
-strategy = "round_robin"
-
-[[rule]]
-match = { project = "web" }
-agents = ["codex"]
-
-[worktrees]               # dispatcher-owned task worktrees (see Task worktrees)
-branch_prefix = "axe/"    # default
-
-[otel]                    # OTEL_RESOURCE_ATTRIBUTES for agent runs
-prefix = "axe"            # per-run keys: <prefix>.task_id, .project, .agent, .mode, .run
-resource = { "service.namespace" = "agents" }   # static attributes, default none
-
-[metrics]
-projects = ["web"]        # own `project` label on /metrics; every other project is `other`
-
-[prompts]                 # dispatcher prompts; {id} and {project} are replaced
-# fresh = "Work axe task {id} in project {project}: ..."
-# resume = "Task {id} resumed; run axe log {id} for what changed."
-# interrupted = "Your previous run was interrupted by an axe rollout, ..."
-```
-
-Rules match on `project` only. Each field (`agents`, `strategy`, `max_runs`,
-`max_resumes`) comes from the most specific matching rule that sets it (project
-rules over catch-all rules over defaults; later wins on ties). Round-robin
-cursors are keyed by the match of the rule that supplied `agents` and persist in
-the database. Unknown keys, including retired ones (`personas`, `looped`,
-`persona_dir`, `pool.priority`, `continuity`, `match.persona`, `concurrency`),
-fail validation.
-
-Placeholders: `{session_id}`, `{prompt}`, `{cwd}`, `{task_id}`, `{project}`;
-any other `{name}` is rejected. An agent's optional `bot_args` (see Bots) may
-also use `{system_prompt_file}` and `{settings_file}`. Session modes: `preset` (dispatcher generates a
-UUID), `jsonl:<key>` (read from the first JSON output line containing `<key>`,
-fallback `session_id`), `none`.
-
-The database uses WAL, so committed transactions may live only in
-`tasks.db-wal`; never back up by copying `tasks.db`. `axe backup PATH` asks
-the running server for a consistent snapshot (SQLite `VACUUM INTO`, WAL
-included) and downloads it to a new file, refusing to overwrite one.
+| `pending` | Eligible to run; the dispatcher claims it and starts or resumes its session |
+| `in_progress` | A session is working on it |
+| `escalated` | A hold for a human decision; resumes only when set back to `pending` (or `axe approve`) |
+| `blocked` | A non-human external wait; also resumed explicitly |
+| `done` | The completion contract: dependents start, so set it only when the spec's outcome holds |
+
+Each task also has a derived `status`: `blocked` for a pending task still
+waiting on prerequisites, otherwise its state. Human attention is
+`axe list --state escalated`. Block notes use one format so a hold says what
+to do: `blocked:` / `resolver:` / `resume:` lines (`axe escalate`).
+
+Tasks may declare prerequisites (`blocked_by`, `axe deps`). A dependency wait
+is never stored: a task is ready when it is `pending`, every prerequisite is
+`done` and its `not_before` has passed, computed inside each claim
+transaction. Holds and dependencies stay separate; finishing a prerequisite
+never lifts a hold. A rejected prerequisite is removed (`axe deps --remove`),
+never marked `done` to release its dependents. Code: `db.rs`.
+
+The actor on each event is `--actor`, else `$AXE_ACTOR`, else `human`, with
+`$AXE_SESSION` alongside. `axe approve` records an owner decision and resumes
+a held task; dispatcher task sessions are refused, a guardrail rather than a
+security boundary since agents share one token.
+
+## Architecture
+
+| Piece | What it does | Code |
+|---|---|---|
+| Server | Sole owner of the database; HTTP API, change stream, routine and schedule ticks, Telegram gateway | `server.rs`, `db.rs` |
+| CLI | HTTP client; rides out a server restart by retrying with one request id per write, so a write is applied once | `cli.rs`, `client.rs` |
+| Dispatcher | Holds a lease on the server, claims ready work, supervises agent processes, relays their logs | `dispatch.rs`, `remote.rs`, `agent_proc.rs` |
+| Dashboard | Read-only Next.js UI over the GET API | `web/` |
+
+Paths in `crates/axe/src/` unless noted.
+
+**Dispatcher.** One dispatcher at a time holds a server-issued lease; its
+operations go through a journaled, replayable endpoint so a retry after an
+outage is applied once (`remote.rs`). While the server is unreachable it
+admits nothing and keeps workers running; a dispatcher that finds unresolved
+runs refuses to start until `axe dispatch --reconcile-note` escalates them.
+Worker logs stay on the dispatcher host and the server relays reads over the
+dispatcher's WebSocket without storing them (`run_log.rs`, `relay_log` in `server.rs`).
+
+**Session continuity.** A task's first run starts fresh with the agent from
+its `--agent` pin or the matching `[[rule]]`; every later run resumes that
+session with the agent's `resume_cmd`. A failed resume with no axe change
+retries fresh in the same pass. Prompts are one line (`[prompts]`); the agent
+reads the task itself.
+
+**When the dispatcher escalates.** A session that exits with its task still
+`in_progress`, a task over `max_runs`, a missing project directory or
+worktree base, a spawn failure, an orphaned claim after restart, and a
+SIGTERM. Each gets a block note.
+
+**Admission.** A task session starts only when a pool slot is free, the
+optional resource gate is open, and no admission hold is set
+(`admission.rs`). Bots have their own pool and are held only at the resource
+gate's hard floor, so a full task queue never delays a bot's reply. Waiting
+tasks stay `pending` and spend nothing. `axe admission` shows why.
+
+**Rollouts.** SIGUSR1 starts a bounded drain: nothing new is admitted, and
+after `drain_abort_seconds` unprotected task runs are stopped and requeued on
+the same session. `axe protect ID` marks the live run as inside a
+non-repeatable step (merge, deploy, migration) so the drain waits for it;
+`--clear` ends it. `axe abort ID` force-stops a run remotely and exits zero
+only once termination is confirmed. An admission hold
+(`axe admission hold --until T`) gives a quiet queue without aborting
+anything.
+
+**Task worktrees.** With `[worktrees]`, every session of a task runs in one
+reused Git worktree of the project checkout
+(`<workspace_root>/.worktrees/<project>/task-<id>--work`, `$AXE_WORKTREE`).
+It is never reset; housekeeping removes it after the task is done only when
+nothing in it could be lost (`worktree.rs`, `housekeeping.rs`;
+`axe housekeeping --dry-run` prints each decision).
+
+**Agent environment.** Sessions get `AXE_ACTOR=agent`, `AXE_SESSION`,
+`AXE_TASK`, `AXE_SERVER`, `AXE_WORKTREE` and OpenTelemetry resource
+attributes tagging the task, project, agent and run (`[otel]`). The token
+reaches them through the inherited token file, not the environment.
+
+## Routines, bots and goals
+
+These sit next to tasks with their own tables, API and CLI namespace; task
+code gains no branches for them.
+
+- **Routines** (`axe routine`, `routine.rs`) create ordinary pending tasks on a
+  five-field cron in an IANA timezone. After downtime only the latest missed
+  occurrence is created; manual triggers take a retry key. Each task keeps a
+  snapshot of the template it came from.
+- **Bots** (`axe bot`, `bot.rs`, `dispatch/bots.rs`) are persistent
+  identities with one agent session resumed on every wake. Wakes come from the
+  bot itself, named cron schedules (`schedule.rs`), task-event subscriptions
+  (`subscription.rs`) and the Telegram gateway (`telegram.rs`, `board.rs`).
+  Design: [docs/design/bots.md](docs/design/bots.md).
+- **Goals** (`axe goal`, `goal.rs`, `goal_board.rs`) are durable outcomes
+  bots share, with weekly budgets and an append-only trajectory. Design:
+  [docs/design/goals.md](docs/design/goals.md).
+
+Delivery statistics (`axe stats`, `flow.rs`) and run cost (`usage.rs`) are
+computed from the event log and run usage; the only recorded classifications
+are an escalation's class (`axe escalate --class`) and a task's workload.
+
+## Blobs
+
+`axe blob put/get/ls/link` (`blob.rs`) keeps immutable files on the server,
+named by the sha256 of their bytes, so the same bytes are stored once. There
+is no delete, overwrite or version. Contents live on local disk next to the
+database, or in an S3-compatible bucket with `[blobs.s3]`. `axe blob link`
+signs a URL (`/b/<sha256>/<name>?exp=..&sig=..`, at most seven days) that
+opens without the token, for example from a phone; it renders inline in a
+sandbox. The signing key is created on first start; `[blobs]` sets the
+directory, size limit, link base URL and key file.
+
+## Configuration
+
+One TOML file, `$AXE_CONFIG` (default `~/.config/axe/config.toml`; built-in
+defaults when missing), read once at startup by both `axe server` and
+`axe dispatch`. The server uses `[server]`, `[telegram]`, `[metrics]`,
+`[blobs]` and the agent names; the dispatcher uses the rest, so keep agent
+names aligned when they run on different machines. Unknown keys fail validation.
+`crates/axe/src/config.rs` defines every table, default and check;
+`axe config` validates and prints the resolved file, including the built-in
+`claude` agent.
+
+| What | Default | Override |
+|---|---|---|
+| Database (server) | `~/.local/share/axe/axe.db` | `$AXE_DB` |
+| Bearer token | `~/.config/axe/token` | `$AXE_TOKEN_FILE`; clients also take `$AXE_TOKEN` |
+| Server address (clients) | `http://127.0.0.1:8790` | `$AXE_SERVER` |
+| Listen address | `127.0.0.1:8790` | `axe server --listen` |
+| Admission hold (dispatcher host) | `~/.local/state/axe/admission-hold.json` | `$AXE_ADMISSION_HOLD` |
+| Agent logs and dispatcher journal | `~/.local/state/axe/logs` | `log_dir` |
+
+The database uses WAL: back it up with `axe backup PATH`, a consistent
+snapshot from the running server, never by copying the file. Schema upgrades
+run on server start (`db.rs`); back up before upgrading.
+
+## HTTP API
+
+`GET` is unauthenticated, except Telegram message content, `/api/blobs` and
+the dispatcher connection (a signed `/b/` link needs only its signature);
+every other method needs `Authorization: Bearer <token>`. The server refuses
+a non-loopback listen address without a token file. Expose it only on a
+trusted network: reads include full agent logs. Bodies are JSON, errors are
+`{"error": "..."}`, and `X-Axe-Request-Id` makes a write retry-safe.
+
+The route table is `route`, `bot_route`, `goal_route` and `blob_api` in
+`crates/axe/src/server.rs`; dispatcher operations are in `remote.rs`. Response
+shapes are the serialized Rust types, exported to `web/lib/api.ts`. There is
+no version prefix.
 
 ## Development
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --locked
+cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
 cargo test --locked --features ts --test ts_bindings   # web/lib/api.ts is current
 ```
 
-The dashboard lives in `web/` (Node 24); its checks and the `embed-ui` build
-are in [web/README.md](web/README.md).
-
-
-## Legacy v8 conversion
-
-The v8 conversion is retained in the current v10 migration and runs in one
-transaction; any older schema is refused (upgrade it to v8 with an earlier
-release first). The conversion drops `tasks.owner` and its index,
-`runs.persona`, and the retired `dream_attempts` table, and keeps one session
-per task: the builder session when one exists, else the most recently prompted
-one. All other rows and ids are kept.
-Take `axe backup` with the old binary first. This legacy conversion removes
-columns; the additive v9→v10 rollback below does not reverse it. Never restore
-an older snapshot over newer committed work.
-
-## Routines (schema v10)
-
-The server polls once per second. Routines create ordinary pending tasks;
-execution, session ownership, approvals and retries remain the dispatcher's
-responsibility. Overlapping occurrences are allowed. Each task retains a
-snapshot of the template and a durable occurrence backlink, even after editing
-or archiving its routine. Nothing is deleted by archival.
-
-```sh
-# JSON: name, project, cron, timezone (optional; UTC), title, detail (full spec), agent (optional)
-axe routine save --file template.json
-axe routine save --id 1 --file revised-template.json
-axe routine list
-axe routine show 1
-axe routine pause 1
-axe routine resume 1
-axe routine trigger 1 --key unique-request-id
-axe routine history 1 [--before OCCURRENCE_ID]
-axe routine events 1 [--before EVENT_ID]
-axe routine archive 1
-```
-
-An optional `"agent":"claude"` template field is copied to every scheduled or
-manually triggered task and retained in the occurrence snapshot. Old templates
-without a pin still load. Editing the pin only affects future tasks.
-
-Commands return JSON. `save --id` replaces the complete configuration. Name,
-project, title and detail must be nonempty. Cron accepts exactly five numeric
-fields (minute, hour, day of month, month, day of week) with `*`, lists, ranges
-and steps; timezone is an IANA name. Invalid or impossible schedules are
-rejected before writing. Day-of-month/day-of-week use cron OR semantics.
-
-Scheduling uses locked `croner` 4.0.2 with `chrono-tz`. Fixed-time jobs in a
-spring-forward gap run at the first valid instant after the gap; in a fall-back
-fold they run only at the first instance. Interval/wildcard jobs skip the gap
-and may run in both instances of the repeated hour. The integration tests pin
-these behaviors. Occurrence identity uses UTC epoch seconds, never ambiguous
-local timestamps. Upgrading the cron or timezone dependencies requires rerunning
-these tests. Library source/API: https://docs.rs/croner/4.0.2/croner/struct.Cron.html.
-
-Creation starts at the next future occurrence. After downtime, one task is
-created for the latest missed occurrence, then the cursor advances into the
-future. A pause does not catch up: resume starts at the next future occurrence.
-Repeating resume on an enabled routine keeps its cursor. Schedule/timezone
-edits start a new future cursor; other edits keep the cursor, and only affect
-future tasks. Archive is terminal. Manual triggers work while paused, use a
-caller-supplied retry key, and never move the schedule cursor. Retrying the
-same key returns the same task, including after archival.
-
-The server commits occurrence, task, created event, routine audit and cursor
-in one immediate transaction. `(routine_id, identity)` is unique; a failed
-transaction leaves neither task nor occurrence. No OS/Kubernetes cron objects
-are created. Routine reads are public like task reads; all writes use the
-existing bearer-token/actor/session authentication contract.
-
-API: GET `/api/routines`, GET `/api/routines/:id`, POST `/api/routines` and
-PUT `/api/routines/:id` with `{template:{...},actor,session}`; POST
-`/api/routines/:id/{pause,resume,archive,trigger}` (trigger requires `key`).
-GET `/api/routines/:id/{history,events}` returns newest first, at most 100 rows;
-use `?before=<last id>` for the next page. GET `/api/tasks/:id/routine` returns
-the backlink/snapshot, or null. Lists include archived routines.
-## Delivery statistics
-
-`axe stats` and `GET /api/stats/flow?project=&since=&until=&workload=&origin=` compute
-delivery figures from the event log and runs, overall and per workload, with no
-run cap. `--origin routine` keeps only tasks created by a routine occurrence,
-`--origin task` only the others. Two facts are recorded rather than derived, as append-only events where
-the latest wins: `escalation_class` (`axe escalate --class`; the dispatcher
-records `runtime`) and `workload` (`axe add --workload`, a routine's `workload`).
-Each entry into `escalated` starts an escalation episode, numbered from 1 in
-`axe log` order. `axe classify --escalation` corrects the latest episode;
-`--episode N` corrects an earlier one, closed or not (recorded as `episode=N`).
-
-| Class | Meaning |
-|---|---|
-| `decision` | A legitimate human call: product, risk, authorization |
-| `capability` | The worker lacked tooling, context, instructions or verification |
-| `coordination` | Scheduling, ordering or recovery failed |
-| `runtime` | axe or infrastructure failed |
-
-Workloads are `prod-bug`, `infra`, `feature` and `ops`.
-
-- **Intervention:** an escalation that was approved, names `owner` as resolver, or
-  was resumed by `human`; an approval outside an escalation; or any other
-  `human` state change or spec edit. One resolution counts once.
-- **Verified shipped:** finished in the window, not reopened since, with an
-  artifact. A proxy: axe does not record that Verify passed.
-- **Autonomous:** an escalation resolved in the window with no intervention.
-- **Backlog:** tasks ready now and the longest they have been runnable; dependency
-  and timed holds do not count. The figure is as of now, not the window's end.
-
-`owner_messages` counts inbound bot messages for context; their text is not
-classified, so it is not an intervention. Tasks escalated before classes existed
-report as `unclassified`.
-
-GET `/api/stats/history` returns `{events, routines, runs}` for the dashboard Stats
-view in one read: every `run_start` event and every state event whose value
-changed (`id, task_id, at, kind, from_value, to_value`, ID order), the task
-IDs that are routine occurrences, and every run, uncapped (`id, task_id, agent,
-started_at, ended_at`, ID order).
-
-Schema v11 adds nullable `tasks.agent`, preserving all prior columns and rows.
-Schema v10 added only `routines`, `routine_occurrences`, `routine_events` and
-their indexes, preserving every v9 table/column/row. v8 still migrates through
-the existing v9 conversion. Back up the database before an upgrade that changes the schema.
-
-## Bots (schema v12)
-
-A bot is a standalone primitive next to tasks: a persistent identity tied to a
-project, one agent session resumed on every wake, and one wake schedule. Wakes come from
-`axe bot wake`, named schedules, task-event subscriptions and the Telegram
-gateway (below). A bot with none of these due sleeps until woken.
-
-```sh
-# JSON: name, project, agent (default claude), identity, conduct, notes,
-# nudge_after (default 10m)
-axe bot create --file bot.json
-axe bot list | show [NAME] [--json]
-axe bot edit [NAME] [--identity-file F] [--conduct-file F] [--nudge-after 10m] --why W
-axe bot notes [NAME]                       # print; --edit-file F --why W replaces
-axe bot wake [NAME] (--in 2h | --at T | --now) --note N [--key K] [--goal G]
-axe bot inbox [NAME] [--take] [--hook post-tool|stop]
-axe bot log [NAME] [--limit 50] [--full] [--json]
-axe bot pause | resume | stop | reset [NAME]
-```
-
-NAME defaults to `$AXE_BOT`. Identity and conduct are capped at 16 KiB, notes
-at 32 KiB; every edit is recorded as a diff event with its `--why`.
-
-**Readiness.** A bot is ready when it is active, has no live run, and has a due
-undelivered wake; elapsed time alone never starts a run. Creating a bot queues a
-`bot created` wake. A message wake (from the gateway) is due 3 s after the
-newest message of its chat's burst, at most 15 s after the burst's first
-message. The dispatcher checks bots every 2 s and admits them before tasks,
-in their own `[pool] bots` slots; the resource gate holds them only at its
-hard floor (Resource admission).
-
-**Runs.** Each run renders `<log_dir>/bots/<name>/system.md` (the static bot
-protocol, identity and conduct) and `settings.json` (PostToolUse and Stop hooks
-calling `axe bot inbox --take --hook ...`), then runs the agent's `cmd` or
-`resume_cmd` with `bot_args` spliced in before the `{prompt}` argument. The
-prompt holds only the wakes; a fresh session adds a line to read
-`axe bot notes`, `axe bot log`, `axe bot tg history` and
-`axe goal list --bot $AXE_BOT` first. A run that
-exits 0 with 200k or more tokens of context retires its session (event
-`shrink`; `shrink_deferred` while the owner's latest message is unanswered),
-so the next wake starts fresh instead of re-reading it from a cold cache. Logs are
-`<log_dir>/bots/<name>/<run>.log`. The session runs in the persistent worktree
-`.worktrees/<project>/bot-<name>` (branch `<branch_prefix>bot-<name>`) when
-`[worktrees]` is configured, else in the canonical workspace. Environment:
-`AXE_ACTOR=bot:<name>`, `AXE_BOT`, `AXE_BOT_RUN`, `AXE_SESSION`,
-`AXE_SERVER`, `AXE_WORKTREE`; never `AXE_TASK`.
-
-```toml
-[agents.claude]   # the built-in claude already has these bot_args
-bot_args = ["--system-prompt-snapshot", "off", "--append-system-prompt-file",
-            "{system_prompt_file}", "--settings", "{settings_file}"]
-```
-
-An agent without `bot_args` is refused at `bot create`. The server validates
-against its own config, so a server or VM config that redefines `agents.claude`
-must include `bot_args`. Codex has no `bot_args` until its instruction
-semantics on `exec resume` are verified.
-
-**Mid-run wakes.** `inbox --take --hook post-tool` atomically delivers due
-wakes to the live run (`delivered_via=hook`) and prints
-`hookSpecificOutput.additionalContext`; after `nudge_after` it also adds a
-long-run nudge, at most once per interval. `--hook stop` prints
-`{"decision":"block","reason":...}` only when it took new wakes, so the stop
-loop ends. Hook mode never fails the hook. Output is capped at 10,000 chars.
-Wakes still undelivered when a run exits make the bot ready again at once; the
-next run resumes the same session and lists them under "Arrived while you were
-working on the previous run".
-
-**Finish.** Exit 0 saves the session and resets `failures`. `bot stop`, `bot
-pause` and a dispatcher stop are not failures (a dispatcher stop also returns
-the run's prompt wakes). Any other end returns the prompt wakes (marked
-`redelivered`) and counts a failure: at 2 the session is cleared, at 3 the bot
-pauses with an `attention` event; `bot resume` clears the count.
-
-**API.** Public reads: GET `/api/bots`, `/api/bots/:name`,
-`/api/bots/:name/{wakes,events}` (`?limit=`, `?undelivered=1`; message text is
-redacted), `/api/bots/:name/activity?limit=` (metadata only, oldest first:
-`messages` `{id,direction,kind,reply_to,edit_of,attachments,at}` with an
-attachment count and no text, file or chat ids, and `task_actions`
-`{task_id,at,actor,kind}` for task events in the bot's project by `bot:<name>`
-or `human`; each list is the latest `limit`, default and cap 1000),
-`/api/bot-runs?bot=&live=&limit=`, `/api/bot-runs/:id`,
-`/api/bot-runs/:id/log` (relayed as `{"kind":"bot_log"}`). `/api/overview`
-gains `bots`. Writes (token): POST `/api/bots` `{bot:{...}}`, PATCH
-`/api/bots/:name` `{identity,conduct,nudge_after,why}`, PUT
-`/api/bots/:name/notes` `{notes,why}`, POST `/api/bots/:name/wakes`
-`{in_seconds|at|now,note,key}`, POST `/api/bots/:name/inbox`
-`{run,take,hook,stop_hook_active}`, POST
-`/api/bots/:name/{pause,resume,stop,reset}`. Dispatcher operations:
-`bot_ready`, `bot_control` (reads), `bot_claim`, `bot_started`,
-`bot_activity`, `bot_finish`, fenced by dispatcher generation and replayable
-like task operations. Reconciliation closes open bot runs and returns their
-prompt wakes.
-
-### Telegram gateway
-
-With a `[telegram]` table, `axe server` runs one `getUpdates` long-poll
-thread per configured bot token (no webhook; one poller per token, so run one
-server replica). Without it, or when a bot's token file is missing, the server
-starts as before and `bot tg` reports that Telegram is not configured.
-
-```toml
-[telegram]
-owner_user_id = 123456789        # the only person who controls bots (numeric id)
-# api_base = "https://api.telegram.org"
-# poll_timeout = 30              # seconds, 1..=50
-[[telegram.bot]]
-name = "cos"                     # the axe bot it talks for
-token_file = "/run/secrets/telegram/cos"
-chats = [123456789]              # inbound and outbound allowlist (groups are negative)
-```
-
-Tokens live only in the server's token files (for example a mounted secret); agents call the
-server, never Telegram. `/api/config` shows only the configured bot names.
-
-**Inbound.** Requested updates: `message`, `edited_message`, `callback_query`,
-`my_chat_member`, `message_reaction`. An update is accepted only when
-`from.id == owner_user_id`, `from.is_bot` is false, there is no `sender_chat`
-or `via_bot`, and the chat is allowlisted (callback queries and reactions get
-the same check). Everything else is dropped before it is stored, with a
-metadata-only `security_drop` bot event; the first drop from a new source
-alerts the owner's private chat (at most one alert a minute). Being added to a
-chat that is not allowlisted makes the bot `leaveChat` and alert. Accepted
-messages are stored in `bot_messages` (`forward_origin` sets
-`flags.forwarded`), get a 👀 reaction and `typing`, and queue a debounced
-message wake (3 s quiet, 15 s cap per chat burst, which also groups media
-groups and quick edits). Edits are kind `edit` with `edit_of`; button presses
-become `button` wakes and get a "Got it: <label>" toast, the pressed message
-loses its keyboard and shows `> <label> (selected)`, and a later press on it
-only gets an "Already received" toast; `typing` is refreshed every 4 s in the
-chats whose wakes a live run took;
-reactions are kind `reaction`. Those three kinds store the Telegram
-`update_id` as `message_id`. The poller confirms an update (the next
-`getUpdates` offset) only after its effects commit; a redelivered update
-dedupes on the stored message or the wake key. After 3 failed attempts an
-update is skipped with an `update_skipped` event. A bot paused by failures
-(`attention` event) alerts the owner.
-
-**Owner commands**, handled by the server without waking the bot and answered
-in the chat: `/status` (state, live run and activity, next wake, queued
-wakes), `/stop`, `/pause`, `/resume`, `/reset`, `/wake [note]`. Only the
-owner's own plain text counts (never forwarded content or captions);
-`/cmd@name` counts only when `name` is this bot's username. A command that
-committed is not repeated if its reply fails. `/wake` notes are redacted from
-the public wakes view.
-
-**Outbound** (`bot tg`, NAME from `--bot` or `$AXE_BOT`, MSG is the local
-`bot_messages` id shown as `#N` in wakes):
-
-```sh
-axe bot tg send [--reply-to MSG] [--chat C] [--thread T] [--html] [--buttons "Yes=yes,No=no"] [--task N] [--silent] (TEXT | --file F)
-axe bot tg send-file PATH [--as photo|document|voice] [--caption C] [--reply-to MSG]
-axe bot tg edit MSG [TEXT [--html]] [--buttons "Label=data,...;Row2=data" | --clear-buttons]
-axe bot tg pin MSG [--silent] | unpin MSG
-axe bot tg react MSG EMOJI | typing [--chat C] | delete MSG
-axe bot tg file MSG[/N] [--out DIR]     # default $AXE_WORKTREE/.inbox
-axe bot tg history [--limit 50] [--before MSG] [--search Q] [--json]
-axe bot tg board show [--json] | set-message MSG | clear
-axe bot tg goal-board show [--json] | unset
-```
-
-Targets must be allowlisted chats (403 otherwise); the default target is the
-replied message's chat, else the latest inbound chat, else the first
-allowlisted chat. Text is split into parts of at most 4096 UTF-16 units at
-line boundaries, at most 20 parts (`--html` text must fit one message). Calls are serialized per
-chat, spaced about 1 s apart, and retried after a 429's `retry_after` (3
-attempts). Uploads are refused over 10 MB (photo) or 50 MB (document, voice);
-downloads over 20 MB. Files pass through the server and are not stored.
-Deleting a message keeps its record (`flags.deleted`).
-
-`--buttons` takes `Label=data` pairs: `,` separates buttons in a row and `;`
-starts a new row (`"A=a,B=b;C=c"` is rows [A, B] and [C]); without `;` all
-buttons share one row. Labels cannot contain `,`, `;` or `=`, empty labels
-and empty rows are refused, and data is 1-64 bytes. The API takes the flat
-`buttons` list plus optional `rows` (buttons per row; absent is one row).
-
-`edit` works on the bot's own text messages. TEXT alone calls
-`editMessageText` without `reply_markup`, as it always has: Telegram then
-drops an existing keyboard, so pass `--buttons` to keep or change it.
-`--buttons` replaces the keyboard and `--clear-buttons` removes it;
-without TEXT these call `editMessageReplyMarkup` and keep the text. A new
-keyboard clears `flags.answered`, so presses on it are new button wakes. The
-output reports the buttons Telegram says remain. `pin` and `unpin`
-(`pinChatMessage`, `unpinChatMessage`) take the bot's own messages and record
-`flags.pinned`; `--silent` sets `disable_notification` (private chats never
-notify). Groups need the bot to be an admin with `can_pin_messages`.
-
-**The inbox: pinned cards and the overview.** In each bot's chat the pinned
-list is the owner's inbox, rendered by the server, never a hand-kept list.
-`board set-message MSG` makes one of the bot's own text messages its
-overview (`flags.board`) and turns the inbox on for that bot; `board clear`
-turns it off. What waits on the owner: the escalated tasks in the bot's
-subscribed projects (`*` is all) and the bot's open cards, its text messages
-that still have buttons. A press (`flags.answered`), a `--clear-buttons`
-edit, a text edit without `--buttons` (Telegram drops the keyboard) or a
-delete closes a card.
-
-- **One pinned card per item.** The server pins each open card silently
-  (`disable_notification`, `flags.card_pin`) and unpins it as soon as it is
-  closed. A card sent with `send --task N --buttons ...` (`flags.task`) stands
-  for escalated task N: the overview lists the task once, and the card closes
-  (keyboard removed, `flags.closed`) when the task leaves escalated. An
-  escalated task with no card sent since its escalation gets one: the bot gets
-  one wake (key `card-task-<id>-<escalated at>`, so a restart never repeats
-  it) asking it to post the card with its real options; 10 minutes after
-  that wake without one, the server posts a minimal card itself (task id,
-  project, title, the `blocked:` and `resolver:` lines, buttons `Resolved` /
-  `Discuss` with data `task #N resolved` / `task #N discuss`) and records a
-  `card_fallback` bot event. A press on any card is an ordinary button wake.
-  A pin Telegram refuses (400) is logged as a skipped `board_error` and not
-  retried (`flags.pin_skipped`). The Bot API documents no limit on pinned
-  messages per chat (Bot API 10.4, `pinChatMessage`).
-- **The overview** is one message, always the newest pin, so it shows last
-  in the pinned list (Telegram orders pins by sending date). It carries, for
-  the bot's subscribed projects: decisions waiting (count and ids, `#N` for a
-  task, `card #N` for a card), running tasks, blocked or waiting tasks
-  (status `blocked`), tasks done since 00:00 UTC, then the goal lines of the
-  goals the bot is attached to (below), and an "Updated <time>" footer, in
-  Telegram HTML within 4096 characters (12 ids per line, then `+N`; goals that
-  do not fit become "+N more goals"). It has no buttons: each item is its own
-  pinned card. A per-bot thread re-renders it after every committed change
-  (and every 60 s), only when what it shows changed (`flags.board_key`) or a
-  pinned card is newer than it, recording a `board_render` bot event. The
-  first render of a message just made the overview edits and pins it in
-  place. After that each change re-posts it (`[telegram] board = "repost"`,
-  the default): the new overview is sent silently at the bottom of the chat,
-  pinned silently, and the old one is unpinned and deleted (edited to "Moved
-  below (#new)" when Telegram refuses the delete, for example after 48 h). The
-  new message keeps `flags.board_from` until all steps are done, so a retry
-  repeats only what is left; Telegram refusing a step on the old overview
-  (400) is logged as a skipped `board_error`. `board = "edit"` edits the
-  overview in place instead, except that a pinned card newer than it still
-  re-posts it. A failed pass is logged to stderr and as a `board_error` event
-  and retried with backoff (5 s doubling to 5 min, at least `retry_after`). A
-  hand edit is rendered over. `board show` prints the overview message, its
-  text and whether it is current; `--json` adds `lines`, `stats` and `goals`.
-
-**Goal lines.** Each goal the bot is attached to in state proposed, active or
-paused (done and dropped are omitted): the name and state ("awaiting your Go"
-while proposed), the other bots on it, the latest verdict or observation
-(first line), open linked tasks (`#id`), `$spent/$limit` and `attention
-spent/limit` over the last 7 days, the next goal-tagged wake or schedule run
-of any bot, and the deadline; "No active goals." when there are none. Spend
-counts toward a re-render only in 10% steps of each weekly limit. The
-separate goal board message is retired: on the first pass the server unpins
-an old one (`flags.goal_board`), edits it to "Goals moved into the pinned
-overview." and clears the flag. `goal-board show` prints the goal lines;
-`goal-board set` is refused and `unset` clears an old flag.
-
-**Read privacy.** `GET /api/bots/:name/tg/history`, `/api/bots/:name/tg/board`,
-`/api/bots/:name/tg/goal-board` and
-`/api/bots/:name/tg/file/:msg[/:n]` need the bearer token. Public:
-`GET /api/bots/:name/activity` (message metadata only: id, direction, kind,
-time, reply/edit links, attachment count, forwarded). Writes: POST
-`/api/bots/:name/tg/{send,send-file,edit,pin,unpin,react,typing,delete,board,goal-board}`
-(`board` and `goal-board` take `{"msg": MSG|null}`); `send-file`
-takes the raw file as the body with `as`, `name`, `caption`, `reply_to`,
-`chat`, `thread` query parameters.
-
-Schema v12 only adds `bots`, `bot_messages` (written by the gateway),
-`bot_wakes`, `bot_runs`, `bot_events` and their indexes. A v12 database with
-`user_version` lowered to 11 opens with a v11 binary, keeps every bot row, and
-upgrades again in place.
-
-### Schedules (schema v15)
-
-A bot can have named cron schedules, each with an objective. Off unless
-created; the bot manages its own.
-
-```bash
-axe bot schedule [--bot NAME] add SCHEDULE --cron "0 9 * * 1" [--timezone Asia/Taipei] --objective TEXT [--goal G] --why W
-axe bot schedule [--bot NAME] edit SCHEDULE --goal G|none --why W
-axe bot schedule [--bot NAME] list [--json]
-axe bot schedule [--bot NAME] pause|resume|remove SCHEDULE --why W
-```
-
-`--bot` defaults to `$AXE_BOT`. The cron is the routines' five-field numeric
-syntax, read in `--timezone` (default UTC). A schedule must fire at least 15
-minutes apart. Changes are `schedule_add`, `schedule_pause`, `schedule_resume`
-and `schedule_remove` bot events, shown by `axe bot show` with the schedules
-and their next fire time.
-
-The server fires schedules on its one-second tick, as an ordinary `bot_wakes`
-row: actor `schedule:<name>`, body `scheduled wake (automation, not an owner
-message). Objective: ...`, prefixed `[goal NAME] ` for a schedule with a
-goal (`--goal`; `edit --goal none` clears it, event `schedule_edit`). It batches with other wakes and never counts as an
-owner message. The cursor `next_at` moves in the same transaction as the wake,
-so a restart neither loses nor repeats a firing, and any slots missed during
-downtime fire once. A schedule has at most one undelivered wake: a firing while
-one is queued coalesces (`schedule_fire` event with `coalesced`), so a firing
-during a live run reaches that run through its hook or causes one follow-up run.
-A paused bot's slots pass without a wake. Pausing or removing a schedule also
-drops its queued wake. In Cost, a run caused by one appears under the bot wake
-reason `schedule: <name>`.
-
-`GET /api/bots/:name/schedules` lists; POST to it (`name`, `cron`, `timezone`,
-`objective`, `why`) adds; POST `.../schedules/:schedule/{pause,resume,remove}`
-(`why`) changes. Schema v15 only adds `bot_schedules` and its index. A v15
-database with `user_version` lowered to 14 opens with a v14 binary and upgrades
-again in place.
-
-### Task-event subscriptions (schema v13)
-
-A bot can follow task events, per project or for all projects. Off by default.
-
-```bash
-axe bot subscribe [NAME] [--project P | --all-projects] [--wake a,b] [--ride c,d] [--batch 5m] --why W
-axe bot unsubscribe [NAME] [--project P | --all-projects] --why W
-axe bot subscriptions [NAME] [--json]
-```
-
-Events: `new`, `pending`, `blocked`, `escalated`, `done`. A new subscription
-defaults to the bot's own project, `--wake escalated`, `--ride new,done` and
-`--batch 5m`; on an existing one, omitted options keep their value and `""`
-clears an event list. The batch period is 1m to 24h, an event cannot both wake
-and ride, and one of the lists must be non-empty. Changes are recorded as
-`subscribe` / `unsubscribe` bot events and shown by `axe bot show`.
-
-Wake events join the bot's one open batch, across projects, due after the
-shortest batch period that joined it, so they cost one run. The batch lists up
-to 50 tasks, then ids. Ride-along events never cause a run: the next run gets
-one digest with counts and up to 10 ids per event, one line per project, at
-most 12 projects.
-
-Fan-out happens in the transaction that writes the task event, so a restart
-neither loses nor repeats one, and each event reaches a bot once (a project
-subscription wins over an all-projects one). Batches are ordinary `bot_wakes`,
-so a run lost to a crash is redelivered like any wake. A bot's own actions
-(`bot:<name>`) are not fanned out to it. `GET /api/bots/:name/subscriptions`
-lists; POST to it (with `project`, `wake`, `ride`, `batch_seconds`, `why`)
-creates or changes; POST `.../subscriptions/remove` deletes.
-
-Schema v13 only adds `bot_subscriptions`, `bot_feed` and their indexes. A v13
-database with `user_version` lowered to 12 opens with a v12 binary and upgrades
-again in place.
-
-## Goals (schema v16)
-
-A goal is a durable outcome that bots share: freeform intent (16 KiB),
-a deadline, weekly budgets and an append-only trajectory. Design and owner
-decisions: [docs/design/goals.md](docs/design/goals.md).
-
-```sh
-# JSON: name, project, intent, deadline, budget_cost_week, budget_attention_week, bots
-axe goal propose --file goal.json [--owner-ref R]
-axe goal list [--bot B] [--state S] [--json]   # with spent/limit per weekly budget
-axe goal show NAME [--json]                # budget spend, bots, linked tasks, latest 10 trajectory events
-axe goal log NAME [--limit 50] [--full] [--json]
-axe goal edit NAME [--intent-file F] [--deadline T] [--budget-cost-week X] [--budget-attention-week N] --why W [--owner-ref R]
-axe goal activate|pause|resume|done|drop NAME --why W [--owner-ref R]
-axe goal join|leave NAME --bot B --why W [--owner-ref R]
-axe goal record NAME --kind hypothesis|test|verdict|observation|note [--task ID] TEXT
-```
-
-States: `proposed` -> `active` (activate) <-> `paused` (pause, resume) ->
-`done`; `drop` ends any open goal. Bots propose; the owner activates and edits
-intent, deadline and budget (`none` clears a value). Those decisions, and
-join or leave of another bot, need `--owner-ref` (for example `msg #873`) from
-any actor but `human`; it is stored on the event, not verified. `propose`
-attaches the proposing bot (`$AXE_BOT`); a bot may join or leave itself.
-Every change is a `goal_events` audit row with its `--why`; `record` appends a
-trajectory event. A task links with `axe add --goal` or `axe set --goal`
-(task event `goal`, latest wins), and a wake with `--goal`, which labels it
-`[goal NAME]` in the bot's prompt.
-
-Budgets are weekly and rolling (the last 7 days). Cost is the estimated spend
-of runs of linked tasks and of bot runs whose wakes are all tagged with the
-goal; a bot run mixing the goal with other work is shown as unattributed.
-Attention counts escalation episodes and approvals on linked tasks, plus the
-owner's activate, budget and intent decisions, one each. Once either budget is
-spent, `axe add --goal` and `axe set --goal` refuse to link more tasks until
-the owner raises it (`axe goal edit --budget-...`); nothing else is refused,
-and a goal with no budget never gates. Schema v16 only adds `goals`, `goal_bots`,
-`goal_events` and `bot_schedules.goal_id`; a v16 database with
-`user_version` lowered to 15 opens with a v15 binary and upgrades again in
-place.
+CI (`.github/workflows/ci.yml`) runs these on pull requests, plus the `web`
+job when `scripts/ci_scope.py` says the dashboard is affected; the release
+gate runs the full matrix. Dashboard checks: [web/README.md](web/README.md).
 
 ## Docs
 
-References and design records are in [`docs/`](docs/README.md): the
-[configuration reference](docs/config.md), the [HTTP API v1](docs/api-v1.md)
-and the design docs. Agents use the [`axe` skill](skills/axe/SKILL.md).
+- [docs/design/](docs/design/): why axe is shaped this way:
+  [one agent per task](docs/design/one-agent-per-task.md),
+  [bots](docs/design/bots.md), [goals](docs/design/goals.md) and the
+  [dashboard design contract](docs/design/dashboard.md).
+- [`skills/axe`](skills/axe/SKILL.md): the agent-facing guide (states,
+  commands, the spec format), released with axe.
+- [SECURITY.md](SECURITY.md): reporting and the threat model.
 
 ## Licence
 

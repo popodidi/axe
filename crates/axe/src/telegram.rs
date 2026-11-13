@@ -2,7 +2,7 @@
 //! bot token, the inbound security filter, owner commands, and the outbound
 //! Bot API calls behind `axe bot tg`. Tokens stay in this process; agents
 //! talk to Telegram only through the server. Design:
-//! `docs/decisions/axe-bots.md` ("Telegram", "Security", "Wake delivery").
+//! `docs/design/bots.md` ("Telegram and security", "Wake delivery").
 //!
 //! Every method and field used here was checked against
 //! <https://core.telegram.org/bots/api> (Bot API 10.3).
@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use crate::board;
 use crate::bot::{self, NewMessage};
-use crate::config::{self, BoardMode};
+use crate::config;
 use crate::db::{Actor, Forbidden};
 use crate::goal_board;
 
@@ -248,8 +248,6 @@ pub struct TgBot {
     username: Mutex<Option<String>>,
     /// `getMe` user id, to recognise the bot's own service messages.
     id: Mutex<Option<i64>>,
-    /// How a changed board reaches the chat.
-    board: BoardMode,
 }
 
 #[derive(Default)]
@@ -425,7 +423,6 @@ impl Gateway {
                     alerts: Mutex::new(Alerts::default()),
                     username: Mutex::new(None),
                     id: Mutex::new(None),
-                    board: cfg.board,
                 }),
             );
         }
@@ -1298,8 +1295,8 @@ impl Gateway {
         if let Some(t) = text {
             // Without `buttons`, Telegram drops the keyboard: the card closes.
             conn.execute(
-                // A hand edit of the board is rendered over on the next pass.
-                "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key','$.goal_board_key') WHERE id=?2",
+                // A hand edit of a goal pin is rendered over on the next pass.
+                "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key','$.goal_board_key','$.goal_pin_key') WHERE id=?2",
                 params![t, msg],
             )?;
             if buttons.is_none() {
@@ -1531,11 +1528,12 @@ fn board_loop(b: &TgBot, store: &dyn Store) {
     }
 }
 
-/// One inbox pass, for a bot with an overview message: retires a goal board,
-/// asks for or posts the cards of escalated tasks, closes cards of tasks no
-/// longer escalated, pins open cards and unpins closed ones, then renders the
-/// overview so it stays the newest pin. Each step is recorded in message
-/// flags, so a retry or a restart repeats only what is left.
+/// One inbox pass, for a bot with a board message: retires an old goal
+/// board and the old overview, asks for or posts the cards of escalated
+/// tasks, closes cards of tasks no longer escalated, pins open cards and
+/// unpins closed ones, then keeps one pinned message per active goal. Each
+/// step is recorded in message flags, so a retry or a restart repeats only
+/// what is left.
 fn inbox_pass(b: &TgBot, store: &dyn Store) -> Result<()> {
     let conn = store.conn();
     if bot_id(&conn, &b.name).is_err() {
@@ -1546,16 +1544,15 @@ fn inbox_pass(b: &TgBot, store: &dyn Store) -> Result<()> {
         return Ok(());
     };
     drop(conn);
-    if m.flags["board_from"].is_i64() {
-        finish_move(b, store, &m)?;
+    if m.flags["board_retired"] != true {
+        retire_overview(b, store, &m)?;
     }
     if let Some(g) = goal_board {
         retire_goal_board(b, store, &g)?;
     }
     task_cards(b, store, m.chat_id, m.thread_id)?;
     sync_pins(b, store)?;
-    let m = get_message(&store.conn(), &b.name, m.id)?;
-    board_pass(b, store, &m)?;
+    goal_pins(b, store, m.chat_id, m.thread_id)?;
     Ok(())
 }
 
@@ -1578,8 +1575,8 @@ fn skip_refused(b: &TgBot, store: &dyn Store, step: &str, msg: i64, e: ApiError)
     Ok(())
 }
 
-/// The separate goal board is part of the overview now: unpin it, edit it to
-/// a pointer, and stop rendering it.
+/// The separate goal board is retired (each active goal has its own pin):
+/// unpin it, edit it to a pointer, and stop rendering it.
 fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<()> {
     let live = g.flags["deleted"] != true && b.allowed(g.chat_id).is_ok();
     if live && g.flags["pinned"] != false {
@@ -1610,7 +1607,7 @@ fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<
 /// Escalated tasks without a card since their escalation: the bot gets one
 /// wake (keyed by task and escalation, so a restart never repeats it) to post
 /// the card itself; [`board::CARD_WAIT`] after that wake the server posts
-/// [`board::fallback_card`] in the overview's chat. Open cards of tasks no
+/// [`board::fallback_card`] in the board message's chat. Open cards of tasks no
 /// longer escalated lose their keyboard (closed).
 fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Result<()> {
     let needs = board::card_needs(&store.conn(), &b.name)?;
@@ -1720,150 +1717,177 @@ fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
     Ok(())
 }
 
-/// Whether a pinned card is newer than overview `m`: Telegram lists pins by
-/// sending date, so the overview must be re-sent to stay the newest pin.
-fn card_after(store: &dyn Store, m: &StoredMessage) -> Result<bool> {
-    Ok(store
-        .conn()
-        .query_row(
-            "SELECT 1 FROM bot_messages WHERE bot_id=(SELECT bot_id FROM bot_messages WHERE id=?1)
-               AND chat_id=?2 AND id>?1
-               AND json_extract(flags,'$.card_pin')=1 AND json_extract(flags,'$.pinned')=1
-             LIMIT 1",
-            params![m.id, m.chat_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
+/// The pinned overview is retired: unpin board message `m` (and the
+/// overview a move had not finished leaving, `flags.board_from`) and edit it
+/// to [`board::RETIRED_TEXT`]. Telegram refusing a step (400) is logged as a
+/// skipped `board_error`; other failures are retried.
+fn retire_overview(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
+    let mut old = vec![m.clone()];
+    if let Some(from) = m.flags["board_from"].as_i64() {
+        if let Ok(f) = get_message(&store.conn(), &b.name, from) {
+            old.push(f);
+        }
+    }
+    for o in &old {
+        let live = o.flags["deleted"] != true && b.allowed(o.chat_id).is_ok();
+        // A board message that never was an overview keeps its text.
+        let shown = o.id != m.id || o.flags["board_key"].is_string();
+        // A rendered overview was pinned unless recorded otherwise.
+        let pinned = o.flags["pinned"] == true || (shown && o.flags["pinned"] != false);
+        if live && pinned {
+            let p = json!({"chat_id": o.chat_id, "message_id": o.message_id});
+            if let Err(e) = b.paced(o.chat_id, || b.api.call("unpinChatMessage", &p)) {
+                skip_refused(b, store, "unpin overview", o.id, e)?;
+            }
+        }
+        if live && shown && o.text != board::RETIRED_TEXT {
+            // An empty keyboard drops the pick buttons of older boards.
+            let p = json!({"chat_id": o.chat_id, "message_id": o.message_id,
+                "text": board::RETIRED_TEXT, "reply_markup": {"inline_keyboard": []}});
+            match b.paced(o.chat_id, || b.api.call("editMessageText", &p)) {
+                Ok(_) => {}
+                Err(e) if e.description.contains("message is not modified") => {}
+                Err(e) => skip_refused(b, store, "edit overview", o.id, e)?,
+            }
+            store.conn().execute(
+                "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.edited',json('true')) WHERE id=?2",
+                params![board::RETIRED_TEXT, o.id],
+            )?;
+        }
+        store.conn().execute(
+            "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.board_key','$.board_from','$.board_buttons'),'$.pinned',json('false')) WHERE id=?1",
+            [o.id],
+        )?;
+    }
+    set_flag(store, m.id, "$.board_retired", json!(true))?;
+    store.changed();
+    Ok(())
 }
 
-/// Renders overview `m` when what it shows changed or a pinned card is newer
-/// than it. Returns whether it rendered.
-fn board_pass(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<bool> {
+/// Records a `goal_pin` bot event: `action` on goal `goal`'s pin `msg`.
+fn goal_pin_event(store: &dyn Store, name: &str, msg: i64, goal: &str, action: &str) -> Result<()> {
     let conn = store.conn();
-    let id = bot_id(&conn, &b.name)?;
-    let t = now();
-    let lines = board::lines(&conn, &b.name)?;
-    let stats = board::stats(&conn, &b.name, t)?;
-    let goals = goal_board::lines(&conn, &b.name)?;
-    drop(conn);
-    let key = board::key(&lines, &stats, &goals);
-    let stale = m.flags["board_key"].as_str() != Some(key.as_str());
-    let buried = m.flags["board_key"].is_string() && card_after(store, m)?;
-    if !stale && !buried {
-        return Ok(false);
-    }
-    b.allowed(m.chat_id)?;
-    let text = board::render(&lines, &stats, &goals, t);
-    // A message just made the overview (or hand-edited) has no key yet: it
-    // is where the owner put it, so it is rendered in place. A newer pinned
-    // card always re-posts it, so it stays the newest pin.
-    let repost = m.flags["board_key"].is_string() && (b.board == BoardMode::Repost || buried);
-    let shown = if repost {
-        let mut p = json!({"chat_id": m.chat_id, "text": text, "parse_mode": "HTML",
-            "disable_notification": true});
-        if let Some(t) = m.thread_id {
-            p["message_thread_id"] = json!(t);
-        }
-        let sent = b.paced(m.chat_id, || b.api.call("sendMessage", &p))?;
-        let new = record_out(
-            store,
-            &b.name,
-            &sent,
-            "text",
-            &text,
-            None,
-            json!([]),
-            json!({"html": true}),
-        )?;
-        board::reposted(&mut store.conn(), m.id, new, &key)?;
-        let nm = get_message(&store.conn(), &b.name, new)?;
-        finish_move(b, store, &nm)?;
-        new
-    } else {
-        // An empty keyboard drops the pick buttons of older boards.
-        let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text,
-            "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []}});
-        match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
-            Ok(_) => {}
-            // The text already matches (for example after a lost reply).
-            Err(e) if e.description.contains("message is not modified") => {}
-            Err(e) => return Err(e.into()),
-        }
-        board::rendered(&store.conn(), m.id, &key, &text)?;
-        if m.flags["pinned"] != true {
-            let p = json!({"chat_id": m.chat_id, "message_id": m.message_id,
-                "disable_notification": true});
-            b.paced(m.chat_id, || b.api.call("pinChatMessage", &p))?;
-            set_flag(store, m.id, "$.pinned", json!(true))?;
-        }
-        m.id
-    };
-    let conn = store.conn();
-    let mut body = json!({"message": shown, "lines": lines.len()});
-    if repost {
-        body["from"] = json!(m.id);
-    }
     bot::event(
         &conn,
-        id,
+        bot_id(&conn, name)?,
         &Actor::new("telegram"),
-        "board_render",
-        &body.to_string(),
+        "goal_pin",
+        &json!({"message": msg, "goal": goal, "action": action}).to_string(),
     )?;
     drop(conn);
     store.changed();
-    Ok(true)
+    Ok(())
 }
 
-/// Finishes moving the overview to `m` (which has `flags.board_from`): pins
-/// it silently, unpins the old overview and deletes it (edited to "Moved
-/// below (#new)" when Telegram refuses the delete, for example after 48 h).
-/// Each step is recorded, so a retry after a failure repeats only what is
-/// left. Telegram refusing a step on the old overview (400) is logged as a
-/// skipped `board_error`, so an old message never holds up the overview;
-/// other failures are retried.
-fn finish_move(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
-    let old_id = m.flags["board_from"].as_i64().unwrap_or(0);
-    let old = get_message(&store.conn(), &b.name, old_id)?;
-    if m.flags["pinned"] != true {
-        let p =
-            json!({"chat_id": m.chat_id, "message_id": m.message_id, "disable_notification": true});
-        b.paced(m.chat_id, || b.api.call("pinChatMessage", &p))?;
-        set_flag(store, m.id, "$.pinned", json!(true))?;
-    }
-    let live = old.flags["deleted"] != true;
-    if live && old.flags["pinned"] != false {
-        let p = json!({"chat_id": old.chat_id, "message_id": old.message_id});
-        if let Err(e) = b.paced(old.chat_id, || b.api.call("unpinChatMessage", &p)) {
-            skip_refused(b, store, "unpin", old_id, e)?;
+/// Stops pin `m` standing for its goal: unpins it and clears `goal_pin`.
+fn drop_goal_pin(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
+    if m.flags["pinned"] == true && m.flags["deleted"] != true && b.allowed(m.chat_id).is_ok() {
+        let p = json!({"chat_id": m.chat_id, "message_id": m.message_id});
+        if let Err(e) = b.paced(m.chat_id, || b.api.call("unpinChatMessage", &p)) {
+            skip_refused(b, store, "unpin goal", m.id, e)?;
         }
-        set_flag(store, old.id, "$.pinned", json!(false))?;
     }
-    let text = board::moved_text(m.id);
-    if live && old.text != text {
-        let p = json!({"chat_id": old.chat_id, "message_id": old.message_id});
-        match b.paced(old.chat_id, || b.api.call("deleteMessage", &p)) {
-            Ok(_) => set_flag(store, old.id, "$.deleted", json!(true))?,
-            Err(e) => {
-                skip_refused(b, store, "delete", old_id, e)?;
-                let p = json!({"chat_id": old.chat_id, "message_id": old.message_id, "text": text});
-                match b.paced(old.chat_id, || b.api.call("editMessageText", &p)) {
-                    Ok(_) => {}
-                    Err(e) if e.description.contains("message is not modified") => {}
-                    Err(e) => skip_refused(b, store, "edit", old_id, e)?,
+    store.conn().execute(
+        "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.goal_pin','$.goal_pin_key'),'$.pinned',json('false'),'$.goal_unpinned',json(?1)) WHERE id=?2",
+        params![m.flags["goal_pin"].to_string(), m.id],
+    )?;
+    Ok(())
+}
+
+/// One pinned message per active goal of the bot (`goal_board::pin_text`):
+/// a goal without one gets it, sent silently in the board's chat and
+/// pinned silently; a pin whose text changed is edited in place; the pin of
+/// a goal that is no longer active (done, dropped, paused), or no longer
+/// the bot's, is unpinned. A pin Telegram refuses (400) is logged and not
+/// retried (`flags.pin_skipped`); a refused edit (the message is gone)
+/// drops the pin, so the next pass posts a new one.
+fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Result<()> {
+    let conn = store.conn();
+    let goals = goal_board::pinned_lines(&conn, &b.name)?;
+    let pins = goal_board::pins(&conn, &b.name)?;
+    drop(conn);
+    let mut kept: HashMap<i64, StoredMessage> = HashMap::new();
+    for m in pins {
+        let gid = m.flags["goal_pin"].as_i64().unwrap_or(0);
+        let wanted = goals.iter().find(|g| g.id == gid);
+        if wanted.is_none() || m.flags["deleted"] == true || kept.contains_key(&gid) {
+            drop_goal_pin(b, store, &m)?;
+            let name: String = store
+                .conn()
+                .query_row("SELECT name FROM goals WHERE id=?1", [gid], |r| r.get(0))
+                .optional()?
+                .unwrap_or_else(|| gid.to_string());
+            goal_pin_event(store, &b.name, m.id, &name, "unpinned")?;
+            continue;
+        }
+        kept.insert(gid, m);
+    }
+    for g in &goals {
+        let text = goal_board::pin_text(g);
+        let m = match kept.remove(&g.id) {
+            Some(m) => m,
+            None => {
+                b.allowed(chat)?;
+                let mut p = json!({"chat_id": chat, "text": text, "parse_mode": "HTML",
+                    "disable_notification": true});
+                if let Some(th) = thread {
+                    p["message_thread_id"] = json!(th);
                 }
-                // Recorded either way, so a refused edit is not retried. The
-                // edit sends no keyboard, so Telegram drops any old buttons.
-                store.conn().execute(
-                    "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_buttons') WHERE id=?2",
-                    params![text, old.id],
+                let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+                let id = record_out(
+                    store,
+                    &b.name,
+                    &sent,
+                    "text",
+                    &text,
+                    None,
+                    json!([]),
+                    json!({"html": true, "goal_pin": g.id, "goal_pin_key": text}),
                 )?;
+                goal_pin_event(store, &b.name, id, &g.name, "posted")?;
+                get_message(&store.conn(), &b.name, id)?
             }
+        };
+        if m.flags["goal_pin_key"].as_str() != Some(text.as_str()) {
+            if b.allowed(m.chat_id).is_err() {
+                continue;
+            }
+            let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text,
+                "parse_mode": "HTML"});
+            match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
+                Ok(_) => {}
+                // The text already matches (for example after a lost reply).
+                Err(e) if e.description.contains("message is not modified") => {}
+                Err(e) if e.code == Some(400) => {
+                    skip_refused(b, store, "edit goal", m.id, e)?;
+                    drop_goal_pin(b, store, &m)?;
+                    goal_pin_event(store, &b.name, m.id, &g.name, "unpinned")?;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+            store.conn().execute(
+                "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.goal_pin_key',?1,'$.edited',json('true')) WHERE id=?2",
+                params![text, m.id],
+            )?;
+            goal_pin_event(store, &b.name, m.id, &g.name, "edited")?;
+        }
+        if m.flags["pinned"] != true && m.flags["pin_skipped"] != true {
+            if b.allowed(m.chat_id).is_err() {
+                continue;
+            }
+            let p = json!({"chat_id": m.chat_id, "message_id": m.message_id,
+                "disable_notification": true});
+            match b.paced(m.chat_id, || b.api.call("pinChatMessage", &p)) {
+                Ok(_) => set_flag(store, m.id, "$.pinned", json!(true))?,
+                Err(e) => {
+                    skip_refused(b, store, "pin goal", m.id, e)?;
+                    set_flag(store, m.id, "$.pin_skipped", json!(true))?;
+                }
+            }
+            store.changed();
         }
     }
-    board::moved(&store.conn(), m.id)?;
-    store.changed();
     Ok(())
 }
 
