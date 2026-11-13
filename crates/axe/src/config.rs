@@ -425,7 +425,8 @@ pub struct Telegram {
     /// `getUpdates` long-poll timeout in seconds.
     #[serde(default = "default_telegram_poll")]
     pub poll_timeout: u64,
-    /// How a changed overview reaches the chat.
+    /// Ignored: the pinned overview it configured is retired. Accepted so
+    /// older configs still load.
     #[serde(default)]
     pub board: BoardMode,
     #[serde(rename = "bot", default)]
@@ -443,7 +444,8 @@ pub struct TelegramBot {
     pub chats: Vec<i64>,
 }
 
-/// `telegram.board`: how a changed overview reaches the chat.
+/// `telegram.board`: how the retired pinned overview reached the chat. It
+/// has no effect; the values are still accepted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BoardMode {

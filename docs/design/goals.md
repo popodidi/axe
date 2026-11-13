@@ -2,7 +2,7 @@
 
 Design approved by the owner on 2026-11-11 and built in phases: G1 the
 primitive (this page), G2 budget accounting and the hard gate, G3 the pinned
-goal lines ([Goal board](#goal-board)), G4 the goals reference in the axe skill, G5 the release.
+goal pins ([Goal pins](#goal-pins)), G4 the goals reference in the axe skill, G5 the release.
 
 ## Context
 
@@ -32,8 +32,8 @@ verbs.
 - A goal can be worked by several bots (many-to-many). Budget and trajectory
   belong to the goal, not to a bot.
 - The per-goal autonomy tier lives in the freeform intent, not in a field.
-- Budget is soft accounting plus one hard gate (G2), shown in the pinned
-  overview (G3).
+- Budget is soft accounting plus one hard gate (G2), shown in each active
+  goal's pinned message (G3).
 
 ## Data (schema v16, additive)
 
@@ -121,32 +121,30 @@ stored.
   occurrence from the others, so a goal on owner attention can count normal
   tasks only.
 
-## Goal board
+## Goal pins
 
 G3, owner decision 2026-11-11: budget state is visible on Telegram in a
-pinned message. Since the pinned inbox (owner decision 2026-11-12, one
-overview instead of scattered pins) the goal lines are part of each bot's
-pinned overview (`board.rs`, README "The inbox: pinned cards and the
-overview"), rendered from `goal_board.rs`. The separate goal board message
-(`flags.goal_board`) is retired: the gateway unpins an old one, edits it to
-"Goals moved into the pinned overview." and clears the flag;
-`axe bot tg goal-board show` prints the goal lines alone, `set` is refused.
+pinned message. Owner decision 2026-11-13: the pinned list holds only cards
+and goals, so each active goal of a bot has its own pinned message, and the
+pinned overview (stats and goal lines in one message, 2026-11-12) is retired.
+Rendered from `goal_board.rs`, kept by the gateway (`telegram.rs`,
+`goal_pins`); behaviour in the README, "The inbox: pinned cards and goal
+pins". The older separate goal board message (`flags.goal_board`) and the
+overview are unpinned and edited to a pointer on the first pass.
 
-- **Content**, per goal the bot is attached to in state proposed, active or
-  paused (done and dropped are omitted): the name (bold) and state, "awaiting
-  your Go" while proposed, the other bots on the goal, the latest verdict or
-  observation (first line), open linked H tasks (`<code>#id</code>`),
-  `$spent/$limit` and `attention spent/limit` from [Budget](#budget), the
-  next goal-tagged wake (a pending `[goal NAME]` wake of any bot, or the next
-  run of an enabled schedule with the goal), and the deadline. No goals:
-  "No active goals.". Goals that do not fit the overview's 4096 characters
-  become "+N more goals".
-- **Render key**: the goal lines are part of the overview's key. It bands
-  each spend in 10% steps of its weekly limit, so a small spend change does
-  not re-render the overview; spend toward no limit never does on its own. A
-  state change, a new verdict or observation, a linked task opening or
-  closing, a goal wake, a bot joining or leaving, and a budget or deadline
-  edit do.
+- **Content**, per goal: the name (bold) and state, the other bots on the
+  goal, the first line of the intent, the latest verdict or observation
+  (first line), open linked H tasks (`<code>#id</code>`), `$spent/$limit`
+  and `attention spent/limit` from [Budget](#budget), the next goal-tagged
+  wake (a pending `[goal NAME]` wake of any bot, or the next run of an
+  enabled schedule with the goal), and the deadline. `goal-board show`
+  prints the same lines for every proposed, active or paused goal.
+- **Lifecycle**: a pin exists while the goal is active and the bot is on it.
+  Activating or resuming posts and pins one silently; pausing, done, drop or
+  the bot leaving unpins it.
+- **Render key**: the pin's text, which has no time in it. Any change to
+  what it shows edits it in place; edits are silent, so spend is shown and
+  keyed to the cent.
 
 ## Bot protocol
 

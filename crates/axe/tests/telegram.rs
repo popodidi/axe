@@ -1753,34 +1753,18 @@ fn pin_and_edit_refuse_messages_that_are_not_the_bots_own() {
     }
 }
 
-/// Board edits (editMessageText on `board`) so far, as texts.
-fn board_edits(rig: &Rig, board: i64) -> Vec<String> {
+/// Texts of the editMessageText calls on Telegram message `tg` so far.
+fn edits_of(rig: &Rig, tg: i64) -> Vec<String> {
     rig.stub
         .calls("editMessageText")
         .into_iter()
-        .filter(|c| c.params["message_id"] == board)
+        .filter(|c| c.params["message_id"] == tg)
         .map(|c| c.params["text"].as_str().unwrap_or("").to_string())
         .collect()
 }
 
-/// Waits for a board edit after the first `after` ones that satisfies `f`;
-/// returns its text.
-fn wait_board(rig: &Rig, board: i64, after: usize, what: &str, f: impl Fn(&str) -> bool) -> String {
-    let mut found = String::new();
-    wait_for(what, 20, || {
-        let edits = board_edits(rig, board);
-        match edits.iter().skip(after).find(|t| f(t)) {
-            Some(t) => {
-                found = t.clone();
-                true
-            }
-            None => false,
-        }
-    });
-    found
-}
-
-/// A board message: the local id and the Telegram message id.
+/// A board message (the inbox is on in its chat): the local id and the
+/// Telegram message id.
 fn make_board(rig: &Rig) -> (i64, i64) {
     let out = rig.tg_ok(&["send", "--silent", "board"]);
     let local: i64 = out.trim().trim_start_matches("sent #").parse().unwrap();
@@ -1815,149 +1799,87 @@ fn escalate(rig: &Rig, id: &str) {
 }
 
 #[test]
-fn overview_renders_stats_and_decisions_in_place() {
-    // In-place edits (`board = "edit"`): with no cards, every render lands
-    // on one message.
-    let rig = Rig::with("board = \"edit\"");
-    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
-    let (_, board) = make_board(&rig);
-    let t = wait_board(&rig, board, 0, "empty overview", |t| {
-        t.contains("Nothing waiting on you")
-    });
-    assert!(
-        t.starts_with("<b>Overview</b>\n\nDecisions waiting: none\nRunning: none\nBlocked or waiting: none\nDone today: none"),
-        "{t}"
-    );
-    assert!(t.contains("<b>Goals</b>\nNo active goals."), "{t}");
-    assert!(t.contains("<i>Updated "), "{t}");
-    let edit = rig.stub.calls("editMessageText").pop().unwrap();
-    assert_eq!(edit.params["parse_mode"], "HTML");
-    assert_eq!(edit.params["reply_markup"], json!({"inline_keyboard": []}));
-    // The first render also pins the overview, silently.
-    wait_for("overview pinned", 20, || {
-        !rig.stub.calls("pinChatMessage").is_empty()
-    });
-    let pin = rig.stub.calls("pinChatMessage").pop().unwrap();
-    assert_eq!(pin.params["message_id"], board);
-    assert_eq!(pin.params["disable_notification"], true);
-
-    // An escalation is a decision; approve, set pending and done remove it.
-    rig.srv()
-        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
-    rig.srv()
-        .ok(&["add", "--project", "other", "--title", "Not subscribed"]);
-    escalate(&rig, "2");
-    let resolutions: [&[&str]; 3] = [
-        &["approve", "1", "--sha", "abc", "--scope", "prod"],
-        &["set", "1", "--state", "pending", "--note", "resolved"],
-        &["set", "1", "--state", "done", "--note", "resolved"],
-    ];
-    for resolve in resolutions {
-        let n = board_edits(&rig, board).len();
-        escalate(&rig, "1");
-        let t = wait_board(&rig, board, n, "decision", |t| {
-            t.contains("Decisions waiting: 1 · #1\n")
-        });
-        assert!(!t.contains("#2"), "{t}");
-        let n = board_edits(&rig, board).len();
-        rig.srv().ok(resolve);
-        wait_board(&rig, board, n, "decision removed", |t| {
-            t.contains("Decisions waiting: none")
-        });
-    }
-    let t = board_edits(&rig, board).pop().unwrap();
-    assert!(t.contains("Done today: 1 · #1"), "{t}");
-
-    // Running and blocked tasks of subscribed projects are counted.
-    let n = board_edits(&rig, board).len();
-    rig.srv().ok(&["add", "--project", "p", "--title", "Runs"]);
-    rig.srv().ok(&["set", "3", "--state", "in_progress"]);
-    rig.srv().ok(&[
-        "add",
-        "--project",
-        "p",
-        "--title",
-        "Waits",
-        "--blocked-by",
-        "3",
-    ]);
-    rig.srv()
-        .ok(&["add", "--project", "other", "--title", "Elsewhere"]);
-    rig.srv().ok(&["set", "5", "--state", "in_progress"]);
-    let t = wait_board(&rig, board, n, "stats", |t| {
-        t.contains("Running: 1 · #3\n") && t.contains("Blocked or waiting: 1 · #4\n")
-    });
-    assert!(!t.contains("#5"), "{t}");
-
-    // A proposed goal shows in the overview.
-    let n = board_edits(&rig, board).len();
-    propose_goal(&rig, json!({"name":"grow","project":"p","bots":["cos"]}));
-    let t = wait_board(&rig, board, n, "goal", |t| t.contains("<b>grow</b>"));
-    assert!(
-        t.contains("<b>Goals</b>\n\n<b>grow</b> · proposed · awaiting your Go"),
-        "{t}"
-    );
-
-    // Unrelated changes leave the overview alone.
-    let n = board_edits(&rig, board).len();
-    rig.srv()
-        .ok(&["add", "--project", "other", "--title", "Not escalated"]);
-    rig.tg_ok(&["send", "plain message"]);
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(
-        board_edits(&rig, board).len(),
-        n,
-        "no edit without an input change"
-    );
-    let show = rig.tg_ok(&["board", "show"]);
-    assert!(show.contains("(current)"), "{show}");
-    assert_eq!(rig.events("board_render").len(), n);
-
-    // A hand edit of the overview is rendered over.
-    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
-    let local = v["message"].as_i64().unwrap().to_string();
-    assert_eq!(v["stats"]["running"], json!([3]), "{v}");
-    rig.tg_ok(&["edit", &local, "hand-kept list"]);
-    let t = wait_board(&rig, board, n + 1, "re-render", |t| t.contains("Overview"));
-    assert!(t.contains("Nothing waiting on you"), "{t}");
-}
-
-#[test]
-fn board_edit_failures_are_logged_and_retried() {
+fn the_old_overview_is_unpinned_and_retired() {
     let rig = Rig::new();
-    rig.stub
-        .state
-        .lock()
-        .unwrap()
-        .fail
-        .insert("editMessageText".into(), "Bad Request: chat is busy".into());
-    let (_, board) = make_board(&rig);
-    // The first edit fails, is logged as a bot event, and is retried.
-    wait_for("board_error event", 20, || {
-        !rig.events("board_error").is_empty()
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    // An overview rendered and pinned before this release, mid-move from an
+    // older one that is still pinned.
+    let older = rig.tg_ok(&["send", "--silent", "<b>Overview</b> old"]);
+    let older: i64 = older.trim().trim_start_matches("sent #").parse().unwrap();
+    let ov = rig.tg_ok(&["send", "--silent", "<b>Overview</b>"]);
+    let ov: i64 = ov.trim().trim_start_matches("sent #").parse().unwrap();
+    rig.db()
+        .execute(
+            "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json('true')) WHERE id=?1",
+            [older],
+        )
+        .unwrap();
+    rig.db()
+        .execute(
+            "UPDATE bot_messages SET flags=json_set(flags,'$.board',json('true'),'$.board_key','k','$.board_from',?2) WHERE id=?1",
+            [ov, older],
+        )
+        .unwrap();
+    rig.srv().ok(&["add", "--project", "p", "--title", "Busy"]);
+    rig.srv().ok(&["set", "1", "--state", "in_progress"]);
+    wait_for("overview retired", 20, || {
+        flags_of(&rig, ov)["board_retired"] == true
     });
-    let err: Value = serde_json::from_str(&rig.events("board_error")[0]).unwrap();
-    assert!(
-        err["error"].as_str().unwrap().contains("chat is busy"),
-        "{err}"
+    let unpinned: Vec<Value> = rig
+        .stub
+        .calls("unpinChatMessage")
+        .into_iter()
+        .map(|c| c.params["message_id"].clone())
+        .collect();
+    assert_eq!(
+        unpinned,
+        vec![json!(tg_id(&rig, ov)), json!(tg_id(&rig, older))]
     );
-    assert_eq!(err["retry_seconds"], 5);
+    for m in [ov, older] {
+        assert_eq!(
+            edits_of(&rig, tg_id(&rig, m)),
+            vec![RETIRED.to_string()],
+            "{m}"
+        );
+        let f = flags_of(&rig, m);
+        assert_eq!(f["pinned"], false, "{f}");
+        assert!(f["board_key"].is_null() && f["board_from"].is_null(), "{f}");
+    }
+    // Nothing is rendered, sent or pinned after that, whatever changes.
+    let sends = rig.stub.calls("sendMessage").len();
+    rig.srv()
+        .ok(&["set", "1", "--state", "done", "--note", "x"]);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(rig.stub.calls("sendMessage").len(), sends);
+    assert!(rig.stub.calls("pinChatMessage").is_empty());
+    assert_eq!(rig.stub.calls("editMessageText").len(), 2);
+    assert!(rig.events("board_render").is_empty());
     let show = rig.tg_ok(&["board", "show"]);
-    assert!(show.contains("(render pending)"), "{show}");
-    wait_for("board_render event", 20, || {
-        rig.events("board_render").len() == 1
-    });
-    let edits = board_edits(&rig, board);
-    assert_eq!(edits.len(), 2, "one failure, one success");
-    assert!(edits[1].contains("Nothing waiting on you"), "{edits:?}");
-    assert!(rig.tg_ok(&["board", "show"]).contains("(current)"));
+    assert_eq!(
+        show,
+        format!("inbox on (board message #{ov})\nNothing waiting on you.\n")
+    );
 
-    // Clearing the overview stops rendering; set-message refuses other kinds.
+    // A fresh board message is left as it is: never edited or pinned.
+    let fresh = rig.tg_ok(&["send", "--silent", "inbox here"]);
+    let fresh: i64 = fresh.trim().trim_start_matches("sent #").parse().unwrap();
+    rig.tg_ok(&["board", "set-message", &fresh.to_string()]);
+    wait_for("fresh board retired", 20, || {
+        flags_of(&rig, fresh)["board_retired"] == true
+    });
+    assert!(edits_of(&rig, tg_id(&rig, fresh)).is_empty());
+    assert_eq!(rig.stub.calls("unpinChatMessage").len(), 2);
+    assert!(flags_of(&rig, ov)["board"].is_null());
+
+    // Clearing turns the inbox off; set-message refuses other kinds.
     rig.tg_ok(&["board", "clear"]);
     let show = rig.tg_ok(&["board", "show"]);
-    assert!(show.contains("no board message"), "{show}");
+    assert!(show.starts_with("inbox off"), "{show}");
     assert!(!rig.tg(&["board", "set-message", "999"]).status.success());
 }
+
+const RETIRED: &str =
+    "The overview is retired: the pinned list shows each open card and each active goal.";
 
 #[test]
 fn clearing_buttons_telegram_already_dropped_closes_the_card() {
@@ -1971,13 +1893,6 @@ fn clearing_buttons_telegram_already_dropped_closes_the_card() {
     let show = rig.tg_ok(&["board", "show", "--json"]);
     let v: Value = serde_json::from_str(&show).unwrap();
     assert_eq!(v["lines"], json!([]), "{v}");
-}
-
-/// Local id and Telegram message id of the current overview, from `board show`.
-fn current_board(rig: &Rig) -> (i64, i64) {
-    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
-    let local = v["message"].as_i64().unwrap();
-    (local, tg_id(rig, local))
 }
 
 /// Telegram message id of local message `local`.
@@ -2001,141 +1916,6 @@ fn flags_of(rig: &Rig, id: i64) -> Value {
             .unwrap(),
     )
     .unwrap()
-}
-
-/// Waits until the overview has moved off `from` and the move is finished
-/// (the new one pinned, the old one deleted or edited); returns the new one.
-fn wait_moved(rig: &Rig, from: i64, what: &str) -> (i64, i64) {
-    let mut out = (0, 0);
-    wait_for(what, 20, || {
-        let (local, tg) = current_board(rig);
-        let done: bool = rig
-            .db()
-            .query_row(
-                "SELECT json_type(flags,'$.board_from') IS NULL FROM bot_messages WHERE id=?1",
-                [local],
-                |r| r.get(0),
-            )
-            .unwrap();
-        out = (local, tg);
-        local != from && done
-    });
-    out
-}
-
-#[test]
-fn board_reposts_at_the_bottom_on_change() {
-    let rig = Rig::new();
-    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
-    let (first, first_tg) = make_board(&rig);
-    // The first render of a chosen message is in place.
-    wait_board(&rig, first_tg, 0, "first render", |t| {
-        t.contains("Nothing waiting on you")
-    });
-    assert_eq!(current_board(&rig).0, first);
-    let sends = rig.stub.calls("sendMessage").len();
-
-    // A change re-posts: a silent HTML send, the new one pinned silently,
-    // the old one unpinned and deleted.
-    rig.srv()
-        .ok(&["add", "--project", "p", "--title", "Pick a colour"]);
-    escalate(&rig, "1");
-    let (second, second_tg) = wait_moved(&rig, first, "re-post on escalation");
-    let sent = rig.stub.calls("sendMessage");
-    assert_eq!(sent.len(), sends + 1, "one send per change");
-    let s = &sent[sends].params;
-    assert_eq!(s["disable_notification"], true, "{s}");
-    assert_eq!(s["parse_mode"], "HTML", "{s}");
-    assert!(s["reply_markup"].is_null(), "no pick buttons: {s}");
-    assert!(
-        s["text"]
-            .as_str()
-            .unwrap()
-            .contains("Decisions waiting: 1 · #1\n"),
-        "{s}"
-    );
-    let pin = rig.stub.calls("pinChatMessage").pop().unwrap();
-    assert_eq!(pin.params["message_id"], second_tg);
-    assert_eq!(pin.params["disable_notification"], true);
-    let unpin = rig.stub.calls("unpinChatMessage").pop().unwrap();
-    assert_eq!(unpin.params["message_id"], first_tg);
-    let del = rig.stub.calls("deleteMessage").pop().unwrap();
-    assert_eq!(del.params["message_id"], first_tg);
-    assert_eq!(flags_of(&rig, first)["deleted"], true);
-    assert_eq!(flags_of(&rig, first)["pinned"], false);
-    let show = rig.tg_ok(&["board", "show"]);
-    assert!(
-        show.starts_with(&format!("board #{second} (current)")),
-        "{show}"
-    );
-    let render: Value = serde_json::from_str(rig.events("board_render").last().unwrap()).unwrap();
-    assert_eq!(
-        render,
-        json!({"message": second, "lines": 1, "from": first})
-    );
-
-    // Resolving re-posts again; the pin fails once and is retried, an unpin
-    // Telegram refuses is logged and skipped, and a refused delete (older
-    // than 48 h) edits the old overview to point at the new one.
-    {
-        let mut st = rig.stub.state.lock().unwrap();
-        st.fail.insert(
-            "pinChatMessage".into(),
-            "Bad Request: not enough rights".into(),
-        );
-    }
-    rig.srv()
-        .ok(&["set", "1", "--state", "done", "--note", "resolved"]);
-    wait_for("failed pin", 20, || !rig.events("board_error").is_empty());
-    {
-        let mut st = rig.stub.state.lock().unwrap();
-        st.fail.insert(
-            "unpinChatMessage".into(),
-            "Bad Request: message to unpin not found".into(),
-        );
-        st.fail.insert(
-            "deleteMessage".into(),
-            "Bad Request: message can't be deleted".into(),
-        );
-    }
-    let (third, third_tg) = wait_moved(&rig, second, "re-post on resolve");
-    assert_eq!(
-        rig.stub.calls("sendMessage").len(),
-        sends + 2,
-        "a retried move sends nothing new"
-    );
-    let pins: Vec<_> = rig
-        .stub
-        .calls("pinChatMessage")
-        .into_iter()
-        .filter(|c| c.params["message_id"] == third_tg)
-        .collect();
-    assert_eq!(pins.len(), 2, "one failed pin, one retry");
-    let skipped: Vec<Value> = rig
-        .events("board_error")
-        .iter()
-        .map(|e| serde_json::from_str(e).unwrap())
-        .filter(|e: &Value| e["skipped"] == true)
-        .collect();
-    let steps: Vec<&str> = skipped
-        .iter()
-        .map(|e| e["step"].as_str().unwrap())
-        .collect();
-    assert_eq!(steps, ["unpin", "delete"], "{skipped:?}");
-    assert_eq!(
-        board_edits(&rig, second_tg).last().unwrap(),
-        &format!("Moved below (#{third}).")
-    );
-    let show = rig.tg_ok(&["board", "show"]);
-    assert!(
-        show.starts_with(&format!("board #{third} (current)")),
-        "{show}"
-    );
-    assert!(show.contains("Nothing waiting on you"), "{show}");
-
-    // No change, no re-post.
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(rig.stub.calls("sendMessage").len(), sends + 2);
 }
 
 /// The inline keyboard in Telegram call `params`, as (label, data) rows.
@@ -2167,7 +1947,7 @@ fn press(update: i64, tg: i64, data: &str) -> Value {
 }
 
 /// Pin, unpin, send and delete calls in order, with Telegram message ids
-/// replaced by names (`overview-1`, `card-1`, ...) in order of first use;
+/// replaced by names (`goal-1`, `card-1`, ...) in order of first use;
 /// `known` names messages sent earlier.
 fn inbox_calls(rig: &Rig, from: usize, known: &[(i64, &str)]) -> Value {
     let mut all: Vec<Call> = rig.stub.state.lock().unwrap().calls[from..].to_vec();
@@ -2184,7 +1964,7 @@ fn inbox_calls(rig: &Rig, from: usize, known: &[(i64, &str)]) -> Value {
     all.sort_by_key(|c| c.at);
     let mut names: HashMap<i64, String> =
         known.iter().map(|(id, n)| (*id, n.to_string())).collect();
-    let (mut overviews, mut cards) = (0, 0);
+    let (mut goals, mut cards) = (0, 0);
     let mut out = Vec::new();
     let mut next_sent = rig.stub.state.lock().unwrap().next_message;
     // Sent ids are the stub's counter in order; recover them per send.
@@ -2195,10 +1975,9 @@ fn inbox_calls(rig: &Rig, from: usize, known: &[(i64, &str)]) -> Value {
         let mut v = json!({"method": c.method});
         let id = if c.method == "sendMessage" {
             next_sent += 1;
-            let text = p["text"].as_str().unwrap_or("");
-            let name = if text.starts_with("<b>Overview</b>") {
-                overviews += 1;
-                format!("overview-{overviews}")
+            let name = if p["reply_markup"].is_null() {
+                goals += 1;
+                format!("goal-{goals}")
             } else {
                 cards += 1;
                 format!("card-{cards}")
@@ -2223,48 +2002,37 @@ fn inbox_calls(rig: &Rig, from: usize, known: &[(i64, &str)]) -> Value {
 }
 
 #[test]
-fn cards_are_pinned_under_the_overview_and_unpinned_when_closed() {
+fn cards_are_pinned_and_unpinned_when_closed() {
     let rig = Rig::new();
     rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
-    let (first, first_tg) = make_board(&rig);
-    wait_board(&rig, first_tg, 0, "first render", |t| {
-        t.contains("Nothing waiting on you")
-    });
-    wait_for("overview pinned", 20, || {
-        flags_of(&rig, first)["pinned"] == true
+    let (board, board_tg) = make_board(&rig);
+    wait_for("board retired", 20, || {
+        flags_of(&rig, board)["board_retired"] == true
     });
     let from = rig.stub.state.lock().unwrap().calls.len();
 
-    // A card is pinned silently, then the overview is re-sent and pinned,
-    // so it stays the newest pin (Telegram orders pins by sending date).
+    // A card is pinned silently; nothing else is sent or pinned.
     let card = rig.tg_ok(&["send", "--buttons", "A=a;B=b", "Which one?"]);
     let card: i64 = card.trim().trim_start_matches("sent #").parse().unwrap();
     let card_tg = tg_id(&rig, card);
-    let (second, _) = wait_moved(&rig, first, "re-post over the card");
-    let f = flags_of(&rig, card);
-    assert_eq!(
-        (f["pinned"].clone(), f["card_pin"].clone()),
-        (json!(true), json!(true))
-    );
+    wait_for("card pinned", 20, || flags_of(&rig, card)["pinned"] == true);
+    assert_eq!(flags_of(&rig, card)["card_pin"], true);
     let show: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
-    assert!(
-        show["text"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("Decisions waiting: 1 · card #{card}\n")),
-        "{show}"
-    );
+    assert_eq!(show["message"], board, "{show}");
+    assert_eq!(show["lines"][0]["kind"], "card", "{show}");
+    assert_eq!(show["lines"][0]["id"], card, "{show}");
 
-    // A second card: pinned, and the overview moves below it again.
+    // A second card is pinned too.
     let card2 = rig.tg_ok(&["send", "--buttons", "Go=go", "Ship it?"]);
     let card2: i64 = card2.trim().trim_start_matches("sent #").parse().unwrap();
     let card2_tg = tg_id(&rig, card2);
-    let (third, _) = wait_moved(&rig, second, "re-post over the second card");
+    wait_for("second card pinned", 20, || {
+        flags_of(&rig, card2)["pinned"] == true
+    });
 
     // Pressing a card closes it: a normal button wake, and it is unpinned.
     rig.stub.push(press(400, card_tg, "a"));
     rig.stub.wait_confirmed(400);
-    let (fourth, _) = wait_moved(&rig, third, "re-post after the press");
     wait_for("card unpinned", 20, || {
         flags_of(&rig, card)["pinned"] == false
     });
@@ -2282,17 +2050,15 @@ fn cards_are_pinned_under_the_overview_and_unpinned_when_closed() {
 
     // Clearing the buttons closes and unpins the other one.
     rig.tg_ok(&["edit", &card2.to_string(), "--clear-buttons"]);
-    let (fifth, fifth_tg) = wait_moved(&rig, fourth, "re-post after the clear");
     wait_for("second card unpinned", 20, || {
         flags_of(&rig, card2)["pinned"] == false
     });
     let show = rig.tg_ok(&["board", "show"]);
     assert!(show.contains("Nothing waiting on you"), "{show}");
-    assert_eq!(current_board(&rig), (fifth, fifth_tg));
 
-    // The recorded call sequence: every pin silent, overview always pinned
-    // last, closed cards unpinned, old overviews unpinned and deleted.
-    let calls = inbox_calls(&rig, from, &[(first_tg, "overview-0")]);
+    // The recorded call sequence: every pin silent, closed cards unpinned,
+    // the board message never sent, pinned or deleted.
+    let calls = inbox_calls(&rig, from, &[(board_tg, "board")]);
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/telegram-inbox-calls.json");
     let pretty = serde_json::to_string_pretty(&calls).unwrap() + "\n";
@@ -2317,10 +2083,7 @@ fn cards_are_pinned_under_the_overview_and_unpinned_when_closed() {
 fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
     let mut rig = Rig::new();
     rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
-    let (first, first_tg) = make_board(&rig);
-    wait_board(&rig, first_tg, 0, "first render", |t| {
-        t.contains("Nothing waiting on you")
-    });
+    make_board(&rig);
 
     // An escalation wakes the bot to post its card, once, across a restart.
     rig.srv()
@@ -2345,14 +2108,18 @@ fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
             && note.contains("axe bot tg send --task 1 --buttons"),
         "{note}"
     );
-    let (second, _) = wait_moved(&rig, first, "re-post on escalation");
+    let sends = rig.stub.calls("sendMessage").len();
     rig.restart();
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(card_wakes(&rig).len(), 1, "no second wake after a restart");
-    assert_eq!(current_board(&rig).0, second, "no re-post after a restart");
+    assert_eq!(
+        rig.stub.calls("sendMessage").len(),
+        sends,
+        "nothing sent after a restart"
+    );
 
     // The bot posts the card: it stands for the task (listed once) and is
-    // pinned under the overview.
+    // pinned.
     assert!(!rig
         .tg(&["send", "--task", "1", "No buttons"])
         .status
@@ -2370,26 +2137,18 @@ fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
         "Task #1: pick a colour",
     ]);
     let card: i64 = card.trim().trim_start_matches("sent #").parse().unwrap();
-    let (third, _) = wait_moved(&rig, second, "re-post over the task card");
     assert_eq!(flags_of(&rig, card)["task"], 1);
     wait_for("task card pinned", 20, || {
         flags_of(&rig, card)["pinned"] == true
     });
     let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
     assert_eq!(v["lines"].as_array().unwrap().len(), 1, "{v}");
-    assert!(
-        v["text"]
-            .as_str()
-            .unwrap()
-            .contains("Decisions waiting: 1 · #1\n"),
-        "{v}"
-    );
+    assert_eq!(v["lines"][0]["task"], 1, "{v}");
 
     // Resuming the task closes its card: keyboard removed, unpinned.
     let edits = rig.stub.calls("editMessageReplyMarkup").len();
     rig.srv()
         .ok(&["set", "1", "--state", "pending", "--note", "resolved"]);
-    let (fourth, _) = wait_moved(&rig, third, "re-post on resume");
     wait_for("task card unpinned", 20, || {
         flags_of(&rig, card)["pinned"] == false
     });
@@ -2416,6 +2175,9 @@ fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
             [],
         )
         .unwrap();
+    // A change through the API runs a pass now (else the 60 s resync does).
+    rig.srv()
+        .ok(&["add", "--project", "other", "--title", "Nudge"]);
     wait_for("fallback card", 20, || {
         !rig.events("card_fallback").is_empty()
     });
@@ -2449,12 +2211,6 @@ fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
     wait_for("fallback pinned", 20, || {
         flags_of(&rig, fallback)["pinned"] == true
     });
-    // The overview is re-sent below the fallback card, so it stays last.
-    wait_for("overview below the fallback", 20, || {
-        let (local, _) = current_board(&rig);
-        local > fallback && flags_of(&rig, local)["board_from"].is_null()
-    });
-    assert!(current_board(&rig).0 > fourth);
     rig.restart();
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(rig.events("card_fallback").len(), 1, "no second fallback");
@@ -2491,8 +2247,259 @@ fn propose_goal(rig: &Rig, spec: Value) {
         .ok(&["goal", "propose", "--file", f.to_str().unwrap()]);
 }
 
+/// The goal pins of goal `name`'s current pin message, if any: (local id,
+/// Telegram id, text).
+fn goal_pin(rig: &Rig, name: &str) -> Option<(i64, i64, String)> {
+    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
+    let local = v["goals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["goal"] == name && g["current"] == true)?["message"]
+        .as_i64()?;
+    let text: String = rig
+        .db()
+        .query_row("SELECT text FROM bot_messages WHERE id=?1", [local], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    Some((local, tg_id(rig, local), text))
+}
+
+/// Waits for goal `name`'s pin to be current with text satisfying `f`.
+fn wait_goal_pin(
+    rig: &Rig,
+    name: &str,
+    what: &str,
+    f: impl Fn(&str) -> bool,
+) -> (i64, i64, String) {
+    let mut out = None;
+    wait_for(what, 20, || {
+        out = goal_pin(rig, name).filter(|(_, _, t)| f(t));
+        out.is_some()
+    });
+    out.unwrap()
+}
+
+/// Goal pin events: (goal, action, message).
+fn goal_pin_events(rig: &Rig) -> Vec<(String, String, i64)> {
+    rig.events("goal_pin")
+        .iter()
+        .map(|e| {
+            let v: Value = serde_json::from_str(e).unwrap();
+            (
+                v["goal"].as_str().unwrap().to_string(),
+                v["action"].as_str().unwrap().to_string(),
+                v["message"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
 #[test]
-fn the_goal_board_is_retired_into_the_overview() {
+fn each_active_goal_has_its_own_pin() {
+    let rig = Rig::new();
+    make_board(&rig);
+    propose_goal(
+        &rig,
+        json!({"name":"grow","project":"p","bots":["cos"],"intent":"Reach ten users\nmore detail",
+            "deadline":"2026-12-01","budget_cost_week":10.0,"budget_attention_week":4}),
+    );
+    propose_goal(&rig, json!({"name":"later","project":"p","bots":["cos"]}));
+    // A proposed goal has no pin.
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(goal_pin_events(&rig).is_empty());
+    assert!(rig.stub.calls("pinChatMessage").is_empty());
+
+    // Activating posts one silent HTML message and pins it silently.
+    rig.srv().ok(&["goal", "activate", "grow", "--why", "go"]);
+    let (pin, pin_tg, t) = wait_goal_pin(&rig, "grow", "goal pin", |_| true);
+    assert_eq!(
+        t,
+        "<b>grow</b> · active\nReach ten users\nno open tasks\n$0.00/$10.00 · attention 1/4\nno goal wake · deadline 2026-12-01"
+    );
+    wait_for("goal pinned", 20, || flags_of(&rig, pin)["pinned"] == true);
+    let sent = rig.stub.calls("sendMessage").pop().unwrap().params;
+    assert_eq!(
+        (
+            &sent["parse_mode"],
+            &sent["disable_notification"],
+            &sent["text"]
+        ),
+        (&json!("HTML"), &json!(true), &json!(t))
+    );
+    assert!(sent["reply_markup"].is_null(), "{sent}");
+    let p = rig.stub.calls("pinChatMessage").pop().unwrap().params;
+    assert_eq!(
+        (p["message_id"].clone(), p["disable_notification"].clone()),
+        (json!(pin_tg), json!(true))
+    );
+    assert_eq!(flags_of(&rig, pin)["goal_pin"], json!(1));
+
+    // An observation and a budget change edit it in place.
+    rig.srv().ok(&[
+        "goal",
+        "record",
+        "grow",
+        "--kind",
+        "observation",
+        "Two users signed up\nnotes",
+    ]);
+    let (p2, _, t) = wait_goal_pin(&rig, "grow", "observation", |t| t.contains("observation:"));
+    assert_eq!(p2, pin);
+    assert!(t.contains("\nobservation: Two users signed up\n"), "{t}");
+    rig.srv().ok(&[
+        "goal",
+        "edit",
+        "grow",
+        "--budget-cost-week",
+        "20",
+        "--why",
+        "more",
+    ]);
+    let (p3, _, t) = wait_goal_pin(&rig, "grow", "budget", |t| t.contains("$0.00/$20.00"));
+    assert_eq!(p3, pin);
+    let edits = edits_of(&rig, pin_tg);
+    assert_eq!(edits.len(), 2, "{edits:?}");
+    assert_eq!(edits[1], t);
+    assert_eq!(rig.stub.calls("pinChatMessage").len(), 1, "pinned once");
+
+    // A hand edit is rendered over.
+    rig.tg_ok(&["edit", &pin.to_string(), "hand-kept"]);
+    wait_for("re-render", 20, || {
+        edits_of(&rig, pin_tg).last() == Some(&t)
+    });
+
+    // No change, no edit.
+    let n = edits_of(&rig, pin_tg).len();
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Unrelated"]);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(edits_of(&rig, pin_tg).len(), n);
+
+    // A second active goal gets its own pin.
+    rig.srv().ok(&["goal", "activate", "later", "--why", "go"]);
+    let (later, _, _) = wait_goal_pin(&rig, "later", "second pin", |_| true);
+    assert_ne!(later, pin);
+
+    // Pausing unpins; resuming posts a new pin; done and drop unpin.
+    rig.srv().ok(&["goal", "pause", "grow", "--why", "wait"]);
+    wait_for("paused unpinned", 20, || {
+        flags_of(&rig, pin)["pinned"] == false
+    });
+    let un = rig.stub.calls("unpinChatMessage").pop().unwrap().params;
+    assert_eq!(un["message_id"], pin_tg);
+    assert!(flags_of(&rig, pin)["goal_pin"].is_null());
+    assert!(goal_pin(&rig, "grow").is_none());
+    rig.srv().ok(&["goal", "resume", "grow", "--why", "on"]);
+    let (again, _, t) = wait_goal_pin(&rig, "grow", "resumed pin", |_| true);
+    assert_ne!(again, pin);
+    assert!(t.starts_with("<b>grow</b> · active"), "{t}");
+    wait_for("resumed pinned", 20, || {
+        flags_of(&rig, again)["pinned"] == true
+    });
+    rig.srv().ok(&["goal", "done", "grow", "--why", "met"]);
+    rig.srv().ok(&["goal", "drop", "later", "--why", "no"]);
+    wait_for("done and dropped unpinned", 20, || {
+        flags_of(&rig, again)["pinned"] == false && flags_of(&rig, later)["pinned"] == false
+    });
+    let actions: Vec<(String, String)> = goal_pin_events(&rig)
+        .into_iter()
+        .map(|(g, a, _)| (g, a))
+        .collect();
+    let want: Vec<(String, String)> = [
+        ("grow", "posted"),
+        ("grow", "edited"),
+        ("grow", "edited"),
+        ("grow", "edited"),
+        ("later", "posted"),
+        ("grow", "unpinned"),
+        ("grow", "posted"),
+    ]
+    .iter()
+    .map(|(g, a)| (g.to_string(), a.to_string()))
+    .collect();
+    assert_eq!(actions[..want.len()], want[..], "{actions:?}");
+    let mut rest = actions[want.len()..].to_vec();
+    rest.sort();
+    assert_eq!(
+        rest,
+        vec![
+            ("grow".to_string(), "unpinned".to_string()),
+            ("later".to_string(), "unpinned".to_string())
+        ]
+    );
+    let v: Value = serde_json::from_str(&rig.tg_ok(&["board", "show", "--json"])).unwrap();
+    assert_eq!(v["goals"], json!([]), "{v}");
+}
+
+#[test]
+fn goal_pin_failures_are_logged_and_retried() {
+    let rig = Rig::new();
+    make_board(&rig);
+    propose_goal(&rig, json!({"name":"grow","project":"p","bots":["cos"]}));
+    // The send is rate limited once and retried; the pin is refused (400),
+    // logged and not retried.
+    {
+        let mut st = rig.stub.state.lock().unwrap();
+        st.too_many.insert("sendMessage".into(), 1);
+        st.fail.insert(
+            "pinChatMessage".into(),
+            "Bad Request: not enough rights".into(),
+        );
+    }
+    rig.srv().ok(&["goal", "activate", "grow", "--why", "go"]);
+    let (pin, pin_tg, _) = wait_goal_pin(&rig, "grow", "goal pin", |_| true);
+    wait_for("pin skipped", 20, || {
+        flags_of(&rig, pin)["pin_skipped"] == true
+    });
+    let errors: Vec<Value> = rig
+        .events("board_error")
+        .iter()
+        .map(|e| serde_json::from_str(e).unwrap())
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["step"] == "pin goal" && e["skipped"] == true),
+        "{errors:?}"
+    );
+    let posted: Vec<_> = goal_pin_events(&rig)
+        .into_iter()
+        .filter(|(_, a, _)| a == "posted")
+        .collect();
+    assert_eq!(posted.len(), 1, "one post after the retry: {posted:?}");
+    assert_eq!(
+        rig.stub.calls("sendMessage").len(),
+        3,
+        "board, 429, the post"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        rig.stub.calls("pinChatMessage").len(),
+        1,
+        "a refused pin is not retried"
+    );
+
+    // An edit Telegram refuses (the message is gone) drops the pin; the next
+    // pass posts a new one.
+    rig.stub.state.lock().unwrap().fail.insert(
+        "editMessageText".into(),
+        "Bad Request: message to edit not found".into(),
+    );
+    rig.srv()
+        .ok(&["goal", "record", "grow", "--kind", "verdict", "H1 holds"]);
+    let (new, _, t) = wait_goal_pin(&rig, "grow", "re-posted pin", |t| {
+        t.contains("verdict: H1 holds")
+    });
+    assert_ne!(new, pin);
+    assert!(flags_of(&rig, pin)["goal_pin"].is_null());
+    assert_eq!(edits_of(&rig, pin_tg).len(), 1, "one refused edit");
+    let _ = t;
+}
+
+#[test]
+fn the_goal_board_is_retired_into_goal_pins() {
     let rig = Rig::new();
     // An old goal board message (set before this release), pinned.
     let out = rig.tg_ok(&["send", "--silent", "goals"]);
@@ -2509,11 +2516,7 @@ fn the_goal_board_is_retired_into_the_overview() {
     assert!(!refused.status.success(), "{refused:?}");
     propose_goal(&rig, json!({"name":"grow","project":"p","bots":["cos"]}));
 
-    let (_, board) = make_board(&rig);
-    let t = wait_board(&rig, board, 0, "overview with goals", |t| {
-        t.contains("<b>grow</b>")
-    });
-    assert!(t.contains("<b>Goals</b>\n\n<b>grow</b> · proposed"), "{t}");
+    make_board(&rig);
     let gb_tg = tg_id(&rig, gb);
     wait_for("goal board retired", 20, || {
         flags_of(&rig, gb)["goal_board"].is_null()
@@ -2521,12 +2524,12 @@ fn the_goal_board_is_retired_into_the_overview() {
     let unpin = rig.stub.calls("unpinChatMessage").pop().unwrap();
     assert_eq!(unpin.params["message_id"], gb_tg);
     assert_eq!(
-        board_edits(&rig, gb_tg).last().unwrap(),
-        "Goals moved into the pinned overview."
+        edits_of(&rig, gb_tg).last().unwrap(),
+        "Goals moved into their own pinned messages."
     );
     assert_eq!(flags_of(&rig, gb)["pinned"], false);
     let show = rig.tg_ok(&["goal-board", "show"]);
-    assert!(show.contains("no goal board message"), "{show}");
-    assert!(show.contains("<b>grow</b>"), "{show}");
+    assert!(!show.contains("old goal board"), "{show}");
+    assert!(show.contains("<b>grow</b> · proposed"), "{show}");
     assert_eq!(rig.tg_ok(&["goal-board", "unset"]), "goal board cleared\n");
 }

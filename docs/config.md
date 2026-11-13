@@ -222,7 +222,7 @@ default); a server built without it logs a warning and ignores the table.
 | `owner_user_id` | integer | required | Numeric Telegram user id of the only person who may control the bots. Must be > 0. |
 | `api_base` | string | `"https://api.telegram.org"` | Bot API base URL (tests point it at a stub). |
 | `poll_timeout` | integer | `30` | `getUpdates` long-poll timeout in seconds. Must be 1..=50. |
-| `board` | `"repost"` \| `"edit"` | `"repost"` | How a changed overview (the newest pin of the inbox) reaches the chat. `repost` sends it silently at the bottom of the chat, pins it, unpins the old one and deletes it (or edits it to "Moved below (#new)" when Telegram refuses the delete). `edit` edits the overview in place, but a pinned card newer than it still re-posts it so it stays the newest pin. |
+| `board` | `"repost"` \| `"edit"` | `"repost"` | No effect: it configured the retired pinned overview. Still accepted so older configs load. |
 
 ### `[[telegram.bot]]`
 
@@ -304,7 +304,6 @@ projects = ["web"]                      # own label on /metrics; others are "oth
 owner_user_id = 123456789
 # api_base = "https://api.telegram.org"
 # poll_timeout = 30                     # 1..=50
-# board = "repost"                      # or "edit": update the overview in place
 
 [[telegram.bot]]
 name = "assistant"

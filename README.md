@@ -1148,20 +1148,22 @@ output reports the buttons Telegram says remain. `pin` and `unpin`
 `flags.pinned`; `--silent` sets `disable_notification` (private chats never
 notify). Groups need the bot to be an admin with `can_pin_messages`.
 
-**The inbox: pinned cards and the overview.** In each bot's chat the pinned
-list is the owner's inbox, rendered by the server, never a hand-kept list.
-`board set-message MSG` makes one of the bot's own text messages its
-overview (`flags.board`) and turns the inbox on for that bot; `board clear`
-turns it off. What waits on the owner: the escalated tasks in the bot's
-subscribed projects (`*` is all) and the bot's open cards, its text messages
-that still have buttons. A press (`flags.answered`), a `--clear-buttons`
-edit, a text edit without `--buttons` (Telegram drops the keyboard) or a
-delete closes a card.
+**The inbox: pinned cards and goal pins.** In each bot's chat the pinned
+list is the owner's inbox, rendered by the server, never a hand-kept list:
+one pinned card per item that waits on the owner and one pinned message per
+active goal of the bot. `board set-message MSG` turns the inbox on in the
+chat (and thread) of one of the bot's own text messages (`flags.board`);
+fallback cards and goal pins are posted there. That message is not rendered
+or pinned. `board clear` turns the inbox off. What waits on the owner: the
+escalated tasks in the bot's subscribed projects (`*` is all) and the bot's
+open cards, its text messages that still have buttons. A press
+(`flags.answered`), a `--clear-buttons` edit, a text edit without
+`--buttons` (Telegram drops the keyboard) or a delete closes a card.
 
 - **One pinned card per item.** The server pins each open card silently
   (`disable_notification`, `flags.card_pin`) and unpins it as soon as it is
   closed. A card sent with `send --task N --buttons ...` (`flags.task`) stands
-  for escalated task N: the overview lists the task once, and the card closes
+  for escalated task N: `board show` lists the task once, and the card closes
   (keyboard removed, `flags.closed`) when the task leaves escalated. An
   escalated task with no card sent since its escalation gets one: the bot gets
   one wake (key `card-task-<id>-<escalated at>`, so a restart never repeats
@@ -1173,42 +1175,40 @@ delete closes a card.
   A pin Telegram refuses (400) is logged as a skipped `board_error` and not
   retried (`flags.pin_skipped`). The Bot API documents no limit on pinned
   messages per chat (Bot API 10.4, `pinChatMessage`).
-- **The overview** is one message, always the newest pin, so it shows last
-  in the pinned list (Telegram orders pins by sending date). It carries, for
-  the bot's subscribed projects: decisions waiting (count and ids, `#N` for a
-  task, `card #N` for a card), running tasks, blocked or waiting tasks
-  (status `blocked`), tasks done since 00:00 UTC, then the goal lines of the
-  goals the bot is attached to (below), and an "Updated <time>" footer, in
-  Telegram HTML within 4096 characters (12 ids per line, then `+N`; goals that
-  do not fit become "+N more goals"). It has no buttons: each item is its own
-  pinned card. A per-bot thread re-renders it after every committed change
-  (and every 60 s), only when what it shows changed (`flags.board_key`) or a
-  pinned card is newer than it, recording a `board_render` bot event. The
-  first render of a message just made the overview edits and pins it in
-  place. After that each change re-posts it (`[telegram] board = "repost"`,
-  the default): the new overview is sent silently at the bottom of the chat,
-  pinned silently, and the old one is unpinned and deleted (edited to "Moved
-  below (#new)" when Telegram refuses the delete, for example after 48 h). The
-  new message keeps `flags.board_from` until all steps are done, so a retry
-  repeats only what is left; Telegram refusing a step on the old overview
-  (400) is logged as a skipped `board_error`. `board = "edit"` edits the
-  overview in place instead, except that a pinned card newer than it still
-  re-posts it. A failed pass is logged to stderr and as a `board_error` event
-  and retried with backoff (5 s doubling to 5 min, at least `retry_after`). A
-  hand edit is rendered over. `board show` prints the overview message, its
-  text and whether it is current; `--json` adds `lines`, `stats` and `goals`.
+- **One pinned message per active goal** (`flags.goal_pin`, the goal id). It
+  shows the goal lines below for that goal, in Telegram HTML, with no time in
+  it. A goal that becomes active gets one, sent and pinned silently; when its
+  text changes (a new verdict or observation, spend, a budget, deadline or
+  intent edit, a linked task, a goal wake) it is edited in place; when the
+  goal is paused, done or dropped, or the bot leaves it, it is unpinned
+  (`flags.goal_unpinned`), and a resumed goal gets a new one. A hand edit is
+  rendered over. Each step records a `goal_pin` bot event (`posted`,
+  `edited`, `unpinned`). An edit Telegram refuses (400, for example the
+  message was deleted) unpins it, and the next pass posts a new one.
+- **Passes.** A per-bot thread runs a pass after every committed change (and
+  every 60 s). A failed pass is logged to stderr and as a `board_error` event
+  and retried with backoff (5 s doubling to 5 min, at least `retry_after`).
+  `board show` prints whether the inbox is on, what waits on the owner and
+  each goal pin; `--json` has `message`, `lines` and `goals` (`{goal,
+  message, current}`).
+- **The old pinned overview is retired.** Earlier releases kept one pinned
+  overview (decisions waiting, running, blocked, done today, goal lines). On
+  the first pass the server unpins it (and an older one a move had not
+  finished leaving), edits it to "The overview is retired: the pinned list
+  shows each open card and each active goal." and records
+  `flags.board_retired`. `[telegram] board` has no effect any more.
 
 **Goal lines.** Each goal the bot is attached to in state proposed, active or
 paused (done and dropped are omitted): the name and state ("awaiting your Go"
-while proposed), the other bots on it, the latest verdict or observation
-(first line), open linked tasks (`#id`), `$spent/$limit` and `attention
-spent/limit` over the last 7 days, the next goal-tagged wake or schedule run
-of any bot, and the deadline; "No active goals." when there are none. Spend
-counts toward a re-render only in 10% steps of each weekly limit. The
-separate goal board message is retired: on the first pass the server unpins
-an old one (`flags.goal_board`), edits it to "Goals moved into the pinned
-overview." and clears the flag. `goal-board show` prints the goal lines;
-`goal-board set` is refused and `unset` clears an old flag.
+while proposed), the other bots on it, the first line of its intent, the
+latest verdict or observation (first line), open linked tasks (`#id`),
+`$spent/$limit` and `attention spent/limit` over the last 7 days, the next
+goal-tagged wake or schedule run of any bot, and the deadline; "No active
+goals." when there are none. `goal-board show` prints them for every open
+goal. The separate goal board message is retired: on the first pass the
+server unpins an old one (`flags.goal_board`), edits it to "Goals moved into
+their own pinned messages." and clears the flag; `goal-board set` is refused
+and `unset` clears an old flag.
 
 **Read privacy.** `GET /api/bots/:name/tg/history`, `/api/bots/:name/tg/board`,
 `/api/bots/:name/tg/goal-board` and

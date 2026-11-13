@@ -25,24 +25,6 @@
     "method": "pinChatMessage"
   },
   {
-    "disable_notification": true,
-    "method": "sendMessage",
-    "sent": "overview-1"
-  },
-  {
-    "disable_notification": true,
-    "message": "overview-1",
-    "method": "pinChatMessage"
-  },
-  {
-    "message": "overview-0",
-    "method": "unpinChatMessage"
-  },
-  {
-    "message": "overview-0",
-    "method": "deleteMessage"
-  },
-  {
     "method": "sendMessage",
     "reply_markup": {
       "inline_keyboard": [
@@ -62,44 +44,8 @@
     "method": "pinChatMessage"
   },
   {
-    "disable_notification": true,
-    "method": "sendMessage",
-    "sent": "overview-2"
-  },
-  {
-    "disable_notification": true,
-    "message": "overview-2",
-    "method": "pinChatMessage"
-  },
-  {
-    "message": "overview-1",
-    "method": "unpinChatMessage"
-  },
-  {
-    "message": "overview-1",
-    "method": "deleteMessage"
-  },
-  {
     "message": "card-1",
     "method": "unpinChatMessage"
-  },
-  {
-    "disable_notification": true,
-    "method": "sendMessage",
-    "sent": "overview-3"
-  },
-  {
-    "disable_notification": true,
-    "message": "overview-3",
-    "method": "pinChatMessage"
-  },
-  {
-    "message": "overview-2",
-    "method": "unpinChatMessage"
-  },
-  {
-    "message": "overview-2",
-    "method": "deleteMessage"
   },
   {
     "message": "card-2",
@@ -111,23 +57,5 @@
   {
     "message": "card-2",
     "method": "unpinChatMessage"
-  },
-  {
-    "disable_notification": true,
-    "method": "sendMessage",
-    "sent": "overview-4"
-  },
-  {
-    "disable_notification": true,
-    "message": "overview-4",
-    "method": "pinChatMessage"
-  },
-  {
-    "message": "overview-3",
-    "method": "unpinChatMessage"
-  },
-  {
-    "message": "overview-3",
-    "method": "deleteMessage"
   }
 ]

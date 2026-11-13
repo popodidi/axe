@@ -347,16 +347,15 @@ including reads.
 | POST | `/api/bots/{name}/tg/react` | `{msg, emoji? = ""}` | Result |
 | POST | `/api/bots/{name}/tg/delete` | `{msg}` | Result |
 | POST | `/api/bots/{name}/tg/typing` | `{chat?}` | Result |
-| GET | `/api/bots/{name}/tg/board` | | `{message, lines: [{kind: "task" \| "card", id, title, project, since, task}], stats: {running, waiting, done_today}, goals: [...], text, current}`: the rendered overview (decisions waiting, task stats, goal lines), and whether its message shows it |
-| POST | `/api/bots/{name}/tg/board` | `{msg}` makes the bot's own text message `msg` its overview and turns on the pinned inbox; `{msg: null}` turns it off | `{message}` |
-| GET | `/api/bots/{name}/tg/goal-board` | | `{message, goals: [{name, state, others, latest: {id, kind, text}?, open_tasks, cost_spent, cost_week, attention_spent, attention_week, next_wake, deadline}], text, current}`: the goal lines the overview shows; `message` is an old goal board message not yet retired |
-| POST | `/api/bots/{name}/tg/goal-board` | `{msg: null}` clears an old goal board message; any `msg` is refused (the goal lines are part of the overview) | `{message}` |
+| GET | `/api/bots/{name}/tg/board` | | `{message, lines: [{kind: "task" \| "card", id, title, project, since, task}], goals: [{goal, message, current}]}`: the board message (`null`: the inbox is off), what waits on the owner, and each active goal's pin (`message` `null` until posted; `current` whether it shows the current text) |
+| POST | `/api/bots/{name}/tg/board` | `{msg}` turns the pinned inbox on in the chat of the bot's own text message `msg`; `{msg: null}` turns it off | `{message}` |
+| GET | `/api/bots/{name}/tg/goal-board` | | `{message, goals: [{id, name, state, intent, others, latest: {id, kind, text}?, open_tasks, cost_spent, cost_week, attention_spent, attention_week, next_wake, deadline}], text}`: the goal lines of the bot's open goals; `message` is an old goal board message not yet retired |
+| POST | `/api/bots/{name}/tg/goal-board` | `{msg: null}` clears an old goal board message; any `msg` is refused (each active goal has its own pin) | `{message}` |
 
 The `board` and `goal-board` routes read and write only stored state, so they also work without
-the `telegram` feature; rendering the overview and pinning cards need the
-gateway. Decisions are escalated tasks in the bot's subscribed projects and
+the `telegram` feature; pinning cards and goals needs the gateway. Decisions are escalated tasks in the bot's subscribed projects and
 the bot's open cards (its text messages that still have buttons); see the
-README, "The inbox: pinned cards and the overview".
+README, "The inbox: pinned cards and goal pins".
 
 `msg` and `reply_to` are local message ids (from history), not Telegram ids.
 Default `chat`: the chat of `reply_to`, else the latest inbound chat, else the

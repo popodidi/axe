@@ -112,9 +112,9 @@ pub const TELEGRAM_PROTOCOL: &str = r#"## Talking to the owner (Telegram)
 - The server already reacted 👀 to each message; still answer it.
 - Anything that waits on the owner is an escalated task or a card (a
   message with `--buttons`). The pinned list is the owner's inbox: the
-  server pins each open card and keeps one pinned overview (decisions
-  waiting, running, blocked, done today, your goals) as the newest pin
-  (`axe bot tg board show`). Never pin, unpin, edit or resend these by hand.
+  server pins each open card and keeps one pinned message per active goal
+  of yours, edited in place as the goal changes (`axe bot tg board show`).
+  Never pin, unpin, edit or resend these by hand.
 - When a task in your projects is escalated you get a wake to post its card:
   `axe bot tg send --task N --buttons "Approve=approve;Hold=hold" "<short
   blocked/resolver text>"` with the real options. Without it the server posts
