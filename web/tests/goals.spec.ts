@@ -74,19 +74,38 @@ test("goal detail: intent, trajectory, linked tasks and next wake", async ({ pag
   // Intent renders as Markdown.
   const intent = detail.getByRole("region", { name: "Intent" });
   await expect(intent.locator("strong")).toHaveText("PR CI");
-  // Every linked task: open ones first, then done ones newest first, each
-  // with its state and title.
+  // Linked tasks default to open ones only; the counts cover every link.
   const open = detail.getByRole("region", { name: "Linked tasks" });
+  const filter = open.getByRole("group", { name: "Show tasks" });
+  const rowIds = () => open.locator("tbody tr").evaluateAll((rows) => rows.map((r) => r.id));
+  await expect(open).toContainText("2 open · 4 linked");
+  await expect(filter.getByRole("button", { name: "Open" })).toHaveAttribute("aria-pressed", "true");
+  await expect(filter.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "false");
+  await expect(open.locator("tbody tr")).toHaveCount(2);
+  await expect(rowIds()).resolves.toEqual(["goal-task-3", "goal-task-4"]);
+  await expect(open.locator("#goal-task-8")).toHaveCount(0);
+  // All: every linked task, open ones first, then done ones newest first,
+  // each with its state and title. The counts stay the same.
+  await filter.getByRole("button", { name: "All" }).click();
+  await expect(filter.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
   await expect(open).toContainText("2 open · 4 linked");
   await expect(open.locator("tbody tr")).toHaveCount(4);
-  await expect(
-    open.locator("tbody tr").evaluateAll((rows) => rows.map((r) => r.id)),
-  ).resolves.toEqual(["goal-task-3", "goal-task-4", "goal-task-8", "goal-task-2"]);
+  await expect(rowIds()).resolves.toEqual(["goal-task-3", "goal-task-4", "goal-task-8", "goal-task-2"]);
   await expect(open.locator("#goal-task-3")).toContainText("Make dashboard Overview a desk page");
   await expect(open.locator("#goal-task-4")).toBeVisible();
   await expect(open.locator("#goal-task-8")).toContainText("done");
   await expect(open.locator("#goal-task-8")).toContainText("Close out shipped dashboard rebuild");
   await expect(open.locator("#goal-task-2")).toContainText("Cache the dependency build");
+  // The choice persists in this browser across a reload.
+  await page.reload();
+  await expect(open.locator("tbody tr")).toHaveCount(4);
+  await expect(filter.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+  await filter.getByRole("button", { name: "Open" }).click();
+  await expect(open.locator("tbody tr")).toHaveCount(2);
+  await expect(open).toContainText("2 open · 4 linked");
+  await page.reload();
+  await expect(open.locator("tbody tr")).toHaveCount(2);
+  await expect(filter.getByRole("button", { name: "Open" })).toHaveAttribute("aria-pressed", "true");
   // The full trajectory, oldest first, read from the events route.
   const traj = detail.getByRole("region", { name: "Trajectory" });
   await expect(traj.locator("li")).toHaveCount(4);
@@ -143,6 +162,24 @@ test("goal without trajectory or wake, and a bare goal link", async ({ page }) =
   await expect(detail).toContainText("None scheduled");
   await expect(detail).toContainText("No linked tasks");
   await expect(detail).toContainText("No trajectory yet");
+});
+test("goal tasks Open/All switch at phone width", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await mockGoals(page);
+  await page.goto(base + "&goal=faster-ci");
+  const open = page.getByRole("region", { name: "Linked tasks" });
+  const filter = open.getByRole("group", { name: "Show tasks" });
+  await expect(open.locator("tbody tr")).toHaveCount(2);
+  // The switch sits in the card head, beside the counts, and fits the width.
+  const head = await open.getByText("2 open · 4 linked").boundingBox();
+  const all = await filter.getByRole("button", { name: "All" }).boundingBox();
+  expect(head && all && all.x + all.width <= 390).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await open.screenshot({ path: info.outputPath("goal-tasks-open-390.png") });
+  await filter.getByRole("button", { name: "All" }).click();
+  await expect(open.locator("tbody tr")).toHaveCount(4);
+  await expect(open).toContainText("2 open · 4 linked");
+  await open.screenshot({ path: info.outputPath("goal-tasks-all-390.png") });
 });
 test("goals empty state", async ({ page }) => {
   await mockGoals(page, []);

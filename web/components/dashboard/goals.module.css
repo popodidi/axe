@@ -222,3 +222,38 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Linked tasks: counts, then an Open/All switch in the card's top right. */
+.taskMeta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.taskFilter {
+  display: inline-flex;
+  gap: var(--space-quarter);
+}
+
+.taskFilter button {
+  min-height: var(--control-min-height);
+  padding: 0 var(--space-half);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--transition-hover);
+}
+
+.taskFilter button:hover {
+  color: var(--text-primary);
+}
+
+.taskFilter button[aria-pressed="true"] {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
