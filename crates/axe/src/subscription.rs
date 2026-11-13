@@ -2,7 +2,7 @@
 //! bots in the same transaction, so a restart can neither lose nor repeat one.
 //! Wake events join the bot's one open batch, an ordinary `bot_wakes` row, and
 //! inherit its delivery rules. Ride-along events only wait for the next run.
-//! Design: `docs/decisions/axe-bots.md`.
+//! Design: `docs/design/bots.md`.
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Context, Result};
