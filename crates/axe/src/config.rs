@@ -146,6 +146,60 @@ pub struct Config {
     /// housekeep` is not `off` (see `housekeeping.rs`).
     #[serde(default)]
     pub housekeeping: Housekeeping,
+    /// `[blobs]`: the server's content-addressed blob store (`blob.rs`).
+    #[serde(default)]
+    pub blobs: Blobs,
+}
+
+/// `[blobs]`: where `axe server` keeps blobs and how it signs their links.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Blobs {
+    /// Local store, upload spool and link key directory (default: `blobs/`
+    /// next to the database).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Largest accepted blob in MiB (default 1024).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_mib: Option<u64>,
+    /// Base URL of signed links, as a phone reaches the server (default: the
+    /// URL the CLI used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    /// File holding the link signing key (default: `link.key` in `dir`,
+    /// created on first start). Share it between servers that serve one store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_key_file: Option<String>,
+    /// Store blob contents in an S3-compatible bucket instead of `dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3: Option<BlobsS3>,
+}
+
+/// `[blobs.s3]`: an S3-compatible bucket (AWS S3, MinIO, ...). Keys are read
+/// from files and never stored in the config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobsS3 {
+    /// Service URL, e.g. `https://s3.us-east-1.amazonaws.com` or `http://minio:9000`.
+    pub endpoint: String,
+    pub bucket: String,
+    #[serde(default = "default_s3_region")]
+    pub region: String,
+    /// Key prefix inside the bucket.
+    #[serde(default)]
+    pub prefix: String,
+    /// `https://endpoint/bucket/key` (default) instead of `https://bucket.endpoint/key`.
+    #[serde(default = "default_true")]
+    pub path_style: bool,
+    pub access_key_id_file: String,
+    pub secret_access_key_file: String,
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".into()
+}
+fn default_true() -> bool {
+    true
 }
 
 /// `[dispatcher]`: switches of `axe dispatch`.

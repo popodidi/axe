@@ -332,6 +332,146 @@ enum Cmd {
     },
     /// Download a consistent server-side snapshot of the database to a new file
     Backup { to: PathBuf },
+    /// Immutable, content-addressed files kept by the server, shared through
+    /// signed, expiring links
+    Blob {
+        #[command(subcommand)]
+        command: BlobCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlobCmd {
+    /// Store a file; prints its sha256 (the same bytes are stored once)
+    Put {
+        file: PathBuf,
+        /// Content type (default: from the file extension)
+        #[arg(long = "type")]
+        content_type: Option<String>,
+        /// Also print a signed link that lasts this long (e.g. 1h, 7d)
+        #[arg(long)]
+        link: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a blob to a file, or to stdout
+    Get {
+        sha256: String,
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// List stored blobs
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a signed link that opens the blob without the token until it expires
+    Link {
+        sha256: String,
+        /// Lifetime: 90s, 10m, 4h, 7d (at most 7d)
+        #[arg(long, default_value = "24h")]
+        ttl: String,
+        /// File name shown when the link opens
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Signs a link for `sha`; the URL uses the server's `public_url`, else the
+/// client's server address.
+fn blob_link(c: &Client, sha: &str, ttl: &str, name: Option<&str>) -> Result<Value> {
+    let ttl = crate::bot::parse_duration(ttl)?;
+    let mut v: Value = c.send(
+        "POST",
+        &format!("/api/blobs/{sha}/link"),
+        json!({"ttl": ttl, "name": name}),
+    )?;
+    if v["url"].is_null() {
+        v["url"] = format!("{}{}", c.base(), v["path"].as_str().unwrap_or("")).into();
+    }
+    Ok(v)
+}
+
+fn run_blob(c: &Client, command: &BlobCmd) -> Result<()> {
+    match command {
+        BlobCmd::Put {
+            file,
+            content_type,
+            link,
+            json,
+        } => {
+            let ct = content_type.clone().unwrap_or_else(|| {
+                crate::blob::guess_content_type(&file.to_string_lossy()).to_string()
+            });
+            let mut v = c.put_blob(file, &ct)?;
+            if let Some(ttl) = link {
+                let name = file.file_name().map(|n| n.to_string_lossy().into_owned());
+                let sha = v["sha256"].as_str().unwrap_or("").to_string();
+                v["link"] = blob_link(c, &sha, ttl, name.as_deref())?;
+            }
+            if *json {
+                return print_json(&v);
+            }
+            println!("{}", v["sha256"].as_str().unwrap_or(""));
+            if let Some(url) = v["link"]["url"].as_str() {
+                println!("{url}");
+            }
+        }
+        BlobCmd::Get { sha256, output } => {
+            crate::blob::check_sha(sha256)?;
+            let path = format!("/api/blobs/{sha256}");
+            match output {
+                Some(p) => {
+                    let tmp = p.with_extension("axe-partial");
+                    let result = std::fs::File::create(&tmp)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|mut f| c.download(&path, &mut f));
+                    match result {
+                        Ok(_) => std::fs::rename(&tmp, p)?,
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&tmp);
+                            return Err(e);
+                        }
+                    }
+                }
+                None => {
+                    let stdout = std::io::stdout();
+                    c.download(&path, &mut stdout.lock())?;
+                }
+            }
+        }
+        BlobCmd::Ls { json } => {
+            let v: Vec<Value> = c.get_private("/api/blobs", &[])?;
+            if *json {
+                return print_json(&v);
+            }
+            for b in &v {
+                println!(
+                    "{}  {:>12}  {}  {}",
+                    b["sha256"].as_str().unwrap_or(""),
+                    b["size"],
+                    b["created_at"].as_str().unwrap_or("-"),
+                    b["content_type"].as_str().unwrap_or("")
+                );
+            }
+        }
+        BlobCmd::Link {
+            sha256,
+            ttl,
+            name,
+            json,
+        } => {
+            crate::blob::check_sha(sha256)?;
+            let v = blob_link(c, sha256, ttl, name.as_deref())?;
+            if *json {
+                return print_json(&v);
+            }
+            println!("{}", v["url"].as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
 }
 
 /// How long `axe admission hold|release` waits for the dispatcher to report it.
@@ -2037,6 +2177,7 @@ pub fn run() -> Result<()> {
 
     match &cli.cmd {
         Cmd::Bot { command } => run_bot(&client(), command)?,
+        Cmd::Blob { command } => run_blob(&client(), command)?,
         Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Routine { command } => {
             let c = client();

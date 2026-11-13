@@ -155,13 +155,24 @@ Delivery statistics (`axe stats`, `flow.rs`) and run cost (`usage.rs`) are
 computed from the event log and run usage; the only recorded classifications
 are an escalation's class (`axe escalate --class`) and a task's workload.
 
+## Blobs
+
+`axe blob put/get/ls/link` (`blob.rs`) keeps immutable files on the server,
+named by the sha256 of their bytes, so the same bytes are stored once. There
+is no delete, overwrite or version. Contents live on local disk next to the
+database, or in an S3-compatible bucket with `[blobs.s3]`. `axe blob link`
+signs a URL (`/b/<sha256>/<name>?exp=..&sig=..`, at most seven days) that
+opens without the token, for example from a phone; it renders inline in a
+sandbox. The signing key is created on first start; `[blobs]` sets the
+directory, size limit, link base URL and key file.
+
 ## Configuration
 
 One TOML file, `$AXE_CONFIG` (default `~/.config/axe/config.toml`; built-in
 defaults when missing), read once at startup by both `axe server` and
-`axe dispatch`. The server uses `[server]`, `[telegram]`, `[metrics]` and the
-agent names; the dispatcher uses the rest, so keep agent names aligned when
-they run on different machines. Unknown keys fail validation.
+`axe dispatch`. The server uses `[server]`, `[telegram]`, `[metrics]`,
+`[blobs]` and the agent names; the dispatcher uses the rest, so keep agent
+names aligned when they run on different machines. Unknown keys fail validation.
 `crates/axe/src/config.rs` defines every table, default and check;
 `axe config` validates and prints the resolved file, including the built-in
 `claude` agent.
@@ -181,14 +192,14 @@ run on server start (`db.rs`); back up before upgrading.
 
 ## HTTP API
 
-`GET` is unauthenticated, except Telegram message content and the dispatcher
-connection; every other method needs `Authorization: Bearer <token>`. The
-server refuses a non-loopback listen address without a token file. Expose it
-only on a trusted network: reads include full agent logs. Bodies are JSON,
-errors are `{"error": "..."}`, and `X-Axe-Request-Id` makes a write
-retry-safe.
+`GET` is unauthenticated, except Telegram message content, `/api/blobs` and
+the dispatcher connection (a signed `/b/` link needs only its signature);
+every other method needs `Authorization: Bearer <token>`. The server refuses
+a non-loopback listen address without a token file. Expose it only on a
+trusted network: reads include full agent logs. Bodies are JSON, errors are
+`{"error": "..."}`, and `X-Axe-Request-Id` makes a write retry-safe.
 
-The route table is `route`, `bot_route` and `goal_route` in
+The route table is `route`, `bot_route`, `goal_route` and `blob_api` in
 `crates/axe/src/server.rs`; dispatcher operations are in `remote.rs`. Response
 shapes are the serialized Rust types, exported to `web/lib/api.ts`. There is
 no version prefix.
