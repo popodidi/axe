@@ -1002,3 +1002,153 @@ fn dispatcher_skips_waiting_tasks_without_using_slots_or_budget() {
     let start = ev.iter().find(|e| e.kind == "run_start").unwrap();
     assert!(start.id > claimed.id);
 }
+
+#[test]
+fn task_api_outage_keeps_session_and_budget_and_retries_after_backoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join("a")).unwrap();
+    std::fs::create_dir_all(ws.join("b")).unwrap();
+    let outage = r#"echo '{"type":"result","is_error":true,"terminal_reason":"api_error","api_error_status":403,"result":"API Error: 403 Attention Required"}'; exit 1"#;
+    let bad_request = r#"echo '{"type":"result","is_error":true,"terminal_reason":"api_error","api_error_status":400,"result":"API Error: 400 prompt too long"}'; exit 1"#;
+    let toml_str = |s: &str| serde_json::to_string(s).unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+workspace_root = "{ws}"
+log_dir = "{logs}"
+[pool]
+total = 2
+[agents.outage]
+cmd = ["sh", "-c", {outage}, "{{session_id}}", "{{prompt}}"]
+resume_cmd = ["sh", "-c", {outage}, "{{session_id}}", "{{prompt}}"]
+session = "preset"
+[agents.bad_request]
+cmd = ["sh", "-c", {bad_request}, "{{session_id}}", "{{prompt}}"]
+session = "preset"
+[[rule]]
+match = {{ project = "a" }}
+agents = ["outage"]
+[[rule]]
+match = {{ project = "b" }}
+agents = ["bad_request"]
+"#,
+            ws = ws.display(),
+            logs = dir.path().join("logs").display(),
+            outage = toml_str(outage),
+            bad_request = toml_str(bad_request),
+        ),
+    )
+    .unwrap();
+    let path = dir.path().join("t.db");
+    let mut conn = db::open(&path).unwrap();
+    let id = add(&mut conn, "a");
+    let real = add(&mut conn, "b");
+    run_dispatch_once(dir.path(), &path, &config);
+
+    let t = db::get_task(&conn, id).unwrap();
+    assert_eq!((t.state.as_str(), t.runs), ("pending", 0), "{t:?}");
+    assert!(t.not_before.is_some(), "retries after a backoff");
+    let session = db::session(&conn, id).unwrap().expect("session kept");
+    let ev = db::events(&conn, id).unwrap();
+    assert!(!ev
+        .iter()
+        .any(|e| e.kind == "state" && e.to_value.as_deref() == Some("escalated")));
+    let end = ev.iter().rfind(|e| e.kind == "run_end").unwrap();
+    assert!(end.body.as_deref().unwrap().contains("\"api_error\""));
+    let note = ev.last().unwrap().body.as_deref().unwrap();
+    assert!(
+        note.contains("model API error (403") && note.contains("in 60s"),
+        "{note}"
+    );
+
+    // The backoff passes: the same session resumes, and the next outage waits longer.
+    conn.execute("UPDATE tasks SET not_before=NULL WHERE id=?1", [id])
+        .unwrap();
+    run_dispatch_once(dir.path(), &path, &config);
+    let t = db::get_task(&conn, id).unwrap();
+    assert_eq!((t.state.as_str(), t.runs), ("pending", 0));
+    let runs = starts(&conn, id);
+    assert_eq!(runs.len(), 2, "no fresh-session fallback");
+    assert_eq!(runs[1]["mode"], "resume");
+    assert_eq!(
+        runs[1]["session_id"].as_str(),
+        Some(session.session_id.as_str())
+    );
+    let ev = db::events(&conn, id).unwrap();
+    let note = ev.last().unwrap().body.as_deref().unwrap();
+    assert!(
+        note.contains("in 120s") && note.contains("run 2 in a row"),
+        "{note}"
+    );
+
+    // A non-transient API error is a real failure: escalated, run counted.
+    let t = db::get_task(&conn, real).unwrap();
+    assert_eq!((t.state.as_str(), t.runs), ("escalated", 1));
+}
+
+#[test]
+fn api_outage_detection_reads_only_the_last_structured_result() {
+    use axe::agent_proc::{api_backoff_seconds, api_outage};
+    let dir = tempfile::tempdir().unwrap();
+    let check = |name: &str, text: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, text).unwrap();
+        api_outage(&p)
+    };
+    let result = |status: &str, is_error: bool, reason: &str| {
+        format!(
+            r#"{{"type":"result","subtype":"success","is_error":{is_error},"terminal_reason":"{reason}"{status},"result":"Failed to authenticate. API Error: 403 Attention Required! | Cloudflare"}}"#
+        )
+    };
+    let edge = result(
+        r#","api_error_status":403,"api_error_origin":"first_party""#,
+        true,
+        "api_error",
+    );
+    let o = check("edge", &format!("{{\"type\":\"system\"}}\n{edge}\n")).expect("403 edge block");
+    assert_eq!(o["status"], 403);
+    assert!(o["message"].as_str().unwrap().contains("Cloudflare"));
+    for status in [408, 429, 500, 503, 529] {
+        let line = result(
+            &format!(r#","api_error_status":{status}"#),
+            true,
+            "api_error",
+        );
+        assert!(check("t", &line).is_some(), "{status}");
+    }
+    for (name, text) in [
+        (
+            "bad request",
+            result(r#","api_error_status":400"#, true, "api_error"),
+        ),
+        (
+            "auth",
+            result(r#","api_error_status":401"#, true, "api_error"),
+        ),
+        ("no status", result("", true, "api_error")),
+        (
+            "not an error",
+            result(r#","api_error_status":529"#, false, "api_error"),
+        ),
+        (
+            "other reason",
+            result(r#","api_error_status":529"#, true, "max_turns"),
+        ),
+        (
+            "recovered",
+            format!("{edge}\n{}", result("", false, "completed")),
+        ),
+        (
+            "no result",
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\nplain text\n".into(),
+        ),
+    ] {
+        assert_eq!(check("t", &text), None, "{name}");
+    }
+    assert_eq!(api_outage(&dir.path().join("missing")), None);
+    let backoff: Vec<i64> = [0, 1, 2, 3, 5, 6, 40].map(api_backoff_seconds).into();
+    assert_eq!(backoff, [60, 60, 120, 240, 960, 1800, 1800]);
+}

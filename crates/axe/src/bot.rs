@@ -837,9 +837,13 @@ pub fn change(conn: &mut Connection, actor: &Actor, name: &str, action: &str) ->
 }
 
 /// SQL: bot `b` is active, has no live run, and has a due wake.
+/// A wake a model-API outage returned and postponed (redelivered, due later) holds
+/// the whole bot until its retry time; no other wake is redelivered into the future.
 const READY: &str = "b.state='active'
  AND NOT EXISTS (SELECT 1 FROM bot_runs r WHERE r.bot_id=b.id AND r.ended_at IS NULL)
- AND EXISTS (SELECT 1 FROM bot_wakes w WHERE w.bot_id=b.id AND w.run_id IS NULL AND w.due_at<=?1)";
+ AND EXISTS (SELECT 1 FROM bot_wakes w WHERE w.bot_id=b.id AND w.run_id IS NULL AND w.due_at<=?1)
+ AND NOT EXISTS (SELECT 1 FROM bot_wakes w WHERE w.bot_id=b.id AND w.run_id IS NULL
+   AND w.redelivered=1 AND w.due_at>?1)";
 
 /// Names of bots ready to run, oldest bot first.
 pub fn ready(conn: &Connection, now: i64) -> Result<Vec<String>> {
@@ -1090,9 +1094,12 @@ fn undeliver(conn: &Connection, run: i64) -> Result<usize> {
 }
 
 /// Ends a run. `reason`: `exit` (with `code`), `stop` (owner interrupt), `pause`,
-/// `dispatcher_stopped`, `spawn_failed` or `error`. Exit 0 saves the session and
-/// resets failures; stop and pause keep the session and are not failures; a
-/// dispatcher stop also returns the prompt's wakes. Anything else is a failure:
+/// `dispatcher_stopped`, `api_error`, `spawn_failed` or `error`. Exit 0 saves the
+/// session and resets failures; stop and pause keep the session and are not
+/// failures; a dispatcher stop also returns the prompt's wakes. `api_error` (the
+/// dispatcher saw a model-API outage end the run) keeps the session and the
+/// failure count, and returns the prompt's wakes due after a backoff that grows
+/// with consecutive outage runs. Anything else is a failure:
 /// prompt wakes return, failures increment, the session is cleared at
 /// [`FAILURES_FRESH`] and the bot pauses at [`FAILURES_PAUSE`].
 pub fn finish(
@@ -1125,6 +1132,7 @@ pub fn finish(
     )?;
     let ok = reason == "exit" && code == Some(0);
     let interrupted = matches!(reason, "stop" | "pause" | "dispatcher_stopped");
+    let outage = reason == "api_error";
     let save = |failures_sql: &str| -> Result<()> {
         if let Some(sid) = &session_id {
             let resumes = if mode == "resume" {
@@ -1151,9 +1159,21 @@ pub fn finish(
         Ok(())
     };
     let mut returned = 0;
+    let mut retry_at = None;
     let mut failures: i64 =
         conn.query_row("SELECT failures FROM bots WHERE id=?1", [bot], |r| r.get(0))?;
-    if ok {
+    if outage {
+        returned = undeliver(conn, run)?;
+        save("")?;
+        let streak = outage_streak(conn, bot)?;
+        let at = ts(now + crate::agent_proc::api_backoff_seconds(streak));
+        conn.execute(
+            "UPDATE bot_wakes SET due_at=MAX(due_at, ?1)
+             WHERE bot_id=?2 AND run_id IS NULL AND redelivered=1",
+            params![at, bot],
+        )?;
+        retry_at = Some(at);
+    } else if ok {
         save(", failures=0")?;
         failures = 0;
     } else if interrupted {
@@ -1174,10 +1194,13 @@ pub fn finish(
             save(&format!(", failures={failures}"))?;
         }
     }
-    let body = json!({"run":run,"exit_code":code,"reason":reason,"failures":failures,
+    let mut body = json!({"run":run,"exit_code":code,"reason":reason,"failures":failures,
         "returned_wakes":returned,"session_id":session_id,"note":note});
+    if let Some(at) = retry_at {
+        body["retry_at"] = json!(at);
+    }
     event(conn, bot, &system_actor(), "run_end", &body.to_string())?;
-    if !ok && !interrupted && failures >= FAILURES_PAUSE {
+    if !ok && !interrupted && !outage && failures >= FAILURES_PAUSE {
         conn.execute("UPDATE bots SET state='paused' WHERE id=?1", [bot])?;
         event(
             conn,
@@ -1195,6 +1218,23 @@ pub fn finish(
         params![ts(now), bot],
     )?;
     Ok(body)
+}
+
+/// Consecutive latest ended runs of `bot` that a model-API outage ended.
+fn outage_streak(conn: &Connection, bot: i64) -> Result<i64> {
+    let mut stmt = conn.prepare(
+        "SELECT stop_reason FROM bot_runs WHERE bot_id=?1 AND ended_at IS NOT NULL
+         ORDER BY id DESC LIMIT 32",
+    )?;
+    let reasons = stmt.query_map([bot], |r| r.get::<_, Option<String>>(0))?;
+    let mut streak = 0;
+    for reason in reasons {
+        if reason?.as_deref() != Some("api_error") {
+            break;
+        }
+        streak += 1;
+    }
+    Ok(streak)
 }
 
 /// Context tokens at the end of the latest run of `session` with known usage.
