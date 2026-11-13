@@ -256,12 +256,13 @@ fn tables(conn: &rusqlite::Connection) -> Vec<String> {
 }
 
 #[test]
-fn fresh_database_is_created_at_v14() {
+fn fresh_database_is_created_at_v17() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open(&dir.path().join("t.db")).unwrap();
-    assert_eq!(user_version(&conn), 16);
+    assert_eq!(user_version(&conn), 17);
     assert!(!tables(&conn).contains(&"dream_attempts".to_string()));
-    assert!(!columns(&conn, "tasks").contains(&"owner".to_string()));
+    // v17's `owner` is the task's follow-up owner, not the persona column v9 dropped.
+    assert!(columns(&conn, "tasks").ends_with(&["owner".into(), "repos".into(), "labels".into()]));
     assert!(!columns(&conn, "runs").contains(&"persona".to_string()));
     assert_eq!(
         columns(&conn, "sessions"),
@@ -304,9 +305,17 @@ fn migrates_v8_to_one_session_per_task() {
     drop(conn);
 
     let mut conn = db::open(&path).unwrap();
-    assert_eq!(user_version(&conn), 16);
+    assert_eq!(user_version(&conn), 17);
     assert!(!tables(&conn).contains(&"dream_attempts".to_string()));
-    assert!(!columns(&conn, "tasks").contains(&"owner".to_string()));
+    // The v8 persona `owner` is dropped; v17 adds an empty follow-up owner.
+    let owners: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE owner IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(owners, 0);
     assert!(!columns(&conn, "runs").contains(&"persona".to_string()));
     let index: i64 = conn
         .query_row(
@@ -604,7 +613,7 @@ fn migrates_v10_agent_column_and_retains_it_after_compatibility_downgrade() {
         .unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 16);
+    assert_eq!(user_version(&c), 17);
     assert_eq!(db::get_task(&c, id).unwrap().title, before);
     assert_eq!(db::get_task(&c, id).unwrap().agent, None);
     c.execute("UPDATE tasks SET agent='claude' WHERE id=?1", [id])
@@ -612,7 +621,7 @@ fn migrates_v10_agent_column_and_retains_it_after_compatibility_downgrade() {
     c.pragma_update(None, "user_version", 10).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 16);
+    assert_eq!(user_version(&c), 17);
     assert_eq!(
         db::get_task(&c, id).unwrap().agent.as_deref(),
         Some("claude")
@@ -629,7 +638,7 @@ fn migrates_v12_to_v14_subscription_tables_and_keeps_rows_after_downgrade() {
         .unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 16);
+    assert_eq!(user_version(&c), 17);
     for t in ["bot_feed", "bot_subscriptions"] {
         assert!(tables(&c).contains(&t.to_string()), "{t}");
     }
@@ -637,7 +646,7 @@ fn migrates_v12_to_v14_subscription_tables_and_keeps_rows_after_downgrade() {
     c.pragma_update(None, "user_version", 12).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 16);
+    assert_eq!(user_version(&c), 17);
     assert_eq!(db::get_task(&c, id).unwrap().title, "t");
 }
 
@@ -654,7 +663,7 @@ fn migrates_v11_to_v12_bot_tables_and_retains_them_after_compatibility_downgrade
     .unwrap();
     drop(c);
     let mut c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 16);
+    assert_eq!(user_version(&c), 17);
     for t in [
         "bots",
         "bot_messages",
@@ -681,7 +690,51 @@ fn migrates_v11_to_v12_bot_tables_and_retains_them_after_compatibility_downgrade
     c.pragma_update(None, "user_version", 11).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 16);
+    assert_eq!(user_version(&c), 17);
     assert_eq!(count(&c, "bots"), 1);
     assert_eq!(count(&c, "bot_wakes"), 1);
+}
+
+#[test]
+fn migrates_v16_task_fields_and_keeps_them_after_downgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v16.db");
+    let mut c = db::open(&path).unwrap();
+    let id = db::add_task(&mut c, &Actor::new("test"), &new_task("orchid")).unwrap();
+    c.execute_batch(
+        "ALTER TABLE tasks DROP COLUMN owner; ALTER TABLE tasks DROP COLUMN repos;
+         ALTER TABLE tasks DROP COLUMN labels; PRAGMA user_version=16;",
+    )
+    .unwrap();
+    drop(c);
+    let mut c = db::open(&path).unwrap();
+    assert_eq!(user_version(&c), 17);
+    for col in ["owner", "repos", "labels"] {
+        assert!(columns(&c, "tasks").contains(&col.to_string()), "{col}");
+    }
+    // An old task has no owner or labels and keeps its project checkout.
+    let t = db::get_task(&c, id).unwrap();
+    assert_eq!((t.owner, t.repos, t.labels), (None, None, vec![]));
+    db::set_task(
+        &mut c,
+        &Actor::new("test"),
+        id,
+        &db::Changes {
+            owner: Some("bot:b".into()),
+            repos: Some(vec!["a".into(), "b".into()]),
+            add_labels: vec!["x".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Compatibility downgrade keeps the columns and values; the next open
+    // upgrades in place.
+    c.pragma_update(None, "user_version", 16).unwrap();
+    drop(c);
+    let c = db::open(&path).unwrap();
+    assert_eq!(user_version(&c), 17);
+    let t = db::get_task(&c, id).unwrap();
+    assert_eq!(t.owner.as_deref(), Some("bot:b"));
+    assert_eq!(t.repos, Some(vec!["a".to_string(), "b".to_string()]));
+    assert_eq!(t.labels, vec!["x".to_string()]);
 }

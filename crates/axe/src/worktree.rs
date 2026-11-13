@@ -1,10 +1,12 @@
 //! Dispatcher-owned task worktrees.
 //!
-//! Every session of a task runs in `<workspace_root>/.worktrees/<project>/task-<id>--work`,
-//! a Git worktree of the canonical workspace clone on `<branch_prefix>task-<id>--work`
-//! (`[worktrees] branch_prefix`, default `axe/`). The dispatcher sees only the
-//! workspace: sub-repositories are the worker's business. Cleanup of a done
-//! task's directory is left to the operator.
+//! A task without its own `repos` runs every session in
+//! `<workspace_root>/.worktrees/<project>/task-<id>--work`, a Git worktree of
+//! the project's canonical clone on `<branch_prefix>task-<id>--work`
+//! (`[worktrees] branch_prefix`, default `axe/`). A task with `repos` runs in a
+//! run workspace instead (`run_workspace.rs`), which uses [`repo_readiness`]
+//! and [`allocate_at`] for each repo. Cleanup of a done task's directory is
+//! left to housekeeping or the operator.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,6 +36,29 @@ pub fn readiness(cfg: &Config, project: &str) -> Result<Ready, String> {
     let workspace = cfg.workspace_root();
     let canonical = workspace.join(project);
     let gap = |detail: String| format!("project {project} has no task worktree base: {detail}");
+    check(
+        cfg,
+        canonical,
+        workspace.join(".worktrees").join(project),
+        gap,
+    )
+}
+
+/// [`readiness`] for repo `name` of a run workspace: its canonical clone is
+/// `[repos.<name>] path` (default `<workspace_root>/<name>`). `root` is unused
+/// by [`allocate_at`].
+pub fn repo_readiness(cfg: &Config, name: &str) -> Result<Ready, String> {
+    let canonical = cfg.repo_path(name);
+    let gap = |detail: String| format!("repo {name} has no worktree base: {detail}");
+    check(cfg, canonical.clone(), canonical, gap)
+}
+
+fn check(
+    cfg: &Config,
+    canonical: PathBuf,
+    root: PathBuf,
+    gap: impl Fn(String) -> String,
+) -> Result<Ready, String> {
     if !canonical.is_dir() {
         return Err(gap(format!("{} does not exist", canonical.display())));
     }
@@ -59,7 +84,7 @@ pub fn readiness(cfg: &Config, project: &str) -> Result<Ready, String> {
             ))
         })?;
     Ok(Ready {
-        root: workspace.join(".worktrees").join(project),
+        root,
         canonical,
         base_ref,
         branch_prefix: cfg.worktrees.clone().unwrap_or_default().branch_prefix,
@@ -134,7 +159,18 @@ pub fn allocate_dir(ready: &Ready, dir: &str) -> Result<PathBuf> {
         !dir.is_empty() && !dir.contains('/') && !dir.starts_with('.'),
         "invalid worktree directory name {dir:?}"
     );
-    let path = ready.root.join(dir);
+    allocate_at(
+        ready,
+        &ready.root.join(dir),
+        &format!("{}{dir}", ready.branch_prefix),
+    )
+}
+
+/// Creates or reuses a worktree of `ready.canonical` at `path` on `branch`,
+/// created from the default branch when missing. Same reuse rules as
+/// [`allocate`].
+pub fn allocate_at(ready: &Ready, path: &Path, branch: &str) -> Result<PathBuf> {
+    let path = path.to_path_buf();
     let path_str = path.to_str().context("non-UTF-8 worktree path")?;
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_dir() && std::fs::read_dir(&path)?.next().is_none() => {
@@ -160,10 +196,9 @@ pub fn allocate_dir(ready: &Ready, dir: &str) -> Result<PathBuf> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    std::fs::create_dir_all(&ready.root)
-        .with_context(|| format!("create {}", ready.root.display()))?;
+    let parent = path.parent().context("worktree path has no parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     git_timeout(&ready.canonical, &["fetch", "origin"], FETCH_TIMEOUT)?;
-    let branch = format!("{}{dir}", ready.branch_prefix);
     // Cleanup deletes directories, never branches: a reopened task resumes its
     // existing branch.
     let exists = git(
@@ -177,11 +212,11 @@ pub fn allocate_dir(ready: &Ready, dir: &str) -> Result<PathBuf> {
     )
     .is_ok();
     if exists {
-        git(&ready.canonical, &["worktree", "add", path_str, &branch])?;
+        git(&ready.canonical, &["worktree", "add", path_str, branch])?;
     } else {
         git(
             &ready.canonical,
-            &["worktree", "add", "-b", &branch, path_str, &ready.base_ref],
+            &["worktree", "add", "-b", branch, path_str, &ready.base_ref],
         )?;
     }
     Ok(path)

@@ -87,6 +87,19 @@ enum Cmd {
         /// task stays pending but is not claimed until every prerequisite is done
         #[arg(long, value_delimiter = ',')]
         blocked_by: Vec<i64>,
+        /// Who follows the task up: a bot (bot:<name>) or a person
+        #[arg(long)]
+        owner: Option<String>,
+        /// Repos to work in (repeat or comma-separate): the session runs in a
+        /// run workspace with one worktree per repo. Omitted: the project checkout
+        #[arg(long, value_delimiter = ',', conflicts_with = "no_repos")]
+        repo: Vec<String>,
+        /// A run workspace with no repos
+        #[arg(long)]
+        no_repos: bool,
+        /// Free-form labels (repeat or comma-separate)
+        #[arg(long, value_delimiter = ',')]
+        label: Vec<String>,
     },
     /// Show a task's prerequisites (blocked_by) and dependents (blocks); --add or
     /// --remove edges first, in one transaction
@@ -108,6 +121,11 @@ enum Cmd {
         state: Option<String>,
         #[arg(long)]
         project: Option<String>,
+        /// Tasks with this label (the project counts as a label)
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
         #[arg(long)]
         all: bool,
         #[arg(long)]
@@ -151,6 +169,21 @@ enum Cmd {
         /// Link the task to a goal (by name), or "none" to unlink; latest wins
         #[arg(long)]
         goal: Option<String>,
+        /// New owner, or "none" to clear it
+        #[arg(long)]
+        owner: Option<String>,
+        /// Replace the repo list (repeat or comma-separate)
+        #[arg(long, value_delimiter = ',', conflicts_with = "no_repos")]
+        repo: Vec<String>,
+        /// Replace the repo list with none
+        #[arg(long)]
+        no_repos: bool,
+        /// Add labels (repeat or comma-separate)
+        #[arg(long, value_delimiter = ',')]
+        label: Vec<String>,
+        /// Remove labels (repeat or comma-separate)
+        #[arg(long, value_delimiter = ',')]
+        unlabel: Vec<String>,
     },
     /// Escalate for ops/owner with a block note; the task's session resumes later
     Escalate {
@@ -2163,8 +2196,13 @@ pub fn run() -> Result<()> {
             blocked_by,
             workload,
             goal,
+            owner,
+            repo,
+            no_repos,
+            label,
         } => {
             let detail = detail_arg(detail.clone(), detail_file.clone())?.unwrap_or_default();
+            let repos = (*no_repos || !repo.is_empty()).then_some(repo);
             let v: Value = client().send(
                 "POST",
                 "/api/tasks",
@@ -2177,6 +2215,9 @@ pub fn run() -> Result<()> {
                     "agent": agent,
                     "workload": workload,
                     "goal": goal,
+                    "owner": owner,
+                    "repos": repos,
+                    "labels": label,
                 }),
             )?;
             println!("{}", v["id"]);
@@ -2206,11 +2247,18 @@ pub fn run() -> Result<()> {
         Cmd::List {
             state,
             project,
+            label,
+            owner,
             all,
             json,
         } => {
             let mut q: Vec<(&str, &str)> = Vec::new();
-            for (k, v) in [("state", state), ("project", project)] {
+            for (k, v) in [
+                ("state", state),
+                ("project", project),
+                ("label", label),
+                ("owner", owner),
+            ] {
                 if let Some(v) = v {
                     q.push((k, v));
                 }
@@ -2333,8 +2381,14 @@ pub fn run() -> Result<()> {
             note,
             not_before,
             goal,
+            owner,
+            repo,
+            no_repos,
+            label,
+            unlabel,
         } => {
             let detail = detail_arg(detail.clone(), detail_file.clone())?;
+            let repos = (*no_repos || !repo.is_empty()).then_some(repo);
             let not_before = not_before.as_deref().map(db::parse_wake).transpose()?;
             let _: Value = client().send(
                 "PATCH",
@@ -2347,6 +2401,10 @@ pub fn run() -> Result<()> {
                     "reset_runs": reset_runs,
                     "not_before": not_before,
                     "goal": goal,
+                    "owner": owner,
+                    "repos": repos,
+                    "add_labels": label,
+                    "remove_labels": unlabel,
                 }),
             )?;
         }

@@ -14,6 +14,7 @@ pub mod goal;
 pub mod goal_board;
 pub mod housekeeping;
 pub mod run_log;
+pub mod run_workspace;
 pub mod schedule;
 pub mod server;
 pub mod subscription;
