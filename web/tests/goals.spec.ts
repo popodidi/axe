@@ -55,7 +55,7 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     expect(reads.every((r) => r.startsWith("GET "))).toBe(true);
   });
 }
-test("goal detail: intent, trajectory, open tasks and next wake", async ({ page }, info) => {
+test("goal detail: intent, trajectory, linked tasks and next wake", async ({ page }, info) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   const reads = await mockGoals(page);
   await page.goto(base + "&view=goals");
@@ -74,12 +74,19 @@ test("goal detail: intent, trajectory, open tasks and next wake", async ({ page 
   // Intent renders as Markdown.
   const intent = detail.getByRole("region", { name: "Intent" });
   await expect(intent.locator("strong")).toHaveText("PR CI");
-  // Open linked tasks only: done #8 is left out.
-  const open = detail.getByRole("region", { name: "Open tasks" });
-  await expect(open).toContainText("2 open · 3 linked");
+  // Every linked task: open ones first, then done ones newest first, each
+  // with its state and title.
+  const open = detail.getByRole("region", { name: "Linked tasks" });
+  await expect(open).toContainText("2 open · 4 linked");
+  await expect(open.locator("tbody tr")).toHaveCount(4);
+  await expect(
+    open.locator("tbody tr").evaluateAll((rows) => rows.map((r) => r.id)),
+  ).resolves.toEqual(["goal-task-3", "goal-task-4", "goal-task-8", "goal-task-2"]);
   await expect(open.locator("#goal-task-3")).toContainText("Make dashboard Overview a desk page");
   await expect(open.locator("#goal-task-4")).toBeVisible();
-  await expect(open.locator("#goal-task-8")).toHaveCount(0);
+  await expect(open.locator("#goal-task-8")).toContainText("done");
+  await expect(open.locator("#goal-task-8")).toContainText("Close out shipped dashboard rebuild");
+  await expect(open.locator("#goal-task-2")).toContainText("Cache the dependency build");
   // The full trajectory, oldest first, read from the events route.
   const traj = detail.getByRole("region", { name: "Trajectory" });
   await expect(traj.locator("li")).toHaveCount(4);
@@ -134,7 +141,7 @@ test("goal without trajectory or wake, and a bare goal link", async ({ page }) =
   const detail = page.getByRole("region", { name: "Goal detail" });
   await expect(detail).toContainText("Paused");
   await expect(detail).toContainText("None scheduled");
-  await expect(detail).toContainText("No open linked tasks");
+  await expect(detail).toContainText("No linked tasks");
   await expect(detail).toContainText("No trajectory yet");
 });
 test("goals empty state", async ({ page }) => {
