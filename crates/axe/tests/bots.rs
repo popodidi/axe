@@ -203,6 +203,10 @@ fn create_then_first_run_gets_system_prompt_and_only_wakes() {
         !system.contains("NOTES-TEXT"),
         "notes stay out of the system prompt"
     );
+    assert!(
+        !system.contains("Attached knowledge"),
+        "nothing attached, nothing added: {system}"
+    );
 
     let prompt = rig.file("prompt-1");
     let lines: Vec<&str> = prompt.lines().collect();
@@ -330,6 +334,55 @@ fn edits_render_as_edit_of_the_original_message() {
     );
     assert!(prompt.starts_with(&format!("Run {} (resumed). Wakes:", c.run)));
     assert!(!prompt.contains("Fresh session"), "{prompt}");
+}
+
+#[test]
+fn bot_system_prompt_lists_docs_attached_to_the_bot_its_project_and_global() {
+    use std::io::Write;
+    let rig = Rig::new(1);
+    for (path, text, scope) in [
+        ("notes/bot.md", "# Bot notes\nSECRET-BOT\n", "owner:bot:b"),
+        ("notes/proj.md", "# Project notes\n", "label:a"),
+        (
+            "notes/all.md",
+            "---\ndescription: For everyone\n---\n",
+            "global",
+        ),
+        ("notes/other.md", "# Not mine\n", "owner:bot:other"),
+    ] {
+        let mut child = rig
+            .srv
+            .cli(&["doc", "put", path])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        rig.srv.ok(&["doc", "attach", path, scope]);
+    }
+    rig.create(json!({}));
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let system = rig.file("system-1");
+    let section = &system[system.find("\n# Attached knowledge\n").expect(&system)..];
+    for want in [
+        "- doc `notes/bot.md` (owner:bot:b): Bot notes\n",
+        "- doc `notes/proj.md` (label:a): Project notes\n",
+        "- doc `notes/all.md` (global): For everyone\n",
+        "`axe doc get <path>`",
+    ] {
+        assert!(section.contains(want), "{want:?} in {section}");
+    }
+    assert!(
+        !section.contains("other.md") && !section.contains("SECRET"),
+        "{section}"
+    );
 }
 
 #[test]

@@ -266,8 +266,14 @@ path = "{two}"
 
     /// Adds tasks through the CLI, then runs one dispatcher pass per task.
     fn run(&self, tasks: &[&[&str]]) -> (Server, Vec<String>) {
+        self.run_with(|_| {}, tasks)
+    }
+
+    /// [`Fixture::run`] after `setup` (e.g. docs to attach) on the server.
+    fn run_with(&self, setup: impl FnOnce(&Server), tasks: &[&[&str]]) -> (Server, Vec<String>) {
         let base = self.base();
         let srv = Server::start_with(&base, &self.config, Some(TOKEN), &[], &[]);
+        setup(&srv);
         let mut ids = Vec::new();
         for args in tasks {
             let mut a = vec!["add", "--title", "t", "--detail", "Outcome: x"];
@@ -346,6 +352,160 @@ fn two_repo_task_gets_both_worktrees_on_its_branch() {
     let docs = std::fs::read_to_string(run.join("docs/index.md")).unwrap();
     assert!(docs.contains("## one\n\n- [Start here](../repos/one/docs/guide/start.md)\n- [One docs](../repos/one/docs/index.md)\n"), "{docs}");
     assert!(!docs.contains("## two"), "{docs}");
+    // Nothing attached: no attached entries anywhere.
+    assert!(!docs.contains("## Attached"), "{docs}");
+    assert!(!agents.contains("attached"), "{agents}");
+    let skills: Vec<_> = std::fs::read_dir(run.join("skills"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(skills, ["build"]);
+}
+
+/// Puts a doc (stdin) or a folder (a temp dir of `files`) and attaches it.
+fn attach(srv: &Server, path: &str, files: &[(&str, &str)], scopes: &[&str]) {
+    use std::io::Write;
+    if let [("", text)] = files {
+        let mut child = srv
+            .cli(&["doc", "put", path])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    } else {
+        let dir = tempfile::tempdir().unwrap();
+        for (f, text) in files {
+            std::fs::write(dir.path().join(f), text).unwrap();
+        }
+        srv.ok(&["doc", "put", path, dir.path().to_str().unwrap()]);
+    }
+    for s in scopes {
+        srv.ok(&["doc", "attach", path, s]);
+    }
+}
+
+#[test]
+fn run_workspace_indexes_attached_docs_by_precedence() {
+    let f = Fixture::new(&["proj", "one"]);
+    let skill = |d: &str| format!("---\nname: x\ndescription: {d}\n---\nSECRET body of {d}\n");
+    let (g, l, o, r, b) = (
+        skill("global review"),
+        skill("label review"),
+        skill("owner review"),
+        skill("repo review"),
+        skill("attached build"),
+    );
+    let (srv, ids) = f.run_with(
+        |srv| {
+            attach(srv, "g/review", &[("SKILL.md", &g)], &["global"]);
+            attach(srv, "l/review", &[("SKILL.md", &l)], &["label:z"]);
+            attach(srv, "o/review", &[("SKILL.md", &o)], &["owner:bot:b"]);
+            attach(srv, "r/review", &[("SKILL.md", &r)], &["repo:one"]);
+            // Same name as repo one's own skill: the repo's wins.
+            attach(srv, "o/build", &[("SKILL.md", &b)], &["owner:bot:b"]);
+            attach(
+                srv,
+                "notes/plan.md",
+                &[("", "# The plan\nSECRET plan body\n")],
+                &["label:proj", "global"],
+            );
+            attach(
+                srv,
+                "notes/other.md",
+                &[("", "# Other\n")],
+                &["label:elsewhere"],
+            );
+        },
+        &[&[
+            "--project",
+            "proj",
+            "--repo",
+            "one",
+            "--owner",
+            "bot:b",
+            "--label",
+            "z",
+        ]],
+    );
+    let id = &ids[0];
+    assert_eq!(show(&srv, id)["state"], "done", "{}", srv.ok(&["log", id]));
+    let run = f.run_dir(id);
+
+    // The repo's own skill is untouched; the winning attached skill is an
+    // index entry (name and description, no body) where Claude Code looks.
+    assert_eq!(
+        std::fs::read_to_string(run.join("skills/build/SKILL.md")).unwrap(),
+        "---\nname: build\ndescription: Build the thing\n---\nbody\n"
+    );
+    let stub = std::fs::read_to_string(run.join(".claude/skills/review/SKILL.md")).unwrap();
+    assert!(
+        stub.starts_with("---\nname: \"review\"\ndescription: \"repo review\"\n---\n"),
+        "{stub}"
+    );
+    assert!(stub.contains("`axe doc get r/review`"), "{stub}");
+    let agents = std::fs::read_to_string(run.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("- `skills/build` (one): Build the thing\n- `skills/review` (repo:one, attached): repo review\n"), "{agents}");
+    assert!(
+        agents.contains(&format!("`axe context explain {id}`")),
+        "{agents}"
+    );
+    let docs = std::fs::read_to_string(run.join("docs/index.md")).unwrap();
+    assert!(
+        docs.contains("- doc `notes/plan.md` (label:proj): The plan\n"),
+        "{docs}"
+    );
+    assert!(!docs.contains("other.md"), "{docs}");
+    for text in [&stub, &agents, &docs] {
+        assert!(!text.contains("SECRET"), "{text}");
+    }
+    // The body loads on use.
+    assert!(srv
+        .ok(&["doc", "get", "r/review"])
+        .contains("SECRET body of repo review"));
+
+    // explain lists every candidate with its scope and why.
+    let out = srv
+        .cli(&["context", "explain", id])
+        .env("AXE_CONFIG", &f.config)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rows: Vec<String> = text
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().take(4).collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "included skill repos/one/.agents/skills/build repo:one",
+            "included skill r/review repo:one",
+            "included doc notes/plan.md label:proj",
+            "skipped skill o/build owner:bot:b",
+            "skipped skill o/review owner:bot:b",
+            "skipped skill l/review label:z",
+            "skipped skill g/review global",
+            "skipped doc notes/plan.md global",
+        ],
+        "{text}"
+    );
+    assert!(
+        text.starts_with(
+            "scopes (most specific first): repo:one, owner:bot:b, label:proj, label:z, global\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("shadowed by repos/one/.agents/skills/build from repo:one: a repo's own skills are not overridable"), "{text}");
+    let json: Value = serde_json::from_str(&srv.ok(&["context", "explain", id, "--json"])).unwrap();
+    assert_eq!(json["items"][2]["reason"], "attached to label:proj");
 }
 
 #[test]

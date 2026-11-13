@@ -8,6 +8,7 @@ pub mod channel;
 pub mod cli;
 pub mod client;
 pub mod config;
+pub mod context;
 pub mod db;
 pub mod dispatch;
 pub mod doc;

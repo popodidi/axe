@@ -140,7 +140,7 @@ pub struct Entry {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub scope: String,
     pub path: String,

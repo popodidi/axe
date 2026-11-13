@@ -704,7 +704,11 @@ impl Dispatcher {
             .clone();
         let session_mode = agent.session_mode()?;
         let task_worktree = match &self.cfg.worktrees {
-            _ if task.repos.is_some() => Some(crate::run_workspace::build(&self.cfg, task)?),
+            _ if task.repos.is_some() => Some(crate::run_workspace::build(
+                &self.cfg,
+                task,
+                Some(&self.store.client),
+            )?),
             Some(_) => {
                 let ready =
                     worktree::readiness(&self.cfg, &task.project).map_err(anyhow::Error::msg)?;

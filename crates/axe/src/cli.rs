@@ -345,6 +345,23 @@ enum Cmd {
         #[command(subcommand)]
         command: DocCmd,
     },
+    /// The docs and skills a run gets from its scopes
+    Context {
+        #[command(subcommand)]
+        command: ContextCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextCmd {
+    /// What a task's run includes from the doc store, from which scope, and
+    /// why (repo > owner > label > global; policy and a repo's own skills
+    /// are not overridable)
+    Explain {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2454,6 +2471,30 @@ pub fn run() -> Result<()> {
         Cmd::Bot { command } => run_bot(&client(), command)?,
         Cmd::Blob { command } => run_blob(&client(), command)?,
         Cmd::Doc { command } => run_doc(&client(), command)?,
+        Cmd::Context {
+            command: ContextCmd::Explain { id, json },
+        } => {
+            let c = client();
+            let t: db::Task = c.get(&format!("/api/tasks/{id}"), &[])?;
+            // The repos' own skills are read from the run workspace when it is
+            // on this machine; without a config only the store is consulted.
+            let cfg = config::default_path()
+                .ok()
+                .filter(|p| p.exists())
+                .and_then(|p| Config::load(&p).ok());
+            let res = crate::run_workspace::explain(cfg.as_ref(), &t, &c)?;
+            if *json {
+                print_json(&res)?;
+            } else {
+                if t.repos.is_none() {
+                    println!(
+                        "note: task {id} has no repos, so it runs in its project worktree \
+                         without this context; set --repo or --no-repos to give it a run workspace"
+                    );
+                }
+                print!("{}", crate::context::explain(&res));
+            }
+        }
         Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Routine { command } => {
             let c = client();
