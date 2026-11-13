@@ -225,7 +225,7 @@ fn cli_verbs_enforce_the_worker_protocol() {
     ]);
     let t = show(&id);
     assert_eq!(t["state"].as_str(), Some("escalated"));
-    assert!(t.get("owner").is_none());
+    assert!(t["owner"].is_null());
     let log = srv.ok(&["log", &id, "--full"]);
     assert!(log.contains(
         "blocked: needs a decision\nresolver: owner: pick A or B\nresume: decision recorded"

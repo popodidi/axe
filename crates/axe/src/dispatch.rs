@@ -170,6 +170,16 @@ pub fn format_show(t: &Task) -> String {
         t.updated_at,
     );
     s.push_str(&format!("\nagent: {}", t.agent.as_deref().unwrap_or("-")));
+    s.push_str(&format!("\nowner: {}", t.owner.as_deref().unwrap_or("-")));
+    let repos = match &t.repos {
+        None => format!("- (project checkout {})", t.project),
+        Some(r) if r.is_empty() => "none".into(),
+        Some(r) => r.join(", "),
+    };
+    s.push_str(&format!("\nrepos: {repos}"));
+    if !t.labels.is_empty() {
+        s.push_str(&format!("\nlabels: {}", t.labels.join(", ")));
+    }
     if let Some(at) = &t.not_before {
         s.push_str(&format!("\nnot_before: {at}"));
     }
@@ -590,13 +600,16 @@ impl Dispatcher {
     fn admit_one(&mut self, project: &str) -> Result<bool> {
         let res = self.cfg.resolve(project);
         // A project without a worktree base escalates its next task before any
-        // claim, so no run budget is spent discovering the gap.
+        // claim, so no run budget is spent discovering the gap. A task with its
+        // own repos is not held (`Claim::None`) and is claimed below.
         if self.cfg.worktrees.is_some() {
             if let Err(gap) = worktree::readiness(&self.cfg, project) {
                 let held = self
                     .store
                     .request::<Claim>("hold", json!({"project":project,"note":gap}))?;
-                return Ok(!matches!(held, Claim::None));
+                if !matches!(held, Claim::None) {
+                    return Ok(true);
+                }
             }
         }
         let claim_id = format!("dispatch:{}", uuid::Uuid::new_v4());
@@ -691,6 +704,7 @@ impl Dispatcher {
             .clone();
         let session_mode = agent.session_mode()?;
         let task_worktree = match &self.cfg.worktrees {
+            _ if task.repos.is_some() => Some(crate::run_workspace::build(&self.cfg, task)?),
             Some(_) => {
                 let ready =
                     worktree::readiness(&self.cfg, &task.project).map_err(anyhow::Error::msg)?;

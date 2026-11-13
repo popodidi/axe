@@ -66,6 +66,7 @@ axe wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge"
 | Situation | Command |
 |---|---|
 | Queue a spec | `axe add --project <p> --title "<imperative>" --detail-file <spec>` (`--blocked-by <ids>` for prerequisites, `--agent <name>` to pick an agent) |
+| Owner, repos, labels | `axe add`/`axe set` with `--owner <bot:name\|person>` (`none` clears), `--repo <r>` (repeat; `--no-repos` for none), `--label <l>` (`--unlabel` on set); `axe list --label <l> --owner <o>` |
 | Read a task | `axe show <id>`, `axe log <id>` (`--full` for whole event bodies) |
 | Done | `axe set <id> --state done --note "<what holds now>"` |
 | Needs a human | `axe escalate <id> --blocked ... --resolver ... --resume ... --class decision\|capability\|coordination\|runtime` |

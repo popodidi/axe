@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -100,6 +100,31 @@ FROM runs;
 DROP TABLE runs; ALTER TABLE runs_new RENAME TO runs;
 ";
 
+/// v17: the task fields `owner` (who follows the task up; its creator stays the
+/// first event), `repos` (a JSON array of repo names; NULL means the project's
+/// own checkout, as before v17) and `labels` (a JSON array). Additive and
+/// idempotent, so a lowered `user_version` upgrades again.
+fn migrate_task_fields(tx: &Transaction) -> Result<()> {
+    for (col, ddl) in [
+        ("owner", "ALTER TABLE tasks ADD COLUMN owner TEXT"),
+        ("repos", "ALTER TABLE tasks ADD COLUMN repos TEXT"),
+        (
+            "labels",
+            "ALTER TABLE tasks ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'",
+        ),
+    ] {
+        let has: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name=?1)",
+            [col],
+            |r| r.get(0),
+        )?;
+        if !has {
+            tx.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
+}
+
 /// The v9 `CREATE TABLE` statement for `name`, renamed to `<name>_new`.
 fn new_table(name: &str) -> String {
     let head = format!("CREATE TABLE IF NOT EXISTS {name} (");
@@ -117,12 +142,13 @@ pub fn default_path() -> Result<PathBuf> {
         .context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v16 schema, or migrates v8-v15 to v16. Older
+/// Opens the database: creates a fresh v17 schema, or migrates v8-v16 to v17. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
 /// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
-/// tables (`usage::SCHEMA`) and v16 only adds goal tables and a nullable column
-/// (`goal::migrate`), so a database lowered to `user_version` 15, 14, 13, 12 or
-/// 11 still opens with that binary and upgrades again in place.
+/// tables (`usage::SCHEMA`), v16 only adds goal tables and a nullable column
+/// (`goal::migrate`) and v17 only adds the task field columns
+/// ([`migrate_task_fields`]), so a database lowered to `user_version` 16, 15,
+/// 14, 13, 12 or 11 still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -150,15 +176,17 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
+        migrate_task_fields(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=15).contains(&version) {
+    if (11..=16).contains(&version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
+        migrate_task_fields(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -178,6 +206,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
+        migrate_task_fields(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -200,6 +229,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     tx.execute_batch(crate::bot::SCHEMA)?;
     tx.execute_batch(crate::usage::SCHEMA)?;
     crate::goal::migrate(&tx)?;
+    migrate_task_fields(&tx)?;
     let violations: i64 =
         tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
@@ -346,6 +376,17 @@ pub struct Task {
     pub waiting_on: Vec<i64>,
     #[serde(default)]
     pub deps: Deps,
+    /// Who follows the task up: a bot (`bot:<name>`) or a person. The creator is
+    /// the actor of the `created` event.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Repos the task works in, each a worktree in its run workspace. `None`
+    /// means the project's own checkout (tasks from before repos existed).
+    #[serde(default)]
+    pub repos: Option<Vec<String>>,
+    /// Free-form labels. Filters also match the project as a label.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// Dependency edges of one task, both directions, with each other task's status.
@@ -385,6 +426,12 @@ impl Task {
             status: r.get("status")?,
             waiting_on: Vec::new(),
             deps: Deps::default(),
+            owner: r.get("owner")?,
+            repos: r
+                .get::<_, Option<String>>("repos")?
+                .map(|j| json_list(&j))
+                .transpose()?,
+            labels: json_list(&r.get::<_, String>("labels")?)?,
         })
     }
 
@@ -399,6 +446,63 @@ impl Task {
             .as_deref()
             .is_some_and(|t| t > wake_now().as_str())
     }
+}
+
+fn json_list(text: &str) -> rusqlite::Result<Vec<String>> {
+    serde_json::from_str(text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+/// Checks a repo or label name: a letter or digit, then letters, digits, `.`,
+/// `_` or `-`, at most 64 characters. Repo names are directory names in a run
+/// workspace.
+pub fn validate_name(kind: &str, name: &str) -> Result<()> {
+    let ok = name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !ok {
+        bail!("invalid {kind} {name:?}: use letters, digits, '.', '_' or '-', starting with a letter or digit, at most 64 characters");
+    }
+    Ok(())
+}
+
+/// Checks an owner: non-empty, no whitespace, at most 128 characters; `none`
+/// is reserved for clearing it.
+pub fn validate_owner(owner: &str) -> Result<()> {
+    if owner.is_empty()
+        || owner.len() > 128
+        || owner == "none"
+        || owner.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        bail!("invalid owner {owner:?}: a non-empty name without spaces (\"none\" clears it)");
+    }
+    Ok(())
+}
+
+/// Validated, de-duplicated names in their given order.
+fn names(kind: &str, list: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for n in list {
+        validate_name(kind, n)?;
+        if !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn fields_json(list: &[String]) -> String {
+    serde_json::to_string(list).expect("a string list serialises")
+}
+
+fn fields_text(list: Option<&[String]>) -> Option<String> {
+    list.map(|l| l.join(","))
 }
 
 fn dep_refs(conn: &Connection, join_on: &str, where_col: &str, id: i64) -> Result<Vec<DepRef>> {
@@ -601,20 +705,83 @@ pub fn add_linked_task(
     workload: Option<&str>,
     goal: Option<&str>,
 ) -> Result<i64> {
+    add_task_full(
+        conn,
+        actor,
+        t,
+        blocked_by,
+        workload,
+        goal,
+        &Fields::default(),
+    )
+}
+
+/// A task's owner, repos and labels (see [`Task`]).
+#[derive(Debug, Default, Clone)]
+pub struct Fields {
+    pub owner: Option<String>,
+    pub repos: Option<Vec<String>>,
+    pub labels: Vec<String>,
+}
+
+/// [`add_linked_task`] that also sets the task's [`Fields`]. Each set field is
+/// recorded as its own event after `created`.
+pub fn add_task_full(
+    conn: &mut Connection,
+    actor: &Actor,
+    t: &NewTask,
+    blocked_by: &[i64],
+    workload: Option<&str>,
+    goal: Option<&str>,
+    f: &Fields,
+) -> Result<i64> {
     validate_state(t.state)?;
     if let Some(w) = workload {
         validate_workload(w)?;
     }
+    if let Some(o) = &f.owner {
+        validate_owner(o)?;
+    }
+    let repos = f.repos.as_deref().map(|r| names("repo", r)).transpose()?;
+    let labels = names("label", &f.labels)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ts = now();
     tx.execute(
-        "INSERT INTO tasks (project, title, detail, state, created_at, updated_at, agent)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
-        params![t.project, t.title, t.detail, t.state, ts, t.agent],
+        "INSERT INTO tasks (project, title, detail, state, created_at, updated_at, agent,
+           owner, repos, labels)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            t.project,
+            t.title,
+            t.detail,
+            t.state,
+            ts,
+            t.agent,
+            f.owner,
+            repos.as_deref().map(fields_json),
+            fields_json(&labels)
+        ],
     )?;
     let id = tx.last_insert_rowid();
     let body = format!("state={}", t.state);
     write_event(&tx, actor, id, "created", None, Some(t.title), Some(&body))?;
+    if let Some(o) = &f.owner {
+        write_event(&tx, actor, id, "owner", None, Some(o), None)?;
+    }
+    if let Some(r) = &repos {
+        write_event(&tx, actor, id, "repos", None, Some(&r.join(",")), None)?;
+    }
+    if !labels.is_empty() {
+        write_event(
+            &tx,
+            actor,
+            id,
+            "labels",
+            None,
+            Some(&labels.join(",")),
+            None,
+        )?;
+    }
     if let Some(w) = workload {
         write_event(&tx, actor, id, "workload", None, Some(w), None)?;
     }
@@ -789,6 +956,9 @@ pub struct Filter<'a> {
     pub state: Option<&'a str>,
     pub project: Option<&'a str>,
     pub include_done: bool,
+    /// A label; the project counts as one.
+    pub label: Option<&'a str>,
+    pub owner: Option<&'a str>,
 }
 
 /// Lists tasks; the `state` filter matches the derived `status`, so `blocked`
@@ -801,10 +971,13 @@ pub fn list_tasks(conn: &Connection, f: &Filter) -> Result<Vec<Task>> {
              WHERE (?1 IS NULL OR status = ?1)
                AND (?2 IS NULL OR project = ?2)
                AND (?1 IS NOT NULL OR ?3 OR state != 'done')
+               AND (?4 IS NULL OR project = ?4
+                    OR EXISTS (SELECT 1 FROM json_each(labels) WHERE value = ?4))
+               AND (?5 IS NULL OR owner = ?5)
              ORDER BY id",
             task_cols()
         ),
-        params![f.state, f.project, f.include_done],
+        params![f.state, f.project, f.include_done, f.label, f.owner],
     )
 }
 
@@ -883,6 +1056,13 @@ pub struct Changes {
     pub escalation_class: Option<String>,
     /// Link the task to a goal by name, or `none` to unlink; latest wins.
     pub goal: Option<String>,
+    /// New owner, or `none` to clear it.
+    pub owner: Option<String>,
+    /// Replaces the task's repo list (an empty list is a run workspace with no
+    /// repos).
+    pub repos: Option<Vec<String>>,
+    pub add_labels: Vec<String>,
+    pub remove_labels: Vec<String>,
 }
 
 /// Applies changes inside an existing transaction. When `expect_claim` is set the
@@ -1032,6 +1212,62 @@ pub fn apply_changes(
     }
     if let Some(g) = &c.goal {
         changed |= link_goal(tx, actor, id, g)?;
+    }
+    if let Some(o) = &c.owner {
+        let to = (o != "none").then_some(o.as_str());
+        if let Some(o) = to {
+            validate_owner(o)?;
+        }
+        if to != task.owner.as_deref() {
+            tx.execute("UPDATE tasks SET owner = ?1 WHERE id = ?2", params![to, id])?;
+            write_event(tx, actor, id, "owner", task.owner.as_deref(), to, None)?;
+            changed = true;
+        }
+    }
+    if let Some(r) = &c.repos {
+        let r = names("repo", r)?;
+        if Some(&r) != task.repos.as_ref() {
+            tx.execute(
+                "UPDATE tasks SET repos = ?1 WHERE id = ?2",
+                params![fields_json(&r), id],
+            )?;
+            write_event(
+                tx,
+                actor,
+                id,
+                "repos",
+                fields_text(task.repos.as_deref()).as_deref(),
+                Some(&r.join(",")),
+                None,
+            )?;
+            changed = true;
+        }
+    }
+    if !c.add_labels.is_empty() || !c.remove_labels.is_empty() {
+        names("label", &c.remove_labels)?;
+        let mut labels = task.labels.clone();
+        labels.retain(|l| !c.remove_labels.contains(l));
+        for l in names("label", &c.add_labels)? {
+            if !labels.contains(&l) {
+                labels.push(l);
+            }
+        }
+        if labels != task.labels {
+            tx.execute(
+                "UPDATE tasks SET labels = ?1 WHERE id = ?2",
+                params![fields_json(&labels), id],
+            )?;
+            write_event(
+                tx,
+                actor,
+                id,
+                "labels",
+                Some(&task.labels.join(",")),
+                Some(&labels.join(",")),
+                None,
+            )?;
+            changed = true;
+        }
     }
     if let Some(n) = &c.note {
         write_event(tx, actor, id, "note", None, None, Some(n))?;
@@ -1295,10 +1531,21 @@ fn oldest_ready(tx: &Transaction, project: Option<&str>) -> Result<Option<(i64, 
 
 /// Escalates the task `claim_in` would pick next in `project`, without claiming
 /// it or spending run budget: its project cannot host a run yet.
+///
+/// A task with its own `repos` does not use the project checkout, so it is not
+/// held: `Claim::None` tells the caller to claim it as usual.
 pub fn hold_in(tx: &Transaction, actor: &Actor, project: &str, blocker: &str) -> Result<Claim> {
     let Some((id, _)) = oldest_ready(tx, Some(project))? else {
         return Ok(Claim::None);
     };
+    let own_repos: bool = tx.query_row(
+        "SELECT repos IS NOT NULL FROM tasks WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    if own_repos {
+        return Ok(Claim::None);
+    }
     let c = Changes {
         state: Some("escalated".into()),
         note: Some(block_note(
