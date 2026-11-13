@@ -778,8 +778,6 @@ pub fn wake_goal(body: &str) -> Option<&str> {
 
 /// The rolling window budgets are spent over.
 pub const BUDGET_WINDOW_DAYS: i64 = 7;
-/// Owner goal actions that each cost one attention unit.
-pub const ATTENTION_KINDS: [&str; 3] = ["activated", "budget", "intent"];
 
 /// The window a [`Budget`] covers, `[since, until)` in RFC3339.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -799,8 +797,8 @@ pub struct Budget {
     /// Estimated USD of the runs attributed to the goal.
     pub cost_spent: f64,
     pub attention_week: Option<i64>,
-    /// Escalation episodes and approvals on linked tasks, plus owner goal
-    /// actions (activate, budget, intent): one unit each.
+    /// Escalation episodes and approvals on linked tasks: one unit each.
+    /// Goal setup (propose, edit, activate) is not counted.
     pub attention_spent: i64,
     /// Bot runs whose wakes mix this goal with other work; not in `cost_spent`.
     pub unattributed_runs: i64,
@@ -881,8 +879,9 @@ pub fn budget(conn: &Connection, g: &Goal, now: i64) -> Result<Budget> {
 }
 
 /// Owner attention per goal in `[since, until)`: each escalation episode and
-/// approval on a task linked to the goal at the time, and each owner goal
-/// action ([`ATTENTION_KINDS`]).
+/// approval on a task linked to the goal at the time. Goal setup actions
+/// (propose, edit, activate) are the owner steering, not intervening, and are
+/// not counted.
 pub fn attention(
     conn: &Connection,
     since: i64,
@@ -922,17 +921,6 @@ pub fn attention(
         };
         if counts && in_window(&r.get::<_, String>(1)?)? {
             *out.entry(g.clone()).or_default() += 1;
-        }
-    }
-    let mut stmt = conn.prepare(&format!(
-        "SELECT g.name, e.at FROM goal_events e JOIN goals g ON g.id=e.goal_id
-         WHERE e.kind IN ({})",
-        ATTENTION_KINDS.map(|k| format!("'{k}'")).join(",")
-    ))?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        if in_window(&r.get::<_, String>(1)?)? {
-            *out.entry(r.get(0)?).or_default() += 1;
         }
     }
     Ok(out)

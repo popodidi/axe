@@ -57,7 +57,8 @@ Spend is computed on read over a rolling seven-day window; nothing is stored.
   work is reported as unattributed, and runs with unknown usage as unknown,
   never as zero.
 - **Attention** counts what the goal cost the owner: escalation episodes and
-  approvals on linked tasks, and the owner's own goal decisions.
+  approvals on linked tasks. Setting the goal up (propose, edits, activate) is
+  not counted, so a fresh goal starts at 0.
 - **The gate.** While either weekly budget is spent, linking more tasks to the
   goal is refused until the owner raises it. Nothing else is refused, and a
   goal with no budget never gates.

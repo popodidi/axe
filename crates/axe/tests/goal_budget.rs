@@ -308,11 +308,12 @@ fn pending(c: &mut Connection, id: i64) {
 }
 
 #[test]
-fn attention_counts_escalations_approvals_and_owner_goal_actions() {
+fn attention_counts_escalations_and_approvals_not_goal_setup() {
     let (_d, mut c) = setup();
-    // activate (setup) = 1
-    assert_eq!(budget(&c, "g").attention_spent, 1);
+    // propose + activate (setup) and every edit kind are free.
+    assert_eq!(budget(&c, "g").attention_spent, 0);
     edit(&mut c, "g", cost_edit("50"));
+    edit(&mut c, "g", attention_edit("4"));
     edit(
         &mut c,
         "g",
@@ -330,38 +331,38 @@ fn attention_counts_escalations_approvals_and_owner_goal_actions() {
         },
     );
     goal::record(&mut c, &human(), "g", "note", None, "trajectory is free").unwrap();
-    assert_eq!(
-        budget(&c, "g").attention_spent,
-        3,
-        "deadline and notes are free"
-    );
+    assert_eq!(budget(&c, "g").attention_spent, 0, "goal setup is free");
+    assert!(budget(&c, "g").exhausted().is_none());
 
+    // One owner-resolved escalation on a linked task counts 1.
     let linked = task(&mut c, Some("g")).unwrap();
     escalate(&mut c, linked);
-    db::approve(&mut c, &human(), linked, "abc", "main", None).unwrap();
     pending(&mut c, linked);
+    assert_eq!(budget(&c, "g").attention_spent, 1, "1 episode");
+
     escalate(&mut c, linked);
+    db::approve(&mut c, &human(), linked, "abc", "main", None).unwrap();
     let unlinked = task(&mut c, None).unwrap();
     escalate(&mut c, unlinked);
     db::approve(&mut c, &human(), unlinked, "abc", "main", None).unwrap();
     assert_eq!(
         budget(&c, "g").attention_spent,
-        6,
+        3,
         "2 episodes + 1 approval"
     );
-    assert_eq!(budget(&c, "h").attention_spent, 1);
+    assert_eq!(budget(&c, "h").attention_spent, 0);
 
     // Work before a task was linked is not the goal's.
     set_goal(&mut c, unlinked, "h").unwrap();
-    assert_eq!(budget(&c, "h").attention_spent, 1);
+    assert_eq!(budget(&c, "h").attention_spent, 0);
 
     // Events outside the window do not count.
     c.execute(
-        "UPDATE goal_events SET at=?1 WHERE kind='activated'",
-        [ts(now() - 8 * DAY)],
+        "UPDATE events SET at=?1 WHERE task_id=?2 AND kind='approval'",
+        params![ts(now() - 8 * DAY), linked],
     )
     .unwrap();
-    assert_eq!(budget(&c, "g").attention_spent, 5);
+    assert_eq!(budget(&c, "g").attention_spent, 2);
 }
 
 fn refused(r: anyhow::Result<impl std::fmt::Debug>, want: &str) {
@@ -395,9 +396,11 @@ fn a_spent_budget_refuses_new_linked_tasks_until_raised() {
     task(&mut c, Some("g")).unwrap();
     set_goal(&mut c, free, "g").unwrap();
 
-    // Attention: activate + one budget edit = 2 of 2.
-    edit(&mut c, "h", attention_edit("2"));
-    refused(task(&mut c, Some("h")), "attention 2 of 2");
+    // Attention: setting the budget costs nothing; one escalation spends 1 of 1.
+    edit(&mut c, "h", attention_edit("1"));
+    let on_h = task(&mut c, Some("h")).unwrap();
+    escalate(&mut c, on_h);
+    refused(task(&mut c, Some("h")), "attention 1 of 1");
     edit(&mut c, "h", attention_edit("5"));
     task(&mut c, Some("h")).unwrap();
     edit(&mut c, "h", attention_edit("none"));
@@ -424,11 +427,11 @@ fn cli_shows_spend_and_reports_the_gate() {
     let show: Value = srv.get("/api/goals/g");
     assert_eq!(show["budget"]["cost_week"], 1.0);
     assert_eq!(show["budget"]["cost_spent"], 2.5);
-    assert_eq!(show["budget"]["attention_spent"], 1);
+    assert_eq!(show["budget"]["attention_spent"], 0);
     assert_eq!(show["budget"]["window"]["days"], 7);
     let text = srv.ok(&["goal", "show", "g"]);
     assert!(
-        text.contains("spent (last 7 days): cost $2.50  attention 1"),
+        text.contains("spent (last 7 days): cost $2.50  attention 0"),
         "{text}"
     );
     assert!(text.contains("over budget: cost $2.50 of $1.00"), "{text}");
