@@ -81,6 +81,7 @@ export const detail: GoalDetail = {
   tasks: [
     { id: 3, state: "in_progress", title: "Make dashboard Overview a desk page" },
     { id: 4, state: "pending", title: "Verify Lark reply ledger fix" },
+    { id: 2, state: "done", title: "Cache the dependency build" },
     { id: 8, state: "done", title: "Close out shipped dashboard rebuild" },
   ],
   // The detail route returns the latest 10; the page reads the full trajectory.

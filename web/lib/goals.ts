@@ -73,6 +73,13 @@ export function attentionMeter(g: Goal): Meter {
 export function openTasks(tasks: GoalTask[]) {
   return tasks.filter((t) => !closedTaskStates.includes(t.state));
 }
+/** Every linked task: open ones first, then closed ones, newest (highest id) first. */
+export function linkedTasks(tasks: GoalTask[]) {
+  const closed = tasks
+    .filter((t) => closedTaskStates.includes(t.state))
+    .sort((a, b) => b.id - a.id);
+  return [...openTasks(tasks), ...closed];
+}
 /** Goals matching the list's project filter and search (`q`). */
 export function selectGoals(goals: Goal[], params: URLSearchParams) {
   const q = (params.get("q") || "").toLowerCase();

@@ -23,6 +23,7 @@ import {
   attentionMeter,
   costMeter,
   deadline,
+  linkedTasks,
   openTasks,
   selectGoals,
   usd,
@@ -204,6 +205,7 @@ export function GoalDetailPage({
   const d = detail?.goal.name === name ? detail : null;
   const g = d?.goal;
   const open = g ? openTasks(g.tasks) : [];
+  const linked = g ? linkedTasks(g.tasks) : [];
   return (
     <section className={styles.stack} id="goal-detail" aria-label="Goal detail">
       <header className={styles.header}>
@@ -287,15 +289,15 @@ export function GoalDetailPage({
               <p className={styles.note}>None</p>
             )}
           </section>
-          <Panel aria-label="Open tasks">
+          <Panel aria-label="Linked tasks">
             <PanelHead
-              label="Open tasks"
+              label="Linked tasks"
               meta={`${open.length} open · ${g.tasks.length} linked`}
             />
-            {open.length ? (
+            {linked.length ? (
               <Table>
                 <tbody>
-                  {open.map((t) => (
+                  {linked.map((t) => (
                     <tr
                       key={t.id}
                       id={"goal-task-" + t.id}
@@ -325,7 +327,7 @@ export function GoalDetailPage({
                 </tbody>
               </Table>
             ) : (
-              <EmptyState>No open linked tasks</EmptyState>
+              <EmptyState>No linked tasks</EmptyState>
             )}
           </Panel>
           <section className={styles.block} aria-label="Trajectory">

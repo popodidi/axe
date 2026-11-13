@@ -3,6 +3,7 @@ import {
   attentionMeter,
   costMeter,
   deadline,
+  linkedTasks,
   openTasks,
   selectGoals,
   type Goal,
@@ -72,6 +73,16 @@ describe("goal lists", () => {
         { id: 2, state: "escalated", title: "b" },
       ]).map((t) => t.id),
     ).toEqual([2]);
+  });
+  it("lists every linked task, open first then done newest first", () => {
+    expect(
+      linkedTasks([
+        { id: 1, state: "done", title: "a" },
+        { id: 2, state: "escalated", title: "b" },
+        { id: 3, state: "done", title: "c" },
+        { id: 4, state: "pending", title: "d" },
+      ]).map((t) => t.id),
+    ).toEqual([2, 4, 3, 1]);
   });
   it("shows a date deadline as is", () => {
     expect(deadline("2026-12-01")).toBe("2026-12-01");
