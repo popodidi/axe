@@ -8,6 +8,14 @@
 //! - a folder with a `SKILL.md` is a skill, named by its last path segment;
 //! - any other folder is a bundle, and a single file is a doc.
 //!
+//! A bundle may hold a `prompt.md`: text a bot carries in its system prompt
+//! (the bot protocol, a channel protocol, a role). For a bot run, the prompt
+//! parts of its included bundles are inlined before its identity, ordered by
+//! the `order:` front matter of each `prompt.md` (default 0), then path
+//! ([`bot_prompt_parts`]); the bundle is then not listed again in the index.
+//! The front matter `description:` describes the bundle. Task runs list
+//! bundles like any other.
+//!
 //! Two candidates conflict when they would take the same place in the run: a
 //! skill name, or the same path attached to more than one scope. One wins and
 //! the others are shadowed, in this order:
@@ -31,6 +39,9 @@ use serde_json::Value;
 
 use crate::client::Client;
 use crate::doc::{self, Attachment, Scope};
+
+/// The file of a bundle that a bot inlines into its system prompt.
+pub const BUNDLE_PROMPT: &str = "prompt.md";
 
 /// What a run's context is read from: the server (`Client`) or a store.
 pub trait Source {
@@ -145,6 +156,10 @@ pub struct Item {
     pub own: bool,
     pub included: bool,
     pub reason: String,
+    /// A bundle's prompt part (its `prompt.md` without front matter) and
+    /// order; bots inline it.
+    #[serde(skip)]
+    pub prompt: Option<(i64, String)>,
 }
 
 /// A repo's own skill (`repos/<repo>/.agents/skills/<name>`).
@@ -206,10 +221,11 @@ pub fn resolve(source: &dyn Source, scopes: &[Scope], own: &[OwnSkill]) -> Resul
                 own: true,
                 included: false,
                 reason: String::new(),
+                prompt: None,
             },
         ));
     }
-    let mut cache: BTreeMap<String, Result<(Kind, String), String>> = BTreeMap::new();
+    let mut cache: BTreeMap<String, Result<Described, String>> = BTreeMap::new();
     for (r, a) in attached {
         let mut item = Item {
             kind: Kind::Doc,
@@ -220,6 +236,7 @@ pub fn resolve(source: &dyn Source, scopes: &[Scope], own: &[OwnSkill]) -> Resul
             own: false,
             included: false,
             reason: String::new(),
+            prompt: None,
         };
         if !a.exists {
             item.reason = format!("attached to {} but no longer exists", a.scope);
@@ -230,9 +247,10 @@ pub fn resolve(source: &dyn Source, scopes: &[Scope], own: &[OwnSkill]) -> Resul
             .entry(a.path.clone())
             .or_insert_with(|| describe(source, &a.path).map_err(|e| format!("{e:#}")));
         match got {
-            Ok((kind, description)) => {
+            Ok((kind, description, prompt)) => {
                 item.kind = *kind;
                 item.description = description.clone();
+                item.prompt = prompt.clone();
                 if *kind == Kind::Skill {
                     item.name = a.path.rsplit('/').next().unwrap_or(&a.path).to_string();
                 }
@@ -290,20 +308,66 @@ pub fn resolve(source: &dyn Source, scopes: &[Scope], own: &[OwnSkill]) -> Resul
     })
 }
 
+/// Kind, description and, for a bundle with a `prompt.md`, its prompt part.
+type Described = (Kind, String, Option<(i64, String)>);
+
 /// The kind and description of a stored doc or folder. A doc's description
 /// is its front matter `description`, else its first heading; a skill's is
-/// its `SKILL.md` front matter.
-fn describe(source: &dyn Source, path: &str) -> Result<(Kind, String)> {
+/// its `SKILL.md` front matter; a bundle's is its `prompt.md` front matter,
+/// else its file count.
+fn describe(source: &dyn Source, path: &str) -> Result<Described> {
     Ok(match source.get(path)? {
-        Fetched::Doc(text) => (Kind::Doc, doc_description(&text)),
-        Fetched::Folder(files) => match files.iter().find(|f| f.path == "SKILL.md") {
-            Some(f) => (
-                Kind::Skill,
-                frontmatter(&f.content, "description").unwrap_or_default(),
-            ),
-            None => (Kind::Bundle, format!("{} files", files.len())),
-        },
+        Fetched::Doc(text) => (Kind::Doc, doc_description(&text), None),
+        Fetched::Folder(files) => {
+            if let Some(f) = files.iter().find(|f| f.path == "SKILL.md") {
+                (
+                    Kind::Skill,
+                    frontmatter(&f.content, "description").unwrap_or_default(),
+                    None,
+                )
+            } else if let Some(f) = files.iter().find(|f| f.path == BUNDLE_PROMPT) {
+                let order = match frontmatter(&f.content, "order") {
+                    None => 0,
+                    Some(o) => o.parse().with_context(|| {
+                        format!("{path}/{BUNDLE_PROMPT}: order {o:?} is not an integer")
+                    })?,
+                };
+                (
+                    Kind::Bundle,
+                    frontmatter(&f.content, "description")
+                        .unwrap_or_else(|| format!("{} files", files.len())),
+                    Some((order, strip_frontmatter(&f.content).to_string())),
+                )
+            } else {
+                (Kind::Bundle, format!("{} files", files.len()), None)
+            }
+        }
     })
+}
+
+/// A Markdown file's text after its YAML front matter, if any.
+pub fn strip_frontmatter(text: &str) -> &str {
+    text.strip_prefix("---\n")
+        .and_then(|body| {
+            let end = body.find("\n---\n")?;
+            Some(&body[end + "\n---\n".len()..])
+        })
+        .unwrap_or(text)
+}
+
+/// The prompt parts of the included attached bundles, in order (`order:`,
+/// then path): what a bot inlines into its system prompt.
+pub fn bot_prompt_parts(res: &Resolution) -> Vec<String> {
+    let mut parts: Vec<(i64, &str, &str)> = res
+        .attached(Kind::Bundle)
+        .filter_map(|i| {
+            i.prompt
+                .as_ref()
+                .map(|(o, t)| (*o, i.path.as_str(), t.as_str()))
+        })
+        .collect();
+    parts.sort();
+    parts.into_iter().map(|(_, _, t)| t.to_string()).collect()
 }
 
 fn doc_description(text: &str) -> String {
@@ -401,11 +465,18 @@ pub fn skills_lines(res: &Resolution, prefix: &str) -> String {
 }
 
 /// A prompt section listing what is attached, for runs without a run folder
-/// (bots); empty when nothing is.
+/// (bots); empty when nothing is. Bundles whose prompt part the bot inlines
+/// ([`bot_prompt_parts`]) are not listed again.
 pub fn prompt_section(res: &Resolution) -> String {
-    if res.is_empty() {
+    let inlined = |i: &Item| i.included && !i.own && i.prompt.is_some();
+    if res.items.iter().all(|i| !i.included || i.own || inlined(i)) {
         return String::new();
     }
+    let listed = Resolution {
+        scopes: res.scopes.clone(),
+        items: res.items.iter().filter(|i| !inlined(i)).cloned().collect(),
+    };
+    let res = &listed;
     let mut s = String::from(
         "\n# Attached knowledge\n\nGenerated by axe from the docs attached to this run's scopes. \
          Bodies stay in the axe doc store: load one with `axe doc get <path>` when you need it.\n",
@@ -747,6 +818,84 @@ mod tests {
             Fetched::Folder(f) => assert!(f[0].content.contains("SECRET-SKILL-BODY")),
             Fetched::Doc(_) => panic!("folder"),
         }
+    }
+
+    #[test]
+    fn bundle_prompts_are_ordered_inlined_and_not_listed_again() {
+        let (_d, s) = store();
+        let bundle = |path: &str, prompt: &str| {
+            let files = vec![
+                File {
+                    path: BUNDLE_PROMPT.into(),
+                    content: prompt.into(),
+                },
+                File {
+                    path: "ref.md".into(),
+                    content: "reference\n".into(),
+                },
+            ];
+            s.put(path, &Body::Folder(files), None, "t", "m").unwrap();
+        };
+        bundle(
+            "b/chan",
+            "---\ndescription: The channel\norder: 20\n---\n## Channel\nC\n",
+        );
+        bundle("b/proto", "---\norder: 10\n---\n# Protocol\nP\n");
+        bundle("b/plain", "# No front matter\n");
+        put_doc(&s, "b/other/a.md", "a\n");
+        attach(&s, "b/chan", "global");
+        attach(&s, "b/proto", "owner:bot:b");
+        attach(&s, "b/plain", "label:proj");
+        attach(&s, "b/other", "global");
+        let r = resolve(&s, &task_like(), &[]).unwrap();
+        assert_eq!(
+            bot_prompt_parts(&r),
+            ["# No front matter\n", "# Protocol\nP\n", "## Channel\nC\n"],
+            "order 0, 10, 20; front matter stripped"
+        );
+        assert_eq!(find(&r, "b/chan", "global").description, "The channel");
+        assert_eq!(find(&r, "b/proto", "owner:bot:b").description, "2 files");
+        let prompt = prompt_section(&r);
+        assert!(
+            prompt.contains("- bundle `b/other` (global): 1 files\n"),
+            "{prompt}"
+        );
+        for inlined in ["b/chan", "b/proto", "b/plain"] {
+            assert!(!prompt.contains(inlined), "{prompt}");
+        }
+        // Task runs list every bundle; explain shows them all.
+        let docs = docs_section(&r);
+        assert!(
+            docs.contains("- bundle `b/chan` (global): The channel\n"),
+            "{docs}"
+        );
+        assert_eq!(explain(&r).lines().count(), 5);
+
+        // Only inlined bundles attached: no listing at all.
+        s.attach("b/other", &Scope::parse("global").unwrap(), false, "t")
+            .unwrap();
+        let r = resolve(&s, &task_like(), &[]).unwrap();
+        assert_eq!(bot_prompt_parts(&r).len(), 3);
+        assert_eq!(prompt_section(&r), "");
+
+        // A bad order is reported, not guessed.
+        bundle("b/bad", "---\norder: soon\n---\nX\n");
+        attach(&s, "b/bad", "global");
+        let r = resolve(&s, &task_like(), &[]).unwrap();
+        assert!(find(&r, "b/bad", "global")
+            .reason
+            .contains("order \"soon\" is not an integer"));
+        assert_eq!(bot_prompt_parts(&r).len(), 3);
+    }
+
+    #[test]
+    fn strip_frontmatter_keeps_text_without_one() {
+        assert_eq!(strip_frontmatter("---\na: b\n---\nbody\n"), "body\n");
+        assert_eq!(strip_frontmatter("body\n---\n"), "body\n---\n");
+        assert_eq!(
+            strip_frontmatter("---\nunterminated\n"),
+            "---\nunterminated\n"
+        );
     }
 
     #[test]

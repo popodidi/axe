@@ -16,7 +16,8 @@ tasks:
 - one wake queue that merges self-wakes, named schedules, task events and
   Telegram messages;
 - identity and a code of conduct, held on the server and delivered as the
-  system prompt;
+  system prompt, after the prompt parts of its attached bundles (the bot
+  protocol and channel protocols, `bundles/` and `context.rs`);
 - notes the bot reads and edits through the CLI.
 
 Telegram is the main interface. Heavy work is still offloaded to tasks and
@@ -51,7 +52,7 @@ with several objectives is bad for focus (2026-11-09).
 
 | Content | Channel | Why |
 |---|---|---|
-| Bot protocol (static, shipped in axe), identity, conduct | System prompt, rendered on every spawn | They change rarely. In the system prompt they survive compaction, are never resent as conversation text and keep the prompt cache warm |
+| Bot protocol (attached bundles, `bundles/`), identity, conduct | System prompt, rendered on every spawn | They change rarely. In the system prompt they survive compaction, are never resent as conversation text and keep the prompt cache warm |
 | Owner preferences and standing rules | The conduct's "Owner preferences" section | They must apply on every run. The bot records one the moment the owner states it, citing the message |
 | Wakes | User prompt of each run | The only content that is new on each wake |
 | Notes: working state (commitments, follow-ups, lessons) | CLI (`axe bot notes`) | They change often; in the system prompt every edit would break the cache, and resending them would bloat context. A fresh session reads them first |

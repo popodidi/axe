@@ -408,7 +408,8 @@ fn a_bots_own_actions_do_not_reach_it() {
 
 #[test]
 fn protocol_states_the_triage_rules() {
-    assert!(bot::PROTOCOL.contains("Triage it"));
-    assert!(bot::PROTOCOL.contains("never clear an escalation"));
-    assert!(bot::PROTOCOL.contains("Never relay `new` or `done`"));
+    let protocol = include_str!("../../../bundles/axe-bot/prompt.md");
+    assert!(protocol.contains("Triage it"));
+    assert!(protocol.contains("never clear an escalation"));
+    assert!(protocol.contains("Never relay `new` or `done`"));
 }

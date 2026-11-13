@@ -192,7 +192,15 @@ index entry `skills/<name>/SKILL.md` (found through `.claude/skills` and
 `.agents/skills`), each doc a line in `docs/index.md`; bodies load on use with
 `axe doc get <path>`. A bot's system prompt lists what is attached to
 `owner:bot:<name>`, its project and `global`. Nothing attached means nothing
-changes. `axe context explain <task>` prints each candidate, its scope and why
+changes.
+
+**Bundles.** A bundle's `prompt.md` is text a bot carries in its system
+prompt: the bot inlines it, ordered by its `order:` front matter, before its
+identity and conduct. The bot protocol and the Telegram channel protocol ship
+as bundles in [`bundles/`](bundles/README.md); load and attach them
+(`axe doc put bundles/axe-bot bundles/axe-bot`, then `axe doc attach`) to give
+bots the protocol. A bot with no bundles runs on its identity and conduct
+alone. `axe context explain <task>` prints each candidate, its scope and why
 it was included or skipped (`context.rs`).
 
 ## Configuration

@@ -127,13 +127,16 @@ impl Dispatcher {
         let dir = self.cfg.log_dir().join("bots").join(&b.name);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let system_file = dir.join("system.md");
-        // Docs attached to the bot (owner `bot:<name>`), its project and global.
+        // Docs attached to the bot (owner `bot:<name>`), its project and global:
+        // bundles with a prompt part (the bot protocol, a channel) are inlined,
+        // everything else is listed.
         let attached = crate::context::resolve_or_empty(
             &self.store.client,
             &crate::context::bot_scopes(&b.name, &b.project),
             &[],
         );
-        let system = bot::system_prompt(b) + &crate::context::prompt_section(&attached);
+        let system = bot::system_prompt(b, &crate::context::bot_prompt_parts(&attached))
+            + &crate::context::prompt_section(&attached);
         std::fs::write(&system_file, system)
             .with_context(|| format!("write {}", system_file.display()))?;
         let settings_file = dir.join("settings.json");
