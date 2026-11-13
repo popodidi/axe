@@ -413,3 +413,199 @@ fn protocol_states_the_triage_rules() {
     assert!(protocol.contains("never clear an escalation"));
     assert!(protocol.contains("Never relay `new` or `done`"));
 }
+
+const FOLLOW: i64 = sub::FOLLOW_BATCH_SECONDS;
+
+fn own(c: &mut Connection, id: i64, owner: &str) {
+    let ch = Changes {
+        owner: Some(owner.into()),
+        ..Default::default()
+    };
+    assert!(db::set_task(c, &who(), id, &ch).unwrap());
+}
+
+fn watch(c: &mut Connection, task: i64) -> sub::Subscription {
+    let ch = Change {
+        task: Some(task),
+        ..Default::default()
+    };
+    sub::subscribe(c, &who(), "b", &ch, "following", epoch()).unwrap()
+}
+
+#[test]
+fn owned_done_wakes_on_the_follow_batch_and_unrelated_done_only_rides() {
+    let (_d, _p, mut c) = rig();
+    let ch = Change {
+        owned: Some(vec!["done".into(), "escalated".into()]),
+        ..Default::default()
+    };
+    let s = sub::subscribe(&mut c, &who(), "b", &ch, "follow mine", epoch()).unwrap();
+    assert_eq!(s.wake, ["escalated"]);
+    assert_eq!(s.owned, ["done", "escalated"]);
+    assert_eq!(s.ride, ["new", "done"]);
+    assert_eq!(sub::list(&c, "b").unwrap(), vec![s]);
+
+    let other = add(&mut c, "a", &who());
+    set(&mut c, other, "done", &who());
+    assert!(!ready(&c, PAST_BATCH), "unrelated done only rides along");
+
+    let mine = add(&mut c, "a", &who());
+    own(&mut c, mine, "bot:b");
+    set(&mut c, mine, "done", &who());
+    assert!(!ready(&c, 0));
+    let run = claim(&mut c, epoch() + FOLLOW + 2).expect("owned done wakes");
+    let body = bodies(&run);
+    assert!(
+        body.contains(&format!("#{mine} a done: a task title")),
+        "{body}"
+    );
+    assert!(!body.contains(&format!("#{other} a done:")), "{body}");
+}
+
+#[test]
+fn owned_events_follow_the_owner_and_skip_other_bots_tasks() {
+    let (_d, _p, mut c) = rig();
+    let ch = Change {
+        owned: Some(vec!["done".into()]),
+        ..Default::default()
+    };
+    sub::subscribe(&mut c, &who(), "b", &ch, "follow mine", epoch()).unwrap();
+    let theirs = add(&mut c, "a", &who());
+    own(&mut c, theirs, "bot:other");
+    set(&mut c, theirs, "done", &who());
+    let in_z = add(&mut c, "z", &who());
+    own(&mut c, in_z, "bot:b");
+    set(&mut c, in_z, "done", &who());
+    assert!(
+        !ready(&c, PAST_BATCH),
+        "another owner, or an unsubscribed project"
+    );
+    let mine = add(&mut c, "a", &who());
+    own(&mut c, mine, "bot:b");
+    set(&mut c, mine, "done", &Actor::new("bot:b"));
+    assert!(!ready(&c, PAST_BATCH), "never told about its own actions");
+}
+
+#[test]
+fn a_watched_task_wakes_on_the_follow_batch_and_the_watch_drops_at_done() {
+    let (_d, _p, mut c) = rig();
+    let watched = add(&mut c, "z", &who());
+    let w = watch(&mut c, watched);
+    assert_eq!(w.task, Some(watched));
+    assert_eq!(w.project, format!("#{watched}"));
+    assert_eq!(w.wake, sub::WATCH_EVENTS);
+    assert_eq!(w.batch_seconds, FOLLOW);
+    let ev = bot::events(&c, "b", 5).unwrap();
+    assert!(ev.iter().any(|e| e.kind == "watch"), "{ev:?}");
+
+    let unrelated = add(&mut c, "z", &who());
+    set(&mut c, unrelated, "done", &who());
+    set(&mut c, watched, "in_progress", &who());
+    assert!(
+        !ready(&c, PAST_BATCH),
+        "no wake for unrelated or unfollowed events"
+    );
+
+    set(&mut c, watched, "done", &who());
+    assert!(!ready(&c, 0));
+    let run = claim(&mut c, epoch() + FOLLOW + 2).expect("watched done wakes");
+    let body = bodies(&run);
+    assert!(
+        body.contains(&format!("#{watched} z done: a task title")),
+        "{body}"
+    );
+    assert!(!body.contains(&format!("#{unrelated} ")), "{body}");
+    done(&c, run.run);
+
+    assert!(sub::list(&c, "b").unwrap().is_empty(), "dropped at done");
+    let ev = bot::events(&c, "b", 10).unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| e.kind == "unwatch" && e.actor == "axe" && e.body.contains("task done")),
+        "{ev:?}"
+    );
+    set(&mut c, watched, "pending", &who());
+    set(&mut c, watched, "escalated", &who());
+    assert!(!ready(&c, PAST_BATCH), "no longer followed");
+}
+
+#[test]
+fn a_watch_overrides_project_rules_only_for_its_events() {
+    let (_d, _p, mut c) = rig();
+    subscribe_default(&mut c);
+    let watched = add(&mut c, "a", &who());
+    watch(&mut c, watched);
+    // `blocked` wakes through the watch, not the project's ride-along rules.
+    set(&mut c, watched, "blocked", &who());
+    let run = claim(&mut c, epoch() + FOLLOW + 2).expect("blocked wakes");
+    assert_eq!(batches(&run), 1, "{:?}", run.wakes);
+    assert!(bodies(&run).contains(&format!("#{watched} a blocked")));
+}
+
+#[test]
+fn follow_joins_an_open_project_batch_and_pulls_it_forward() {
+    let (_d, _p, mut c) = rig();
+    subscribe_default(&mut c);
+    let esc = escalated(&mut c, "a");
+    let watched = add(&mut c, "z", &who());
+    watch(&mut c, watched);
+    set(&mut c, watched, "done", &who());
+    let run = claim(&mut c, epoch() + FOLLOW + 2).expect("one run");
+    assert_eq!(batches(&run), 1, "{:?}", run.wakes);
+    let body = bodies(&run);
+    assert!(body.contains(&format!("#{esc} a escalated")), "{body}");
+    assert!(body.contains(&format!("#{watched} z done")), "{body}");
+}
+
+#[test]
+fn watch_validation_and_unwatch() {
+    let (_d, _p, mut c) = rig();
+    let t = add(&mut c, "a", &who());
+    let bad = [
+        Change {
+            task: Some(9999),
+            ..Default::default()
+        },
+        Change {
+            task: Some(t),
+            project: Some("a".into()),
+            ..Default::default()
+        },
+        Change {
+            task: Some(t),
+            owned: Some(vec!["done".into()]),
+            ..Default::default()
+        },
+        Change {
+            task: Some(t),
+            wake: Some(vec![]),
+            ..Default::default()
+        },
+        Change {
+            project: Some("#5".into()),
+            ..Default::default()
+        },
+        Change {
+            owned: Some(vec!["bogus".into()]),
+            ..Default::default()
+        },
+    ];
+    for b in &bad {
+        assert!(
+            sub::subscribe(&mut c, &who(), "b", b, "x", epoch()).is_err(),
+            "{b:?}"
+        );
+    }
+    watch(&mut c, t);
+    assert!(sub::unsubscribe(&mut c, &who(), "b", Some(&format!("#{t}")), "x").is_err());
+    sub::unwatch(&mut c, &who(), "b", t, "no longer needed").unwrap();
+    assert!(sub::unwatch(&mut c, &who(), "b", t, "again").is_err());
+    assert!(sub::list(&c, "b").unwrap().is_empty());
+    set(&mut c, t, "done", &who());
+    let ch = Change {
+        task: Some(t),
+        ..Default::default()
+    };
+    let err = sub::subscribe(&mut c, &who(), "b", &ch, "x", epoch()).unwrap_err();
+    assert!(err.to_string().contains("already done"), "{err}");
+}

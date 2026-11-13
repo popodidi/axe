@@ -91,7 +91,8 @@ Dispatcher task sessions cannot approve their own task. Run `axe --help` and
 
 Bots are a separate primitive with their own commands under `axe bot`
 (and `axe bot tg` for the Telegram gateway); see `axe bot --help` and
-`axe bot tg --help`.
+`axe bot tg --help`. A bot follows a task with `axe bot watch <task>`, or all
+tasks it owns with `axe bot subscribe --owned-wake done,escalated`.
 
 Bots pursuing goals: see [references/goals.md](references/goals.md).
 

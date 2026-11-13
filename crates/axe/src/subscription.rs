@@ -2,6 +2,10 @@
 //! bots in the same transaction, so a restart can neither lose nor repeat one.
 //! Wake events join the bot's one open batch, an ordinary `bot_wakes` row, and
 //! inherit its delivery rules. Ride-along events only wait for the next run.
+//! A bot can also follow single tasks: `owned` events on the tasks it owns
+//! (per project subscription) and a watch list of other tasks, both on a short
+//! batch. A watch is a row whose `project` is `#<task id>`, so following needs
+//! no table of its own.
 //! Design: `docs/design/bots.md`.
 use std::collections::BTreeMap;
 
@@ -19,6 +23,14 @@ pub const ALL_PROJECTS: &str = "*";
 pub const DEFAULT_BATCH_SECONDS: i64 = 300;
 pub const MIN_BATCH_SECONDS: i64 = 60;
 pub const MAX_BATCH_SECONDS: i64 = 86_400;
+/// Batch period for followed tasks (owned or watched), unless a watch sets one.
+pub const FOLLOW_BATCH_SECONDS: i64 = 60;
+/// Events a new watch wakes on.
+pub const WATCH_EVENTS: [&str; 3] = ["done", "escalated", "blocked"];
+/// A watch row's `project` is this prefix and the task id.
+pub const WATCH_PREFIX: &str = "#";
+/// Owned events share the `wake_events` list, tagged with this prefix.
+const OWNED_TAG: &str = "owned:";
 /// Task lines one batch lists before collapsing the rest to ids.
 const BATCH_LINE_CAP: usize = 50;
 const BATCH_MORE_IDS: usize = 20;
@@ -31,10 +43,17 @@ const WHY_CAP: usize = 1024;
 pub const BATCH_PREFIX: &str = "sub:";
 pub const RIDE_PREFIX: &str = "ride:";
 
+/// A project subscription (`project` is a name or `*`), or a watch on one
+/// task (`task` is set and `project` is `#<task>`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Subscription {
     pub project: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<i64>,
     pub wake: Vec<String>,
+    /// Events on tasks the bot owns that wake it on the follow batch.
+    #[serde(default)]
+    pub owned: Vec<String>,
     pub ride: Vec<String>,
     pub batch_seconds: i64,
     pub created_at: String,
@@ -42,17 +61,26 @@ pub struct Subscription {
 }
 
 /// `None` keeps the stored value, or takes the default on a new subscription.
-/// A `project` of `None` means the bot's own project.
+/// A `project` of `None` means the bot's own project. A `task` makes it a
+/// watch on that task instead (no `project`, `owned` or `ride`).
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct Change {
     pub project: Option<String>,
+    #[serde(default)]
+    pub task: Option<i64>,
     pub wake: Option<Vec<String>>,
+    #[serde(default)]
+    pub owned: Option<Vec<String>>,
     pub ride: Option<Vec<String>>,
     pub batch_seconds: Option<i64>,
 }
 
 fn check_project(project: &str) -> Result<()> {
-    if project.is_empty() || project.len() > 128 || project.chars().any(char::is_whitespace) {
+    if project.is_empty()
+        || project.len() > 128
+        || project.starts_with(WATCH_PREFIX)
+        || project.chars().any(char::is_whitespace)
+    {
         bail!("invalid project {project:?}");
     }
     Ok(())
@@ -93,10 +121,26 @@ fn stored(conn: &Connection, bot: i64, project: &str) -> Result<Option<Subscript
         .optional()?)
 }
 
+fn watch_key(task: i64) -> String {
+    format!("{WATCH_PREFIX}{task}")
+}
+
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Subscription> {
+    let project: String = r.get(0)?;
+    let task = project
+        .strip_prefix(WATCH_PREFIX)
+        .and_then(|t| t.parse().ok());
+    let (owned, wake): (Vec<String>, Vec<String>) = parse_list(r.get(1)?)
+        .into_iter()
+        .partition(|e| e.starts_with(OWNED_TAG));
     Ok(Subscription {
-        project: r.get(0)?,
-        wake: parse_list(r.get(1)?),
+        project,
+        task,
+        wake,
+        owned: owned
+            .iter()
+            .map(|e| e[OWNED_TAG.len()..].to_string())
+            .collect(),
         ride: parse_list(r.get(2)?),
         batch_seconds: r.get(3)?,
         created_at: r.get(4)?,
@@ -109,7 +153,7 @@ pub fn list(conn: &Connection, name: &str) -> Result<Vec<Subscription>> {
     Ok(conn
         .prepare(
             "SELECT project, wake_events, ride_events, batch_seconds, created_at, updated_at
-             FROM bot_subscriptions WHERE bot_id=?1 ORDER BY project",
+             FROM bot_subscriptions WHERE bot_id=?1 ORDER BY project LIKE '#%', project",
         )?
         .query_map([b.id], row)?
         .collect::<rusqlite::Result<_>>()?)
@@ -127,6 +171,11 @@ pub fn subscribe(
     check_why(why)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = bot::get(&tx, name)?;
+    if let Some(task) = c.task {
+        let new = watch(&tx, actor, &b, task, c, why, now)?;
+        tx.commit()?;
+        return Ok(new);
+    }
     let project = c.project.clone().unwrap_or_else(|| b.project.clone());
     check_project(&project)?;
     let old = stored(&tx, b.id, &project)?;
@@ -140,8 +189,13 @@ pub fn subscribe(
         (None, Some(o)) => o.ride.clone(),
         (None, None) => vec!["new".to_string(), "done".to_string()],
     };
-    if wake.is_empty() && ride.is_empty() {
-        bail!("a subscription needs at least one wake or ride event");
+    let owned = match (&c.owned, &old) {
+        (Some(v), _) => clean_events("owned", v)?,
+        (None, Some(o)) => o.owned.clone(),
+        (None, None) => vec![],
+    };
+    if wake.is_empty() && ride.is_empty() && owned.is_empty() {
+        bail!("a subscription needs at least one wake, owned or ride event");
     }
     if let Some(e) = wake.iter().find(|e| ride.contains(e)) {
         bail!("event {e:?} cannot both wake and ride along");
@@ -163,7 +217,12 @@ pub fn subscribe(
         params![
             b.id,
             project,
-            json!(wake).to_string(),
+            json!(wake
+                .iter()
+                .cloned()
+                .chain(owned.iter().map(|e| format!("{OWNED_TAG}{e}")))
+                .collect::<Vec<_>>())
+            .to_string(),
             json!(ride).to_string(),
             batch,
             at
@@ -175,12 +234,105 @@ pub fn subscribe(
         b.id,
         actor,
         "subscribe",
-        &json!({"project":project,"wake":wake,"ride":ride,"batch_seconds":batch,"why":why,
-            "previous":old})
+        &json!({"project":project,"wake":wake,"owned":owned,"ride":ride,"batch_seconds":batch,
+            "why":why,"previous":old})
         .to_string(),
     )?;
     tx.commit()?;
     Ok(new)
+}
+
+/// Creates or changes a watch on one task, inside the caller's transaction.
+fn watch(
+    tx: &Connection,
+    actor: &Actor,
+    b: &bot::Bot,
+    task: i64,
+    c: &Change,
+    why: &str,
+    now: i64,
+) -> Result<Subscription> {
+    if c.project.is_some() || c.owned.is_some() || c.ride.as_ref().is_some_and(|r| !r.is_empty()) {
+        bail!("a task watch takes only wake events and a batch");
+    }
+    let state: Option<String> = tx
+        .query_row("SELECT state FROM tasks WHERE id=?1", [task], |r| r.get(0))
+        .optional()?;
+    match state.as_deref() {
+        None => bail!("no task #{task}"),
+        Some("done") => bail!("task #{task} is already done"),
+        Some(_) => {}
+    }
+    let key = watch_key(task);
+    let old = stored(tx, b.id, &key)?;
+    let wake = match (&c.wake, &old) {
+        (Some(v), _) => clean_events("wake", v)?,
+        (None, Some(o)) => o.wake.clone(),
+        (None, None) => WATCH_EVENTS.iter().map(|e| e.to_string()).collect(),
+    };
+    if wake.is_empty() {
+        bail!("a task watch needs at least one wake event");
+    }
+    let batch = c
+        .batch_seconds
+        .or(old.as_ref().map(|o| o.batch_seconds))
+        .unwrap_or(FOLLOW_BATCH_SECONDS);
+    if !(MIN_BATCH_SECONDS..=MAX_BATCH_SECONDS).contains(&batch) {
+        bail!("batch must be {MIN_BATCH_SECONDS}-{MAX_BATCH_SECONDS} seconds, got {batch}");
+    }
+    let at = ts(now);
+    tx.execute(
+        "INSERT INTO bot_subscriptions
+           (bot_id, project, wake_events, ride_events, batch_seconds, created_at, updated_at)
+         VALUES (?1,?2,?3,'[]',?4,?5,?5)
+         ON CONFLICT (bot_id, project) DO UPDATE SET wake_events=?3, batch_seconds=?4,
+           updated_at=?5",
+        params![b.id, key, json!(wake).to_string(), batch, at],
+    )?;
+    let new = stored(tx, b.id, &key)?.context("watch not stored")?;
+    bot::event(
+        tx,
+        b.id,
+        actor,
+        "watch",
+        &json!({"task":task,"wake":wake,"batch_seconds":batch,"why":why,"previous":old})
+            .to_string(),
+    )?;
+    Ok(new)
+}
+
+/// Removes a watch on one task.
+pub fn unwatch(
+    conn: &mut Connection,
+    actor: &Actor,
+    name: &str,
+    task: i64,
+    why: &str,
+) -> Result<()> {
+    check_why(why)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let b = bot::get(&tx, name)?;
+    let key = watch_key(task);
+    if stored(&tx, b.id, &key)?.is_none() {
+        bail!("bot {name} is not watching task #{task}");
+    }
+    drop_watch(&tx, b.id, actor, task, why)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn drop_watch(conn: &Connection, bot_id: i64, actor: &Actor, task: i64, why: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM bot_subscriptions WHERE bot_id=?1 AND project=?2",
+        params![bot_id, watch_key(task)],
+    )?;
+    bot::event(
+        conn,
+        bot_id,
+        actor,
+        "unwatch",
+        &json!({"task":task,"why":why}).to_string(),
+    )
 }
 
 /// Removes one subscription. An open batch is still delivered: its events
@@ -196,6 +348,9 @@ pub fn unsubscribe(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = bot::get(&tx, name)?;
     let project = project.unwrap_or(&b.project);
+    if project.starts_with(WATCH_PREFIX) {
+        bail!("{project:?} is a task watch; use unwatch");
+    }
     let Some(old) = stored(&tx, b.id, project)? else {
         bail!("bot {name} has no subscription for project {project}");
     };
@@ -243,9 +398,11 @@ fn one_line_title(title: &str) -> String {
 }
 
 /// Fans a just-written task event out, inside the writer's transaction. One
-/// event reaches a bot at most once: its project subscription wins over its
-/// all-projects one. A bot is never told about its own actions, so handling
-/// an event cannot wake it again.
+/// event reaches a bot at most once: a watch on the task wins, then its
+/// project subscription, then its all-projects one. A watch or an `owned`
+/// event wakes on the follow batch; other tasks keep the subscription's rules.
+/// A watch is dropped when its task is done. A bot is never told about its own
+/// actions, so handling an event cannot wake it again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fan_out(
     conn: &Connection,
@@ -260,38 +417,66 @@ pub(crate) fn fan_out(
     let Some(event) = event_name(kind, from, to, body) else {
         return Ok(());
     };
-    let (project, title): (String, String) = conn.query_row(
-        "SELECT project, title FROM tasks WHERE id=?1",
+    let (project, title, owner): (String, String, Option<String>) = conn.query_row(
+        "SELECT project, title, owner FROM tasks WHERE id=?1",
         [task_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    let watch = watch_key(task_id);
     let mut subs = conn.prepare_cached(
-        "SELECT s.bot_id, b.name, s.wake_events, s.ride_events, s.batch_seconds
+        "SELECT s.bot_id, b.name, s.project, s.wake_events, s.ride_events, s.batch_seconds
          FROM bot_subscriptions s JOIN bots b ON b.id=s.bot_id
-         WHERE s.project IN (?1, '*') ORDER BY s.bot_id, s.project='*'",
+         WHERE s.project IN (?1, '*', ?2)
+         ORDER BY s.bot_id, s.project<>?2, s.project='*'",
     )?;
-    let rows: Vec<(i64, String, String, String, i64)> = subs
-        .query_map([&project], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    type Row = (i64, String, String, String, String, i64);
+    let rows: Vec<Row> = subs
+        .query_map([&project, &watch], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let now = crate::remote::epoch();
-    let mut seen = None;
-    for (bot_id, name, wake, ride, batch) in rows {
-        if seen == Some(bot_id) {
+    let mut decided = None;
+    for (bot_id, name, scope, wake, ride, batch) in rows {
+        if decided == Some(bot_id) {
             continue;
         }
-        seen = Some(bot_id);
+        let wake = parse_list(wake);
+        let has = |list: &[String], e: &str| list.iter().any(|x| x == e);
+        let rule = if scope == watch {
+            if event == "done" {
+                drop_watch(conn, bot_id, &Actor::new("axe"), task_id, "task done")?;
+            }
+            if !has(&wake, event) {
+                // Not a followed event: the project rules decide.
+                continue;
+            }
+            Some(("wake", batch))
+        } else if owner.as_deref() == Some(&format!("bot:{name}"))
+            && has(&wake, &format!("{OWNED_TAG}{event}"))
+        {
+            Some(("wake", batch.min(FOLLOW_BATCH_SECONDS)))
+        } else if has(&wake, event) {
+            Some(("wake", batch))
+        } else if has(&parse_list(ride), event) {
+            Some(("ride", batch))
+        } else {
+            None
+        };
+        decided = Some(bot_id);
+        let Some((mode, batch)) = rule else {
+            continue;
+        };
         if actor == format!("bot:{name}") {
             continue;
         }
-        let mode = if parse_list(wake).iter().any(|e| e == event) {
-            "wake"
-        } else if parse_list(ride).iter().any(|e| e == event) {
-            "ride"
-        } else {
-            continue;
-        };
         let wake_id = if mode == "wake" {
             Some(open_batch(conn, bot_id, event_id, batch, now)?)
         } else {
