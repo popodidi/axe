@@ -917,7 +917,11 @@ impl Dispatcher {
             resume_count: run.resume_count,
         });
         let usage = crate::usage::parse_log(&run.log_path);
-        let retry=self.store.request::<bool>("finish",json!({"usage":usage,"run":run.run_id,"aborted":block_note == "remote abort confirmed","drained":block_note == DRAIN_ABORT_NOTE,"resumed":run.resumed,"code":code,"note":block_note,"session":session,"session_id":run.session_id,"event":{"exit_code":code,"log":run.log_path,"agent":run.agent,"session_id":run.session_id}}))?;
+        // Only a plain non-zero exit can be an outage; stops, drains and aborts keep their path.
+        let api_error = (code.is_some_and(|c| c != 0) && block_note.starts_with("session exited"))
+            .then(|| agent_proc::api_outage(&run.log_path))
+            .flatten();
+        let retry=self.store.request::<bool>("finish",json!({"api_error":api_error,"usage":usage,"run":run.run_id,"aborted":block_note == "remote abort confirmed","drained":block_note == DRAIN_ABORT_NOTE,"resumed":run.resumed,"code":code,"note":block_note,"session":session,"session_id":run.session_id,"event":{"exit_code":code,"log":run.log_path,"agent":run.agent,"session_id":run.session_id}}))?;
         self.store.log(run.run_id, run.log_path.clone(), true)?;
         if retry {
             let task = self
