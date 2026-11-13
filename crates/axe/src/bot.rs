@@ -1,7 +1,7 @@
 //! Bots: a persistent identity in a project, one resumed agent session, and one
 //! wake schedule (self-wakes, named schedules, task events and messages). Identity and
 //! conduct are delivered as the system prompt; wakes are the only user prompt.
-//! Design: `docs/decisions/axe-bots.md`.
+//! Design: `docs/design/bots.md`.
 //!
 //! All times are fixed-width UTC strings (`2026-11-07T10:00:00Z`), so string
 //! order is time order; functions take `now` as epoch seconds so tests control it.

@@ -1,7 +1,7 @@
 //! The goals of a bot as Telegram shows them: one pinned message per active
 //! goal (the "goal pin", `flags.goal_pin` holds the goal id), kept current
 //! by the gateway (`telegram.rs`, `goal_pins`). Design: `docs/design/goals.md`,
-//! "Goal pins". `show` renders the goal lines of every open goal (proposed,
+//! "Budget". `show` renders the goal lines of every open goal (proposed,
 //! active, paused) as one text. The separate goal board message
 //! (`flags.goal_board`) is retired: the gateway unpins it, edits it to a
 //! pointer and clears the flag; `set_message` only unsets it.
