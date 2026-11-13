@@ -110,6 +110,10 @@ axe admission [--json]      # is the dispatcher admitting new sessions (resource
 axe admission hold --until T [--reason R]   # no new task sessions until T (on the dispatcher host)
 axe admission release       # end the hold now
 axe backup PATH             # download a consistent server snapshot (WAL included) to a new file
+axe blob put FILE [--type T] [--link 1h] [--json]   # store a file; prints its sha256 (and a signed link)
+axe blob get SHA [-o FILE]  # bytes to a file or stdout
+axe blob ls [--json]
+axe blob link SHA [--ttl 24h] [--name N]   # signed URL that opens without the token until it expires (max 7d)
 ```
 
 `add` defaults to `--state pending`. Create work `pending` only when its spec

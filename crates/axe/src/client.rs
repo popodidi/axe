@@ -225,6 +225,40 @@ impl Client {
         })
     }
 
+    /// Streams a file to `POST /api/blobs`. Blobs are content-addressed, so a
+    /// retried upload stores nothing twice and needs no request id.
+    pub fn put_blob(&self, file: &std::path::Path, content_type: &str) -> Result<Value> {
+        self.attempts(false, |_| {
+            let f = std::fs::File::open(file)?;
+            let len = f.metadata()?.len();
+            let mut req = self
+                .agent
+                .post(&format!("{}/api/blobs", self.base))
+                .timeout(Duration::from_secs(3600))
+                .set("Content-Type", content_type)
+                .set("Content-Length", &len.to_string());
+            if let Some(token) = self.token()? {
+                req = req.set("Authorization", &format!("Bearer {token}"));
+            }
+            self.finish(req.send(f))
+        })
+    }
+
+    /// Streams `GET path` (with the token) into `out`; returns the byte count.
+    pub fn download(&self, path: &str, out: &mut dyn std::io::Write) -> Result<u64> {
+        let mut req = self
+            .agent
+            .get(&format!("{}{path}", self.base))
+            .timeout(Duration::from_secs(3600));
+        if let Some(token) = self.token()? {
+            req = req.set("Authorization", &format!("Bearer {token}"));
+        }
+        match req.call() {
+            Ok(resp) => Ok(std::io::copy(&mut resp.into_reader(), out)?),
+            Err(e) => self.finish(Err(e)),
+        }
+    }
+
     pub fn backup(&self, to: &std::path::Path) -> Result<()> {
         if to.exists() {
             bail!("backup target {} already exists", to.display());

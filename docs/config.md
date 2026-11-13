@@ -234,6 +234,36 @@ default); a server built without it logs a warning and ignores the table.
 
 Tokens are read from files only and never stored in the config or database.
 
+## `[blobs]`
+
+Server only: the blob store (`axe blob`, API Blobs). Without the table blobs
+are kept on local disk next to the database.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `dir` | string (path) | `blobs/` next to the database | Local blob directory, upload spool (`tmp/`) and default link key. |
+| `max_mib` | integer | `1024` | Largest accepted blob, in MiB. |
+| `public_url` | string | none | Base URL of signed links as a phone reaches the server; without it the CLI uses its own server URL. |
+| `link_key_file` | string (path) | `<dir>/link.key` | Link signing key; created (0600) on first start when missing. Servers sharing one store share this key. Replacing it invalidates every issued link. |
+
+### `[blobs.s3]`
+
+Keeps blob contents in an S3-compatible bucket (AWS S3, MinIO, ...) under
+`<prefix>sha256/<id>`. The bucket must exist. Requests are signed with AWS
+Signature Version 4.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `endpoint` | string | required | `http(s)://host[:port]`, e.g. `https://s3.us-east-1.amazonaws.com`. |
+| `bucket` | string | required | Bucket name. |
+| `region` | string | `"us-east-1"` | Signing region. |
+| `prefix` | string | `""` | Key prefix inside the bucket. |
+| `path_style` | bool | `true` | `endpoint/bucket/key`; `false` uses `bucket.endpoint/key`. |
+| `access_key_id_file` | string (path) | required | File holding the access key id. |
+| `secret_access_key_file` | string (path) | required | File holding the secret key. |
+
+Keys are read from files only. A missing or empty key file stops the server.
+
 ## Full example
 
 ```toml
@@ -310,6 +340,15 @@ owner_user_id = 123456789
 name = "assistant"
 token_file = "/run/secrets/telegram/assistant"
 chats = [123456789]
+
+[blobs]                                 # server only; local disk by default
+# public_url = "https://axe.example.com"
+# max_mib = 1024
+# [blobs.s3]                            # optional: contents in a bucket instead
+# endpoint = "http://minio:9000"
+# bucket = "axe-blobs"
+# access_key_id_file = "/run/secrets/s3/access_key_id"
+# secret_access_key_file = "/run/secrets/s3/secret_access_key"
 ```
 
 ## Environment variables

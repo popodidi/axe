@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::admission;
+use crate::blob;
 use crate::bot;
 use crate::channel;
 use crate::config::{self, Config};
@@ -109,6 +110,7 @@ struct State {
     admission: Mutex<Option<(serde_json::Value, Instant)>>,
     /// Telegram gateway, when `[telegram]` is configured.
     telegram: Option<Arc<Gateway>>,
+    blobs: blob::Store,
 }
 
 impl channel::Store for State {
@@ -160,6 +162,7 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         );
     }
     let api_conn = db::open(&opts.db_path)?;
+    let blobs = blob::Store::open(&cfg.blobs, &opts.db_path).context("open the blob store")?;
     let listener =
         TcpListener::bind(&addrs[..]).with_context(|| format!("bind {}", opts.listen))?;
     let local = listener.local_addr()?;
@@ -189,6 +192,7 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         telegram: cfg.telegram.as_ref().map(|t| Arc::new(Gateway::new(t))),
         #[cfg(not(feature = "telegram"))]
         telegram: None,
+        blobs,
     });
     #[cfg(feature = "telegram")]
     if let Some(gw) = &state.telegram {
@@ -250,6 +254,8 @@ struct Request {
     query: HashMap<String, String>,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+    /// Length of a body left unread for streaming (blob uploads).
+    streamed: Option<u64>,
 }
 
 impl Request {
@@ -367,16 +373,19 @@ pub(crate) fn pct_decode(s: &str, plus_is_space: bool) -> String {
 }
 
 /// Reads one request; `Ok(None)` when the peer closed without sending one.
-/// Reads one request; `token` decides whether a large upload body is allowed.
-fn read_request(stream: &TcpStream, token: Option<&str>) -> Result<Option<Request>, HttpError> {
+/// `token` decides whether a large upload body is allowed. A blob upload's
+/// body stays in `reader` for the handler to stream.
+fn read_request(
+    reader: &mut BufReader<&TcpStream>,
+    token: Option<&str>,
+) -> Result<Option<Request>, HttpError> {
     let bad = |m: &str| HttpError(400, m.to_string());
-    let mut reader = BufReader::new(stream);
     let mut head = 0usize;
     let mut lines = Vec::new();
     loop {
         let mut line = String::new();
         let limit = (MAX_HEADER_BYTES - head) as u64;
-        let n = (&mut reader)
+        let n = (&mut *reader)
             .take(limit)
             .read_line(&mut line)
             .map_err(|_| bad("unreadable request"))?;
@@ -421,15 +430,20 @@ fn read_request(stream: &TcpStream, token: Option<&str>) -> Result<Option<Reques
         .map(|s| pct_decode(s, false))
         .collect();
     let mut body = Vec::new();
+    let mut streamed = None;
     if let Some(len) = headers.get("content-length") {
         let len: usize = len.parse().map_err(|_| bad("invalid content-length"))?;
-        if len > body_limit(method, &path, bearer_ok(&headers, token)) {
-            return Err(HttpError(413, "request body too large".into()));
+        if method == "POST" && path == ["api", "blobs"] {
+            streamed = Some(len as u64);
+        } else {
+            if len > body_limit(method, &path, bearer_ok(&headers, token)) {
+                return Err(HttpError(413, "request body too large".into()));
+            }
+            body.resize(len, 0);
+            reader
+                .read_exact(&mut body)
+                .map_err(|_| bad("truncated body"))?;
         }
-        body.resize(len, 0);
-        reader
-            .read_exact(&mut body)
-            .map_err(|_| bad("truncated body"))?;
     } else if headers.contains_key("transfer-encoding") {
         return Err(HttpError(411, "content-length required".into()));
     }
@@ -439,6 +453,7 @@ fn read_request(stream: &TcpStream, token: Option<&str>) -> Result<Option<Reques
         query,
         headers,
         body,
+        streamed,
     }))
 }
 
@@ -451,10 +466,11 @@ fn body_limit(method: &str, path: &[String], authorized: bool) -> usize {
     }
 }
 
-/// GETs of message content (`/api/bots/<name>/tg/...`) need the token, unlike
-/// other reads.
+/// GETs of message content (`/api/bots/<name>/tg/...`) and blobs need the
+/// token, unlike other reads.
 fn private_read(path: &[String]) -> bool {
-    path.len() >= 4 && path[0] == "api" && path[1] == "bots" && path[3] == "tg"
+    (path.len() >= 4 && path[0] == "api" && path[1] == "bots" && path[3] == "tg")
+        || (path.len() >= 2 && path[0] == "api" && path[1] == "blobs")
 }
 
 fn write_head(
@@ -525,7 +541,8 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut w = stream.try_clone()?;
-    let req = match read_request(&stream, st.token.as_deref()) {
+    let mut reader = BufReader::new(&stream);
+    let req = match read_request(&mut reader, st.token.as_deref()) {
         Ok(Some(r)) => r,
         Ok(None) => return Ok(()),
         Err(HttpError(status, msg)) => {
@@ -556,6 +573,9 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
             },
         )?;
         return Ok(w.flush()?);
+    }
+    if req.path.first().is_some_and(|p| p == "b") && req.method == "GET" {
+        return blob_link_get(st, &mut w, &req, &observe);
     }
     if req.path == ["api", "dispatcher", "connect"] {
         if !authorized(st, &req) {
@@ -596,6 +616,10 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
     if (!read || private_read(&req.path)) && !authorized(st, &req) {
         observe(401);
         return Ok(write_response(&mut w, &error(401, "unauthorized"), None)?);
+    }
+    if req.path.first().is_some_and(|p| p == "api") && req.path.get(1).is_some_and(|p| p == "blobs")
+    {
+        return blob_api(st, &mut w, &mut reader, &req, &observe);
     }
     if read && req.path.len() >= 6 && private_read(&req.path) && req.path[4] == "file" {
         return tg_file(st, &mut w, &req, &observe);
@@ -769,6 +793,205 @@ fn replayable(st: &State, req: &Request, id: &str) -> Response {
 /// `GET /api/bots/<name>/tg/file/<msg>[/<n>]`: streams an inbound attachment
 /// through the server (nothing is stored). The file name is in
 /// `X-Axe-File-Name`, percent-encoded.
+/// Writes a blob's bytes after a 200 head with `extra` headers.
+fn send_blob(
+    w: &mut TcpStream,
+    meta: &blob::Meta,
+    mut body: Box<dyn Read + Send>,
+    extra: &str,
+) -> Result<()> {
+    write_head(
+        w,
+        200,
+        &meta.content_type,
+        Some(meta.size as usize),
+        None,
+        &format!("X-Axe-Sha256: {}\r\n{extra}", meta.sha256),
+    )?;
+    std::io::copy(&mut body, w)?;
+    Ok(w.flush()?)
+}
+
+/// `/api/blobs` routes (the caller checked the token): upload, list, download
+/// and link signing.
+fn blob_api(
+    st: &State,
+    w: &mut TcpStream,
+    reader: &mut BufReader<&TcpStream>,
+    req: &Request,
+    observe: &dyn Fn(u16),
+) -> Result<()> {
+    let path: Vec<&str> = req.path.iter().map(String::as_str).collect();
+    // `None`: the response was streamed already.
+    let result = (|| -> Result<Option<Response>> {
+        if let Some(sha) = path.get(2) {
+            blob::check_sha(sha).map_err(|e| HttpError(400, e.to_string()))?;
+        }
+        match (req.method.as_str(), path.as_slice()) {
+            ("POST", ["api", "blobs"]) => {
+                let len = req
+                    .streamed
+                    .ok_or_else(|| HttpError(411, "content-length required".into()))?;
+                if len > st.blobs.max_bytes {
+                    return Err(HttpError(
+                        413,
+                        format!("blob is over the {} byte limit", st.blobs.max_bytes),
+                    )
+                    .into());
+                }
+                let ct = req
+                    .headers
+                    .get("content-type")
+                    .map_or(blob::OCTET_STREAM, String::as_str);
+                let (meta, created) = st.blobs.put(reader, len, ct)?;
+                let mut v = serde_json::to_value(&meta)?;
+                v["created"] = created.into();
+                ok(if created { 201 } else { 200 }, &v).map(Some)
+            }
+            ("GET", ["api", "blobs"]) => ok(200, &st.blobs.list()?).map(Some),
+            ("GET", ["api", "blobs", sha]) => {
+                let Some((meta, body)) = st.blobs.open_blob(sha)? else {
+                    return Err(HttpError(404, format!("blob {sha} not found")).into());
+                };
+                observe(200);
+                send_blob(w, &meta, body, "")?;
+                Ok(None)
+            }
+            ("POST", ["api", "blobs", sha, "link"]) => {
+                #[derive(Deserialize)]
+                struct Link {
+                    /// Lifetime in seconds.
+                    ttl: i64,
+                    name: Option<String>,
+                }
+                let b: Link = req.json()?;
+                if b.ttl <= 0 || b.ttl > blob::MAX_LINK_SECS {
+                    return Err(HttpError(
+                        400,
+                        format!("ttl must be 1..={} seconds", blob::MAX_LINK_SECS),
+                    )
+                    .into());
+                }
+                let name = b.name.filter(|n| !n.is_empty());
+                if name
+                    .as_deref()
+                    .is_some_and(|n| n.contains('/') || n.chars().any(char::is_control))
+                {
+                    return Err(HttpError(400, "name must be a file name".into()).into());
+                }
+                if st.blobs.stat(sha)?.is_none() {
+                    return Err(HttpError(404, format!("blob {sha} not found")).into());
+                }
+                let exp = remote::epoch() + b.ttl;
+                let path = st.blobs.link_path(sha, name.as_deref(), exp);
+                let url = st
+                    .blobs
+                    .public_url
+                    .as_deref()
+                    .map(|base| format!("{}{path}", base.trim_end_matches('/')));
+                let expires_at = time::OffsetDateTime::from_unix_timestamp(exp)?
+                    .format(&time::format_description::well_known::Rfc3339)?;
+                ok(
+                    201,
+                    &json!({"path": path, "url": url, "expires_at": expires_at}),
+                )
+                .map(Some)
+            }
+            _ => Err(HttpError(404, "no such blob route".into()).into()),
+        }
+    })();
+    let r = match result {
+        Ok(None) => return Ok(()),
+        Ok(Some(r)) => r,
+        Err(e) => blob_error(&e),
+    };
+    observe(r.status);
+    Ok(write_response(w, &r, None)?)
+}
+
+/// `GET /b/<sha>[/<name>]?exp=..&sig=..`: a signed link, readable without the
+/// token until it expires. The blob renders inline in a sandbox, so HTML
+/// cannot act on this server's origin.
+fn blob_link_get(
+    st: &State,
+    w: &mut TcpStream,
+    req: &Request,
+    observe: &dyn Fn(u16),
+) -> Result<()> {
+    let result = (|| -> Result<(blob::Meta, Box<dyn Read + Send>, Option<&str>)> {
+        let (sha, name) = match req.path.as_slice() {
+            [_, sha] => (sha.as_str(), None),
+            [_, sha, name] => (sha.as_str(), Some(name.as_str())),
+            _ => return Err(HttpError(404, "no such link".into()).into()),
+        };
+        blob::check_sha(sha).map_err(|e| HttpError(404, e.to_string()))?;
+        let (exp, sig) = (
+            req.query("exp").unwrap_or(""),
+            req.query("sig").unwrap_or(""),
+        );
+        match st.blobs.verify_link(sha, name, exp, sig, remote::epoch()) {
+            Ok(()) => {}
+            Err(blob::LinkError::Invalid) => {
+                return Err(HttpError(403, "invalid link signature".into()).into())
+            }
+            Err(blob::LinkError::Expired) => {
+                return Err(HttpError(403, "link expired".into()).into())
+            }
+        }
+        match st.blobs.open_blob(sha)? {
+            Some((meta, body)) => Ok((meta, body, name)),
+            None => Err(HttpError(404, format!("blob {sha} not found")).into()),
+        }
+    })();
+    match result {
+        Ok((meta, body, name)) => {
+            observe(200);
+            let file = name
+                .map(|n| {
+                    let ascii: String = n
+                        .chars()
+                        .map(|c| {
+                            if c.is_ascii_graphic() && c != '"' && c != '\\' {
+                                c
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect();
+                    format!(
+                        "; filename=\"{ascii}\"; filename*=UTF-8''{}",
+                        channel::pct_encode(n)
+                    )
+                })
+                .unwrap_or_default();
+            send_blob(
+                w,
+                &meta,
+                body,
+                &format!(
+                    "Content-Disposition: inline{file}\r\nX-Content-Type-Options: nosniff\r\n\
+                     Content-Security-Policy: sandbox\r\n"
+                ),
+            )
+        }
+        Err(e) => {
+            let r = blob_error(&e);
+            observe(r.status);
+            Ok(write_response(w, &r, None)?)
+        }
+    }
+}
+
+/// Request problems carry an [`HttpError`]; any other blob error is the
+/// store's (disk, S3), so a 500.
+fn blob_error(e: &anyhow::Error) -> Response {
+    let mut r = error_response(e);
+    if e.downcast_ref::<HttpError>().is_none() {
+        r.status = 500;
+    }
+    r
+}
+
 #[cfg(not(feature = "telegram"))]
 fn tg_file(_: &State, w: &mut TcpStream, _: &Request, observe: &dyn Fn(u16)) -> Result<()> {
     let r = error_response(&HttpError(409, NO_TELEGRAM.into()).into());

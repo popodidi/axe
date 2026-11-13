@@ -30,6 +30,8 @@ constant-time.
 |---|---|
 | `GET` (all paths not listed below) | No |
 | `GET /api/bots/{name}/tg/...` (history, files) | Yes |
+| `GET /api/blobs...` | Yes |
+| `GET /b/...` (signed blob links) | No; the link's signature instead |
 | `GET /api/dispatcher/connect` (WebSocket) | Yes |
 | `OPTIONS` (CORS preflight) | No; answers `204` |
 | Every other method (`POST`, `PUT`, `PATCH`, ...) | Yes |
@@ -52,8 +54,8 @@ constant-time.
 
 - Request and response bodies are JSON (`Content-Type: application/json`)
   except: `/metrics` (Prometheus text), `/api/stream` (SSE), `POST
-  /api/backup` and Telegram file downloads (binary), and the `send-file`
-  upload (raw bytes).
+  /api/backup`, Telegram file and blob downloads (binary), and the
+  `send-file` and blob uploads (raw bytes).
 - An empty request body is parsed as `{}`. Invalid JSON: `400 {"error":"invalid JSON body: ..."}`.
 - A request with `Transfer-Encoding` and no `Content-Length` gets `411`;
   chunked bodies are not supported.
@@ -100,6 +102,7 @@ use the numeric code.
 | Request head (request line plus headers) | 64 KiB (`431`) |
 | Request body | 8 MiB (`413`) |
 | Authorized `POST /api/bots/{name}/tg/send-file` | 51 MiB transport limit; then `photo` max 10 MiB, `document`/`voice` max 50 MiB (`413`) |
+| Authorized `POST /api/blobs` | `blobs.max_mib` (default 1 GiB, `413`); streamed, not held in memory |
 
 ### Headers
 
@@ -108,6 +111,7 @@ use the numeric code.
 | `Authorization: Bearer <token>` | request | See Auth |
 | `X-Axe-Request-Id` | request (writes only) | Makes a write retry-safe (below) |
 | `X-Axe-File-Name` | response | Percent-encoded file name on Telegram file downloads |
+| `X-Axe-Sha256` | response | Blob id on blob downloads |
 | `Origin` | request | Checked against `server.cors_origins` |
 
 ### Retry-safe writes (`X-Axe-Request-Id`)
@@ -245,6 +249,23 @@ dispatcher's WebSocket and waits up to 5 s. Responses are always `200`:
 | Method | Path | Auth | Response |
 |---|---|---|---|
 | POST | `/api/backup` | token | `application/octet-stream`: a consistent SQLite copy of the database |
+
+## Blobs
+
+Immutable, content-addressed files (`blob.rs`). A blob's id is the lowercase
+hex sha256 of its bytes; storing the same bytes again stores nothing new.
+There is no delete or overwrite. Storage is `[blobs]` in the server config.
+
+| Method | Path | Auth | Request | Response |
+|---|---|---|---|---|
+| POST | `/api/blobs` | token | Raw bytes with `Content-Length`; `Content-Type` is stored | `201` new or `200` already stored: `{sha256,size,content_type,created_at,created}` |
+| GET | `/api/blobs` | token | | `[{sha256,size,content_type?,created_at?}]` |
+| GET | `/api/blobs/{sha256}` | token | | The bytes, with the stored `Content-Type` |
+| POST | `/api/blobs/{sha256}/link` | token | `{ttl: seconds (1..=604800), name?}` | `201 {path, url, expires_at}`; `url` is null without `blobs.public_url` |
+| GET | `/b/{sha256}[/{name}]?exp=&sig=` | signature | | The bytes, `Content-Disposition: inline`, `Content-Security-Policy: sandbox`; `403` when the signature is wrong or the link expired |
+
+A link's signature is an HMAC-SHA256 over the id, name and expiry with the
+server's link key (`blobs.link_key_file`); changing any of them invalidates it.
 
 ## Routines
 
