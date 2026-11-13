@@ -133,7 +133,7 @@ pub fn lines(conn: &Connection, name: &str) -> Result<Vec<GoalLine>> {
             .collect();
         let next_wake = goal::next_wake(conn, &g)?;
         let b = g.budget.clone().unwrap_or_default();
-        let intent = cap(first_line(&g.intent), INTENT_CAP);
+        let intent = cap(intent_line(&g.intent), INTENT_CAP);
         out.push(GoalLine {
             id: g.id,
             others: g.bots.iter().filter(|b| *b != name).cloned().collect(),
@@ -158,6 +158,19 @@ fn first_line(s: &str) -> &str {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("")
+}
+
+/// The first prose line of a markdown intent: headings (`## Outcome`) are
+/// skipped, and a list marker is dropped.
+fn intent_line(s: &str) -> &str {
+    let l = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .unwrap_or("");
+    l.strip_prefix("- ")
+        .or_else(|| l.strip_prefix("* "))
+        .unwrap_or(l)
 }
 
 /// `YYYY-MM-DD HH:MM UTC` for an RFC3339 time; a bare date as it is.
@@ -368,6 +381,17 @@ mod tests {
         let shown = t.matches(" · active").count();
         assert!(shown > 5 && shown < 200, "{shown}");
         assert!(t.contains(&format!("+{} more", 200 - shown)), "{t}");
+    }
+
+    #[test]
+    fn intent_line_skips_markdown_headings() {
+        assert_eq!(
+            intent_line("# Intent\n\n## Outcome\nCut bot run cost.\n\n## Done when\nx"),
+            "Cut bot run cost."
+        );
+        assert_eq!(intent_line("## Outcome\n- Ship it"), "Ship it");
+        assert_eq!(intent_line("Plain first line\nmore"), "Plain first line");
+        assert_eq!(intent_line("## Only headings"), "");
     }
 
     #[test]

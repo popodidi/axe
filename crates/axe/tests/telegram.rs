@@ -2302,7 +2302,7 @@ fn each_active_goal_has_its_own_pin() {
     make_board(&rig);
     propose_goal(
         &rig,
-        json!({"name":"grow","project":"p","bots":["cos"],"intent":"Reach ten users\nmore detail",
+        json!({"name":"grow","project":"p","bots":["cos"],"intent":"## Outcome\nReach ten users\n\n## Done when\nmore detail",
             "deadline":"2026-12-01","budget_cost_week":10.0,"budget_attention_week":4}),
     );
     propose_goal(&rig, json!({"name":"later","project":"p","bots":["cos"]}));
@@ -2400,8 +2400,11 @@ fn each_active_goal_has_its_own_pin() {
     });
     rig.srv().ok(&["goal", "done", "grow", "--why", "met"]);
     rig.srv().ok(&["goal", "drop", "later", "--why", "no"]);
+    // The unpin events are written after the flags; wait for both.
     wait_for("done and dropped unpinned", 20, || {
-        flags_of(&rig, again)["pinned"] == false && flags_of(&rig, later)["pinned"] == false
+        flags_of(&rig, again)["pinned"] == false
+            && flags_of(&rig, later)["pinned"] == false
+            && goal_pin_events(&rig).len() == 9
     });
     let actions: Vec<(String, String)> = goal_pin_events(&rig)
         .into_iter()

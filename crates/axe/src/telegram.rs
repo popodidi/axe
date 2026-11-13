@@ -1704,8 +1704,11 @@ fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
             json!({"chat_id": m.chat_id, "message_id": m.message_id, "disable_notification": true});
         match b.paced(m.chat_id, || b.api.call("pinChatMessage", &p)) {
             Ok(_) => {
-                set_flag(store, m.id, "$.pinned", json!(true))?;
-                set_flag(store, m.id, "$.card_pin", json!(true))?;
+                // One write, so a reader never sees a pin without its kind.
+                store.conn().execute(
+                    "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json('true'),'$.card_pin',json('true')) WHERE id=?1",
+                    [m.id],
+                )?;
             }
             Err(e) => {
                 skip_refused(b, store, "pin card", m.id, e)?;
