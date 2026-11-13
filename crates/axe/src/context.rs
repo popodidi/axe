@@ -247,7 +247,7 @@ pub fn resolve(source: &dyn Source, scopes: &[Scope], own: &[OwnSkill]) -> Resul
         candidates.push((class, r, item));
     }
 
-    candidates.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    candidates.sort_by_key(|a| (a.0, a.1));
     let mut winners: BTreeMap<String, (u8, String, String)> = BTreeMap::new();
     let mut items = Vec::new();
     let mut shadowed = Vec::new();
