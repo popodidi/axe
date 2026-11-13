@@ -49,11 +49,13 @@ resumes later without holding a worker slot.
 Size a timed wait to what it waits on, not to a round hour. For a CI run, a
 deploy, a release step or another short external check, wake when it should
 finish: its usual duration from when it started (`gh run view`, recent runs),
-or about 15 minutes when unsure. If it is still running or queued on wake,
-re-arm for the next expected finish. Each wake costs a run against
-`max_runs`, so do not go much below 10 minutes; for something due within a few
-minutes, poll in-session instead. Keep waits of an hour or more for holds that
-really are that long: a timed review window, a scheduled time, a soak period.
+or about 15 minutes when unsure, and at most about 15 minutes even when it
+is queued behind other runs: queue estimates run long, and a short re-armed
+wait costs little. If it is still running or queued on wake, re-arm. Each
+wake costs a run against `max_runs`, so do not go much below 10 minutes; for
+something due within a few minutes, poll in-session instead. Keep waits of an
+hour or more for holds that really are that long: a timed review window, a
+scheduled time, a soak period.
 
 ```bash
 # CI run 123 started 10:02Z and usually takes ~12 min
