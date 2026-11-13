@@ -127,6 +127,10 @@ pub struct Config {
     /// canonical workspace as before (see `worktree.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktrees: Option<Worktrees>,
+    /// `[repos.<name>]`: where each repo a task can name has its canonical
+    /// clone; a repo not listed is `<workspace_root>/<name>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, Repo>,
     /// Telegram gateway (server only); omitted means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<Telegram>,
@@ -475,14 +479,27 @@ pub struct Worktrees {
     /// (`<prefix>task-<id>--work`).
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
+    /// Where run workspaces of tasks with their own repos go
+    /// (`<run_root>/task-<id>`); omitted means `<workspace_root>/.runs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_root: Option<String>,
 }
 
 impl Default for Worktrees {
     fn default() -> Self {
         Worktrees {
             branch_prefix: default_branch_prefix(),
+            run_root: None,
         }
     }
+}
+
+/// `[repos.<name>]`: one repo a task can work in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Repo {
+    /// Its canonical clone; omitted means `<workspace_root>/<name>`.
+    pub path: Option<String>,
 }
 
 fn default_branch_prefix() -> String {
@@ -906,6 +923,20 @@ impl Config {
 
     pub fn workspace_root(&self) -> PathBuf {
         expand_tilde(&self.workspace_root)
+    }
+    /// The canonical clone of repo `name` (`[repos.<name>] path`).
+    pub fn repo_path(&self, name: &str) -> PathBuf {
+        match self.repos.get(name).and_then(|r| r.path.as_deref()) {
+            Some(p) => expand_tilde(p),
+            None => self.workspace_root().join(name),
+        }
+    }
+    /// Parent of task run workspaces (`[worktrees] run_root`).
+    pub fn run_root(&self) -> PathBuf {
+        match self.worktrees.as_ref().and_then(|w| w.run_root.as_deref()) {
+            Some(p) => expand_tilde(p),
+            None => self.workspace_root().join(".runs"),
+        }
     }
     pub fn log_dir(&self) -> PathBuf {
         expand_tilde(&self.log_dir)

@@ -143,7 +143,7 @@ fn migration_preserves_all_existing_rows() {
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("db");
     let c = db::open(&path).unwrap();
-    c.execute_batch("ALTER TABLE tasks DROP COLUMN agent; DROP TABLE routine_events; DROP TABLE routine_occurrences; DROP TABLE routines; PRAGMA user_version=9;
+    c.execute_batch("ALTER TABLE tasks DROP COLUMN agent; ALTER TABLE tasks DROP COLUMN owner; ALTER TABLE tasks DROP COLUMN repos; ALTER TABLE tasks DROP COLUMN labels; DROP TABLE routine_events; DROP TABLE routine_occurrences; DROP TABLE routines; PRAGMA user_version=9;
  INSERT INTO tasks VALUES(7,'orchid','active','spec','in_progress','dispatch:x',1,'a','b',NULL);
  INSERT INTO sessions VALUES(7,'codex','session',2);
  INSERT INTO runs VALUES(3,7,'orchid','codex','fresh','session','dispatch:x','a',NULL,NULL,'log',NULL,NULL);
@@ -173,7 +173,7 @@ fn migration_preserves_all_existing_rows() {
     assert_eq!(
         c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        17
     );
     assert_eq!(
         c.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
