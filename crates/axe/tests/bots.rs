@@ -20,6 +20,7 @@ printf '%s' "$7" > "$out/prompt-$run"
 cp "$4" "$out/system-$run"; cp "$6" "$out/settings-$run"
 printf '%s %s\n' "$1" "$2" > "$out/mode-$run"
 env | grep '^AXE_' | sort > "$out/env-$run"
+pwd > "$out/pwd-$run"
 hold() { while [ -e "$out/$1" ]; do sleep 0.05; done; }
 case "$BOTTEST_MODE" in
   fail) exit 3 ;;
@@ -1562,4 +1563,175 @@ fn schedule_cli_fires_through_the_server_and_reaches_the_prompt() {
         ]);
     }
     assert_eq!(rig.srv.ok(&["bot", "schedule", "--bot", "b", "list"]), "");
+}
+
+/// A canonical clone `ws/<name>` with an origin and `origin/HEAD`; `one` has
+/// AGENTS.md, a skill and a doc.
+fn canonical_clone(base: &Path, name: &str) {
+    let git = |dir: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    let canonical = base.join("ws").join(name);
+    let origin = base.join(format!("{name}.git"));
+    std::fs::create_dir_all(&canonical).unwrap();
+    git(
+        base,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(&canonical, &["init", "-q", "-b", "main"]);
+    std::fs::write(canonical.join("README.md"), format!("{name}\n")).unwrap();
+    if name == "one" {
+        std::fs::write(canonical.join("AGENTS.md"), "rules\n").unwrap();
+        let skill = canonical.join(".agents/skills/build");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: build\ndescription: Build the thing\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(canonical.join("docs")).unwrap();
+        std::fs::write(canonical.join("docs/index.md"), "# One docs\n").unwrap();
+    }
+    git(&canonical, &["add", "."]);
+    git(&canonical, &["commit", "-qm", "base"]);
+    git(
+        &canonical,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&canonical, &["push", "-q", "origin", "main"]);
+    git(&canonical, &["fetch", "-q", "origin"]);
+    git(&canonical, &["remote", "set-head", "origin", "main"]);
+}
+
+fn head_branch(dir: &Path) -> String {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn bot_repo_list_is_set_shown_logged_and_cleared() {
+    let rig = Rig::new(1);
+    rig.create(json!({}));
+    assert!(rig.bot()["repos"].is_null());
+    let show = rig.srv.ok(&["bot", "show", "b"]);
+    assert!(show.contains("\nrepos: - (project worktree)\n"), "{show}");
+    rig.srv.ok(&[
+        "bot",
+        "edit",
+        "b",
+        "--repo",
+        "one",
+        "--repo",
+        "two,one",
+        "--why",
+        "work in both",
+    ]);
+    assert_eq!(rig.bot()["repos"], json!(["one", "two"]));
+    let show = rig.srv.ok(&["bot", "show", "b"]);
+    assert!(show.contains("\nrepos: one,two\n"), "{show}");
+    // An unchanged list records nothing; invalid names are refused.
+    rig.srv
+        .ok(&["bot", "edit", "b", "--repo", "one,two", "--why", "same"]);
+    let out = rig
+        .srv
+        .cli(&["bot", "edit", "b", "--repo", "../x", "--why", "bad"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(rig.bot()["repos"], json!(["one", "two"]));
+    rig.srv.ok(&[
+        "bot",
+        "edit",
+        "b",
+        "--no-repos",
+        "--why",
+        "back to the project",
+    ]);
+    assert!(rig.bot()["repos"].is_null());
+    let log = rig.srv.ok(&["bot", "log", "b"]);
+    let repos: Vec<&str> = log.lines().filter(|l| l.contains(" repos: ")).collect();
+    assert_eq!(repos.len(), 2, "{log}");
+    assert!(repos[0].contains("why: work in both"), "{log}");
+    assert!(log.contains("- -> one,two"), "{log}");
+    assert!(log.contains("one,two -> -"), "{log}");
+}
+
+#[test]
+fn bot_with_repos_runs_in_a_run_folder_and_an_empty_list_keeps_the_project_folder() {
+    let rig = Rig::new(1);
+    let base = rig._dir.path().canonicalize().unwrap();
+    for name in ["one", "two"] {
+        canonical_clone(&base, name);
+    }
+    rig.create(json!({}));
+    rig.srv
+        .ok(&["bot", "edit", "b", "--repo", "one,two", "--why", "repos"]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let run = base.join("ws/.runs/bot-b");
+    assert_eq!(rig.file("pwd-1").trim(), run.display().to_string());
+    let env = rig.file("env-1");
+    assert!(
+        env.lines()
+            .any(|l| l == format!("AXE_WORKTREE={}", run.display())),
+        "{env}"
+    );
+    for repo in ["one", "two"] {
+        let wt = run.join("repos").join(repo);
+        assert_eq!(head_branch(&wt), "axe/bot-b--work", "{repo}");
+    }
+    let agents = std::fs::read_to_string(run.join("AGENTS.md")).unwrap();
+    for want in [
+        "# Bot b: run folder\n",
+        "- Repos: one, two (each a worktree under `repos/`, on branch `axe/bot-b--work`)",
+        "- `repos/one`: its rules are in `repos/one/AGENTS.md`\n- `repos/two`\n",
+        "- `skills/build` (one): Build the thing\n",
+    ] {
+        assert!(agents.contains(want), "{want:?} in {agents}");
+    }
+    assert!(run.join(".claude/skills/build/SKILL.md").is_file());
+    let docs = std::fs::read_to_string(run.join("docs/index.md")).unwrap();
+    assert!(
+        docs.contains("- [One docs](../repos/one/docs/index.md)"),
+        "{docs}"
+    );
+
+    // The next run reuses the worktrees; a file left there survives.
+    std::fs::write(run.join("repos/one/scratch.txt"), "keep").unwrap();
+    rig.srv
+        .ok(&["bot", "wake", "b", "--now", "--note", "again"]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.file("pwd-2").trim(), run.display().to_string());
+    assert!(run.join("repos/one/scratch.txt").is_file());
+
+    // Cleared: back to the project folder, as before repos existed.
+    rig.srv
+        .ok(&["bot", "edit", "b", "--no-repos", "--why", "clear"]);
+    rig.srv
+        .ok(&["bot", "wake", "b", "--now", "--note", "third"]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        rig.file("pwd-3").trim(),
+        base.join("ws/a").display().to_string()
+    );
+    assert!(!rig.file("env-3").contains("AXE_WORKTREE="));
 }

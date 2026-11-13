@@ -126,8 +126,11 @@ per repo under `repos/<name>`, all on the task branch, plus a generated
 repo's `.agents/skills` and a `docs/index.md`, plus attached docs (see Run
 context below). A repo's canonical clone is
 `[repos.<name>] path`, default `<workspace_root>/<name>` (`run_workspace.rs`).
-Tasks without `repos` keep the project worktree. Housekeeping does not remove
-run workspaces yet.
+Tasks without `repos` keep the project worktree. A bot with a repo list
+(`axe bot edit <name> --repo <r>`, `--no-repos` clears it) runs in
+`<run_root>/bot-<name>` the same way, on branch `bot-<name>--work`; a bot
+without one keeps its project worktree. Housekeeping does not remove run
+workspaces yet.
 
 **Agent environment.** Sessions get `AXE_ACTOR=agent`, `AXE_SESSION`,
 `AXE_TASK`, `AXE_SERVER`, `AXE_WORKTREE` and OpenTelemetry resource

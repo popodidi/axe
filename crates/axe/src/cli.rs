@@ -1016,7 +1016,7 @@ enum BotCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Change identity, conduct or schedule; each change is recorded with --why
+    /// Change identity, conduct, nudge or repos; each change is recorded with --why
     Edit {
         #[arg(env = "AXE_BOT")]
         name: String,
@@ -1027,6 +1027,13 @@ enum BotCmd {
         /// Long-run nudge threshold (e.g. 10m)
         #[arg(long)]
         nudge_after: Option<String>,
+        /// Replace the repo list (repeat or comma-separate): each run gets a
+        /// run folder with one worktree per repo
+        #[arg(long, value_delimiter = ',', conflicts_with = "no_repos")]
+        repo: Vec<String>,
+        /// Clear the repo list: runs use the project worktree again
+        #[arg(long)]
+        no_repos: bool,
         #[arg(long)]
         why: String,
     },
@@ -2124,9 +2131,13 @@ fn format_bot(b: &crate::bot::Bot) -> String {
         b.state.clone()
     };
     format!(
-        "name: {}\nproject: {}\nagent: {}\nstate: {state}\nfailures: {}\nnudge_after: {}s\nsession: {}\nlive_run: {}\nnext_wake: {}\nqueued: {}\nlast_run_end: {}\ncreated_at: {}\nupdated_at: {}\n\n# Identity\n\n{}\n\n# Conduct\n\n{}",
+        "name: {}\nproject: {}\nrepos: {}\nagent: {}\nstate: {state}\nfailures: {}\nnudge_after: {}s\nsession: {}\nlive_run: {}\nnext_wake: {}\nqueued: {}\nlast_run_end: {}\ncreated_at: {}\nupdated_at: {}\n\n# Identity\n\n{}\n\n# Conduct\n\n{}",
         b.name,
         b.project,
+        match b.repos.as_deref() {
+            Some(r) if !r.is_empty() => r.join(","),
+            _ => "- (project worktree)".into(),
+        },
         b.agent,
         b.failures,
         b.nudge_after_seconds,
@@ -2283,15 +2294,31 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
             identity_file,
             conduct_file,
             nudge_after,
+            repo,
+            no_repos,
             why,
         } => {
             let read = |f: &Option<PathBuf>| f.as_ref().map(read_file).transpose();
-            let _: Bot = c.send(
+            let repos = (*no_repos || !repo.is_empty()).then_some(repo);
+            let b: Bot = c.send(
                 "PATCH",
                 &format!("/api/bots/{name}"),
                 json!({"identity":read(identity_file)?,"conduct":read(conduct_file)?,
-                    "nudge_after":nudge_after,"why":why}),
+                    "nudge_after":nudge_after,"repos":repos,"why":why}),
             )?;
+            // A server from before bot repos ignores the field.
+            if let Some(r) = repos {
+                let mut want: Vec<&String> = Vec::new();
+                for n in r {
+                    if !want.contains(&n) {
+                        want.push(n);
+                    }
+                }
+                let got = b.repos.clone().unwrap_or_default();
+                if got.iter().collect::<Vec<_>>() != want {
+                    anyhow::bail!("the server did not apply the repo list; it predates bot repos");
+                }
+            }
         }
         BotCmd::Notes {
             name,

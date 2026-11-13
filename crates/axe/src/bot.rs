@@ -167,6 +167,11 @@ pub struct Bot {
     pub failures: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Repos the bot works in: each run gets a run folder with one worktree
+    /// per repo (`run_workspace.rs`). `None` (also an empty list): the
+    /// project worktree.
+    #[serde(default)]
+    pub repos: Option<Vec<String>>,
     /// Derived: the live run, if any.
     #[serde(default)]
     pub live_run: Option<i64>,
@@ -212,6 +217,9 @@ impl Bot {
             failures,
             created_at: r.get("created_at")?,
             updated_at: r.get("updated_at")?,
+            repos: r
+                .get::<_, Option<String>>("repos")?
+                .and_then(|s| serde_json::from_str(&s).ok()),
             live_run: r.get("live_run")?,
             next_wake: r.get("next_wake")?,
             queued: r.get("queued")?,
@@ -406,6 +414,9 @@ pub struct Edit {
     /// Retired: see [`refuse_heartbeat`].
     pub heartbeat: Option<String>,
     pub nudge_after: Option<String>,
+    /// Replaces the repo list; an empty list clears it (the project worktree).
+    #[serde(default)]
+    pub repos: Option<Vec<String>>,
 }
 
 /// Applies an edit and records each change as a diff event with the reason.
@@ -453,6 +464,29 @@ pub fn edit(conn: &mut Connection, actor: &Actor, name: &str, e: &Edit, why: &st
             &format!("why: {why}\n{old}s -> {new}s"),
         )?;
         changed = true;
+    }
+    if let Some(new) = &e.repos {
+        let new = crate::db::names("repo", new)?;
+        let old = b.repos.clone().unwrap_or_default();
+        if new != old {
+            let json = (!new.is_empty()).then(|| serde_json::to_string(&new).expect("names"));
+            tx.execute("UPDATE bots SET repos=?1 WHERE id=?2", params![json, b.id])?;
+            let show = |l: &[String]| {
+                if l.is_empty() {
+                    "-".to_string()
+                } else {
+                    l.join(",")
+                }
+            };
+            event(
+                &tx,
+                b.id,
+                actor,
+                "repos",
+                &format!("why: {why}\n{} -> {}", show(&old), show(&new)),
+            )?;
+            changed = true;
+        }
     }
     if changed {
         tx.execute(
