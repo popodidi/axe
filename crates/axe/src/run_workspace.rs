@@ -3,8 +3,10 @@
 //! ```text
 //! <run_root>/task-<id>/      cwd and $AXE_WORKTREE
 //!   AGENTS.md                generated: the task contract and an index
-//!   skills/                  links to each repo's .agents/skills/<name>
-//!   docs/index.md            generated: each repo's docs, by title
+//!   skills/                  links to each repo's .agents/skills/<name>, and
+//!                            an index entry per attached skill (context.rs)
+//!   docs/index.md            generated: each repo's docs, by title, and the
+//!                            attached docs
 //!   repos/<name>/            worktree of the repo, on the task branch
 //!   .agents/skills, .claude/skills -> ../skills
 //! ```
@@ -20,14 +22,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::config::Config;
+use crate::context::{self, frontmatter};
 use crate::db::Task;
 use crate::worktree;
 
 /// Most docs listed per repo in `docs/index.md`.
 const DOCS_MAX: usize = 200;
 
-/// Builds or refreshes the run workspace of `task`, which must have `repos`.
-pub fn build(cfg: &Config, task: &Task) -> Result<PathBuf> {
+/// Builds or refreshes the run workspace of `task`, which must have `repos`,
+/// with the docs and skills attached to its scopes from `store` (none when
+/// `None` or when the store cannot be read).
+pub fn build(cfg: &Config, task: &Task, store: Option<&dyn context::Source>) -> Result<PathBuf> {
     let repos = task
         .repos
         .as_deref()
@@ -48,7 +53,13 @@ pub fn build(cfg: &Config, task: &Task) -> Result<PathBuf> {
         built.push((name.clone(), path));
     }
     let skills = link_skills(&dir, &built)?;
-    let docs = docs_index(&built)?;
+    let attached = match store {
+        Some(src) => context::resolve_or_empty(src, &context::task_scopes(task), &own(&skills)),
+        None => context::Resolution::default(),
+    };
+    context::write_skills(&dir.join("skills"), &attached)?;
+    let mut docs = docs_index(&built)?;
+    docs.push_str(&context::docs_section(&attached));
     replace_dir(&dir.join("docs"))?;
     std::fs::write(dir.join("docs/index.md"), docs)?;
     for agent_dir in [".agents", ".claude"] {
@@ -60,7 +71,7 @@ pub fn build(cfg: &Config, task: &Task) -> Result<PathBuf> {
     }
     std::fs::write(
         dir.join("AGENTS.md"),
-        agents_md(task, &branch, &built, &skills),
+        agents_md(task, &branch, &built, &skills, &attached),
     )?;
     Ok(dir)
 }
@@ -91,6 +102,22 @@ struct Skill {
 fn link_skills(dir: &Path, repos: &[(String, PathBuf)]) -> Result<Vec<Skill>> {
     let skills_dir = dir.join("skills");
     replace_dir(&skills_dir)?;
+    let skills = repo_skills(repos);
+    for s in &skills {
+        std::os::unix::fs::symlink(
+            Path::new("../repos")
+                .join(&s.repo)
+                .join(".agents/skills")
+                .join(&s.name),
+            skills_dir.join(&s.name),
+        )?;
+    }
+    Ok(skills)
+}
+
+/// The skills in each repo's `.agents/skills` (a folder with `SKILL.md`);
+/// the first repo in order wins a name.
+fn repo_skills(repos: &[(String, PathBuf)]) -> Vec<Skill> {
     let mut out: Vec<Skill> = Vec::new();
     for (repo, path) in repos {
         let Ok(entries) = std::fs::read_dir(path.join(".agents/skills")) else {
@@ -108,13 +135,6 @@ fn link_skills(dir: &Path, repos: &[(String, PathBuf)]) -> Result<Vec<Skill>> {
             if name.starts_with('.') || out.iter().any(|s| s.name == name) {
                 continue;
             }
-            std::os::unix::fs::symlink(
-                Path::new("../repos")
-                    .join(repo)
-                    .join(".agents/skills")
-                    .join(&name),
-                skills_dir.join(&name),
-            )?;
             out.push(Skill {
                 description: frontmatter(&text, "description").unwrap_or_default(),
                 name,
@@ -122,18 +142,39 @@ fn link_skills(dir: &Path, repos: &[(String, PathBuf)]) -> Result<Vec<Skill>> {
             });
         }
     }
-    Ok(out)
+    out
 }
 
-/// A `key: value` line of a Markdown file's YAML front matter.
-fn frontmatter(text: &str, key: &str) -> Option<String> {
-    let body = text.strip_prefix("---\n")?;
-    let end = body.find("\n---")?;
-    body[..end].lines().find_map(|l| {
-        l.strip_prefix(key)?
-            .strip_prefix(':')
-            .map(|v| v.trim().trim_matches('"').to_string())
-    })
+fn own(skills: &[Skill]) -> Vec<context::OwnSkill> {
+    skills
+        .iter()
+        .map(|s| context::OwnSkill {
+            name: s.name.clone(),
+            repo: s.repo.clone(),
+            description: s.description.clone(),
+        })
+        .collect()
+}
+
+/// What `axe context explain` resolves for `task`: its attached docs, and the
+/// repos' own skills when its run workspace is on this machine.
+pub fn explain(
+    cfg: Option<&Config>,
+    task: &Task,
+    store: &dyn context::Source,
+) -> Result<context::Resolution> {
+    let skills = match (cfg, task.repos.as_deref()) {
+        (Some(cfg), Some(repos)) => {
+            let dir = cfg.run_root().join(format!("task-{}", task.id));
+            let repos: Vec<(String, PathBuf)> = repos
+                .iter()
+                .map(|r| (r.clone(), dir.join("repos").join(r)))
+                .collect();
+            repo_skills(&repos)
+        }
+        _ => Vec::new(),
+    };
+    context::resolve(store, &context::task_scopes(task), &own(&skills))
 }
 
 /// `docs/index.md`: every Markdown file under each repo's `docs/` (two levels),
@@ -189,7 +230,13 @@ fn markdown_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 }
 
 /// The generated `AGENTS.md`: the task contract, then where things are.
-fn agents_md(task: &Task, branch: &str, repos: &[(String, PathBuf)], skills: &[Skill]) -> String {
+fn agents_md(
+    task: &Task,
+    branch: &str,
+    repos: &[(String, PathBuf)],
+    skills: &[Skill],
+    attached: &context::Resolution,
+) -> String {
     let mut s = format!(
         "# Task {}: {}\n\nGenerated by axe at the start of every session; edits here are lost.\n\n",
         task.id, task.title
@@ -225,7 +272,8 @@ fn agents_md(task: &Task, branch: &str, repos: &[(String, PathBuf)], skills: &[S
         s.push('\n');
     }
     s.push_str("\n## Skills\n\n");
-    if skills.is_empty() {
+    let attached_skills = context::skills_lines(attached, "skills/");
+    if skills.is_empty() && attached_skills.is_empty() {
         s.push_str("None.\n");
     }
     for k in skills {
@@ -241,6 +289,15 @@ fn agents_md(task: &Task, branch: &str, repos: &[(String, PathBuf)], skills: &[S
             }
         );
     }
+    s.push_str(&attached_skills);
     s.push_str("\n## Docs\n\nSee `docs/index.md`.\n");
+    if !attached.is_empty() {
+        let _ = writeln!(
+            s,
+            "\nAttached skills and docs are index entries: load a body with `axe doc get <path>`. \
+             `axe context explain {}` shows what was included and why.",
+            task.id
+        );
+    }
     s
 }

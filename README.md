@@ -123,7 +123,8 @@ nothing in it could be lost (`worktree.rs`, `housekeeping.rs`;
 `<run_root>/task-<id>` instead (default `<workspace_root>/.runs`): one worktree
 per repo under `repos/<name>`, all on the task branch, plus a generated
 `AGENTS.md` (the task contract and an index), `skills/` linked from each
-repo's `.agents/skills` and a `docs/index.md`. A repo's canonical clone is
+repo's `.agents/skills` and a `docs/index.md`, plus attached docs (see Run
+context below). A repo's canonical clone is
 `[repos.<name>] path`, default `<workspace_root>/<name>` (`run_workspace.rs`).
 Tasks without `repos` keep the project worktree. Housekeeping does not remove
 run workspaces yet.
@@ -180,6 +181,19 @@ what a scope has. A write may name the version it edits (`--base`, or
 `--new` for a new doc) and is refused with a conflict if the doc moved since.
 Back the repository up with git (`git clone --mirror`); `axe backup` covers
 the database only.
+
+**Run context.** When the dispatcher builds a run workspace it collects the
+docs attached to the task's scopes: each repo, the owner, each label (the
+project first) and `global`. A conflict (the same skill name, or the same path
+on two scopes) goes to the more specific scope: repo > owner > label > global.
+Paths under `policy/` and a repo's own `.agents/skills` are never overridden.
+Only names and descriptions go into the run: each attached skill becomes an
+index entry `skills/<name>/SKILL.md` (found through `.claude/skills` and
+`.agents/skills`), each doc a line in `docs/index.md`; bodies load on use with
+`axe doc get <path>`. A bot's system prompt lists what is attached to
+`owner:bot:<name>`, its project and `global`. Nothing attached means nothing
+changes. `axe context explain <task>` prints each candidate, its scope and why
+it was included or skipped (`context.rs`).
 
 ## Configuration
 
