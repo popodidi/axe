@@ -74,6 +74,10 @@ pub fn route(path: &[String]) -> &'static str {
         ["api", "blobs"] => "/api/blobs",
         ["api", "blobs", _] => "/api/blobs/:sha",
         ["api", "blobs", _, "link"] => "/api/blobs/:sha/link",
+        ["api", "docs"] => "/api/docs",
+        ["api", "docs", "file" | "log" | "diff" | "attachments" | "attach" | "detach"] => {
+            "/api/docs/action"
+        }
         ["b", ..] => "/b",
         _ => "unknown",
     }

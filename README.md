@@ -166,12 +166,27 @@ opens without the token, for example from a phone; it renders inline in a
 sandbox. The signing key is created on first start; `[blobs]` sets the
 directory, size limit, link base URL and key file.
 
+## Docs
+
+`axe doc put/get/ls/log/diff/attach/detach` (`doc.rs`) keeps versioned text
+documents on the server: skills, docs, memory, conduct and bundles. A doc is a
+path (`notes/plan.md`); a folder of docs is a path too, so a skill is a folder
+with `SKILL.md` and its files, and a bundle is any folder. Every change is a
+commit in a bare git repository (`docs.git` next to the database, or
+`[docs] dir`), so `log` and `diff` show a doc's history; the server needs
+`git` on its `PATH`. Docs attach to one of four scopes: `global`,
+`label:<name>`, `owner:<name>` or `repo:<name>`; `axe doc ls --scope` lists
+what a scope has. A write may name the version it edits (`--base`, or
+`--new` for a new doc) and is refused with a conflict if the doc moved since.
+Back the repository up with git (`git clone --mirror`); `axe backup` covers
+the database only.
+
 ## Configuration
 
 One TOML file, `$AXE_CONFIG` (default `~/.config/axe/config.toml`; built-in
 defaults when missing), read once at startup by both `axe server` and
 `axe dispatch`. The server uses `[server]`, `[telegram]`, `[metrics]`,
-`[blobs]` and the agent names; the dispatcher uses the rest, so keep agent
+`[blobs]`, `[docs]` and the agent names; the dispatcher uses the rest, so keep agent
 names aligned when they run on different machines. Unknown keys fail validation.
 `crates/axe/src/config.rs` defines every table, default and check;
 `axe config` validates and prints the resolved file, including the built-in
@@ -192,14 +207,15 @@ run on server start (`db.rs`); back up before upgrading.
 
 ## HTTP API
 
-`GET` is unauthenticated, except Telegram message content, `/api/blobs` and
+`GET` is unauthenticated, except Telegram message content, `/api/blobs`,
+`/api/docs` and
 the dispatcher connection (a signed `/b/` link needs only its signature);
 every other method needs `Authorization: Bearer <token>`. The server refuses
 a non-loopback listen address without a token file. Expose it only on a
 trusted network: reads include full agent logs. Bodies are JSON, errors are
 `{"error": "..."}`, and `X-Axe-Request-Id` makes a write retry-safe.
 
-The route table is `route`, `bot_route`, `goal_route` and `blob_api` in
+The route table is `route`, `bot_route`, `goal_route`, `doc_route` and `blob_api` in
 `crates/axe/src/server.rs`; dispatcher operations are in `remote.rs`. Response
 shapes are the serialized Rust types, exported to `web/lib/api.ts`. There is
 no version prefix.

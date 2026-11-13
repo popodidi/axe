@@ -17,4 +17,14 @@ for _ in $(seq 30); do get /healthz >/dev/null 2>&1 && break; sleep 1; done
 get /healthz | grep -q '"ok":true'
 get / | grep -qi '<html'
 test "$(docker exec "$name" cat /etc/axe-revision)" = "$revision"
+# The doc store (git backend) writes and reads back.
+docker exec "$name" python3 -c '
+import json, urllib.request
+h = {"Authorization": "Bearer fixture", "Content-Type": "application/json"}
+put = urllib.request.Request("http://127.0.0.1:8790/api/docs", method="POST", headers=h,
+                             data=json.dumps({"path": "smoke.md", "content": "ok\n"}).encode())
+assert urllib.request.urlopen(put).status == 201
+get = urllib.request.Request("http://127.0.0.1:8790/api/docs/file?path=smoke.md", headers=h)
+assert json.load(urllib.request.urlopen(get))["content"] == "ok\n"
+'
 echo "smoke ok: $image"

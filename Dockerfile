@@ -19,8 +19,9 @@ COPY --from=web /src/web/out ./web/out
 RUN cargo build --release --locked -p axe-os --features embed-ui
 
 FROM debian:bookworm-slim
-# python3 serves maintenance pods that reuse this image (database copies).
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 \
+# python3 serves maintenance pods that reuse this image (database copies);
+# git is the doc store's backend.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/axe /usr/local/bin/axe
 ARG GIT_COMMIT

@@ -338,6 +338,281 @@ enum Cmd {
         #[command(subcommand)]
         command: BlobCmd,
     },
+    /// Versioned text docs kept by the server (skills, docs, memory, conduct,
+    /// bundles), attached to scopes: global, label:<name>, owner:<name>,
+    /// repo:<name>
+    Doc {
+        #[command(subcommand)]
+        command: DocCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocCmd {
+    /// Write a doc from a file or stdin, or a folder (e.g. a skill: SKILL.md
+    /// plus files) from a directory; each write that changes something is a
+    /// new version
+    Put {
+        /// Doc or folder path, e.g. notes/plan.md or skills/review
+        path: String,
+        /// File or directory to read (default: stdin)
+        src: Option<PathBuf>,
+        /// Only write if the doc is still at this version (else: conflict)
+        #[arg(long, conflicts_with = "new")]
+        base: Option<String>,
+        /// Only write if the doc does not exist yet
+        #[arg(long)]
+        new: bool,
+        /// Change message
+        #[arg(long, short)]
+        message: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a doc (or write it, or a folder, to --output)
+    Get {
+        path: String,
+        /// A past version (default: current)
+        #[arg(long)]
+        version: Option<String>,
+        /// File to write a doc to, or directory to write a folder into
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List docs (under a prefix), or the docs attached to a scope
+    Ls {
+        prefix: Option<String>,
+        /// global, label:<name>, owner:<name> or repo:<name>
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Versions of a doc or folder, newest first
+    Log {
+        path: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Unified diff between two versions (default: the last change)
+    Diff {
+        path: String,
+        /// Older version (default: the one before TO)
+        from: Option<String>,
+        /// Newer version (default: current)
+        to: Option<String>,
+    },
+    /// Attach a doc or folder to a scope
+    Attach {
+        path: String,
+        /// global, label:<name>, owner:<name> or repo:<name>
+        scope: String,
+    },
+    /// Detach a doc or folder from a scope
+    Detach { path: String, scope: String },
+}
+
+/// Files of a folder write: every non-hidden file under `dir`.
+fn read_folder(dir: &std::path::Path) -> Result<Vec<Value>> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<Value>) -> Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let p = e.path();
+            if e.file_type()?.is_dir() {
+                walk(root, &p, out)?;
+            } else {
+                let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
+                let content = std::fs::read_to_string(&p)
+                    .with_context(|| format!("read {} (docs are UTF-8 text)", p.display()))?;
+                out.push(json!({"path": rel, "content": content}));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out)?;
+    Ok(out)
+}
+
+fn short(v: &Value) -> &str {
+    let s = v.as_str().unwrap_or("");
+    &s[..s.len().min(12)]
+}
+
+fn run_doc(c: &Client, command: &DocCmd) -> Result<()> {
+    match command {
+        DocCmd::Put {
+            path,
+            src,
+            base,
+            new,
+            message,
+            json,
+        } => {
+            let mut body = json!({"path": path, "message": message.clone().unwrap_or_default()});
+            match src {
+                Some(p) if p.is_dir() => body["files"] = Value::from(read_folder(p)?),
+                Some(p) if p.as_os_str() != "-" => {
+                    body["content"] = std::fs::read_to_string(p)
+                        .with_context(|| format!("read {} (docs are UTF-8 text)", p.display()))?
+                        .into()
+                }
+                _ => {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+                        .context("read stdin (docs are UTF-8 text)")?;
+                    body["content"] = s.into();
+                }
+            }
+            if *new {
+                body["base"] = "".into();
+            } else if let Some(b) = base {
+                body["base"] = b.as_str().into();
+            }
+            let v: Value = c.send("POST", "/api/docs", body)?;
+            if *json {
+                return print_json(&v);
+            }
+            let state = if v["changed"] == true {
+                "written"
+            } else {
+                "unchanged"
+            };
+            println!("{}  {}  {state}", v["version"].as_str().unwrap_or(""), path);
+        }
+        DocCmd::Get {
+            path,
+            version,
+            output,
+            json,
+        } => {
+            let mut q = vec![("path", path.as_str())];
+            if let Some(v) = version {
+                q.push(("version", v.as_str()));
+            }
+            let v: Value = c.get_private("/api/docs/file", &q)?;
+            if *json {
+                return print_json(&v);
+            }
+            if let Some(content) = v["content"].as_str() {
+                match output {
+                    Some(p) => std::fs::write(p, content)?,
+                    None => print!("{content}"),
+                }
+                return Ok(());
+            }
+            let files = v["files"].as_array().cloned().unwrap_or_default();
+            match output {
+                Some(dir) => {
+                    for f in &files {
+                        let rel = crate::doc::check_path(f["path"].as_str().unwrap_or(""))?;
+                        let p = dir.join(&rel);
+                        if let Some(parent) = p.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&p, f["content"].as_str().unwrap_or(""))?;
+                    }
+                }
+                None => {
+                    for f in &files {
+                        println!("==> {} <==", f["path"].as_str().unwrap_or(""));
+                        print!("{}", f["content"].as_str().unwrap_or(""));
+                    }
+                }
+            }
+        }
+        DocCmd::Ls {
+            prefix,
+            scope,
+            json,
+        } => {
+            if let Some(s) = scope {
+                let v: Vec<Value> = c.get_private("/api/docs/attachments", &[("scope", s)])?;
+                if *json {
+                    return print_json(&v);
+                }
+                for a in &v {
+                    let gone = if a["exists"] == false {
+                        "  (missing)"
+                    } else {
+                        ""
+                    };
+                    println!("{}{gone}", a["path"].as_str().unwrap_or(""));
+                }
+                return Ok(());
+            }
+            let q: Vec<(&str, &str)> = prefix.iter().map(|p| ("prefix", p.as_str())).collect();
+            let v: Vec<Value> = c.get_private("/api/docs", &q)?;
+            if *json {
+                return print_json(&v);
+            }
+            for d in &v {
+                println!(
+                    "{}  {:>8}  {}  {}",
+                    short(&d["version"]),
+                    d["size"],
+                    d["updated_at"].as_str().unwrap_or("-"),
+                    d["path"].as_str().unwrap_or("")
+                );
+            }
+        }
+        DocCmd::Log { path, json } => {
+            let v: Vec<Value> = c.get_private("/api/docs/log", &[("path", path.as_str())])?;
+            if *json {
+                return print_json(&v);
+            }
+            for e in &v {
+                println!(
+                    "{}  {}  {}  {}",
+                    short(&e["version"]),
+                    e["at"].as_str().unwrap_or(""),
+                    e["author"].as_str().unwrap_or(""),
+                    e["message"].as_str().unwrap_or("")
+                );
+            }
+        }
+        DocCmd::Diff { path, from, to } => {
+            let mut q = vec![("path", path.as_str())];
+            if let Some(f) = from {
+                q.push(("from", f.as_str()));
+            }
+            if let Some(t) = to {
+                q.push(("to", t.as_str()));
+            }
+            let v: Value = c.get_private("/api/docs/diff", &q)?;
+            print!("{}", v["diff"].as_str().unwrap_or(""));
+        }
+        DocCmd::Attach { path, scope } | DocCmd::Detach { path, scope } => {
+            let verb = if matches!(command, DocCmd::Attach { .. }) {
+                "attach"
+            } else {
+                "detach"
+            };
+            let v: Value = c.send(
+                "POST",
+                &format!("/api/docs/{verb}"),
+                json!({"path": path, "scope": scope}),
+            )?;
+            let what = if v["changed"] == true {
+                format!("{verb}ed")
+            } else {
+                "unchanged".into()
+            };
+            println!(
+                "{} {} {what}",
+                v["path"].as_str().unwrap_or(""),
+                v["scope"].as_str().unwrap_or("")
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -2178,6 +2453,7 @@ pub fn run() -> Result<()> {
     match &cli.cmd {
         Cmd::Bot { command } => run_bot(&client(), command)?,
         Cmd::Blob { command } => run_blob(&client(), command)?,
+        Cmd::Doc { command } => run_doc(&client(), command)?,
         Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Routine { command } => {
             let c = client();

@@ -149,6 +149,18 @@ pub struct Config {
     /// `[blobs]`: the server's content-addressed blob store (`blob.rs`).
     #[serde(default)]
     pub blobs: Blobs,
+    /// `[docs]`: the server's versioned doc store (`doc.rs`).
+    #[serde(default)]
+    pub docs: Docs,
+}
+
+/// `[docs]`: where `axe server` keeps versioned docs (a bare git repository).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Docs {
+    /// The repository (default: `docs.git` next to the database).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 /// `[blobs]`: where `axe server` keeps blobs and how it signs their links.
