@@ -58,6 +58,12 @@ export type Bot = { id: number, name: string, project: string, agent: string, id
  */
 heartbeat_seconds: number, nudge_after_seconds: number, state: string, session_agent: string | null, session_id: string | null, resume_count: number, failures: number, created_at: string, updated_at: string, 
 /**
+ * Repos the bot works in: each run gets a run folder with one worktree
+ * per repo (`run_workspace.rs`). `None` (also an empty list): the
+ * project worktree.
+ */
+repos: Array<string> | null, 
+/**
  * Derived: the live run, if any.
  */
 live_run: number | null, 

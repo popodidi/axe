@@ -455,7 +455,7 @@ fn v15_database_migrates_to_v16_additively() {
     let version: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 17);
+    assert_eq!(version, 18);
     assert_eq!(db::get_task(&c, 1).unwrap().title, "t");
     let s = &schedule::list(&c, "a").unwrap()[0];
     assert_eq!((s.name.as_str(), s.goal.as_deref()), ("s", None));

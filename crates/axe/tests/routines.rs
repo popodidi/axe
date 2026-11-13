@@ -173,7 +173,7 @@ fn migration_preserves_all_existing_rows() {
     assert_eq!(
         c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        17
+        18
     );
     assert_eq!(
         c.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r

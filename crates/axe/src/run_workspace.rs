@@ -16,6 +16,10 @@
 //! `docs/` are generated again at the start of every session. A task with an
 //! empty repo list gets the folder without `repos/`. Tasks without `repos`
 //! keep the project worktree (`worktree.rs`).
+//!
+//! A bot with a repo list gets the same layout at `<run_root>/bot-<name>`
+//! ([`build_bot`]), on branch `<branch_prefix>bot-<name>--work`; a bot
+//! without one keeps its project worktree.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -38,20 +42,8 @@ pub fn build(cfg: &Config, task: &Task, store: Option<&dyn context::Source>) -> 
         .as_deref()
         .context("task has no repos; it runs in its project worktree")?;
     let dir = cfg.run_root().join(format!("task-{}", task.id));
-    match std::fs::symlink_metadata(&dir) {
-        Ok(m) if !m.is_dir() => bail!("{} exists and is not a directory", dir.display()),
-        _ => {}
-    }
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let prefix = cfg.worktrees.clone().unwrap_or_default().branch_prefix;
-    let branch = format!("{prefix}task-{}--work", task.id);
-    let mut built = Vec::new();
-    for name in repos {
-        crate::db::validate_name("repo", name)?;
-        let ready = worktree::repo_readiness(cfg, name).map_err(anyhow::Error::msg)?;
-        let path = worktree::allocate_at(&ready, &dir.join("repos").join(name), &branch)?;
-        built.push((name.clone(), path));
-    }
+    let branch = format!("{}task-{}--work", branch_prefix(cfg), task.id);
+    let built = checkout(cfg, &dir, repos, &branch)?;
     let skills = link_skills(&dir, &built)?;
     let attached = match store {
         Some(src) => context::resolve_or_empty(src, &context::task_scopes(task), &own(&skills)),
@@ -60,6 +52,59 @@ pub fn build(cfg: &Config, task: &Task, store: Option<&dyn context::Source>) -> 
     context::write_skills(&dir.join("skills"), &attached)?;
     let mut docs = docs_index(&built)?;
     docs.push_str(&context::docs_section(&attached));
+    finish(
+        &dir,
+        &docs,
+        &agents_md(task, &branch, &built, &skills, &attached),
+    )?;
+    Ok(dir)
+}
+
+/// The run folder of bot `name` with `repos` (non-empty): `<run_root>/bot-<name>`,
+/// laid out like a task's, each repo on branch `<branch_prefix>bot-<name>--work`.
+/// Worktrees persist across runs. Attached docs stay in the bot's system
+/// prompt, so the folder lists only the repos' own skills and docs.
+pub fn build_bot(cfg: &Config, name: &str, repos: &[String]) -> Result<PathBuf> {
+    let dir = cfg.run_root().join(format!("bot-{name}"));
+    let branch = format!("{}bot-{name}--work", branch_prefix(cfg));
+    let built = checkout(cfg, &dir, repos, &branch)?;
+    let skills = link_skills(&dir, &built)?;
+    finish(
+        &dir,
+        &docs_index(&built)?,
+        &bot_agents_md(name, &branch, &built, &skills),
+    )?;
+    Ok(dir)
+}
+
+fn branch_prefix(cfg: &Config) -> String {
+    cfg.worktrees.clone().unwrap_or_default().branch_prefix
+}
+
+/// Creates `dir` and a worktree of each repo under `dir/repos/<name>` on `branch`.
+fn checkout(
+    cfg: &Config,
+    dir: &Path,
+    repos: &[String],
+    branch: &str,
+) -> Result<Vec<(String, PathBuf)>> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if !m.is_dir() => bail!("{} exists and is not a directory", dir.display()),
+        _ => {}
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut built = Vec::new();
+    for name in repos {
+        crate::db::validate_name("repo", name)?;
+        let ready = worktree::repo_readiness(cfg, name).map_err(anyhow::Error::msg)?;
+        let path = worktree::allocate_at(&ready, &dir.join("repos").join(name), branch)?;
+        built.push((name.clone(), path));
+    }
+    Ok(built)
+}
+
+/// Writes `docs/index.md`, the `.agents`/`.claude` skill links and `AGENTS.md`.
+fn finish(dir: &Path, docs: &str, agents: &str) -> Result<()> {
     replace_dir(&dir.join("docs"))?;
     std::fs::write(dir.join("docs/index.md"), docs)?;
     for agent_dir in [".agents", ".claude"] {
@@ -69,11 +114,8 @@ pub fn build(cfg: &Config, task: &Task, store: Option<&dyn context::Source>) -> 
             std::os::unix::fs::symlink("../skills", &link)?;
         }
     }
-    std::fs::write(
-        dir.join("AGENTS.md"),
-        agents_md(task, &branch, &built, &skills, &attached),
-    )?;
-    Ok(dir)
+    std::fs::write(dir.join("AGENTS.md"), agents)?;
+    Ok(())
 }
 
 /// Removes a generated directory (only links and generated files) and makes it
@@ -260,9 +302,64 @@ fn agents_md(
     }
     s.push_str("\n## Spec\n\n");
     s.push_str(task.detail.trim_end());
-    s.push_str("\n\n## Repos\n\n");
+    s.push_str("\n\n");
+    s.push_str(&index_md(
+        repos,
+        skills,
+        attached,
+        "This task has no repos.\n",
+    ));
+    if !attached.is_empty() {
+        let _ = writeln!(
+            s,
+            "\nAttached skills and docs are index entries: load a body with `axe doc get <path>`. \
+             `axe context explain {}` shows what was included and why.",
+            task.id
+        );
+    }
+    s
+}
+
+/// The generated `AGENTS.md` of a bot's run folder: where things are. The
+/// bot's identity and conduct stay in its system prompt.
+fn bot_agents_md(
+    name: &str,
+    branch: &str,
+    repos: &[(String, PathBuf)],
+    skills: &[Skill],
+) -> String {
+    let mut s = format!(
+        "# Bot {name}: run folder\n\nGenerated by axe at the start of every run; edits here are lost. \
+         Your identity and conduct are in your system prompt.\n\n"
+    );
+    let _ = writeln!(
+        s,
+        "- Repos: {} (each a worktree under `repos/`, on branch `{branch}`)\n",
+        repos
+            .iter()
+            .map(|(r, _)| r.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    s.push_str(&index_md(
+        repos,
+        skills,
+        &context::Resolution::default(),
+        "",
+    ));
+    s
+}
+
+/// The `## Repos`, `## Skills` and `## Docs` sections.
+fn index_md(
+    repos: &[(String, PathBuf)],
+    skills: &[Skill],
+    attached: &context::Resolution,
+    no_repos: &str,
+) -> String {
+    let mut s = String::from("## Repos\n\n");
     if repos.is_empty() {
-        s.push_str("This task has no repos.\n");
+        s.push_str(no_repos);
     }
     for (repo, path) in repos {
         let _ = write!(s, "- `repos/{repo}`");
@@ -291,13 +388,5 @@ fn agents_md(
     }
     s.push_str(&attached_skills);
     s.push_str("\n## Docs\n\nSee `docs/index.md`.\n");
-    if !attached.is_empty() {
-        let _ = writeln!(
-            s,
-            "\nAttached skills and docs are index entries: load a body with `axe doc get <path>`. \
-             `axe context explain {}` shows what was included and why.",
-            task.id
-        );
-    }
     s
 }

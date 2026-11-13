@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -100,6 +100,21 @@ FROM runs;
 DROP TABLE runs; ALTER TABLE runs_new RENAME TO runs;
 ";
 
+/// v18: a bot's repo list, `bots.repos` (a JSON array; NULL means the bot runs
+/// in its project worktree, as before v18). Additive and idempotent like
+/// [`migrate_task_fields`].
+fn migrate_bot_repos(tx: &Transaction) -> Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='repos')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        tx.execute_batch("ALTER TABLE bots ADD COLUMN repos TEXT")?;
+    }
+    Ok(())
+}
+
 /// v17: the task fields `owner` (who follows the task up; its creator stays the
 /// first event), `repos` (a JSON array of repo names; NULL means the project's
 /// own checkout, as before v17) and `labels` (a JSON array). Additive and
@@ -142,12 +157,13 @@ pub fn default_path() -> Result<PathBuf> {
         .context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v17 schema, or migrates v8-v16 to v17. Older
+/// Opens the database: creates a fresh v18 schema, or migrates v8-v17 to v18. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
 /// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
 /// tables (`usage::SCHEMA`), v16 only adds goal tables and a nullable column
-/// (`goal::migrate`) and v17 only adds the task field columns
-/// ([`migrate_task_fields`]), so a database lowered to `user_version` 16, 15,
+/// (`goal::migrate`), v17 only adds the task field columns
+/// ([`migrate_task_fields`]) and v18 only adds `bots.repos`
+/// ([`migrate_bot_repos`]), so a database lowered to `user_version` 17, 16, 15,
 /// 14, 13, 12 or 11 still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -177,16 +193,18 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
         migrate_task_fields(&tx)?;
+        migrate_bot_repos(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=16).contains(&version) {
+    if (11..=17).contains(&version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
         migrate_task_fields(&tx)?;
+        migrate_bot_repos(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -207,6 +225,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
         migrate_task_fields(&tx)?;
+        migrate_bot_repos(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -230,6 +249,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     tx.execute_batch(crate::usage::SCHEMA)?;
     crate::goal::migrate(&tx)?;
     migrate_task_fields(&tx)?;
+    migrate_bot_repos(&tx)?;
     let violations: i64 =
         tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
@@ -478,7 +498,7 @@ pub fn validate_owner(owner: &str) -> Result<()> {
 }
 
 /// Validated, de-duplicated names in their given order.
-fn names(kind: &str, list: &[String]) -> Result<Vec<String>> {
+pub(crate) fn names(kind: &str, list: &[String]) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for n in list {
         validate_name(kind, n)?;

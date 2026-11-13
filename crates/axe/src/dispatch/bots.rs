@@ -110,7 +110,11 @@ impl Dispatcher {
             .session
             .as_ref()
             .filter(|s| s.agent == b.agent && agent.resume_cmd.is_some());
+        // A bot with a repo list runs in its run folder, like a task with repos.
         let worktree = match &self.cfg.worktrees {
+            _ if b.repos.as_ref().is_some_and(|r| !r.is_empty()) => Some(
+                crate::run_workspace::build_bot(&self.cfg, &b.name, b.repos.as_deref().unwrap())?,
+            ),
             Some(_) => {
                 let ready =
                     worktree::readiness(&self.cfg, &b.project).map_err(anyhow::Error::msg)?;
