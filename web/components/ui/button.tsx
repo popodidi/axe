@@ -3,7 +3,7 @@ import { cx } from "./cx";
 import styles from "./button.module.css";
 type Props = ComponentProps<"button"> & {
   variant?: "primary" | "secondary" | "ghost" | "link" | "nav";
-  // Compact by default (README "Compact defaults"); md is opt-in for a
+  // Compact by default (docs/design/dashboard.md "Compact defaults"); md is opt-in for a
   // prominent standalone action. Link and nav variants size themselves.
   size?: "md" | "sm";
   // Small icon-only control: optional .98 press feedback (brand guide).

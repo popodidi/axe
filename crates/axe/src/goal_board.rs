@@ -1,6 +1,6 @@
 //! The goal lines of a bot: the goals it is attached to, as the pinned
-//! overview (`board.rs`) shows them. Design: `docs/design/goals.md`, "Goal
-//! board". The separate goal board message (`flags.goal_board`) is retired:
+//! overview (`board.rs`) shows them. Design: `docs/design/goals.md`,
+//! "Budget". The separate goal board message (`flags.goal_board`) is retired:
 //! the Telegram gateway unpins it, edits it to a pointer and clears the flag;
 //! `set_message` only unsets it. `show` still renders the goal lines alone.
 //! The key bands budget spend in 10% steps of each weekly limit, so a small

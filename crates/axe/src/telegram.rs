@@ -2,7 +2,7 @@
 //! bot token, the inbound security filter, owner commands, and the outbound
 //! Bot API calls behind `axe bot tg`. Tokens stay in this process; agents
 //! talk to Telegram only through the server. Design:
-//! `docs/decisions/axe-bots.md` ("Telegram", "Security", "Wake delivery").
+//! `docs/design/bots.md` ("Telegram and security", "Wake delivery").
 //!
 //! Every method and field used here was checked against
 //! <https://core.telegram.org/bots/api> (Bot API 10.3).
