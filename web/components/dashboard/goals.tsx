@@ -32,6 +32,7 @@ import {
   type GoalEvent,
   type Meter,
 } from "../../lib/goals";
+import { useGoalTaskFilter, type GoalTaskFilter } from "../../lib/goal-task-filter";
 import styles from "./goals.module.css";
 // Goals: durable outcomes bots share (docs/design/goals.md). Read-only; the
 // owner and bots change goals with `axe goal`.
@@ -206,6 +207,8 @@ export function GoalDetailPage({
   const g = d?.goal;
   const open = g ? openTasks(g.tasks) : [];
   const linked = g ? linkedTasks(g.tasks) : [];
+  const [taskFilter, setTaskFilter] = useGoalTaskFilter();
+  const shown = taskFilter === "all" ? linked : open;
   return (
     <section className={styles.stack} id="goal-detail" aria-label="Goal detail">
       <header className={styles.header}>
@@ -292,12 +295,28 @@ export function GoalDetailPage({
           <Panel aria-label="Linked tasks">
             <PanelHead
               label="Linked tasks"
-              meta={`${open.length} open · ${g.tasks.length} linked`}
+              meta={
+                <span className={styles.taskMeta}>
+                  {`${open.length} open · ${g.tasks.length} linked`}
+                  <span role="group" aria-label="Show tasks" className={styles.taskFilter}>
+                    {(["open", "all"] as GoalTaskFilter[]).map((f) => (
+                      <button
+                        key={f}
+                        type="button"
+                        aria-pressed={taskFilter === f}
+                        onClick={() => setTaskFilter(f)}
+                      >
+                        {title(f)}
+                      </button>
+                    ))}
+                  </span>
+                </span>
+              }
             />
-            {linked.length ? (
+            {shown.length ? (
               <Table>
                 <tbody>
-                  {linked.map((t) => (
+                  {shown.map((t) => (
                     <tr
                       key={t.id}
                       id={"goal-task-" + t.id}
@@ -327,7 +346,11 @@ export function GoalDetailPage({
                 </tbody>
               </Table>
             ) : (
-              <EmptyState>No linked tasks</EmptyState>
+              <EmptyState>
+                {taskFilter === "all" || !g.tasks.length
+                  ? "No linked tasks"
+                  : "No open linked tasks"}
+              </EmptyState>
             )}
           </Panel>
           <section className={styles.block} aria-label="Trajectory">
