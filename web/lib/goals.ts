@@ -1,4 +1,4 @@
-// Read shapes of the axe goals API (crates/axe/src/goal.rs, docs/api-v1.md#goals).
+// Read shapes of the axe goals API (crates/axe/src/goal.rs, `goal_route` in crates/axe/src/server.rs).
 export type BudgetWindow = { since: string; until: string; days: number };
 export type Budget = {
   cost_week: number | null;

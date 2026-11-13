@@ -20,7 +20,7 @@ returns to `pending`.
 ## What changed
 
 - axe has no `owner` or persona: no `handoff`, no `--owner`, no persona-keyed
-  admission (one `pool.total`), one session per task (schema v9). Dispatcher
+  admission (one task pool), one session per task (schema v9). Dispatcher
   sessions start as plain sessions in the task worktree with a one-line prompt;
   no system prompt or persona files.
 - The task protocol lives in the deployment's agent instructions (for example
@@ -35,8 +35,8 @@ returns to `pending`.
   as the owner's approval. A session may run a review subagent of its own.
 - Stepping in means resuming the task's agent session with the command the
   dashboard shows; axe has no attach feature.
-- No backward compatibility was kept: older schemas, config keys and the legacy
-  `ops` owner migration were deleted.
+- No backward compatibility was kept for the persona model: its config keys
+  and the legacy `ops` owner migration were deleted.
 
 Standard workflows for a kind of task, if they emerge, belong in project docs
 or skills, not in axe.
