@@ -193,14 +193,11 @@ fn create_then_first_run_gets_system_prompt_and_only_wakes() {
     let out = rig.dispatcher(true, "exit0").wait();
     assert!(out.status.success(), "{out:?}");
 
+    // No bundle attached: the bot still runs, on its identity and conduct.
     let system = rig.file("system-1");
-    assert!(system.starts_with(bot::PROTOCOL), "{system}");
-    assert!(system.contains("IDENTITY-TEXT") && system.contains("CONDUCT-TEXT"));
-    assert!(
-        system.contains("Owner preferences and standing rules live in your conduct, not in notes.")
-            && system.contains("notes hold only what axe")
-            && system.contains("\"Owner preferences\" section"),
-        "protocol carries the preferences-in-conduct rule: {system}"
+    assert_eq!(
+        system,
+        "# Identity (bot b, project a)\n\nIDENTITY-TEXT\n\n# Code of conduct\n\nCONDUCT-TEXT\n"
     );
     assert!(
         !system.contains("NOTES-TEXT"),
@@ -386,6 +383,96 @@ fn bot_system_prompt_lists_docs_attached_to_the_bot_its_project_and_global() {
         !section.contains("other.md") && !section.contains("SECRET"),
         "{section}"
     );
+}
+
+/// The repository's shipped bundle `name` (`bundles/<name>`).
+fn shipped_bundle(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bundles")
+        .join(name)
+}
+
+#[test]
+fn shipped_bundles_rebuild_the_system_prompt_from_before_bundles() {
+    // Golden: tests/fixtures/bot_system_golden.md is the system prompt the
+    // compiled-in protocol produced (default features) for this bot.
+    let dir = tempfile::tempdir().unwrap();
+    let store = axe::doc::Store::open(&Default::default(), &dir.path().join("axe.db")).unwrap();
+    for name in ["telegram", "axe-bot"] {
+        let mut files = Vec::new();
+        for e in std::fs::read_dir(shipped_bundle(name)).unwrap() {
+            let e = e.unwrap();
+            files.push(axe::doc::File {
+                path: e.file_name().to_string_lossy().into_owned(),
+                content: std::fs::read_to_string(e.path()).unwrap(),
+            });
+        }
+        let path = format!("bundles/{name}");
+        store
+            .put(&path, &axe::doc::Body::Folder(files), None, "t", "m")
+            .unwrap();
+        let scope = axe::doc::Scope::parse("owner:bot:golden").unwrap();
+        store.attach(&path, &scope, true, "t").unwrap();
+    }
+    let b: bot::Bot = serde_json::from_value(json!({
+        "id":1,"name":"golden","project":"proj","agent":"claude",
+        "identity":"You are the golden bot.\n","conduct":"## Owner preferences\n- Be brief.\n",
+        "notes":"","heartbeat_seconds":0,"nudge_after_seconds":600,"state":"active",
+        "session_agent":null,"session_id":null,"resume_count":0,"failures":0,
+        "created_at":"x","updated_at":"x"}))
+    .unwrap();
+    let res =
+        axe::context::resolve(&store, &axe::context::bot_scopes("golden", "proj"), &[]).unwrap();
+    let system = bot::system_prompt(&b, &axe::context::bot_prompt_parts(&res))
+        + &axe::context::prompt_section(&res);
+    let golden = include_str!("fixtures/bot_system_golden.md");
+    assert_eq!(system, golden);
+    assert!(
+        golden.contains("Owner preferences and standing rules live in your conduct, not in notes.")
+            && golden.contains("notes hold only what axe")
+            && golden.contains("\"Owner preferences\" section"),
+        "the protocol bundle carries the preferences-in-conduct rule"
+    );
+}
+
+#[test]
+fn attaching_and_detaching_a_bundle_changes_the_next_runs_system_prompt() {
+    let rig = Rig::new(1);
+    rig.srv.ok(&[
+        "doc",
+        "put",
+        "bundles/axe-bot",
+        shipped_bundle("axe-bot").to_str().unwrap(),
+    ]);
+    rig.srv
+        .ok(&["doc", "attach", "bundles/axe-bot", "owner:bot:b"]);
+    rig.create(json!({}));
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let system = rig.file("system-1");
+    assert!(system.starts_with("# axe bot protocol\n"), "{system}");
+    assert!(
+        system.contains("## Authority\n")
+            && system.contains("\n\n# Identity (bot b, project a)\n\nIDENTITY-TEXT\n"),
+        "{system}"
+    );
+    assert!(
+        !system.contains("description:") && !system.contains("Attached knowledge"),
+        "front matter stripped, an inlined bundle is not listed again: {system}"
+    );
+
+    rig.srv
+        .ok(&["doc", "detach", "bundles/axe-bot", "owner:bot:b"]);
+    rig.srv
+        .ok(&["bot", "wake", "b", "--now", "--note", "again"]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let system = rig.file("system-2");
+    assert!(
+        system.starts_with("# Identity (bot b, project a)\n"),
+        "{system}"
+    );
+    assert!(!system.contains("axe bot protocol"), "{system}");
 }
 
 #[test]
@@ -648,7 +735,7 @@ fn elapsed_time_alone_never_starts_a_run() {
         prompt.contains("ping") && !prompt.contains("heartbeat"),
         "{prompt}"
     );
-    let text = bot::system_prompt(&run.bot).to_lowercase();
+    let text = bot::system_prompt(&run.bot, &[]).to_lowercase();
     assert!(!text.contains("heartbeat"), "{text}");
 }
 
