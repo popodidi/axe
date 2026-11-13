@@ -22,6 +22,7 @@ use crate::bot;
 use crate::channel;
 use crate::config::{self, Config};
 use crate::db::{self, Actor, Changes, Claim, Filter, NewTask, RunFilter};
+use crate::doc;
 use crate::goal;
 use crate::remote;
 use crate::routine;
@@ -111,6 +112,8 @@ struct State {
     /// Telegram gateway, when `[telegram]` is configured.
     telegram: Option<Arc<Gateway>>,
     blobs: blob::Store,
+    /// The doc store; `None` when it could not open (no `git`).
+    docs: Option<doc::Store>,
 }
 
 impl channel::Store for State {
@@ -163,6 +166,9 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     let api_conn = db::open(&opts.db_path)?;
     let blobs = blob::Store::open(&cfg.blobs, &opts.db_path).context("open the blob store")?;
+    let docs = doc::Store::open(&cfg.docs, &opts.db_path)
+        .map_err(|e| eprintln!("axe server: doc store disabled: {e:#}"))
+        .ok();
     let listener =
         TcpListener::bind(&addrs[..]).with_context(|| format!("bind {}", opts.listen))?;
     let local = listener.local_addr()?;
@@ -193,6 +199,7 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         #[cfg(not(feature = "telegram"))]
         telegram: None,
         blobs,
+        docs,
     });
     #[cfg(feature = "telegram")]
     if let Some(gw) = &state.telegram {
@@ -320,6 +327,10 @@ fn error_response(e: &anyhow::Error) -> Response {
         h.0
     } else if e.downcast_ref::<db::Forbidden>().is_some() {
         403
+    } else if e.downcast_ref::<doc::Conflict>().is_some() {
+        409
+    } else if e.downcast_ref::<doc::Invalid>().is_some() {
+        400
     } else if e.downcast_ref::<rusqlite::Error>().is_some() {
         500
     } else if e.to_string().ends_with("not found") {
@@ -470,7 +481,7 @@ fn body_limit(method: &str, path: &[String], authorized: bool) -> usize {
 /// token, unlike other reads.
 fn private_read(path: &[String]) -> bool {
     (path.len() >= 4 && path[0] == "api" && path[1] == "bots" && path[3] == "tg")
-        || (path.len() >= 2 && path[0] == "api" && path[1] == "blobs")
+        || (path.len() >= 2 && path[0] == "api" && matches!(path[1].as_str(), "blobs" | "docs"))
 }
 
 fn write_head(
@@ -1071,6 +1082,77 @@ fn stream_events(st: &State, w: &mut TcpStream, cors: Option<&str>) -> std::io::
     Ok(())
 }
 
+/// `/api/docs` routes (the token was checked: doc reads are private too).
+fn doc_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
+    let docs = st
+        .docs
+        .as_ref()
+        .ok_or_else(|| HttpError(503, "the doc store is disabled (is git installed?)".into()))?;
+    let need = |k: &str| {
+        req.query(k)
+            .ok_or_else(|| anyhow::Error::from(HttpError(400, format!("{k} is required"))))
+    };
+    match (req.method.as_str(), path) {
+        ("GET", ["api", "docs"]) => ok(200, &docs.list(req.query("prefix"))?),
+        ("GET", ["api", "docs", "file"]) => {
+            ok(200, &docs.get(need("path")?, req.query("version"))?)
+        }
+        ("GET", ["api", "docs", "log"]) => ok(200, &docs.log(need("path")?)?),
+        ("GET", ["api", "docs", "diff"]) => ok(
+            200,
+            &docs.diff(need("path")?, req.query("from"), req.query("to"))?,
+        ),
+        ("GET", ["api", "docs", "attachments"]) => {
+            let scope = req.query("scope").map(doc::Scope::parse).transpose()?;
+            ok(200, &docs.attachments(scope.as_ref())?)
+        }
+        ("POST", ["api", "docs"]) => {
+            #[derive(Deserialize)]
+            struct Put {
+                path: String,
+                content: Option<String>,
+                files: Option<Vec<doc::File>>,
+                /// The version this write edits; "" creates only.
+                base: Option<String>,
+                #[serde(default)]
+                message: String,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: Put = req.json()?;
+            let body = match (b.content, b.files) {
+                (Some(c), None) => doc::Body::Doc(c),
+                (None, Some(f)) => doc::Body::Folder(f),
+                _ => {
+                    return Err(
+                        HttpError(400, "give exactly one of content or files".into()).into(),
+                    )
+                }
+            };
+            let actor = b.who.actor().name;
+            let w = docs.put(&b.path, &body, b.base.as_deref(), &actor, &b.message)?;
+            ok(if w.changed { 201 } else { 200 }, &w)
+        }
+        ("POST", ["api", "docs", verb @ ("attach" | "detach")]) => {
+            #[derive(Deserialize)]
+            struct Attach {
+                path: String,
+                scope: String,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: Attach = req.json()?;
+            let scope = doc::Scope::parse(&b.scope)?;
+            let actor = b.who.actor().name;
+            ok(
+                200,
+                &docs.attach(&b.path, &scope, *verb == "attach", &actor)?,
+            )
+        }
+        _ => Err(HttpError(404, "no such doc route".into()).into()),
+    }
+}
+
 /// Actor fields every write carries.
 #[derive(Deserialize)]
 struct Who {
@@ -1207,6 +1289,9 @@ fn route(st: &State, req: &Request) -> Result<Response> {
         if let Some(r) = bot_route(st, req, &path)? {
             return Ok(r);
         }
+    }
+    if path.get(1) == Some(&"docs") && path[0] == "api" {
+        return doc_route(st, req, &path);
     }
     if path.get(1) == Some(&"goals") && path[0] == "api" {
         if let Some(r) = goal_route(st, req, &path)? {

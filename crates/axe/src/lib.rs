@@ -10,6 +10,7 @@ pub mod client;
 pub mod config;
 pub mod db;
 pub mod dispatch;
+pub mod doc;
 pub mod flow;
 pub mod goal;
 pub mod goal_board;
