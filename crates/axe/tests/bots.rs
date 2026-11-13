@@ -23,6 +23,9 @@ env | grep '^AXE_' | sort > "$out/env-$run"
 hold() { while [ -e "$out/$1" ]; do sleep 0.05; done; }
 case "$BOTTEST_MODE" in
   fail) exit 3 ;;
+  api)
+    echo '{"type":"result","is_error":true,"terminal_reason":"api_error","api_error_status":529,"result":"API Error: 529 overloaded"}'
+    exit 1 ;;
   wait) hold hold ;;
   hooks)
     hold hold
@@ -623,6 +626,89 @@ fn failures_undeliver_then_start_fresh_then_pause() {
     assert_eq!(rig.runs().len(), 3, "paused bots do not run");
     rig.srv.ok(&["bot", "resume", "b"]);
     assert_eq!(rig.bot()["failures"], 0);
+}
+
+#[test]
+fn api_outage_run_keeps_session_and_backs_off_without_failing() {
+    let rig = Rig::new(1);
+    rig.create(json!({}));
+    let _d = rig.dispatcher(false, "api");
+    wait_for("run 1 ends", 20, || {
+        rig.runs().first().is_some_and(|r| r["live"] == false)
+    });
+    let runs = rig.runs();
+    assert_eq!(runs[0]["stop_reason"], "api_error");
+    let b = rig.bot();
+    assert_eq!(
+        (b["state"].as_str(), b["failures"].as_i64()),
+        (Some("active"), Some(0))
+    );
+    assert_eq!(b["session_id"], runs[0]["session_id"], "session kept");
+    let wakes = rig.wakes();
+    assert_eq!(wakes[0]["run_id"], Value::Null, "returned to the queue");
+    assert!(wakes[0]["due_at"].as_str().unwrap() > runs[0]["ended_at"].as_str().unwrap());
+    let log = rig.srv.ok(&["bot", "log", "b"]);
+    assert!(
+        log.contains("retry_at") && log.contains("model API error 529"),
+        "{log}"
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(rig.runs().len(), 1, "no retry before the backoff");
+}
+
+#[test]
+fn api_outages_back_off_and_never_pause_or_drop_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+    let human = Actor::new("human");
+    bot::create(&mut conn, &human, &new_bot("b"), T0).unwrap();
+    let mut now = T0;
+    for (n, backoff) in [60, 120, 240, 480, 960, 1800, 1800].into_iter().enumerate() {
+        let c = claim(&mut conn, "b", now).unwrap_or_else(|| panic!("outage {n} claims"));
+        now += 1;
+        let end = bot::finish(&conn, c.run, Some(1), "api_error", Some("sess"), None, now).unwrap();
+        assert_eq!(end["returned_wakes"], n + 1, "held wakes plus the new one");
+        let b = bot::get(&conn, "b").unwrap();
+        assert_eq!((b.state.as_str(), b.failures), ("active", 0));
+        assert_eq!(b.session_id.as_deref(), Some("sess"));
+        // A new wake during the backoff does not start a run either.
+        bot::add_wake(&mut conn, &human, "b", now, &format!("ping {n}"), None, now).unwrap();
+        assert!(
+            bot::ready(&conn, now + backoff - 1).unwrap().is_empty(),
+            "outage {n}"
+        );
+        now += backoff;
+        assert_eq!(bot::ready(&conn, now).unwrap(), ["b"], "outage {n}");
+    }
+    // The API answers: the run gets every held wake and resumes the session.
+    let c = claim(&mut conn, "b", now).unwrap();
+    assert_eq!(c.mode, "resume");
+    assert_eq!(c.wakes.len(), 8);
+    finish(&conn, c.run, 0, now + 1);
+    // A real failure after outages still counts from zero, and the next outage
+    // backs off from the start again.
+    bot::add_wake(&mut conn, &human, "b", now + 2, "again", None, now + 2).unwrap();
+    let c = claim(&mut conn, "b", now + 2).unwrap();
+    finish(&conn, c.run, 3, now + 3);
+    assert_eq!(bot::get(&conn, "b").unwrap().failures, 1);
+    let c = claim(&mut conn, "b", now + 3).unwrap();
+    bot::finish(
+        &conn,
+        c.run,
+        Some(1),
+        "api_error",
+        Some("sess"),
+        None,
+        now + 4,
+    )
+    .unwrap();
+    assert_eq!(
+        bot::get(&conn, "b").unwrap().failures,
+        1,
+        "outage leaves the count"
+    );
+    assert!(bot::ready(&conn, now + 63).unwrap().is_empty());
+    assert_eq!(bot::ready(&conn, now + 64).unwrap(), ["b"]);
 }
 
 #[test]

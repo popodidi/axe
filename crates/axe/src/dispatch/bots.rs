@@ -314,6 +314,21 @@ impl Dispatcher {
             }
         }
         let usage = crate::usage::parse_log(&run.log_path);
+        // A failed exit caused by a model-API outage is transient, not a failure.
+        let outage = (reason == "exit" && code != Some(0))
+            .then(|| agent_proc::api_outage(&run.log_path))
+            .flatten();
+        let (reason, note) = match &outage {
+            Some(o) => (
+                "api_error",
+                Some(format!(
+                    "model API error {}: {}",
+                    o["status"],
+                    o["message"].as_str().unwrap_or("")
+                )),
+            ),
+            None => (reason, note),
+        };
         self.store.request::<serde_json::Value>(
             "bot_finish",
             json!({"usage":usage,"run":run.run_id,"code":code,"reason":reason,"session_id":run.session_id,"note":note}),

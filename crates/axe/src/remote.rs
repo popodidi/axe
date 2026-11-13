@@ -467,7 +467,11 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             let changed = events
                 .iter()
                 .any(|e| e.id > start && e.actor != "dispatcher");
+            // A model-API outage the dispatcher saw end a plain failed exit: keep the
+            // session, refund the run and retry after a backoff instead of escalating.
+            let outage = !aborted && b["drained"] != true && b["api_error"].is_object();
             let retry = !aborted
+                && !outage
                 && b["resumed"] == true
                 && b["code"].as_i64() != Some(0)
                 && !changed
@@ -495,6 +499,10 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                     }
                 ],
             )?;
+            let mut end = b["event"].clone();
+            if outage {
+                end["api_error"] = b["api_error"].clone();
+            }
             db::write_event(
                 &tx,
                 &actor,
@@ -502,7 +510,7 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                 "run_end",
                 None,
                 Some(&r.claim),
-                Some(&b["event"].to_string()),
+                Some(&end.to_string()),
             )?;
             if aborted {
                 db::write_event(
@@ -564,6 +572,37 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                     ..Default::default()
                 };
                 db::apply_changes(&tx, &actor, r.task_id, &changes, Some(&r.claim))?;
+            } else if outage {
+                let streak = 1 + events
+                    .iter()
+                    .rev()
+                    .filter(|e| e.kind == "run_end")
+                    .take_while(|e| {
+                        e.body
+                            .as_deref()
+                            .and_then(|t| serde_json::from_str::<Value>(t).ok())
+                            .is_some_and(|v| v["api_error"].is_object())
+                    })
+                    .count() as i64;
+                let wait = crate::agent_proc::api_backoff_seconds(streak);
+                let changes = Changes {
+                    state: Some("pending".into()),
+                    not_before: Some(format!("+{wait}s")),
+                    note: Some(format!(
+                        "run {run} ended on a model API error ({} {}); not counted against the \
+                         run budget; retrying in the same session in {wait}s \
+                         (outage run {streak} in a row)",
+                        b["api_error"]["status"],
+                        b["api_error"]["message"].as_str().unwrap_or("")
+                    )),
+                    ..Default::default()
+                };
+                if db::apply_changes(&tx, &actor, r.task_id, &changes, Some(&r.claim))? {
+                    tx.execute(
+                        "UPDATE tasks SET runs = MAX(runs - 1, 0) WHERE id = ?1",
+                        [r.task_id],
+                    )?;
+                }
             } else if !retry && !aborted {
                 let changes = Changes {
                     state: Some("escalated".into()),

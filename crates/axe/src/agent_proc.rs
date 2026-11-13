@@ -81,6 +81,58 @@ pub fn parse_jsonl_session(text: &str, key: &str) -> Option<String> {
     find(key).or_else(|| find("session_id"))
 }
 
+/// Upper bound of the retry backoff after a model-API outage.
+pub const API_BACKOFF_CAP_SECONDS: i64 = 1800;
+
+/// Retry delay after `streak` consecutive model-API outage runs (1-based):
+/// 60 s, doubling, capped at [`API_BACKOFF_CAP_SECONDS`].
+pub fn api_backoff_seconds(streak: i64) -> i64 {
+    let shift = streak.clamp(1, 16) - 1;
+    (60_i64 << shift).min(API_BACKOFF_CAP_SECONDS)
+}
+
+/// HTTP statuses of a model API that mean "the API is unavailable right now",
+/// not "this request is wrong": an edge block (403), timeout, rate limit and
+/// server errors (including 529 overloaded).
+fn transient_status(status: i64) -> bool {
+    matches!(status, 403 | 408 | 429 | 500..=599)
+}
+
+/// The model-API outage that ended a run, read from the last `result` event of
+/// a stream-json log (Claude Code `-p --output-format stream-json`): `is_error`,
+/// `terminal_reason: "api_error"` and a transient `api_error_status`. Returns
+/// `{"status", "message"}`; anything else (no result, another reason, a missing
+/// or non-transient status, other agents' logs) is `None`, a real failure.
+pub fn api_outage(path: &Path) -> Option<serde_json::Value> {
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(File::open(path).ok()?);
+    let mut last = None;
+    for line in reader.split(b'\n') {
+        let Ok(line) = line else { break };
+        let text = String::from_utf8_lossy(&line);
+        if !text.contains("\"result\"") {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if v["type"] == "result" {
+                last = Some(v);
+            }
+        }
+    }
+    let v = last?;
+    let status = v["api_error_status"].as_i64()?;
+    if v["is_error"] != true || v["terminal_reason"] != "api_error" || !transient_status(status) {
+        return None;
+    }
+    let message: String = v["result"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect();
+    Some(serde_json::json!({"status": status, "message": message}))
+}
+
 /// Substitutes `{name}` placeholders in one pass so values are never re-expanded.
 pub fn render(template: &str, vars: &BTreeMap<&str, String>) -> String {
     let mut out = String::with_capacity(template.len());

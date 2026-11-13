@@ -87,6 +87,13 @@ is kept while the owner's latest message is unanswered.
   failure; the next wake resumes the session. `/pause` also stops new wakes.
 - **Failures.** A failed run returns its wakes for redelivery. Repeated
   failures first clear the session, then pause the bot and alert the owner.
+- **Model-API outages.** A run that a model-API outage ended (an edge block,
+  rate limit or server error in the agent's structured result) is not a
+  failure: the bot keeps its session and failure count, and its wakes wait
+  out a growing backoff before the next run. Task runs get the same treatment
+  without spending run budget. Detection reads Claude Code's stream-json
+  result only; other agents' errors count as failures
+  (`api_outage` in `crates/axe/src/agent_proc.rs`).
 
 Task-event subscriptions (2026-11-08) exist so escalations are not silent
 while token use and Telegram noise stay bounded: chosen events wake the bot in
