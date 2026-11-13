@@ -31,8 +31,9 @@ branches in task code beyond an event kind.
 - A goal can be worked by several bots. Budget and trajectory belong to the
   goal, not to a bot.
 - The per-goal autonomy tier lives in the freeform intent, not in a field.
-- Budget is soft accounting plus one hard gate, shown in each bot's pinned
-  Telegram overview.
+- Budget is soft accounting plus one hard gate, shown on Telegram in each
+  active goal's own pinned message (owner decision 2026-11-13; it replaced
+  the goal lines of the pinned overview).
 
 ## Authority
 
@@ -61,10 +62,12 @@ Spend is computed on read over a rolling seven-day window; nothing is stored.
   goal is refused until the owner raises it. Nothing else is refused, and a
   goal with no budget never gates.
 
-The goal lines in each bot's pinned overview show state, spend against
-limits, open linked tasks, the latest verdict and the next goal-tagged wake,
-so budget state is visible without asking. Small spend changes do not
-re-render it. Goal intent never goes into a bot's system prompt, so the
+Each active goal has one pinned message in its bots' chats. It shows state,
+intent, spend against limits, open linked tasks, the latest verdict or
+observation, the next goal-tagged wake and the deadline, so budget state is
+visible without asking. It is edited in place whenever its text changes.
+Edits are silent, so spend is shown to the cent, and pausing, finishing or
+dropping the goal unpins it. Goal intent never goes into a bot's system prompt, so the
 prompt cache stays stable when an intent changes.
 
 ## Deferred

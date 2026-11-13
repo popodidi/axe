@@ -1,23 +1,26 @@
-//! The goal lines of a bot: the goals it is attached to, as the pinned
-//! overview (`board.rs`) shows them. Design: `docs/design/goals.md`,
-//! "Budget". The separate goal board message (`flags.goal_board`) is retired:
-//! the Telegram gateway unpins it, edits it to a pointer and clears the flag;
-//! `set_message` only unsets it. `show` still renders the goal lines alone.
-//! The key bands budget spend in 10% steps of each weekly limit, so a small
-//! spend change does not re-render the overview.
+//! The goals of a bot as Telegram shows them: one pinned message per active
+//! goal (the "goal pin", `flags.goal_pin` holds the goal id), kept current
+//! by the gateway (`telegram.rs`, `goal_pins`). Design: `docs/design/goals.md`,
+//! "Budget". `show` renders the goal lines of every open goal (proposed,
+//! active, paused) as one text. The separate goal board message
+//! (`flags.goal_board`) is retired: the gateway unpins it, edits it to a
+//! pointer and clears the flag; `set_message` only unsets it.
 use anyhow::{bail, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
-use serde_json::json;
 
-use crate::board::{escape, short, utf16, FOOTER_ROOM, TEXT_LIMIT};
+use crate::board::{cap, escape, short, utf16, FOOTER_ROOM, TEXT_LIMIT};
 use crate::bot;
-use crate::channel::StoredMessage;
+use crate::channel::{bot_id, get_message, StoredMessage};
 use crate::goal;
 
 pub const EMPTY: &str = "No active goals.";
 /// Goal states the board shows; `done` and `dropped` are omitted.
 pub const SHOWN_STATES: [&str; 3] = ["proposed", "active", "paused"];
+/// The goal state that has a pinned message.
+pub const PINNED_STATE: &str = "active";
+/// Characters of the intent line.
+const INTENT_CAP: usize = 160;
 /// Task states that no longer count as open.
 const CLOSED_TASK_STATES: [&str; 1] = ["done"];
 
@@ -35,8 +38,11 @@ pub struct Latest {
 /// One goal on the board.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GoalLine {
+    pub id: i64,
     pub name: String,
     pub state: String,
+    /// The first non-empty line of the intent, shortened.
+    pub intent: String,
     /// Other bots attached to the goal.
     pub others: Vec<String>,
     pub latest: Option<Latest>,
@@ -57,9 +63,17 @@ pub struct GoalBoard {
     /// Local id of the goal board message, if one is set.
     pub message: Option<i64>,
     pub goals: Vec<GoalLine>,
-    /// The text the next render sends.
+    /// The goal lines as one text.
     pub text: String,
-    /// Whether the goal board message shows the current goals.
+}
+
+/// One goal pin, as `bot tg board show` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Pin {
+    pub goal: String,
+    /// Local id of its pinned message; `None` until the gateway posts it.
+    pub message: Option<i64>,
+    /// Whether that message shows the current text.
     pub current: bool,
 }
 
@@ -69,10 +83,10 @@ pub fn message(conn: &Connection, name: &str) -> Result<Option<StoredMessage>> {
 }
 
 /// With `None`, stops rendering the bot's old goal board message. A new one
-/// is refused: the goal lines are part of the pinned overview.
+/// is refused: each active goal has its own pinned message.
 pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Result<Option<i64>> {
     if msg.is_some() {
-        bail!("the goal board is part of the pinned overview now (`axe bot tg board`); there is no separate goal board message");
+        bail!("each active goal has its own pinned message now (`axe bot tg board show`); there is no goal board message");
     }
     crate::board::set_flagged(
         conn,
@@ -110,12 +124,7 @@ pub fn lines(conn: &Connection, name: &str) -> Result<Vec<GoalLine>> {
             .map(|(id, kind, body)| Latest {
                 id,
                 kind,
-                text: short(
-                    body.lines()
-                        .map(str::trim)
-                        .find(|l| !l.is_empty())
-                        .unwrap_or(""),
-                ),
+                text: short(first_line(&body)),
             });
         let open_tasks = goal::tasks(conn, &g.name)?
             .into_iter()
@@ -124,10 +133,13 @@ pub fn lines(conn: &Connection, name: &str) -> Result<Vec<GoalLine>> {
             .collect();
         let next_wake = goal::next_wake(conn, &g)?;
         let b = g.budget.clone().unwrap_or_default();
+        let intent = cap(first_line(&g.intent), INTENT_CAP);
         out.push(GoalLine {
+            id: g.id,
             others: g.bots.iter().filter(|b| *b != name).cloned().collect(),
             name: g.name,
             state: g.state,
+            intent,
             latest,
             open_tasks,
             cost_spent: b.cost_spent,
@@ -141,39 +153,11 @@ pub fn lines(conn: &Connection, name: &str) -> Result<Vec<GoalLine>> {
     Ok(out)
 }
 
-/// Spend in 10% steps of `limit`; `None` without a limit, so spend toward no
-/// limit never edits the board on its own.
-fn band(spent: f64, limit: Option<f64>) -> Option<i64> {
-    let l = limit?;
-    if l <= 0.0 {
-        return Some(i64::from(spent > 0.0));
-    }
-    Some((spent / l * 10.0).floor() as i64)
-}
-
-/// The render key: what the board shows, with budget spend banded in 10%
-/// steps and without the footer time, so a small spend change or an
-/// unchanged input set never causes an edit.
-pub fn key(goals: &[GoalLine]) -> String {
-    let v: Vec<_> = goals
-        .iter()
-        .map(|g| {
-            json!([
-                g.name,
-                g.state,
-                g.others,
-                g.latest.as_ref().map(|l| l.id),
-                g.open_tasks,
-                band(g.cost_spent, g.cost_week),
-                band(g.attention_spent as f64, g.attention_week.map(|l| l as f64)),
-                g.cost_week,
-                g.attention_week,
-                g.next_wake,
-                g.deadline,
-            ])
-        })
-        .collect();
-    json!(v).to_string()
+fn first_line(s: &str) -> &str {
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
 }
 
 /// `YYYY-MM-DD HH:MM UTC` for an RFC3339 time; a bare date as it is.
@@ -193,6 +177,9 @@ pub(crate) fn block(g: &GoalLine) -> String {
     }
     if !g.others.is_empty() {
         out.push_str(&format!(" · with {}", escape(&g.others.join(", "))));
+    }
+    if !g.intent.is_empty() {
+        out.push_str(&format!("\n{}", escape(&g.intent)));
     }
     if let Some(l) = &g.latest {
         out.push_str(&format!("\n{}: {}", l.kind, escape(&l.text)));
@@ -254,16 +241,62 @@ pub fn render(goals: &[GoalLine], now: i64) -> String {
     out
 }
 
-/// The current goal board of bot `name`.
+/// The text of goal `g`'s pinned message. It has no time in it, so it is
+/// also the render key: the gateway edits the pin when the text changes.
+pub fn pin_text(g: &GoalLine) -> String {
+    block(g).trim_start().to_string()
+}
+
+/// The goal lines of bot `name` that have a pinned message.
+pub fn pinned_lines(conn: &Connection, name: &str) -> Result<Vec<GoalLine>> {
+    Ok(lines(conn, name)?
+        .into_iter()
+        .filter(|g| g.state == PINNED_STATE)
+        .collect())
+}
+
+/// The bot's goal pins (messages with `flags.goal_pin`), oldest first.
+pub fn pins(conn: &Connection, name: &str) -> Result<Vec<StoredMessage>> {
+    let b = bot_id(conn, name)?;
+    let ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM bot_messages WHERE bot_id=?1
+               AND json_type(flags,'$.goal_pin')='integer' ORDER BY id",
+        )?
+        .query_map([b], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.into_iter()
+        .map(|id| get_message(conn, name, id))
+        .collect()
+}
+
+/// Each goal of bot `name` that has a pinned message, with that message.
+pub fn pin_views(conn: &Connection, name: &str) -> Result<Vec<Pin>> {
+    let pins = pins(conn, name)?;
+    Ok(pinned_lines(conn, name)?
+        .iter()
+        .map(|g| {
+            let m = pins
+                .iter()
+                .find(|m| m.flags["goal_pin"].as_i64() == Some(g.id));
+            Pin {
+                goal: g.name.clone(),
+                message: m.map(|m| m.id),
+                current: m.is_some_and(|m| {
+                    m.flags["goal_pin_key"].as_str() == Some(pin_text(g).as_str())
+                }),
+            }
+        })
+        .collect())
+}
+
+/// The goal lines of bot `name`, and its old goal board message if one is
+/// still set.
 pub fn show(conn: &Connection, name: &str, now: i64) -> Result<GoalBoard> {
     let goals = lines(conn, name)?;
     let msg = message(conn, name)?;
-    let k = key(&goals);
     Ok(GoalBoard {
         message: msg.as_ref().map(|m| m.id),
-        current: msg
-            .as_ref()
-            .is_some_and(|m| m.flags["goal_board_key"].as_str() == Some(k.as_str())),
         text: render(&goals, now),
         goals,
     })
@@ -275,8 +308,10 @@ mod tests {
 
     fn goal(name: &str, state: &str) -> GoalLine {
         GoalLine {
+            id: 1,
             name: name.into(),
             state: state.into(),
+            intent: String::new(),
             others: vec![],
             latest: None,
             open_tasks: vec![],
@@ -293,6 +328,7 @@ mod tests {
     fn renders_blocks_and_footer() {
         let mut g = goal("grow <it>", "active");
         g.others = vec!["scout".into()];
+        g.intent = "Reach 10 users & keep them".into();
         g.latest = Some(Latest {
             id: 3,
             kind: "verdict".into(),
@@ -306,7 +342,7 @@ mod tests {
         g.next_wake = Some("2026-11-12T09:00:00Z".into());
         g.deadline = Some("2026-12-01".into());
         let t = render(&[g, goal("next", "proposed")], 0);
-        assert!(t.starts_with("<b>Goals</b>\n\n<b>grow &lt;it&gt;</b> · active · with scout\nverdict: H1 failed &amp; why\nopen <code>#12</code> <code>#14</code>\n$3.20/$10.00 · attention 2/5\nnext wake 2026-11-12 09:00 UTC · deadline 2026-12-01"), "{t}");
+        assert!(t.starts_with("<b>Goals</b>\n\n<b>grow &lt;it&gt;</b> · active · with scout\nReach 10 users &amp; keep them\nverdict: H1 failed &amp; why\nopen <code>#12</code> <code>#14</code>\n$3.20/$10.00 · attention 2/5\nnext wake 2026-11-12 09:00 UTC · deadline 2026-12-01"), "{t}");
         assert!(t.contains("\n\n<b>next</b> · proposed · awaiting your Go\nno open tasks\n$0.00/no limit · attention 0/no limit\nno goal wake"), "{t}");
         assert!(
             t.ends_with("\n\n<i>Updated 1970-01-01 00:00 UTC</i>"),
@@ -335,23 +371,14 @@ mod tests {
     }
 
     #[test]
-    fn key_bands_spend_in_tenths() {
+    fn pin_text_is_the_block_without_a_time() {
         let mut g = goal("g", "active");
-        g.cost_week = Some(10.0);
+        g.intent = "Ship it".into();
         g.cost_spent = 1.0;
-        let k = key(std::slice::from_ref(&g));
-        g.cost_spent = 1.99;
-        assert_eq!(key(std::slice::from_ref(&g)), k, "same 10% band");
-        g.cost_spent = 2.0;
-        assert_ne!(key(std::slice::from_ref(&g)), k, "next band");
-        // Without a limit, spend alone never changes the key.
-        let mut u = goal("u", "active");
-        let k = key(std::slice::from_ref(&u));
-        u.cost_spent = 500.0;
-        u.attention_spent = 9;
-        assert_eq!(key(std::slice::from_ref(&u)), k);
-        assert_eq!(band(1.0, Some(0.0)), Some(1));
-        assert_eq!(band(0.0, Some(0.0)), Some(0));
-        assert_eq!(band(3.0, Some(5.0)), Some(6));
+        g.cost_week = Some(10.0);
+        let t = pin_text(&g);
+        assert_eq!(t, "<b>g</b> · active\nShip it\nno open tasks\n$1.00/$10.00 · attention 0/no limit\nno goal wake");
+        g.cost_spent = 1.01;
+        assert_ne!(pin_text(&g), t, "a spend change edits the pin");
     }
 }

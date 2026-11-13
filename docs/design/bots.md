@@ -115,8 +115,11 @@ Only the owner controls a bot:
    reads; the dashboard shows metadata only and files are proxied, not stored.
 
 The owner's inbox is the bot chat's pinned list, rendered by the server
-(`board.rs`): one pinned card per open decision and one overview, so the
-owner never keeps a list by hand. With the inbox on, every escalated task in
+(`board.rs`, `goal_board.rs`): one pinned card per open decision and one
+pinned message per active goal, edited in place as the goal changes, so the
+owner never keeps a list by hand. The single pinned overview with task stats
+was retired on 2026-11-13 at the owner's request: it only repeated what the
+cards and goals show. With the inbox on, every escalated task in
 the bot's subscribed projects gets a card, posted by the server if the bot
 does not post one.
 
