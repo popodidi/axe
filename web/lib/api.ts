@@ -19,7 +19,21 @@ status: string,
 /**
  * Derived: prerequisites that are not done yet.
  */
-waiting_on: Array<number>, deps: Deps, };
+waiting_on: Array<number>, deps: Deps, 
+/**
+ * Who follows the task up: a bot (`bot:<name>`) or a person. The creator is
+ * the actor of the `created` event.
+ */
+owner: string | null, 
+/**
+ * Repos the task works in, each a worktree in its run workspace. `None`
+ * means the project's own checkout (tasks from before repos existed).
+ */
+repos: Array<string> | null, 
+/**
+ * Free-form labels. Filters also match the project as a label.
+ */
+labels: Array<string>, };
 
 export type Deps = { 
 /**

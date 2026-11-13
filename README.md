@@ -31,10 +31,13 @@ SHA256SUMS`. Other platforms install from source with `--tag <tag>`.
 
 ## Not a workflow engine
 
-A task has a project, a spec (`detail`) and a **state**. Once dispatched, one
-agent session carries it from start to `done` and is resumed on every later
-run ([one agent per task](docs/design/one-agent-per-task.md)). There are no
-owners, pipelines or transitions in code: the spec is the workflow, and the
+A task has a project, a spec (`detail`) and a **state**, and optionally an
+`owner` (the bot or person who follows it up; its creator stays the first
+event), `repos` and free-form `labels` (`--owner`, `--repo`, `--label` on
+`axe add` and `axe set`; filters treat the project as a label). Once
+dispatched, one agent session carries it from start to `done` and is resumed
+on every later run ([one agent per task](docs/design/one-agent-per-task.md)).
+There are no pipelines or transitions in code: the spec is the workflow, and the
 agent's own instructions (skills, `AGENTS.md`) say how to work a task. Every
 mutation appends to an event log (`axe log ID`), so a resumed session can see
 what changed.
@@ -115,6 +118,15 @@ reused Git worktree of the project checkout
 It is never reset; housekeeping removes it after the task is done only when
 nothing in it could be lost (`worktree.rs`, `housekeeping.rs`;
 `axe housekeeping --dry-run` prints each decision).
+
+**Run workspaces.** A task with `repos` (even none, `--no-repos`) runs in
+`<run_root>/task-<id>` instead (default `<workspace_root>/.runs`): one worktree
+per repo under `repos/<name>`, all on the task branch, plus a generated
+`AGENTS.md` (the task contract and an index), `skills/` linked from each
+repo's `.agents/skills` and a `docs/index.md`. A repo's canonical clone is
+`[repos.<name>] path`, default `<workspace_root>/<name>` (`run_workspace.rs`).
+Tasks without `repos` keep the project worktree. Housekeeping does not remove
+run workspaces yet.
 
 **Agent environment.** Sessions get `AXE_ACTOR=agent`, `AXE_SESSION`,
 `AXE_TASK`, `AXE_SERVER`, `AXE_WORKTREE` and OpenTelemetry resource

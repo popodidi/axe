@@ -754,7 +754,8 @@ fn cli_and_api_fan_in_fixture_with_separate_manual_hold() {
     // Every prerequisite done: the manual hold remains and still needs ops.
     let t = srv.get(&format!("/api/tasks/{c}"));
     assert_eq!(t["state"].as_str(), Some("blocked"));
-    assert!(t.get("owner").is_none());
+    // Unowned: no follow-up owner was set.
+    assert!(t["owner"].is_null());
     assert_eq!(t["waiting_on"], serde_json::json!([]));
     // Only D is ready: the hold on C is never claimed.
     assert_eq!(id(srv.ok(&["claim", "--by", "w4"])), d);

@@ -1104,6 +1104,12 @@ struct AddBody {
     workload: Option<String>,
     /// Goal name to link the task to.
     goal: Option<String>,
+    owner: Option<String>,
+    /// Omitted or null: the project checkout; a list (maybe empty): a run
+    /// workspace with these repos.
+    repos: Option<Vec<String>>,
+    #[serde(default)]
+    labels: Vec<String>,
     #[serde(flatten)]
     who: Who,
 }
@@ -1129,6 +1135,14 @@ struct PatchBody {
     not_before: Option<String>,
     escalation_class: Option<String>,
     goal: Option<String>,
+    /// New owner, or "none" to clear it.
+    owner: Option<String>,
+    /// Replaces the repo list.
+    repos: Option<Vec<String>>,
+    #[serde(default)]
+    add_labels: Vec<String>,
+    #[serde(default)]
+    remove_labels: Vec<String>,
     #[serde(flatten)]
     who: Who,
 }
@@ -1269,6 +1283,8 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                     state,
                     project: req.query("project"),
                     include_done: req.flag("all"),
+                    label: req.query("label"),
+                    owner: req.query("owner"),
                 },
             )?;
             ok(200, &tasks)
@@ -1541,7 +1557,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             let b: AddBody = req.json()?;
             st.cfg.validate_agent(b.agent.as_deref())?;
             let mut conn = st.conn();
-            let id = db::add_linked_task(
+            let id = db::add_task_full(
                 &mut conn,
                 &b.who.actor(),
                 &NewTask {
@@ -1554,6 +1570,11 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 &b.blocked_by,
                 b.workload.as_deref(),
                 b.goal.as_deref(),
+                &db::Fields {
+                    owner: b.owner,
+                    repos: b.repos,
+                    labels: b.labels,
+                },
             )?;
             ok(201, &json!({ "id": id, "task": db::get_task(&conn, id)? }))
         }
@@ -1569,6 +1590,10 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 not_before: b.not_before,
                 escalation_class: b.escalation_class,
                 goal: b.goal,
+                owner: b.owner,
+                repos: b.repos,
+                add_labels: b.add_labels,
+                remove_labels: b.remove_labels,
             };
             let mut conn = st.conn();
             let changed = db::set_task(&mut conn, &b.who.actor(), id, &c)?;
