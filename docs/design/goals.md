@@ -104,9 +104,10 @@ stored.
   runs with unknown usage are reported as `unknown_runs`, never as zero.
   `goal show` splits cost into linked tasks and per bot.
 - **Attention** (units): on tasks linked to the goal at the time, each entry
-  into `escalated` (an escalation episode) and each `approval` event; plus each
-  owner goal action (`activated`, `budget`, `intent` events). Each counts 1.
-  Telegram chat about a goal is not counted in v1.
+  into `escalated` (an escalation episode) and each `approval` event. Each
+  counts 1. Goal setup (propose, edit of intent, budget or deadline, activate)
+  is not counted, so a fresh goal starts at 0. Telegram chat about a goal is
+  not counted in v1.
 - **The gate**: linking a task to a goal (`axe add --goal`, `axe set --goal`)
   is refused, naming spent and limit, while either weekly budget is spent
   (`spent >= limit`). Raising the budget (`axe goal edit --budget-...`)
