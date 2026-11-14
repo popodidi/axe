@@ -264,7 +264,12 @@ pub struct Gateway {
     owner: i64,
     poll_timeout: u64,
     bots: HashMap<String, Arc<TgBot>>,
+    /// The weekly retro send: the bot and the weekly slot (`ask::parse_weekly`).
+    retro: Option<(String, i64)>,
 }
+
+/// How often the weekly retro send checks whether its slot came.
+const RETRO_TICK: Duration = Duration::from_secs(10);
 
 /// Kinds whose `message_id` is a Telegram update id, not a message.
 const SYNTHETIC: &str = "('edit','button','reaction')";
@@ -431,10 +436,24 @@ impl Gateway {
                 }),
             );
         }
+        let retro = cfg
+            .retro
+            .enabled
+            .then(|| {
+                let name = cfg
+                    .retro
+                    .bot
+                    .clone()
+                    .or(cfg.bots.first().map(|b| b.name.clone()))?;
+                let at = ask::parse_weekly(&cfg.retro.at).ok()?;
+                bots.contains_key(&name).then_some((name, at))
+            })
+            .flatten();
         Gateway {
             owner: cfg.owner_user_id,
             poll_timeout: cfg.poll_timeout,
             bots,
+            retro,
         }
     }
 
@@ -460,6 +479,73 @@ impl Gateway {
             let (b, store) = (Arc::clone(b), Arc::clone(&store));
             std::thread::spawn(move || typing_loop(&b, store.as_ref()));
         }
+        if self.retro.is_some() {
+            let (gw, store) = (Arc::clone(self), Arc::clone(&store));
+            std::thread::spawn(move || gw.retro_loop(store.as_ref()));
+        }
+    }
+
+    /// Sends the weekly retro card at its slot (`telegram.retro`), once per
+    /// slot: not when a retro card already went out since the slot (by hand
+    /// or before a restart), and not at all when last week has no unrated
+    /// asks. A slot missed while the server was down is still sent up to
+    /// `ask::RETRO_CATCH_UP` late.
+    fn retro_loop(&self, store: &dyn Store) {
+        let Some((name, at)) = self.retro.clone() else {
+            return;
+        };
+        let mut tried = None;
+        while !store.stopping() {
+            if let Err(e) = self.retro_tick(store, &name, at, &mut tried) {
+                eprintln!("telegram: bot {name}: weekly retro: {e:#}");
+            }
+            let until = Instant::now() + RETRO_TICK;
+            while !store.stopping() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+
+    fn retro_tick(
+        &self,
+        store: &dyn Store,
+        name: &str,
+        at: i64,
+        tried: &mut Option<i64>,
+    ) -> Result<()> {
+        let now = now();
+        let Some(slot) = ask::retro_due(now, at, None, *tried) else {
+            return Ok(());
+        };
+        let last = ask::last_retro(&store.conn())?;
+        if ask::retro_due(now, at, last, *tried).is_none() {
+            *tried = Some(slot);
+            return Ok(());
+        }
+        // The bot exists once it was created; until then, try again.
+        bot_id(&store.conn(), name)?;
+        // The owner's private chat when the bot may write there.
+        let chat = self
+            .bot(name)?
+            .chats
+            .contains(&self.owner)
+            .then_some(self.owner);
+        let v = self.send_retro(
+            store,
+            name,
+            &SendOpts {
+                chat,
+                ..SendOpts::default()
+            },
+        )?;
+        *tried = Some(slot);
+        if v["sent"] == true {
+            eprintln!(
+                "telegram: bot {name}: weekly retro sent #{} ({} asks)",
+                v["id"], v["items"]
+            );
+        }
+        Ok(())
     }
 
     fn poll(&self, b: &TgBot, store: &dyn Store) {
@@ -874,9 +960,10 @@ impl Gateway {
         Ok(())
     }
 
-    /// A press on a weekly retro card (`flags.retro`): records the owner's
-    /// rating, re-renders the card without that item's buttons and wakes no
-    /// bot. Returns false when the message is not a retro card.
+    /// A press on a weekly retro card (`flags.retro`): rates an item or a
+    /// kind's unrated items, or opens a kind's page or goes back, then
+    /// re-renders the card in place and wakes no bot. Returns false when the
+    /// message is not a retro card.
     fn retro_press(
         &self,
         b: &TgBot,
@@ -900,33 +987,48 @@ impl Gateway {
         let items: Vec<ask::RetroItem> =
             serde_json::from_value(stored.flags["retro"]["items"].clone()).unwrap_or_default();
         let more = stored.flags["retro"]["more"].as_u64().unwrap_or(0) as usize;
-        let pressed = data
-            .strip_prefix("rate:")
-            .and_then(|r| r.rsplit_once(':'))
-            .and_then(|(a, code)| Some((a, ask::rating_of(code)?)))
-            .filter(|(a, _)| items.iter().any(|i| i.ask == *a));
-        let toast = match pressed {
-            Some((a, rating)) => {
-                ask::rate(&mut store.conn(), &owner_actor(), a, rating)?;
-                store.changed();
-                let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
-                let rated = ask::ratings(&store.conn(), &ids)?;
-                let r = ask::render_retro(&items, more, &rated);
-                if let Err(e) = self.edit(
-                    store,
-                    &b.name,
-                    stored.id,
-                    Some(&r.text),
-                    false,
-                    Some(&r.buttons),
-                    &r.rows,
-                ) {
-                    eprintln!("telegram: bot {}: retro card: {e:#}", b.name);
-                }
-                format!("Rated: {rating}")
+        let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
+        let kind_of = |a: &str| items.iter().find(|i| i.ask == a).map(|i| i.kind.clone());
+        let known = |k: &str| items.iter().any(|i| i.kind == k);
+        let rated_now = || ask::ratings(&store.conn(), &ids);
+        let (toast, view) = match ask::Press::parse(data) {
+            Some(ask::Press::Item(a, rating)) if kind_of(&a).is_some() => {
+                ask::rate(&mut store.conn(), &owner_actor(), &a, rating)?;
+                let k = kind_of(&a).unwrap_or_default();
+                let page = ask::page_of(&items, &k, &a);
+                (format!("Rated: {rating}"), Some(ask::View::Kind(k, page)))
             }
-            None => "Not an item on this card".to_string(),
+            Some(ask::Press::Kind(k, rating)) if known(&k) => {
+                let todo = ask::unrated_of(&items, &rated_now()?, &k);
+                let n = ask::rate_many(&mut store.conn(), &owner_actor(), &todo, rating)?;
+                (
+                    format!("Rated {n} {}: {rating}", ask::kind_label(&k)),
+                    Some(ask::View::Kinds),
+                )
+            }
+            Some(ask::Press::Open(k, page)) if known(&k) => (
+                ask::kind_label(&k).to_string(),
+                Some(ask::View::Kind(k, page)),
+            ),
+            Some(ask::Press::Back) => ("All kinds".to_string(), Some(ask::View::Kinds)),
+            _ => ("Not an item on this card".to_string(), None),
         };
+        if let Some(view) = view {
+            store.changed();
+            // A flat card (sent before kinds) keeps its flat layout.
+            let r = ask::render_retro(&items, more, &rated_now()?, &view);
+            if let Err(e) = self.edit(
+                store,
+                &b.name,
+                stored.id,
+                Some(&r.text),
+                false,
+                Some(&r.buttons),
+                &r.rows,
+            ) {
+                eprintln!("telegram: bot {}: retro card: {e:#}", b.name);
+            }
+        }
         if let Some(qid) = query {
             let r = b.api.call(
                 "answerCallbackQuery",
