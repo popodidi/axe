@@ -129,8 +129,10 @@ context below). A repo's canonical clone is
 Tasks without `repos` keep the project worktree. A bot with a repo list
 (`axe bot edit <name> --repo <r>`, `--no-repos` clears it) runs in
 `<run_root>/bot-<name>` the same way, on branch `bot-<name>--work`; a bot
-without one keeps its project worktree. Housekeeping does not remove run
-workspaces yet.
+without one keeps its project worktree. Housekeeping removes a task's run
+folder like its worktree: after the task is done for the retention, each repo
+worktree is removed with `git worktree remove` and pruned, and only when the
+folder holds nothing but what axe generates. Bot run folders stay.
 
 **Agent environment.** Sessions get `AXE_ACTOR=agent`, `AXE_SESSION`,
 `AXE_TASK`, `AXE_SERVER`, `AXE_WORKTREE` and OpenTelemetry resource
