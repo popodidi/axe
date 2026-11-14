@@ -79,7 +79,7 @@ axe wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge"
 | Evidence | `axe note <id> "<command and key output>"`, `axe artifact <id> <url>` |
 | Before a non-repeatable step (merge, deploy, migration) | `axe protect <id> --note "<step>"`; if it fails, do not start the step. After it: `axe protect <id> --clear` |
 | Human attention queue | `axe list --state escalated` |
-| Attached knowledge | `axe doc attach <path> <global\|label:l\|owner:o\|repo:r>`; a run lists names and descriptions, load a body with `axe doc get <path>`; `axe context explain <id>` shows what a task's run includes and why |
+| Attached knowledge | `axe doc attach <path> <global\|label:l\|owner:o\|repo:r>`; a run folder holds each attached skill whole under `skills/<name>/` and lists docs by name and description (load a body with `axe doc get <path>`); `axe context explain <id>` shows what a task's run includes and why |
 
 Escalation classes: `decision` is a legitimate human call (product, risk,
 authorization); `capability` means the worker lacked tooling, context,

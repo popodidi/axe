@@ -1742,6 +1742,46 @@ fn bot_with_repos_runs_in_a_run_folder_and_an_empty_list_keeps_the_project_folde
     for name in ["one", "two"] {
         canonical_clone(&base, name);
     }
+    // A multi-file skill attached to the bot, one to its project, one to
+    // another bot, and one named like repo one's own skill.
+    let skill = |desc: &str| format!("---\nname: x\ndescription: {desc}\n---\nbody\n");
+    let mine = skill("Chase issues");
+    for (path, files, scope) in [
+        (
+            "skills/chase",
+            vec![
+                ("SKILL.md", mine.as_str()),
+                ("scripts/chase.py", "#!/usr/bin/env python3\nprint(1)\n"),
+                ("references/how.md", "# How\n"),
+            ],
+            "owner:bot:b",
+        ),
+        (
+            "p/skills/plan",
+            vec![("SKILL.md", "---\ndescription: Plan\n---\n")],
+            "label:a",
+        ),
+        (
+            "o/skills/theirs",
+            vec![("SKILL.md", "---\ndescription: No\n---\n")],
+            "owner:bot:other",
+        ),
+        (
+            "o/skills/build",
+            vec![("SKILL.md", "---\ndescription: Shadowed\n---\n")],
+            "global",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        for (f, text) in files {
+            let p = dir.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        rig.srv
+            .ok(&["doc", "put", path, dir.path().to_str().unwrap()]);
+        rig.srv.ok(&["doc", "attach", path, scope]);
+    }
     rig.create(json!({}));
     rig.srv
         .ok(&["bot", "edit", "b", "--repo", "one,two", "--why", "repos"]);
@@ -1765,10 +1805,30 @@ fn bot_with_repos_runs_in_a_run_folder_and_an_empty_list_keeps_the_project_folde
         "- Repos: one, two (each a worktree under `repos/`, on branch `axe/bot-b--work`)",
         "- `repos/one`: its rules are in `repos/one/AGENTS.md`\n- `repos/two`\n",
         "- `skills/build` (one): Build the thing\n",
+        "- `skills/chase` (owner:bot:b, attached): Chase issues\n",
+        "- `skills/plan` (label:a, attached): Plan\n",
     ] {
         assert!(agents.contains(want), "{want:?} in {agents}");
     }
-    assert!(run.join(".claude/skills/build/SKILL.md").is_file());
+    assert!(
+        !agents.contains("theirs") && !agents.contains("Shadowed"),
+        "{agents}"
+    );
+    assert!(!agents.contains("None."), "{agents}");
+    assert_eq!(
+        std::fs::read_to_string(run.join(".claude/skills/build/SKILL.md")).unwrap(),
+        "---\nname: build\ndescription: Build the thing\n---\nbody\n"
+    );
+    // The attached skill's folder is there whole, scripts included.
+    for (f, want) in [
+        ("SKILL.md", mine.as_str()),
+        ("scripts/chase.py", "#!/usr/bin/env python3\nprint(1)\n"),
+        ("references/how.md", "# How\n"),
+    ] {
+        let got = std::fs::read_to_string(run.join("skills/chase").join(f)).unwrap();
+        assert_eq!(got, want, "{f}");
+    }
+    assert!(!run.join("skills/theirs").exists());
     let docs = std::fs::read_to_string(run.join("docs/index.md")).unwrap();
     assert!(
         docs.contains("- [One docs](../repos/one/docs/index.md)"),

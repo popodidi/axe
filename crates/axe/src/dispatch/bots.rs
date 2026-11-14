@@ -110,11 +110,26 @@ impl Dispatcher {
             .session
             .as_ref()
             .filter(|s| s.agent == b.agent && agent.resume_cmd.is_some());
-        // A bot with a repo list runs in its run folder, like a task with repos.
+        // Docs attached to the bot (owner `bot:<name>`), its project and global:
+        // bundles with a prompt part (the bot protocol, a channel) are inlined,
+        // everything else is listed.
+        let attached = crate::context::resolve_or_empty(
+            &self.store.client,
+            &crate::context::bot_scopes(&b.name, &b.project),
+            &[],
+        );
+        // A bot with a repo list runs in its run folder, like a task with repos,
+        // with its attached skills written in full.
         let worktree = match &self.cfg.worktrees {
-            _ if b.repos.as_ref().is_some_and(|r| !r.is_empty()) => Some(
-                crate::run_workspace::build_bot(&self.cfg, &b.name, b.repos.as_deref().unwrap())?,
-            ),
+            _ if b.repos.as_ref().is_some_and(|r| !r.is_empty()) => {
+                Some(crate::run_workspace::build_bot(
+                    &self.cfg,
+                    &b.name,
+                    b.repos.as_deref().unwrap(),
+                    &attached,
+                    &self.store.client,
+                )?)
+            }
             Some(_) => {
                 let ready =
                     worktree::readiness(&self.cfg, &b.project).map_err(anyhow::Error::msg)?;
@@ -131,14 +146,6 @@ impl Dispatcher {
         let dir = self.cfg.log_dir().join("bots").join(&b.name);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let system_file = dir.join("system.md");
-        // Docs attached to the bot (owner `bot:<name>`), its project and global:
-        // bundles with a prompt part (the bot protocol, a channel) are inlined,
-        // everything else is listed.
-        let attached = crate::context::resolve_or_empty(
-            &self.store.client,
-            &crate::context::bot_scopes(&b.name, &b.project),
-            &[],
-        );
         let system = bot::system_prompt(b, &crate::context::bot_prompt_parts(&attached))
             + &crate::context::prompt_section(&attached);
         std::fs::write(&system_file, system)

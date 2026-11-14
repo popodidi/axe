@@ -190,12 +190,17 @@ docs attached to the task's scopes: each repo, the owner, each label (the
 project first) and `global`. A conflict (the same skill name, or the same path
 on two scopes) goes to the more specific scope: repo > owner > label > global.
 Paths under `policy/` and a repo's own `.agents/skills` are never overridden.
-Only names and descriptions go into the run: each attached skill becomes an
-index entry `skills/<name>/SKILL.md` (found through `.claude/skills` and
-`.agents/skills`), each doc a line in `docs/index.md`; bodies load on use with
-`axe doc get <path>`. A bot's system prompt lists what is attached to
-`owner:bot:<name>`, its project and `global`. Nothing attached means nothing
-changes.
+Each attached skill is written whole into `skills/<name>/` (`SKILL.md` and
+its scripts, references and tests; found through `.claude/skills` and
+`.agents/skills`); each doc is a line in `docs/index.md` whose body loads on
+use with `axe doc get <path>` (`context.rs`, `write_skills`). A bot's system
+prompt lists what is attached to `owner:bot:<name>`, its project and
+`global`; a bot with repos also gets those skills in its run folder. Nothing
+attached means nothing changes.
+
+**The axe skill.** [`skills/axe`](skills/axe/SKILL.md) loads into the store
+like any skill, so runs get it from there instead of a machine install:
+`axe doc put skills/axe skills/axe`, then `axe doc attach skills/axe global`.
 
 **Bundles.** A bundle's `prompt.md` is text a bot carries in its system
 prompt: the bot inlines it, ordered by its `order:` front matter, before its

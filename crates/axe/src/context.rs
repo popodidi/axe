@@ -25,8 +25,9 @@
 //!    never override a repo's rules;
 //! 3. the more specific scope: repo > owner > label > global.
 //!
-//! Only names and descriptions are written into the run; bodies stay in the
-//! store and load when used (`axe doc get <path>`). A run with nothing
+//! An attached skill is written into a run folder whole, every file of it
+//! ([`write_skills`]); docs and bundles are listed by name and description,
+//! and their bodies load when used (`axe doc get <path>`). A run with nothing
 //! attached is built exactly as before. `axe context explain <task>` prints
 //! the resolution.
 use std::collections::BTreeMap;
@@ -390,17 +391,48 @@ pub fn frontmatter(text: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Writes each included attached skill as `skills_dir/<name>/SKILL.md`: its
-/// name and description, and how to load the body. Never replaces an
-/// existing entry (a repo's own skill).
-pub fn write_skills(skills_dir: &Path, res: &Resolution) -> Result<()> {
+/// Writes each included attached skill as `skills_dir/<name>/`: every file of
+/// the skill folder from `source` (`SKILL.md`, scripts, references, tests),
+/// a file starting with `#!` made executable. A skill that cannot be read
+/// gets an index entry (`SKILL.md` naming how to load it) instead, so a run
+/// never fails for its context. Never replaces an existing entry (a repo's
+/// own skill).
+pub fn write_skills(skills_dir: &Path, res: &Resolution, source: &dyn Source) -> Result<()> {
     for s in res.attached(Kind::Skill) {
         let dir = skills_dir.join(&s.name);
         if std::fs::symlink_metadata(&dir).is_ok() {
             continue;
         }
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("SKILL.md"), skill_stub(s))?;
+        let files = match source.get(&s.path) {
+            Ok(Fetched::Folder(files)) => files,
+            Ok(Fetched::Doc(_)) => Vec::new(),
+            Err(e) => {
+                eprintln!("axe: skill {} written as an index entry: {e:#}", s.path);
+                Vec::new()
+            }
+        };
+        if !files.iter().any(|f| f.path == "SKILL.md") {
+            std::fs::write(dir.join("SKILL.md"), skill_stub(s))?;
+            continue;
+        }
+        for f in &files {
+            write_file(&dir, f)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes one file of a stored folder under `dir`.
+fn write_file(dir: &Path, f: &doc::File) -> Result<()> {
+    let p = dir.join(doc::check_path(&f.path)?);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&p, &f.content).with_context(|| format!("write {}", p.display()))?;
+    if f.content.starts_with("#!") {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
 }
@@ -768,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn index_has_descriptions_only_and_bodies_load_on_use() {
+    fn index_has_descriptions_only_and_skills_are_written_whole() {
         let (d, s) = store();
         skill(&s, "skills/review", "Review a diff", "SECRET-SKILL-BODY");
         put_doc(&s, "notes/plan.md", "# The plan\n\nSECRET-DOC-BODY\n");
@@ -782,15 +814,16 @@ mod tests {
         assert_eq!(r.items.len(), 3, "{r:#?}");
 
         let dir = d.path().join("skills");
-        write_skills(&dir, &r).unwrap();
-        let stub = std::fs::read_to_string(dir.join("review/SKILL.md")).unwrap();
-        assert!(
-            stub.starts_with("---\nname: \"review\"\ndescription: \"Review a diff\"\n---\n"),
-            "{stub}"
+        write_skills(&dir, &r, &s).unwrap();
+        // The skill folder is written whole; docs stay index lines.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("review/SKILL.md")).unwrap(),
+            "---\nname: x\ndescription: Review a diff\n---\nSECRET-SKILL-BODY\n"
         );
-        assert!(stub.contains("`axe doc get skills/review`"), "{stub}");
-        assert!(!stub.contains("SECRET"), "{stub}");
-        assert!(!dir.join("review/ref.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("review/ref.md")).unwrap(),
+            "reference\n"
+        );
 
         let docs = docs_section(&r);
         assert_eq!(
@@ -907,12 +940,108 @@ mod tests {
         assert!(r.items.is_empty() && r.is_empty());
         let dir = d.path().join("skills");
         std::fs::create_dir_all(&dir).unwrap();
-        write_skills(&dir, &r).unwrap();
+        write_skills(&dir, &r, &s).unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         assert_eq!(docs_section(&r), "");
         assert_eq!(skills_lines(&r, ""), "");
         assert_eq!(prompt_section(&r), "");
         assert!(explain(&r).ends_with("nothing attached\n"));
+    }
+
+    #[test]
+    fn a_multi_file_skill_is_written_with_every_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (d, s) = store();
+        let files = [
+            (
+                "SKILL.md",
+                "---\ndescription: Chase issues\n---\nRun scripts/chase.py\n",
+            ),
+            ("scripts/chase.py", "#!/usr/bin/env python3\nprint('hi')\n"),
+            ("references/deep/notes.md", "# Notes\n"),
+            ("tests/test_chase.py", "def test(): pass\n"),
+        ];
+        let body = files
+            .iter()
+            .map(|(p, c)| File {
+                path: p.to_string(),
+                content: c.to_string(),
+            })
+            .collect();
+        s.put("team/skills/chase", &Body::Folder(body), None, "t", "m")
+            .unwrap();
+        attach(&s, "team/skills/chase", "label:x");
+        let r = resolve(&s, &task_like(), &[]).unwrap();
+        let dir = d.path().join("skills");
+        write_skills(&dir, &r, &s).unwrap();
+        for (p, c) in files {
+            let got = dir.join("chase").join(p);
+            assert_eq!(std::fs::read_to_string(&got).unwrap(), c, "{p}");
+            let mode = std::fs::metadata(&got).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111 != 0, c.starts_with("#!"), "{p} mode {mode:o}");
+        }
+        assert_eq!(
+            skills_lines(&r, "skills/"),
+            "- `skills/chase` (label:x, attached): Chase issues\n"
+        );
+    }
+
+    /// The `axe` skill of this repository loads into the store as a folder
+    /// and comes back out whole.
+    #[test]
+    fn the_axe_skill_imports_into_the_store_and_writes_back_whole() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/axe");
+        let mut files = Vec::new();
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<File>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(root, &p, out);
+                } else {
+                    out.push(File {
+                        path: p.strip_prefix(root).unwrap().to_string_lossy().into(),
+                        content: std::fs::read_to_string(&p).unwrap(),
+                    });
+                }
+            }
+        }
+        walk(&src, &src, &mut files);
+        assert!(files.iter().any(|f| f.path == "references/goals.md"));
+        let (d, s) = store();
+        s.put("skills/axe", &Body::Folder(files.clone()), None, "t", "m")
+            .unwrap();
+        attach(&s, "skills/axe", "global");
+        let r = resolve(&s, &task_like(), &[]).unwrap();
+        let k = r.attached(Kind::Skill).next().unwrap();
+        assert_eq!((k.name.as_str(), k.path.as_str()), ("axe", "skills/axe"));
+        assert!(k.description.starts_with("Use the axe task queue"), "{k:?}");
+        let dir = d.path().join("skills");
+        write_skills(&dir, &r, &s).unwrap();
+        for f in &files {
+            assert_eq!(
+                std::fs::read_to_string(dir.join("axe").join(&f.path)).unwrap(),
+                f.content,
+                "{}",
+                f.path
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_skill_falls_back_to_an_index_entry() {
+        let (d, s) = store();
+        skill(&s, "skills/review", "Review a diff", "body");
+        attach(&s, "skills/review", "label:x");
+        let r = resolve(&s, &task_like(), &[]).unwrap();
+        let dir = d.path().join("skills");
+        write_skills(&dir, &r, &Broken).unwrap();
+        let stub = std::fs::read_to_string(dir.join("review/SKILL.md")).unwrap();
+        assert!(
+            stub.starts_with("---\nname: \"review\"\ndescription: \"Review a diff\"\n---\n"),
+            "{stub}"
+        );
+        assert!(stub.contains("`axe doc get skills/review`"), "{stub}");
+        assert!(!dir.join("review/ref.md").exists());
     }
 
     /// A source with a dangling attachment and an unreadable one.
