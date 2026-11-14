@@ -99,6 +99,10 @@ Task-event subscriptions (2026-11-08) exist so escalations are not silent
 while token use and Telegram noise stay bounded: chosen events wake the bot in
 batches, others only ride along in the next run's prompt. Fan-out happens in
 the transaction that writes the task event, so nothing lags or replays.
+Following single tasks (2026-11-13) extends the same path: events on tasks a
+bot owns (`--owned-wake`) or watches (`axe bot watch`) wake it on a 1m batch,
+so it need not subscribe to a whole project's `done` or poll with self-wakes.
+A watch is a `bot_subscriptions` row keyed `#<task>` (`subscription.rs`).
 
 ## Telegram and security
 

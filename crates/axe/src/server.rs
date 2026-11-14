@@ -2045,6 +2045,7 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
     #[derive(Deserialize)]
     struct UnsubscribeBody {
         project: Option<String>,
+        task: Option<i64>,
         why: String,
         #[serde(flatten)]
         who: Who,
@@ -2139,13 +2140,18 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("POST", ["api", "bots", name, "subscriptions", "remove"]) => {
             let b: UnsubscribeBody = req.json()?;
-            subscription::unsubscribe(
-                &mut st.conn(),
-                &b.who.actor(),
-                name,
-                b.project.as_deref(),
-                &b.why,
-            )?;
+            match b.task {
+                Some(task) => {
+                    subscription::unwatch(&mut st.conn(), &b.who.actor(), name, task, &b.why)?
+                }
+                None => subscription::unsubscribe(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    name,
+                    b.project.as_deref(),
+                    &b.why,
+                )?,
+            }
             ok(200, &json!({"removed": true}))
         }
         ("GET", ["api", "bots"]) => {

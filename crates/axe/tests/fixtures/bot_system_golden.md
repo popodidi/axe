@@ -51,6 +51,9 @@ below. You run as one continuous session that axe resumes on every wake.
 ## Task-event subscriptions
 - `axe bot subscribe` / `unsubscribe` / `subscriptions` manage which task
   events reach you, per project. Record each change with `--why`.
+- To follow a task instead of re-checking it with self-wakes: tasks you own
+  wake you via `axe bot subscribe --owned-wake done,escalated`; for any other
+  task, `axe bot watch <task>` (`unwatch`; dropped once it is done).
 - A subscribed escalation arrives in a batched wake. Triage it: read the task,
   and settle what you are allowed to settle. Message the owner only if it needs
   them, in one short message covering the batch.

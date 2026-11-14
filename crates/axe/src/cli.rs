@@ -1130,6 +1130,10 @@ enum BotCmd {
         /// Events that only ride along on the next run; same names. "" for none
         #[arg(long)]
         ride: Option<String>,
+        /// Events on tasks this bot owns (`--owner bot:NAME`) in the project
+        /// that wake it within 1m; same names. "" for none
+        #[arg(long)]
+        owned_wake: Option<String>,
         /// Batch period for wake events (1m to 24h), e.g. 5m
         #[arg(long)]
         batch: Option<String>,
@@ -1149,7 +1153,30 @@ enum BotCmd {
         #[arg(long)]
         why: String,
     },
-    /// List a bot's task-event subscriptions
+    /// Follow one task: wake within its batch (default 1m) when it enters a
+    /// wake state (default done, escalated, blocked). Dropped when it is done
+    Watch {
+        task: i64,
+        #[arg(long, env = "AXE_BOT")]
+        bot: String,
+        /// Events that wake the bot, comma separated (same names as subscribe)
+        #[arg(long)]
+        wake: Option<String>,
+        /// Batch period (1m to 24h), e.g. 1m
+        #[arg(long)]
+        batch: Option<String>,
+        #[arg(long)]
+        why: String,
+    },
+    /// Stop following one task
+    Unwatch {
+        task: i64,
+        #[arg(long, env = "AXE_BOT")]
+        bot: String,
+        #[arg(long)]
+        why: String,
+    },
+    /// List a bot's task-event subscriptions and watched tasks
     Subscriptions {
         #[arg(env = "AXE_BOT")]
         name: String,
@@ -2161,8 +2188,21 @@ fn format_subscription(s: &crate::subscription::Subscription) -> String {
             v.join(",")
         }
     };
+    if s.task.is_some() {
+        return format!(
+            "{}\twatch\twake={}\tbatch={}s",
+            s.project,
+            join(&s.wake),
+            s.batch_seconds
+        );
+    }
+    let owned = if s.owned.is_empty() {
+        String::new()
+    } else {
+        format!("\towned={}", join(&s.owned))
+    };
     format!(
-        "{}\twake={}\tride={}\tbatch={}s",
+        "{}\twake={}{owned}\tride={}\tbatch={}s",
         s.project,
         join(&s.wake),
         join(&s.ride),
@@ -2417,6 +2457,7 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
             all_projects,
             wake,
             ride,
+            owned_wake,
             batch,
             why,
         } => {
@@ -2431,6 +2472,7 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                     "project": subscription_project(project, *all_projects),
                     "wake": event_list(wake),
                     "ride": event_list(ride),
+                    "owned": event_list(owned_wake),
                     "batch_seconds": batch_seconds,
                     "why": why,
                 }),
@@ -2449,6 +2491,37 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 json!({"project": subscription_project(project, *all_projects), "why": why}),
             )?;
             println!("unsubscribed");
+        }
+        BotCmd::Watch {
+            task,
+            bot,
+            wake,
+            batch,
+            why,
+        } => {
+            let batch_seconds = batch
+                .as_deref()
+                .map(crate::bot::parse_duration)
+                .transpose()?;
+            let s: Subscription = c.send(
+                "POST",
+                &format!("/api/bots/{bot}/subscriptions"),
+                json!({
+                    "task": task,
+                    "wake": event_list(wake),
+                    "batch_seconds": batch_seconds,
+                    "why": why,
+                }),
+            )?;
+            println!("{}", format_subscription(&s));
+        }
+        BotCmd::Unwatch { task, bot, why } => {
+            let _: Value = c.send(
+                "POST",
+                &format!("/api/bots/{bot}/subscriptions/remove"),
+                json!({"task": task, "why": why}),
+            )?;
+            println!("unwatched");
         }
         BotCmd::Subscriptions { name, json } => {
             let subs: Vec<Subscription> = c.get(&format!("/api/bots/{name}/subscriptions"), &[])?;

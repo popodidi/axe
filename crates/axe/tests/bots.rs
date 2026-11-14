@@ -1425,6 +1425,68 @@ fn subscription_cli_round_trip_and_end_to_end_listing() {
 }
 
 #[test]
+fn follow_cli_owned_wake_watch_and_unwatch() {
+    let rig = Rig::new(1);
+    rig.create(json!({}));
+    let out = rig.srv.ok(&[
+        "bot",
+        "subscribe",
+        "b",
+        "--owned-wake",
+        "done,escalated",
+        "--why",
+        "follow mine",
+    ]);
+    assert_eq!(
+        out,
+        "a\twake=escalated\towned=done,escalated\tride=new,done\tbatch=300s\n"
+    );
+    let id = rig.srv.ok(&[
+        "add",
+        "--project",
+        "z",
+        "--title",
+        "theirs",
+        "--detail",
+        "Outcome: x",
+    ]);
+    let id = id.trim();
+    let out = rig
+        .srv
+        .ok(&["bot", "watch", id, "--bot", "b", "--why", "waiting on it"]);
+    assert_eq!(
+        out,
+        format!("#{id}\twatch\twake=done,escalated,blocked\tbatch=60s\n")
+    );
+    let list = rig.srv.ok(&["bot", "subscriptions", "b"]);
+    assert_eq!(list.lines().count(), 2, "{list}");
+    assert!(
+        list.lines()
+            .last()
+            .unwrap()
+            .starts_with(&format!("#{id}\t")),
+        "{list}"
+    );
+    let json_list: Value =
+        serde_json::from_str(&rig.srv.ok(&["bot", "subscriptions", "b", "--json"])).unwrap();
+    assert_eq!(json_list[1]["task"], id.parse::<i64>().unwrap());
+    assert_eq!(json_list[0]["owned"], json!(["done", "escalated"]));
+    let log = rig.srv.ok(&["bot", "log", "b", "--limit", "10"]);
+    assert!(log.contains("watch"), "{log}");
+    rig.srv
+        .ok(&["bot", "unwatch", id, "--bot", "b", "--why", "settled"]);
+    assert_eq!(
+        rig.srv.ok(&["bot", "subscriptions", "b"]).lines().count(),
+        1
+    );
+    let out = rig
+        .srv
+        .run(&["bot", "unwatch", id, "--bot", "b", "--why", "x"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not watching"));
+}
+
+#[test]
 fn activity_is_metadata_only_and_scoped_to_the_bot() {
     let rig = Rig::new(1);
     rig.create(json!({}));
