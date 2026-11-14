@@ -1354,7 +1354,13 @@ fn message_content_needs_the_token_and_metadata_stays_public() {
     assert_eq!(found[0]["flags"]["forwarded"], true);
     let edited: Vec<Value> =
         serde_json::from_str(&rig.tg_ok(&["history", "--before", "3", "--json"])).unwrap();
-    assert_eq!(edited[1]["flags"], json!({"edited": true, "deleted": true}));
+    assert_eq!(
+        (
+            &edited[1]["flags"]["edited"],
+            &edited[1]["flags"]["deleted"]
+        ),
+        (&json!(true), &json!(true))
+    );
 
     let activity = rig.srv().get("/api/bots/cos/activity");
     let text = activity.to_string();
@@ -2294,6 +2300,54 @@ fn goal_pin_events(rig: &Rig) -> Vec<(String, String, i64)> {
             )
         })
         .collect()
+}
+
+/// `board show`, first line.
+fn inbox_line(rig: &Rig) -> String {
+    rig.tg_ok(&["board", "show"])
+        .lines()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+fn sent_id(out: &str) -> i64 {
+    out.trim().trim_start_matches("sent #").parse().unwrap()
+}
+
+#[test]
+fn a_new_bots_first_send_turns_the_inbox_on() {
+    let rig = Rig::new();
+    propose_goal(&rig, json!({"name":"grow","project":"p","bots":["cos"]}));
+    rig.srv().ok(&["goal", "activate", "grow", "--why", "go"]);
+    // An owner command reply (a system message) and a card do not count.
+    rig.stub.push(text_msg(80, 300, OWNER, OWNER, "/status"));
+    wait_for("status reply", 20, || {
+        !rig.stub.calls("sendMessage").is_empty()
+    });
+    let card = rig.tg_ok(&["send", "Pick?", "--buttons", "Yes=y"]);
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(inbox_line(&rig).starts_with("inbox off"));
+    assert!(flags_of(&rig, sent_id(&card))["board"].is_null());
+    assert!(goal_pin_events(&rig).is_empty());
+
+    // The first plain message becomes the board message: the active goal
+    // is pinned in its chat without a manual set-message.
+    let first = sent_id(&rig.tg_ok(&["send", "hello"]));
+    assert_eq!(
+        inbox_line(&rig),
+        format!("inbox on (board message #{first})")
+    );
+    let (pin, _, _) = wait_goal_pin(&rig, "grow", "goal pin", |_| true);
+    wait_for("goal pinned", 20, || flags_of(&rig, pin)["pinned"] == true);
+    assert!(edits_of(&rig, tg_id(&rig, first)).is_empty());
+    assert!(flags_of(&rig, sent_id(&card))["buttons"].is_array());
+
+    // A bot whose inbox was turned off (or any bot with earlier messages)
+    // is left as it is.
+    rig.tg_ok(&["board", "clear"]);
+    rig.tg_ok(&["send", "again"]);
+    assert!(inbox_line(&rig).starts_with("inbox off"));
 }
 
 #[test]

@@ -1767,7 +1767,8 @@ enum BoardCmd {
     /// Turn the inbox on in the chat of one of the bot's own text messages:
     /// the server pins each open card and keeps one pinned message per
     /// active goal there. The message itself is not rendered or pinned (an
-    /// old overview is unpinned and edited to a pointer)
+    /// old overview is unpinned and edited to a pointer). A new bot's first
+    /// plain `send` does this by default
     SetMessage { msg: i64 },
     /// Turn the inbox off: stop pinning cards and goals for this bot
     Clear,

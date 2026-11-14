@@ -131,7 +131,11 @@ The owner's inbox is the bot chat's pinned list, rendered by the server
 pinned message per active goal, edited in place as the goal changes, so the
 owner never keeps a list by hand. The single pinned overview with task stats
 was retired on 2026-11-13 at the owner's request: it only repeated what the
-cards and goals show. With the inbox on, every escalated task in
+cards and goals show. The inbox is on by default: a bot's first plain
+`bot tg send` (not a card, alert or command reply) becomes its board
+message, so a new bot's chat gets its pins without a manual
+`board set-message`; a bot with earlier messages, or whose inbox was turned
+off, is left as it is (2026-11-14). With the inbox on, every escalated task in
 the bot's subscribed projects gets a card, posted by the server if the bot
 does not post one.
 
