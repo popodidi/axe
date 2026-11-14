@@ -77,6 +77,21 @@ At the eval date, compare prediction and result, then pick one:
 
 Use `--kind observation` for evidence that will feed the next hypothesis.
 
+### Status
+
+Each active goal's pinned message is a scoreboard: status, a one-line
+summary, the metric, the next task, what waits on the owner and the weekly
+budget bars. Set the first three with an observation whose first line is a
+status (`on track`, `at risk` or `off track`) and a one-line summary, and an
+optional `metric:` line:
+
+`axe goal record G --kind observation "at risk: Cost is down but no full window yet.
+metric: cost/day $59 -> $125"`
+
+Record one whenever the picture changes (each goal review, each verdict).
+The latest status observation stays on the pin until the next one; without
+one the pin shows the goal state and the intent's first sentence.
+
 ## 3. Autonomy tier
 
 Self-start an H task (state `pending`) only if all hold:

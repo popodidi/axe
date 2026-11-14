@@ -287,6 +287,9 @@ struct Rig {
     cfg: PathBuf,
 }
 
+/// The server's public URL in the rig's config (`[blobs] public_url`).
+const WEB: &str = "http://axe.example";
+
 fn write_config(dir: &Path, api: &str, token_file: &Path) -> PathBuf {
     write_config_with(dir, api, token_file, "")
 }
@@ -297,6 +300,9 @@ fn write_config_with(dir: &Path, api: &str, token_file: &Path, extra: &str) -> P
         r#"
 workspace_root = "{ws}"
 log_dir = "{logs}"
+
+[blobs]
+public_url = "{WEB}/"
 
 [telegram]
 owner_user_id = {OWNER}
@@ -2316,7 +2322,13 @@ fn each_active_goal_has_its_own_pin() {
     let (pin, pin_tg, t) = wait_goal_pin(&rig, "grow", "goal pin", |_| true);
     assert_eq!(
         t,
-        "<b>grow</b> · active\nReach ten users\nno open tasks\n$0.00/$10.00 · attention 0/4\nno goal wake · deadline 2026-12-01"
+        format!(
+            "<b>grow</b> · <i>active</i> · Dec 1\nReach ten users\n\
+             Next: nothing open · Needs you: nothing\n\
+             <code>Cost ░░░░░░░░░░   0%  $0.00/$10 wk</code>\n\
+             <code>Attn ░░░░░░░░░░   0%  0/4 wk</code>\n\
+             <a href=\"{WEB}/?goal=grow\">Open goal</a>"
+        )
     );
     wait_for("goal pinned", 20, || flags_of(&rig, pin)["pinned"] == true);
     let sent = rig.stub.calls("sendMessage").pop().unwrap().params;
@@ -2336,18 +2348,32 @@ fn each_active_goal_has_its_own_pin() {
     );
     assert_eq!(flags_of(&rig, pin)["goal_pin"], json!(1));
 
-    // An observation and a budget change edit it in place.
+    // A status observation and a budget change edit it in place.
     rig.srv().ok(&[
         "goal",
         "record",
         "grow",
         "--kind",
         "observation",
-        "Two users signed up\nnotes",
+        "on track: Two users signed up\nmetric: users 2 -> 10\nnotes",
     ]);
-    let (p2, _, t) = wait_goal_pin(&rig, "grow", "observation", |t| t.contains("observation:"));
+    let (p2, _, t) = wait_goal_pin(&rig, "grow", "status", |t| t.contains("on track"));
     assert_eq!(p2, pin);
-    assert!(t.contains("\nobservation: Two users signed up\n"), "{t}");
+    assert!(
+        t.starts_with(
+            "<b>grow</b> · <i>on track</i> · Dec 1\nTwo users signed up\nusers 2 → 10\nNext: "
+        ),
+        "{t}"
+    );
+    // A later plain observation keeps the status.
+    rig.srv().ok(&[
+        "goal",
+        "record",
+        "grow",
+        "--kind",
+        "observation",
+        "quiet day",
+    ]);
     rig.srv().ok(&[
         "goal",
         "edit",
@@ -2357,7 +2383,7 @@ fn each_active_goal_has_its_own_pin() {
         "--why",
         "more",
     ]);
-    let (p3, _, t) = wait_goal_pin(&rig, "grow", "budget", |t| t.contains("$0.00/$20.00"));
+    let (p3, _, t) = wait_goal_pin(&rig, "grow", "budget", |t| t.contains("$0.00/$20 wk"));
     assert_eq!(p3, pin);
     let edits = edits_of(&rig, pin_tg);
     assert_eq!(edits.len(), 2, "{edits:?}");
@@ -2394,7 +2420,7 @@ fn each_active_goal_has_its_own_pin() {
     rig.srv().ok(&["goal", "resume", "grow", "--why", "on"]);
     let (again, _, t) = wait_goal_pin(&rig, "grow", "resumed pin", |_| true);
     assert_ne!(again, pin);
-    assert!(t.starts_with("<b>grow</b> · active"), "{t}");
+    assert!(t.starts_with("<b>grow</b> · <i>on track</i>"), "{t}");
     wait_for("resumed pinned", 20, || {
         flags_of(&rig, again)["pinned"] == true
     });
@@ -2490,10 +2516,16 @@ fn goal_pin_failures_are_logged_and_retried() {
         "editMessageText".into(),
         "Bad Request: message to edit not found".into(),
     );
-    rig.srv()
-        .ok(&["goal", "record", "grow", "--kind", "verdict", "H1 holds"]);
+    rig.srv().ok(&[
+        "goal",
+        "record",
+        "grow",
+        "--kind",
+        "observation",
+        "at risk: H1 holds",
+    ]);
     let (new, _, t) = wait_goal_pin(&rig, "grow", "re-posted pin", |t| {
-        t.contains("verdict: H1 holds")
+        t.contains("\nH1 holds\n")
     });
     assert_ne!(new, pin);
     assert!(flags_of(&rig, pin)["goal_pin"].is_null());
@@ -2533,6 +2565,9 @@ fn the_goal_board_is_retired_into_goal_pins() {
     assert_eq!(flags_of(&rig, gb)["pinned"], false);
     let show = rig.tg_ok(&["goal-board", "show"]);
     assert!(!show.contains("old goal board"), "{show}");
-    assert!(show.contains("<b>grow</b> · proposed"), "{show}");
+    assert!(
+        show.contains("<b>grow</b> · <i>proposed</i> · awaiting your Go"),
+        "{show}"
+    );
     assert_eq!(rig.tg_ok(&["goal-board", "unset"]), "goal board cleared\n");
 }

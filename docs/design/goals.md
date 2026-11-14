@@ -63,12 +63,16 @@ Spend is computed on read over a rolling seven-day window; nothing is stored.
   goal is refused until the owner raises it. Nothing else is refused, and a
   goal with no budget never gates.
 
-Each active goal has one pinned message in its bots' chats. It shows state,
-intent, spend against limits, open linked tasks, the latest verdict or
-observation, the next goal-tagged wake and the deadline, so budget state is
-visible without asking. It is edited in place whenever its text changes.
-Edits are silent, so spend is shown to the cent, and pausing, finishing or
-dropping the goal unpins it. Goal intent never goes into a bot's system prompt, so the
+Each active goal has one pinned message in its bots' chats, a scoreboard
+(owner's layout, 2026-11-14): name, status and deadline; a one-line summary;
+the metric; the next linked task and how many linked tasks wait on the owner;
+cost and attention as text bars against the weekly limits, always shown; and
+a link to the goal's web page when the server's public URL is set (`[blobs]
+public_url`). Status, summary and metric come from the latest observation
+that opens with a status (`at risk: ...`, `goal::status_of`), so they need no
+new field; without one the pin shows the goal state and the intent's first
+sentence. It is edited in place whenever its text changes. Edits are silent,
+and pausing, finishing or dropping the goal unpins it. Goal intent never goes into a bot's system prompt, so the
 prompt cache stays stable when an intent changes.
 
 ## Deferred
