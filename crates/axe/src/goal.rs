@@ -776,6 +776,44 @@ pub fn wake_goal(body: &str) -> Option<&str> {
         .filter(|g| !g.is_empty())
 }
 
+/// Statuses an observation can open with to set a goal's status line.
+pub const STATUSES: [&str; 3] = ["on track", "at risk", "off track"];
+
+/// A goal's status as its pinned message shows it, read from an observation
+/// whose first line is `<status>: <one-line summary>` (a status in
+/// [`STATUSES`], case-insensitive, `-` for a space). A later
+/// `metric: <name> <now> -> <target>` line sets the metric line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Status {
+    pub status: String,
+    pub summary: String,
+    pub metric: Option<String>,
+}
+
+/// The [`Status`] an observation body sets, if it is a status observation.
+pub fn status_of(body: &str) -> Option<Status> {
+    let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
+    let (head, summary) = lines.next()?.split_once(':')?;
+    let head = head.trim().to_lowercase().replace('-', " ");
+    let status = STATUSES.iter().find(|s| **s == head)?;
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return None;
+    }
+    let metric = lines
+        .find_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.trim().eq_ignore_ascii_case("metric"))
+                .map(|(_, v)| v.trim().replace("->", "\u{2192}"))
+        })
+        .filter(|m| !m.is_empty());
+    Some(Status {
+        status: (*status).to_string(),
+        summary: summary.to_string(),
+        metric,
+    })
+}
+
 /// The rolling window budgets are spent over.
 pub const BUDGET_WINDOW_DAYS: i64 = 7;
 

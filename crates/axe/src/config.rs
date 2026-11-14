@@ -174,8 +174,9 @@ pub struct Blobs {
     /// Largest accepted blob in MiB (default 1024).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_mib: Option<u64>,
-    /// Base URL of signed links, as a phone reaches the server (default: the
-    /// URL the CLI used).
+    /// Base URL of the server as a phone reaches it: signed links use it
+    /// (default: the URL the CLI used), and goal pins link to the goal's web
+    /// page under it (no link when unset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     /// File holding the link signing key (default: `link.key` in `dir`,

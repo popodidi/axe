@@ -248,6 +248,8 @@ pub struct TgBot {
     username: Mutex<Option<String>>,
     /// `getMe` user id, to recognise the bot's own service messages.
     id: Mutex<Option<i64>>,
+    /// The server's public URL, for the goal pins' links to the web goal page.
+    web: Option<String>,
 }
 
 #[derive(Default)]
@@ -395,8 +397,9 @@ fn owner_actor() -> Actor {
 
 impl Gateway {
     /// Reads each bot's token file; a bot whose token cannot be read is skipped
-    /// with a warning, so the server still starts.
-    pub fn new(cfg: &config::Telegram) -> Gateway {
+    /// with a warning, so the server still starts. `web` is the server's
+    /// public URL (`[blobs] public_url`), which goal pins link to.
+    pub fn new(cfg: &config::Telegram, web: Option<String>) -> Gateway {
         let mut bots = HashMap::new();
         for b in &cfg.bots {
             let token = match config::read_token(&config::expand_tilde(&b.token_file)) {
@@ -423,6 +426,7 @@ impl Gateway {
                     alerts: Mutex::new(Alerts::default()),
                     username: Mutex::new(None),
                     id: Mutex::new(None),
+                    web: web.clone(),
                 }),
             );
         }
@@ -1809,7 +1813,7 @@ fn drop_goal_pin(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> 
 /// drops the pin, so the next pass posts a new one.
 fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Result<()> {
     let conn = store.conn();
-    let goals = goal_board::pinned_lines(&conn, &b.name)?;
+    let goals = goal_board::pinned_lines(&conn, &b.name, b.web.as_deref())?;
     let pins = goal_board::pins(&conn, &b.name)?;
     drop(conn);
     let mut kept: HashMap<i64, StoredMessage> = HashMap::new();

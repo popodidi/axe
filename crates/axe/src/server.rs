@@ -195,7 +195,10 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         relay: Mutex::new(None),
         admission: Mutex::new(None),
         #[cfg(feature = "telegram")]
-        telegram: cfg.telegram.as_ref().map(|t| Arc::new(Gateway::new(t))),
+        telegram: cfg
+            .telegram
+            .as_ref()
+            .map(|t| Arc::new(Gateway::new(t, cfg.blobs.public_url.clone()))),
         #[cfg(not(feature = "telegram"))]
         telegram: None,
         blobs,
@@ -2290,9 +2293,10 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                 )?,
             )
         }
-        ("GET", ["api", "bots", name, "tg", "board"]) => {
-            ok(200, &crate::board::show(&st.conn(), name)?)
-        }
+        ("GET", ["api", "bots", name, "tg", "board"]) => ok(
+            200,
+            &crate::board::show(&st.conn(), name, st.blobs.public_url.as_deref())?,
+        ),
         ("POST", ["api", "bots", name, "tg", "board"]) => {
             #[derive(Deserialize)]
             struct Board {
@@ -2304,7 +2308,12 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("GET", ["api", "bots", name, "tg", "goal-board"]) => ok(
             200,
-            &crate::goal_board::show(&st.conn(), name, crate::remote::epoch())?,
+            &crate::goal_board::show(
+                &st.conn(),
+                name,
+                crate::remote::epoch(),
+                st.blobs.public_url.as_deref(),
+            )?,
         ),
         ("POST", ["api", "bots", name, "tg", "goal-board"]) => {
             #[derive(Deserialize)]

@@ -446,12 +446,12 @@ pub fn card_wake_note(n: &CardNeed, fallback: i64) -> String {
 }
 
 /// The inbox of bot `name`: its board message, what waits on the owner
-/// and its goal pins.
-pub fn show(conn: &Connection, name: &str) -> Result<Board> {
+/// and its goal pins. `web` is the server's public URL (goal page links).
+pub fn show(conn: &Connection, name: &str, web: Option<&str>) -> Result<Board> {
     Ok(Board {
         message: message(conn, name)?.map(|m| m.id),
         lines: lines(conn, name)?,
-        goals: goal_board::pin_views(conn, name)?,
+        goals: goal_board::pin_views(conn, name, web)?,
     })
 }
 
