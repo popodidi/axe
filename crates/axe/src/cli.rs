@@ -963,7 +963,11 @@ enum RoutineCmd {
     Show {
         id: i64,
     },
-    /// Save a complete JSON template; omit --id to create
+    /// Save a complete JSON template; omit --id to create. Fields: name,
+    /// project, cron, timezone (default UTC), title, detail, and optionally
+    /// agent, workload, owner, repos and labels. owner, repos and labels set
+    /// each created task as `axe add --owner/--repo/--label` do: repos omitted
+    /// runs in the project checkout, [] in a run workspace with no repos
     Save {
         #[arg(long)]
         id: Option<i64>,

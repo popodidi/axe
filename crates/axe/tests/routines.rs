@@ -14,6 +14,9 @@ fn template() -> Template {
         title: "Record acceptance".into(),
         detail: "## Outcome\nRecord acceptance only.\n## Verify\nRead the note.".into(),
         workload: None,
+        owner: None,
+        repos: None,
+        labels: vec![],
     }
 }
 fn at(s: &str) -> i64 {
@@ -209,4 +212,83 @@ fn authenticated_api_and_cli() {
         }
         s.ok(&args);
     }
+}
+#[test]
+fn template_sets_owner_repos_and_labels() {
+    let d = tempfile::tempdir().unwrap();
+    let mut c = db::open(&d.path().join("db")).unwrap();
+    let a = Actor::new("test");
+    // An existing template without the fields stores and creates as before.
+    let plain = routine::save(&mut c, &a, None, &template(), 0).unwrap();
+    let stored: String = c
+        .query_row("SELECT config FROM routines WHERE id=?1", [plain], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    for k in ["owner", "repos", "labels"] {
+        assert!(stored.get(k).is_none(), "{k} stored for a plain template");
+    }
+    let task = routine::trigger(&mut c, &a, plain, "k").unwrap();
+    let task = db::get_task(&c, task).unwrap();
+    assert_eq!((task.owner, task.repos, task.labels), (None, None, vec![]));
+    // A template with the fields creates tasks carrying them, with the same
+    // events `axe add` writes.
+    let mut t = template();
+    t.owner = Some("bot:ops".into());
+    t.repos = Some(vec!["axe".into(), "web".into(), "axe".into()]);
+    t.labels = vec!["infra".into(), "nightly".into()];
+    let id = routine::save(&mut c, &a, None, &t, 0).unwrap();
+    for task in [routine::trigger(&mut c, &a, id, "k").unwrap(), {
+        routine::tick(&mut c, 120).unwrap();
+        routine::history(&c, id, i64::MAX).unwrap()[0]["task_id"]
+            .as_i64()
+            .unwrap()
+    }] {
+        let got = db::get_task(&c, task).unwrap();
+        assert_eq!(got.owner.as_deref(), Some("bot:ops"));
+        assert_eq!(got.repos, Some(vec!["axe".to_string(), "web".to_string()]));
+        assert_eq!(got.labels, vec!["infra", "nightly"]);
+        let kinds: Vec<String> = c
+            .prepare("SELECT kind FROM events WHERE task_id=?1 ORDER BY id")
+            .unwrap()
+            .query_map([task], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kinds, ["created", "owner", "repos", "labels"]);
+    }
+    // repos: [] is a run workspace with no repos, as `axe add --no-repos`.
+    t.repos = Some(vec![]);
+    routine::save(&mut c, &a, Some(id), &t, 0).unwrap();
+    let task = routine::trigger(&mut c, &a, id, "empty").unwrap();
+    assert_eq!(db::get_task(&c, task).unwrap().repos, Some(vec![]));
+    // Invalid fields are rejected at save, as `axe add` rejects them.
+    for bad in [
+        Template {
+            owner: Some("two words".into()),
+            ..template()
+        },
+        Template {
+            owner: Some("none".into()),
+            ..template()
+        },
+        Template {
+            repos: Some(vec!["bad name".into()]),
+            ..template()
+        },
+        Template {
+            labels: vec!["".into()],
+            ..template()
+        },
+    ] {
+        assert!(routine::save(&mut c, &a, None, &bad, 0).is_err());
+    }
+    // The JSON shape `axe routine save --file` reads.
+    let parsed: Template = serde_json::from_value(json!({
+        "name": "n", "project": "p", "cron": "* * * * *", "title": "t",
+        "detail": "d", "owner": "o", "repos": ["axe"], "labels": ["l"]
+    }))
+    .unwrap();
+    assert_eq!(parsed.repos, Some(vec!["axe".to_string()]));
 }
