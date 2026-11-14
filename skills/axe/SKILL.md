@@ -79,7 +79,7 @@ axe wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge"
 | Evidence | `axe note <id> "<command and key output>"`, `axe artifact <id> <url>` |
 | Before a non-repeatable step (merge, deploy, migration) | `axe protect <id> --note "<step>"`; if it fails, do not start the step. After it: `axe protect <id> --clear` |
 | Human attention queue | `axe list --state escalated` |
-| Owner ratings of asks (escalations, cards) | `axe ask list [--bot <name>] [--unrated] [--json]`, `axe ask stats` (wasted-ask share per bot and week), `axe ask retro --bot <name>` sends the weekly rating card (`--dry` previews it); the owner rates with `axe ask rate <ask> needed\|could_decide\|should_not_exist` |
+| Owner ratings of asks (escalations, cards) | `axe ask list [--bot <name>] [--kind <kind>] [--unrated] [--by kind\|bot] [--json]`, `axe ask stats [--by kind\|bot]` (wasted-ask share per bot, kind and week). Each ask has a stable kind (`category`: approval, decision, choice, confirm, digest, access, stuck, other). The server sends the weekly retro card by kind (`[telegram.retro]`, default `mon 01:00` UTC, only with unrated asks); `axe ask retro --bot <name>` sends it now (`--dry` previews it); the owner rates with `axe ask rate <ask> needed\|could_decide\|should_not_exist` |
 | Attached knowledge | `axe doc attach <path> <global\|label:l\|owner:o\|repo:r>`; a run folder holds each attached skill whole under `skills/<name>/` and lists docs by name and description (load a body with `axe doc get <path>`); `axe context explain <id>` shows what a task's run includes and why |
 
 Escalation classes: `decision` is a legitimate human call (product, risk,

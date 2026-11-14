@@ -1452,6 +1452,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 until: asks_until(req, now)?,
                 project: req.query("project"),
                 bot: req.query("bot"),
+                kind: req.query("kind"),
                 unrated: req
                     .query("unrated")
                     .is_some_and(|v| v == "true" || v == "1"),

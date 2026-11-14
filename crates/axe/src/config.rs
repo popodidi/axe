@@ -502,6 +502,39 @@ pub struct Telegram {
     pub board: BoardMode,
     #[serde(rename = "bot", default)]
     pub bots: Vec<TelegramBot>,
+    /// The weekly retro card (`ask.rs`): sent to the owner once a week when
+    /// last week has unrated asks.
+    #[serde(default)]
+    pub retro: RetroSend,
+}
+
+/// `telegram.retro`: when and from which bot the weekly retro card goes out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetroSend {
+    /// Send it automatically (default true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// UTC weekday and time, `mon 01:00` by default.
+    #[serde(default = "default_retro_at")]
+    pub at: String,
+    /// The bot that sends it; default the first `[[telegram.bot]]`.
+    #[serde(default)]
+    pub bot: Option<String>,
+}
+
+impl Default for RetroSend {
+    fn default() -> Self {
+        RetroSend {
+            enabled: true,
+            at: default_retro_at(),
+            bot: None,
+        }
+    }
+}
+
+fn default_retro_at() -> String {
+    "mon 01:00".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -960,6 +993,12 @@ impl Config {
             }
             if t.poll_timeout == 0 || t.poll_timeout > 50 {
                 bail!("telegram.poll_timeout must be 1..=50 seconds");
+            }
+            crate::ask::parse_weekly(&t.retro.at).context("telegram.retro.at")?;
+            if let Some(name) = &t.retro.bot {
+                if !t.bots.iter().any(|b| &b.name == name) {
+                    bail!("telegram.retro.bot {name:?} is not a [[telegram.bot]]");
+                }
             }
             let mut names = std::collections::BTreeSet::new();
             for b in &t.bots {
