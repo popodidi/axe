@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod admission;
 pub mod agent_proc;
+pub mod ask;
 pub mod blob;
 pub mod board;
 pub mod bot;

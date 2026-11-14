@@ -365,6 +365,45 @@ fn attention_counts_escalations_and_approvals_not_goal_setup() {
     assert_eq!(budget(&c, "g").attention_spent, 2);
 }
 
+#[test]
+fn attention_counts_needed_and_unrated_asks_not_wasted_ones() {
+    let (_d, mut c) = setup();
+    let linked = task(&mut c, Some("g")).unwrap();
+    // Episode 1: escalated and approved (2 units); episode 2: escalated (1);
+    // episode 3: escalated and approved (2). An approval outside an episode (1).
+    escalate(&mut c, linked);
+    db::approve(&mut c, &human(), linked, "abc", "main", None).unwrap();
+    escalate(&mut c, linked);
+    pending(&mut c, linked);
+    escalate(&mut c, linked);
+    db::approve(&mut c, &human(), linked, "abc", "main", None).unwrap();
+    let blocked = Changes {
+        state: Some("blocked".into()),
+        ..Default::default()
+    };
+    db::set_task(&mut c, &human(), linked, &blocked).unwrap();
+    db::approve(&mut c, &human(), linked, "abc", "main", None).unwrap();
+    assert_eq!(budget(&c, "g").attention_spent, 6, "all unrated count");
+
+    let owner = Actor::new("owner");
+    let rate = |c: &mut Connection, ask: &str, r: &str| {
+        axe::ask::rate(c, &owner, ask, r).unwrap();
+    };
+    rate(&mut c, &format!("t{linked}.1"), "needed");
+    assert_eq!(budget(&c, "g").attention_spent, 6, "needed still counts");
+    // A wasted episode drops its escalation and the approval inside it.
+    rate(&mut c, &format!("t{linked}.1"), "could_decide");
+    assert_eq!(budget(&c, "g").attention_spent, 4);
+    rate(&mut c, &format!("t{linked}.2"), "should_not_exist");
+    assert_eq!(budget(&c, "g").attention_spent, 3);
+    // Latest rating wins: back to needed restores the units.
+    rate(&mut c, &format!("t{linked}.1"), "needed");
+    assert_eq!(budget(&c, "g").attention_spent, 5);
+    // Episode 3 wasted: its approval goes, the later one outside any episode stays.
+    rate(&mut c, &format!("t{linked}.3"), "could_decide");
+    assert_eq!(budget(&c, "g").attention_spent, 3);
+}
+
 fn refused(r: anyhow::Result<impl std::fmt::Debug>, want: &str) {
     let e = format!("{:#}", r.unwrap_err());
     assert!(e.contains("over its weekly budget"), "{e}");

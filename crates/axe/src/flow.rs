@@ -424,6 +424,8 @@ pub fn stats(conn: &Connection, q: &Query) -> Result<Value> {
         "overall": overall,
         "workloads": workloads,
         "owner_messages": owner_messages,
+        // Owner asks and their ratings per bot, in 7-day blocks (`ask.rs`).
+        "asks": crate::ask::stats(conn, Some(q.project), q.since, q.until)?,
     });
     if let Some(o) = q.origin {
         out["origin"] = json!(o);

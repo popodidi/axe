@@ -50,6 +50,12 @@ enum Cmd {
         #[command(subcommand)]
         command: GoalCmd,
     },
+    /// Owner asks (task escalations and bot cards with buttons) and the
+    /// owner's ratings of them: needed, could_decide, should_not_exist
+    Ask {
+        #[command(subcommand)]
+        command: AskCmd,
+    },
     /// Force-stop a run and hold its task; succeeds only after confirmation
     Abort {
         id: i64,
@@ -1275,6 +1281,52 @@ enum ScheduleCmd {
 }
 
 #[derive(Subcommand)]
+enum AskCmd {
+    /// List asks made in a window, oldest first
+    List {
+        /// RFC3339 or an age such as 7d, 12h
+        #[arg(long, default_value = "7d")]
+        since: String,
+        /// RFC3339 or an age; default now
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        bot: Option<String>,
+        /// Only asks nobody rated yet
+        #[arg(long)]
+        unrated: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rate an ask: t<task>.<episode> (or a task id: its latest episode) or m<message>
+    Rate {
+        ask: String,
+        #[arg(value_parser = PossibleValuesParser::new(crate::ask::RATINGS))]
+        rating: String,
+    },
+    /// Asks, rated and wasted-ask share per bot and overall, per week (JSON)
+    Stats {
+        #[arg(long, default_value = "28d")]
+        since: String,
+        /// RFC3339 or an age; default now
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// The weekly retro card: last week's unrated asks with rating buttons.
+    /// Sends it from the bot (default $AXE_BOT); --dry prints it instead
+    Retro {
+        #[arg(long)]
+        bot: Option<String>,
+        #[arg(long)]
+        dry: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum GoalCmd {
     /// Propose a goal from JSON: name, project, intent, deadline,
     /// budget_cost_week, budget_attention_week, bots. The proposing bot
@@ -1439,6 +1491,114 @@ fn format_goal_event(e: &crate::goal::Event, full: bool) -> String {
         s.push_str(&format!(": {body}"));
     }
     s
+}
+
+fn format_ask(a: &crate::ask::Ask) -> String {
+    let rating = match (&a.rating, &a.rated_by) {
+        (Some(r), Some(by)) => format!("{r} by {by}"),
+        _ => "unrated".into(),
+    };
+    format!(
+        "{:<10} {:<10} {:<14} {}  {}  {}",
+        a.id,
+        a.kind,
+        a.bot.as_deref().unwrap_or("-"),
+        a.at,
+        rating,
+        a.summary.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
+}
+
+fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
+    use crate::ask::{Ask, Retro};
+    match command {
+        AskCmd::List {
+            since,
+            until,
+            project,
+            bot,
+            unrated,
+            json,
+        } => {
+            let mut q = vec![("since", since.as_str())];
+            if let Some(u) = until {
+                q.push(("until", u));
+            }
+            if let Some(p) = project {
+                q.push(("project", p));
+            }
+            if let Some(b) = bot {
+                q.push(("bot", b));
+            }
+            if *unrated {
+                q.push(("unrated", "true"));
+            }
+            let asks: Vec<Ask> = c.get_private("/api/asks", &q)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&asks)?);
+            } else {
+                for a in &asks {
+                    println!("{}", format_ask(a));
+                }
+            }
+        }
+        AskCmd::Rate { ask, rating } => {
+            let a: Ask = c.send(
+                "POST",
+                &format!("/api/asks/{}/rate", ask.trim_start_matches('#')),
+                json!({ "rating": rating }),
+            )?;
+            println!("{}", format_ask(&a));
+        }
+        AskCmd::Stats {
+            since,
+            until,
+            project,
+        } => {
+            let mut q = vec![("since", since.as_str())];
+            if let Some(u) = until {
+                q.push(("until", u));
+            }
+            if let Some(p) = project {
+                q.push(("project", p));
+            }
+            let v: Value = c.get_private("/api/asks/stats", &q)?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        AskCmd::Retro { bot, dry } => {
+            if *dry {
+                let r: Retro = c.get_private("/api/asks/retro", &[])?;
+                println!("{}", r.text);
+                let mut i = 0;
+                for n in &r.rows {
+                    let row: Vec<_> = r.buttons[i..i + n]
+                        .iter()
+                        .map(|b| format!("[{}]", b.0))
+                        .collect();
+                    println!("{}", row.join(" "));
+                    i += n;
+                }
+                return Ok(());
+            }
+            let name = bot
+                .clone()
+                .or_else(|| std::env::var("AXE_BOT").ok().filter(|b| !b.is_empty()))
+                .context("give --bot NAME (or set AXE_BOT)")?;
+            let v: Value = c.send("POST", &format!("/api/bots/{name}/tg/retro"), json!({}))?;
+            if v["sent"] == true {
+                println!(
+                    "sent #{} ({} asks, {} more)",
+                    v["id"], v["items"], v["more"]
+                );
+            } else {
+                println!(
+                    "not sent: {}",
+                    v["text"].as_str().unwrap_or("nothing to rate")
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_goal(c: &Client, command: &GoalCmd) -> Result<()> {
@@ -2601,6 +2761,7 @@ pub fn run() -> Result<()> {
             }
         }
         Cmd::Goal { command } => run_goal(&client(), command)?,
+        Cmd::Ask { command } => run_ask(&client(), command)?,
         Cmd::Routine { command } => {
             let c = client();
             let value: Value = match command {

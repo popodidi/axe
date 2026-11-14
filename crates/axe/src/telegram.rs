@@ -20,6 +20,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+use crate::ask;
 use crate::board;
 use crate::bot::{self, NewMessage};
 use crate::config;
@@ -797,6 +798,11 @@ impl Gateway {
         let data = cq["data"].as_str().unwrap_or("").to_string();
         let thread = cq["message"]["message_thread_id"].as_i64();
         let tg_msg = cq["message"]["message_id"].as_i64();
+        if let Some(t) = tg_msg {
+            if self.retro_press(b, store, chat, t, &data, cq["id"].as_str())? {
+                return Ok(());
+            }
+        }
         let (target, answered) = {
             let mut conn = store.conn();
             let id = bot_id(&conn, &b.name)?;
@@ -866,6 +872,99 @@ impl Gateway {
         }
         b.typing(chat, thread);
         Ok(())
+    }
+
+    /// A press on a weekly retro card (`flags.retro`): records the owner's
+    /// rating, re-renders the card without that item's buttons and wakes no
+    /// bot. Returns false when the message is not a retro card.
+    fn retro_press(
+        &self,
+        b: &TgBot,
+        store: &dyn Store,
+        chat: i64,
+        tg_msg: i64,
+        data: &str,
+        query: Option<&str>,
+    ) -> Result<bool> {
+        let stored = {
+            let conn = store.conn();
+            let id = bot_id(&conn, &b.name)?;
+            match local_id(&conn, id, chat, tg_msg)? {
+                Some(m) => get_message(&conn, &b.name, m)?,
+                None => return Ok(false),
+            }
+        };
+        if !stored.flags["retro"].is_object() {
+            return Ok(false);
+        }
+        let items: Vec<ask::RetroItem> =
+            serde_json::from_value(stored.flags["retro"]["items"].clone()).unwrap_or_default();
+        let more = stored.flags["retro"]["more"].as_u64().unwrap_or(0) as usize;
+        let pressed = data
+            .strip_prefix("rate:")
+            .and_then(|r| r.rsplit_once(':'))
+            .and_then(|(a, code)| Some((a, ask::rating_of(code)?)))
+            .filter(|(a, _)| items.iter().any(|i| i.ask == *a));
+        let toast = match pressed {
+            Some((a, rating)) => {
+                ask::rate(&mut store.conn(), &owner_actor(), a, rating)?;
+                store.changed();
+                let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
+                let rated = ask::ratings(&store.conn(), &ids)?;
+                let r = ask::render_retro(&items, more, &rated);
+                if let Err(e) = self.edit(
+                    store,
+                    &b.name,
+                    stored.id,
+                    Some(&r.text),
+                    false,
+                    Some(&r.buttons),
+                    &r.rows,
+                ) {
+                    eprintln!("telegram: bot {}: retro card: {e:#}", b.name);
+                }
+                format!("Rated: {rating}")
+            }
+            None => "Not an item on this card".to_string(),
+        };
+        if let Some(qid) = query {
+            let r = b.api.call(
+                "answerCallbackQuery",
+                &json!({"callback_query_id": qid, "text": truncate(&toast, TOAST_LIMIT)}),
+            );
+            if let Err(e) = r {
+                eprintln!("telegram: bot {}: {e}", b.name);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Sends the weekly retro card (`ask::retro`) from bot `name`: one
+    /// message, one row of rating buttons per unrated ask of the last 7 days.
+    /// With nothing to rate it sends nothing.
+    pub fn send_retro(&self, store: &dyn Store, name: &str, o: &SendOpts) -> Result<Value> {
+        let r = ask::retro(&store.conn(), now())?;
+        if r.items.is_empty() {
+            return Ok(json!({"sent": false, "text": r.text}));
+        }
+        let opts = SendOpts {
+            buttons: r.buttons.clone(),
+            rows: r.rows.clone(),
+            html: false,
+            task: None,
+            ..o.clone()
+        };
+        let out = self.send(store, name, &r.text, &opts)?;
+        let id = out
+            .first()
+            .and_then(|m| m["id"].as_i64())
+            .context("retro card was not recorded")?;
+        store.conn().execute(
+            "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.ask'),'$.retro',json(?1)) WHERE id=?2",
+            params![json!({"items": r.items, "more": r.more}).to_string(), id],
+        )?;
+        store.changed();
+        Ok(json!({"sent": true, "id": id, "items": r.items.len(), "more": r.more}))
     }
 
     /// Replaces the pressed message's keyboard with the chosen label:
@@ -1165,7 +1264,9 @@ impl Gateway {
             } else if let Some(t) = o.task {
                 json!({"buttons": o.buttons, "html": o.html, "task": t})
             } else {
-                json!({"buttons": o.buttons, "html": o.html})
+                // `ask` marks an owner ask for good (`ask.rs`): it stays when
+                // the card closes and its buttons go.
+                json!({"buttons": o.buttons, "html": o.html, "ask": true})
             };
             let id = record_out(
                 store,
@@ -1325,6 +1426,12 @@ impl Gateway {
                 "UPDATE bot_messages SET flags=json_remove(json_set(flags,'$.buttons',json(?1),'$.html',json(?2)),'$.answered') WHERE id=?3",
                 params![json!(bs).to_string(), json!(html).to_string(), msg],
             )?;
+            if !bs.is_empty() {
+                conn.execute(
+                    "UPDATE bot_messages SET flags=json_set(flags,'$.ask',json('true')) WHERE id=?1",
+                    [msg],
+                )?;
+            }
         }
         drop(conn);
         store.changed();

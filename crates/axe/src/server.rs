@@ -480,11 +480,13 @@ fn body_limit(method: &str, path: &[String], authorized: bool) -> usize {
     }
 }
 
-/// GETs of message content (`/api/bots/<name>/tg/...`) and blobs need the
-/// token, unlike other reads.
+/// GETs of message content (`/api/bots/<name>/tg/...`, asks, which quote
+/// cards), blobs and docs need the token, unlike other reads.
 fn private_read(path: &[String]) -> bool {
     (path.len() >= 4 && path[0] == "api" && path[1] == "bots" && path[3] == "tg")
-        || (path.len() >= 2 && path[0] == "api" && matches!(path[1].as_str(), "blobs" | "docs"))
+        || (path.len() >= 2
+            && path[0] == "api"
+            && matches!(path[1].as_str(), "blobs" | "docs" | "asks"))
 }
 
 fn write_head(
@@ -1439,6 +1441,58 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 .map_err(|e| HttpError(400, format!("{e:#}")))?;
             ok(200, &serde_json::json!({ "changed": changed }))
         }
+        ("GET", ["api", "asks"]) => {
+            let now = crate::routine::now();
+            let bound = |name, default: &str| {
+                let s = req.query(name).unwrap_or(default);
+                crate::flow::parse_bound(s, now).map_err(|e| HttpError(400, format!("{e:#}")))
+            };
+            let f = crate::ask::Filter {
+                since: bound("since", "7d")?,
+                until: asks_until(req, now)?,
+                project: req.query("project"),
+                bot: req.query("bot"),
+                unrated: req
+                    .query("unrated")
+                    .is_some_and(|v| v == "true" || v == "1"),
+            };
+            ok(200, &crate::ask::list(&st.conn(), &f)?)
+        }
+        ("GET", ["api", "asks", "stats"]) => {
+            let now = crate::routine::now();
+            let bound = |name, default: &str| {
+                let s = req.query(name).unwrap_or(default);
+                crate::flow::parse_bound(s, now).map_err(|e| HttpError(400, format!("{e:#}")))
+            };
+            let (since, until) = (bound("since", "28d")?, asks_until(req, now)?);
+            if since >= until {
+                return Err(HttpError(400, "since must be before until".into()).into());
+            }
+            ok(
+                200,
+                &crate::ask::stats(&st.conn(), req.query("project"), since, until)?,
+            )
+        }
+        ("GET", ["api", "asks", "retro"]) => {
+            ok(200, &crate::ask::retro(&st.conn(), crate::routine::now())?)
+        }
+        ("GET", ["api", "asks", id]) => ok(
+            200,
+            &crate::ask::find(&st.conn(), id).map_err(|e| HttpError(404, format!("{e:#}")))?,
+        ),
+        ("POST", ["api", "asks", id, "rate"]) => {
+            #[derive(Deserialize)]
+            struct Rate {
+                rating: String,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: Rate = req.json()?;
+            let mut conn = st.conn();
+            let a = crate::ask::rate(&mut conn, &b.who.actor(), id, &b.rating)
+                .map_err(|e| HttpError(400, format!("{e:#}")))?;
+            ok(200, &a)
+        }
         ("GET", ["api", "stats", "flow"]) => {
             let now = crate::routine::now();
             let project = req
@@ -2330,6 +2384,17 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
     r.map(Some)
 }
 
+/// The `until` bound of an asks read; without one, through the current
+/// second (asks made this second included).
+fn asks_until(req: &Request, now: i64) -> Result<i64> {
+    match req.query("until") {
+        Some(s) => {
+            Ok(crate::flow::parse_bound(s, now).map_err(|e| HttpError(400, format!("{e:#}")))?)
+        }
+        None => Ok(now + 1),
+    }
+}
+
 /// `POST /api/bots/<name>/tg/<action>`: outbound Telegram calls.
 #[cfg(not(feature = "telegram"))]
 fn tg_route(_: &State, _: &Request, _: &str, _: &str) -> Result<Response> {
@@ -2428,6 +2493,10 @@ fn tg_route(st: &State, req: &Request, name: &str, action: &str) -> Result<Respo
                     &b.rows,
                 )?,
             )
+        }
+        "retro" => {
+            let o: telegram::SendOpts = req.json()?;
+            ok(200, &gw.send_retro(st, name, &o)?)
         }
         "pin" | "unpin" => {
             let b: Pin = req.json()?;
