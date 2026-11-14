@@ -382,7 +382,9 @@ fn attach(srv: &Server, path: &str, files: &[(&str, &str)], scopes: &[&str]) {
     } else {
         let dir = tempfile::tempdir().unwrap();
         for (f, text) in files {
-            std::fs::write(dir.path().join(f), text).unwrap();
+            let p = dir.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
         }
         srv.ok(&["doc", "put", path, dir.path().to_str().unwrap()]);
     }
@@ -407,7 +409,16 @@ fn run_workspace_indexes_attached_docs_by_precedence() {
             attach(srv, "g/review", &[("SKILL.md", &g)], &["global"]);
             attach(srv, "l/review", &[("SKILL.md", &l)], &["label:z"]);
             attach(srv, "o/review", &[("SKILL.md", &o)], &["owner:bot:b"]);
-            attach(srv, "r/review", &[("SKILL.md", &r)], &["repo:one"]);
+            attach(
+                srv,
+                "r/review",
+                &[
+                    ("SKILL.md", &r),
+                    ("scripts/check.sh", "#!/bin/sh\necho ok\n"),
+                    ("references/style.md", "# Style\n"),
+                ],
+                &["repo:one"],
+            );
             // Same name as repo one's own skill: the repo's wins.
             attach(srv, "o/build", &[("SKILL.md", &b)], &["owner:bot:b"]);
             attach(
@@ -438,18 +449,24 @@ fn run_workspace_indexes_attached_docs_by_precedence() {
     assert_eq!(show(&srv, id)["state"], "done", "{}", srv.ok(&["log", id]));
     let run = f.run_dir(id);
 
-    // The repo's own skill is untouched; the winning attached skill is an
-    // index entry (name and description, no body) where Claude Code looks.
+    // The repo's own skill is untouched; the winning attached skill is
+    // written whole (every file, matching content) where Claude Code looks.
     assert_eq!(
         std::fs::read_to_string(run.join("skills/build/SKILL.md")).unwrap(),
         "---\nname: build\ndescription: Build the thing\n---\nbody\n"
     );
-    let stub = std::fs::read_to_string(run.join(".claude/skills/review/SKILL.md")).unwrap();
-    assert!(
-        stub.starts_with("---\nname: \"review\"\ndescription: \"repo review\"\n---\n"),
-        "{stub}"
-    );
-    assert!(stub.contains("`axe doc get r/review`"), "{stub}");
+    for (f, want) in [
+        ("SKILL.md", r.as_str()),
+        ("scripts/check.sh", "#!/bin/sh\necho ok\n"),
+        ("references/style.md", "# Style\n"),
+    ] {
+        let got = std::fs::read_to_string(run.join(".claude/skills/review").join(f)).unwrap();
+        assert_eq!(got, want, "{f}");
+    }
+    let check = std::process::Command::new(run.join("skills/review/scripts/check.sh"))
+        .output()
+        .unwrap();
+    assert_eq!(check.stdout, b"ok\n");
     let agents = std::fs::read_to_string(run.join("AGENTS.md")).unwrap();
     assert!(agents.contains("- `skills/build` (one): Build the thing\n- `skills/review` (repo:one, attached): repo review\n"), "{agents}");
     assert!(
@@ -462,7 +479,7 @@ fn run_workspace_indexes_attached_docs_by_precedence() {
         "{docs}"
     );
     assert!(!docs.contains("other.md"), "{docs}");
-    for text in [&stub, &agents, &docs] {
+    for text in [&agents, &docs] {
         assert!(!text.contains("SECRET"), "{text}");
     }
     // The body loads on use.
