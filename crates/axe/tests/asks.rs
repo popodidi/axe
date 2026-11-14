@@ -264,7 +264,10 @@ fn stats_give_wasted_share_per_bot_and_week() {
     );
     ask::rate(&mut c, &owner(), &format!("m{card}"), "could_decide").unwrap();
 
-    let s = ask::stats(&c, None, t + 1 - 14 * DAY, t + 1).unwrap();
+    // The window ends after every ask was made (asks made in a later second
+    // than `t` would fall outside an end of `t + 1`).
+    let end = now() + 1;
+    let s = ask::stats(&c, None, end - 14 * DAY, end).unwrap();
     assert_eq!(s.overall.total.asks, 7);
     assert_eq!(s.overall.total.rated, 5);
     assert_eq!(s.overall.total.wasted_share, Some(3.0 / 5.0));
@@ -281,11 +284,11 @@ fn stats_give_wasted_share_per_bot_and_week() {
     assert_eq!(s.bots["-"].total.asks, 1);
     assert_eq!(s.bots["-"].total.wasted_share, None, "nothing rated");
     // A project filter keeps the project's tasks and bots.
-    let q = ask::stats(&c, Some("q"), t + 1 - 14 * DAY, t + 1).unwrap();
+    let q = ask::stats(&c, Some("q"), end - 14 * DAY, end).unwrap();
     assert_eq!(q.overall.total.asks, 1);
 
     // The retro card: last week's unrated asks only.
-    let r = ask::retro(&c, t + 1).unwrap();
+    let r = ask::retro(&c, end).unwrap();
     let items: Vec<_> = r.items.iter().map(|i| i.ask.clone()).collect();
     assert_eq!(items, [format!("t{}.1", ids[4]), format!("t{none}.1")]);
     assert_eq!(r.items[0].line, format!("a task #{}: t4", ids[4]));
