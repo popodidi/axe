@@ -264,8 +264,8 @@ fn stats_give_wasted_share_per_bot_and_week() {
     );
     ask::rate(&mut c, &owner(), &format!("m{card}"), "could_decide").unwrap();
 
-    // The window ends after every insert: a slow runner can cross a second
-    // boundary between `t` and the last event.
+    // The window ends after every ask was made (asks made in a later second
+    // than `t` would fall outside an end of `t + 1`).
     let end = now() + 1;
     let s = ask::stats(&c, None, end - 14 * DAY, end).unwrap();
     assert_eq!(s.overall.total.asks, 7);
@@ -291,21 +291,21 @@ fn stats_give_wasted_share_per_bot_and_week() {
     let r = ask::retro(&c, end).unwrap();
     let items: Vec<_> = r.items.iter().map(|i| i.ask.clone()).collect();
     assert_eq!(items, [format!("t{}.1", ids[4]), format!("t{none}.1")]);
+    assert_eq!(r.items[0].line, format!("a task #{}: t4", ids[4]));
+    assert_eq!(r.items[1].line, format!("- task #{none}: nobody's"));
     assert!(
-        r.text.contains(&format!("1. a task #{}: t4", ids[4])),
+        r.text.contains("\n1. decisions: 2 (- 1, a 1)"),
         "{}",
         r.text
     );
-    assert!(
-        r.text.contains(&format!("2. - task #{none}: nobody's")),
-        "{}",
-        r.text
-    );
-    assert_eq!(r.buttons.len(), 6);
+    // Per kind too.
+    assert_eq!(s.kinds["decision"].total.asks, 6);
+    assert_eq!(s.kinds["other"].total.wasted_share, Some(1.0));
+    assert_eq!(r.buttons.len(), 4, "one kind: three ratings and open");
 }
 
 #[test]
-fn retro_truncates_to_ten_items() {
+fn retro_holds_every_unrated_ask_grouped_by_kind() {
     let (_d, mut c) = setup();
     for i in 0..13 {
         let id = task(
@@ -317,13 +317,143 @@ fn retro_truncates_to_ten_items() {
         set_state(&mut c, id, "escalated");
     }
     let r = ask::retro(&c, now() + 1).unwrap();
-    assert_eq!(r.items.len(), ask::RETRO_ITEMS);
-    assert_eq!(r.more, 3);
-    assert!(r.text.contains("(13)") && r.text.contains("+3 more"));
+    assert_eq!(r.items.len(), 13);
+    assert_eq!(r.more, 0);
+    assert!(r.text.contains("(13, 13 unrated)") && r.text.contains("decisions: 13 (a 13)"));
+    assert_eq!(r.rows, [4]);
     assert!(
-        r.items.iter().all(|i| i.line.ends_with('…')),
+        r.items
+            .iter()
+            .all(|i| i.line.ends_with('…') && i.kind == "decision"),
         "{:?}",
         r.items
+    );
+}
+
+/// Escalates `id` with a class and resolver, as `axe escalate` does.
+fn escalate(c: &mut Connection, id: i64, class: Option<&str>, resolver: &str) {
+    let ch = Changes {
+        state: Some("escalated".into()),
+        escalation_class: class.map(String::from),
+        note: Some(format!("blocked: x\nresolver: {resolver}\nresume: y")),
+        ..Default::default()
+    };
+    db::set_task(c, &Actor::new("agent"), id, &ch).unwrap();
+}
+
+#[test]
+fn asks_carry_a_stable_kind() {
+    let (_d, mut c) = setup();
+    let merge = task(&mut c, "p", "merge", Some("bot:a"));
+    escalate(
+        &mut c,
+        merge,
+        Some("decision"),
+        "owner: approve merging #1 at abc",
+    );
+    // A later class correction (episode=1) wins; a second episode is its own.
+    db::classify(
+        &mut c,
+        &Actor::new("human"),
+        merge,
+        Some("capability"),
+        None,
+        Some(1),
+    )
+    .unwrap();
+    set_state(&mut c, merge, "pending");
+    escalate(&mut c, merge, None, "owner: deploy it");
+    let pick = task(&mut c, "p", "pick", None);
+    escalate(&mut c, pick, Some("decision"), "owner: reply A or B");
+    let stuck = task(&mut c, "p", "stuck", None);
+    escalate(&mut c, stuck, Some("runtime"), "owner: look");
+    let cards = [
+        (
+            json!({"buttons": [["Merge","m"],["Hold","h"]], "ask": true}),
+            "approval",
+        ),
+        (
+            json!({"buttons": [["Yes","y"],["No","n"]], "ask": true}),
+            "confirm",
+        ),
+        (
+            json!({"buttons": [["A","a"],["B","b"],["C","c"]], "ask": true}),
+            "choice",
+        ),
+        (
+            json!({"buttons": [["#12","a"],["#13","b"]], "ask": true}),
+            "digest",
+        ),
+        (
+            json!({"buttons": [], "ask": true, "answered": {"label": "Approve"}}),
+            "approval",
+        ),
+        (json!({"buttons": [], "ask": true}), "other"),
+    ];
+    for (i, (flags, _)) in cards.iter().enumerate() {
+        message(&mut c, "a", 30 + i as i64, "card", flags.clone());
+    }
+    let kinds: Vec<_> = all(&c).into_iter().map(|a| (a.id, a.category)).collect();
+    let mut want = vec![
+        (format!("t{merge}.1"), "access".to_string()),
+        (format!("t{merge}.2"), "approval".into()),
+        (format!("t{pick}.1"), "decision".into()),
+        (format!("t{stuck}.1"), "stuck".into()),
+    ];
+    let first_card: i64 = c
+        .query_row(
+            "SELECT MIN(id) FROM bot_messages WHERE message_id>=30",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    for (i, (_, k)) in cards.iter().enumerate() {
+        want.push((format!("m{}", first_card + i as i64), k.to_string()));
+    }
+    assert_eq!(kinds, want);
+    // A kind filter, and every kind a listed one.
+    let only = ask::list(
+        &c,
+        &Filter {
+            since: 0,
+            until: now() + 1,
+            kind: Some("approval"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(only.len(), 3);
+    assert!(kinds
+        .iter()
+        .all(|(_, k)| ask::KINDS.iter().any(|x| x.0 == k)));
+
+    // A kind rating rates only that kind's unrated items.
+    ask::rate(&mut c, &owner(), &format!("t{merge}.2"), "needed").unwrap();
+    let r = ask::retro(&c, now() + 1).unwrap();
+    assert!(
+        r.items.iter().all(|i| i.ask != format!("t{merge}.2")),
+        "rated is off the card"
+    );
+    let todo = ask::unrated_of(&r.items, &Default::default(), "approval");
+    assert_eq!(todo.len(), 2);
+    assert_eq!(
+        ask::rate_many(&mut c, &owner(), &todo, "could_decide").unwrap(),
+        2
+    );
+    let rated = ask::ratings(
+        &c,
+        &r.items.iter().map(|i| i.ask.clone()).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(rated.len(), 2);
+    assert!(rated.values().all(|v| v == "could_decide"));
+    assert_eq!(
+        ask::rate(&mut c, &owner(), &format!("t{merge}.2"), "needed")
+            .unwrap()
+            .rating
+            .as_deref(),
+        Some("needed"),
+        "the item rated alone kept its rating"
     );
 }
 
@@ -365,11 +495,18 @@ fn cli_lists_rates_and_reports_asks() {
         "{list:?}"
     );
     let dry = srv.ok(&["ask", "retro", "--dry"]);
+    assert!(dry.contains("\n1. decisions: 1 (- 1)"), "{dry}");
     assert!(
-        dry.contains(&format!("1. - task #{id}: decide this")),
+        dry.contains("[1 needed] [1 decide] [1 drop] [1 open]"),
         "{dry}"
     );
-    assert!(dry.contains("[1 needed] [1 decide] [1 drop]"), "{dry}");
+    assert!(list.contains("decision"), "{list:?}");
+    let by: Value =
+        serde_json::from_str(&srv.ok(&["ask", "list", "--by", "kind", "--json"])).unwrap();
+    assert_eq!(by["decision"]["asks"], 1);
+    assert_eq!(by["decision"]["unrated"], 1);
+    let none = srv.ok(&["ask", "list", "--kind", "approval"]);
+    assert!(none.trim().is_empty(), "{none}");
 
     let rated = srv.ok(&["ask", "rate", &format!("t{id}.1"), "could_decide"]);
     assert!(rated.contains("could_decide by human"), "{rated}");
@@ -379,6 +516,13 @@ fn cli_lists_rates_and_reports_asks() {
     let v: Value = serde_json::from_str(&srv.ok(&["ask", "stats", "--since", "7d"])).unwrap();
     assert_eq!(v["overall"]["asks"], 1);
     assert_eq!(v["overall"]["wasted_share"], 1.0);
+    assert_eq!(v["kinds"]["decision"]["could_decide"], 1);
+    let k: Value =
+        serde_json::from_str(&srv.ok(&["ask", "stats", "--since", "7d", "--by", "kind"])).unwrap();
+    assert!(
+        k["bots"].is_null() && k["kinds"]["decision"]["asks"] == 1,
+        "{k}"
+    );
     let flow: Value = serde_json::from_str(&srv.ok(&[
         "stats",
         "--project",

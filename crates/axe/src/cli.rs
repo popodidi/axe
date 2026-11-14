@@ -1294,9 +1294,16 @@ enum AskCmd {
         project: Option<String>,
         #[arg(long)]
         bot: Option<String>,
+        /// Only asks of this kind (approval, decision, choice, confirm,
+        /// digest, access, stuck, other)
+        #[arg(long)]
+        kind: Option<String>,
         /// Only asks nobody rated yet
         #[arg(long)]
         unrated: bool,
+        /// Count the asks per kind (or per bot) and rating instead
+        #[arg(long, value_parser = PossibleValuesParser::new(["kind", "bot"]))]
+        by: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1306,7 +1313,8 @@ enum AskCmd {
         #[arg(value_parser = PossibleValuesParser::new(crate::ask::RATINGS))]
         rating: String,
     },
-    /// Asks, rated and wasted-ask share per bot and overall, per week (JSON)
+    /// Asks, rated and wasted-ask share per bot, per kind and overall, per
+    /// week (JSON)
     Stats {
         #[arg(long, default_value = "28d")]
         since: String,
@@ -1315,8 +1323,11 @@ enum AskCmd {
         until: Option<String>,
         #[arg(long)]
         project: Option<String>,
+        /// Only the overall series and this breakdown
+        #[arg(long, value_parser = PossibleValuesParser::new(["kind", "bot"]))]
+        by: Option<String>,
     },
-    /// The weekly retro card: last week's unrated asks with rating buttons.
+    /// The weekly retro card: last week's unrated asks by kind, with rating buttons.
     /// Sends it from the bot (default $AXE_BOT); --dry prints it instead
     Retro {
         #[arg(long)]
@@ -1499,14 +1510,35 @@ fn format_ask(a: &crate::ask::Ask) -> String {
         _ => "unrated".into(),
     };
     format!(
-        "{:<10} {:<10} {:<14} {}  {}  {}",
+        "{:<10} {:<10} {:<9} {:<14} {}  {}  {}",
         a.id,
         a.kind,
+        a.category,
         a.bot.as_deref().unwrap_or("-"),
         a.at,
         rating,
         a.summary.split_whitespace().collect::<Vec<_>>().join(" ")
     )
+}
+
+/// Asks counted per kind (`category`) or bot and rating, keyed by the group.
+fn group_asks(asks: &[crate::ask::Ask], by: &str) -> Value {
+    let mut out = serde_json::Map::new();
+    for a in asks {
+        let key = if by == "kind" {
+            a.category.clone()
+        } else {
+            a.bot.clone().unwrap_or_else(|| "-".into())
+        };
+        let t = out.entry(key).or_insert_with(|| {
+            json!({"asks": 0, "unrated": 0, "needed": 0, "could_decide": 0, "should_not_exist": 0})
+        });
+        let slot = a.rating.as_deref().unwrap_or("unrated");
+        for k in ["asks", slot] {
+            t[k] = json!(t[k].as_u64().unwrap_or(0) + 1);
+        }
+    }
+    Value::Object(out)
 }
 
 fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
@@ -1517,7 +1549,9 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
             until,
             project,
             bot,
+            kind,
             unrated,
+            by,
             json,
         } => {
             let mut q = vec![("since", since.as_str())];
@@ -1530,11 +1564,26 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
             if let Some(b) = bot {
                 q.push(("bot", b));
             }
+            if let Some(k) = kind {
+                q.push(("kind", k));
+            }
             if *unrated {
                 q.push(("unrated", "true"));
             }
             let asks: Vec<Ask> = c.get_private("/api/asks", &q)?;
-            if *json {
+            if let Some(by) = by {
+                let groups = group_asks(&asks, by);
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&groups)?);
+                } else {
+                    for (k, t) in groups.as_object().into_iter().flatten() {
+                        println!(
+                            "{k:<14} {:>4} asks  {:>4} unrated  needed {}  could_decide {}  should_not_exist {}",
+                            t["asks"], t["unrated"], t["needed"], t["could_decide"], t["should_not_exist"]
+                        );
+                    }
+                }
+            } else if *json {
                 println!("{}", serde_json::to_string_pretty(&asks)?);
             } else {
                 for a in &asks {
@@ -1554,6 +1603,7 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
             since,
             until,
             project,
+            by,
         } => {
             let mut q = vec![("since", since.as_str())];
             if let Some(u) = until {
@@ -1562,7 +1612,11 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
             if let Some(p) = project {
                 q.push(("project", p));
             }
-            let v: Value = c.get_private("/api/asks/stats", &q)?;
+            let mut v: Value = c.get_private("/api/asks/stats", &q)?;
+            if let (Some(by), Some(o)) = (by, v.as_object_mut()) {
+                let keep = if by == "kind" { "kinds" } else { "bots" };
+                o.retain(|k, _| !matches!(k.as_str(), "kinds" | "bots") || k == keep);
+            }
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         AskCmd::Retro { bot, dry } => {
