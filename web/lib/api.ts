@@ -121,8 +121,9 @@ export type Budget = { cost_week: number | null,
  */
 cost_spent: number, attention_week: number | null, 
 /**
- * Escalation episodes and approvals on linked tasks: one unit each.
- * Goal setup (propose, edit, activate) is not counted.
+ * Escalation episodes and approvals on linked tasks: one unit each,
+ * except episodes the owner rated wasted ([`attention`]). Goal setup
+ * (propose, edit, activate) is not counted.
  */
 attention_spent: number, 
 /**

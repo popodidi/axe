@@ -2625,3 +2625,101 @@ fn the_goal_board_is_retired_into_goal_pins() {
     );
     assert_eq!(rig.tg_ok(&["goal-board", "unset"]), "goal board cleared\n");
 }
+
+#[test]
+fn the_retro_card_rates_asks_in_place_without_waking_the_bot() {
+    let rig = Rig::new();
+    // Nothing to rate: nothing is sent.
+    let out = rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
+    assert!(
+        out.starts_with("not sent: Weekly retro: no unrated asks"),
+        "{out}"
+    );
+    assert!(rig.stub.calls("sendMessage").is_empty());
+
+    rig.srv().ok(&[
+        "add",
+        "--project",
+        "p",
+        "--title",
+        "pick a region",
+        "--owner",
+        "bot:cos",
+    ]);
+    escalate(&rig, "1");
+    rig.tg_ok(&["send", "--buttons", "Yes=y,No=n", "Rotate the key?"]);
+    let card = rig.messages().len() as i64;
+    assert_eq!(flags_of(&rig, card)["ask"], true, "a card is marked an ask");
+    // Closing the card by a text edit keeps it an ask.
+    rig.tg_ok(&["edit", &card.to_string(), "Decided: yes"]);
+    assert_eq!(flags_of(&rig, card)["ask"], true);
+    assert!(flags_of(&rig, card)["buttons"].is_null());
+
+    let out = rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
+    assert!(out.starts_with("sent #"), "{out}");
+    let sent = rig.stub.calls("sendMessage").pop().unwrap();
+    let text = sent.params["text"].as_str().unwrap().to_string();
+    assert!(text.contains("1. cos task #1: pick a region"), "{text}");
+    assert!(
+        text.contains(&format!("2. cos card #{card}: Decided: yes")),
+        "{text}"
+    );
+    let card_ask = format!("m{card}");
+    assert_eq!(
+        keyboard_of(&sent.params),
+        vec![
+            vec![
+                ("1 needed".to_string(), "rate:t1.1:n".to_string()),
+                ("1 decide".into(), "rate:t1.1:c".into()),
+                ("1 drop".into(), "rate:t1.1:x".into()),
+            ],
+            vec![
+                ("2 needed".into(), format!("rate:{card_ask}:n")),
+                ("2 decide".into(), format!("rate:{card_ask}:c")),
+                ("2 drop".into(), format!("rate:{card_ask}:x")),
+            ],
+        ]
+    );
+    let retro = rig.messages().len() as i64;
+    assert!(flags_of(&rig, retro)["retro"].is_object());
+    assert!(
+        flags_of(&rig, retro)["ask"].is_null(),
+        "the retro card is not an ask"
+    );
+    let tg = tg_id(&rig, retro);
+
+    // A press rates the item, drops its row and wakes no bot.
+    rig.stub.push(press(50, tg, "rate:t1.1:c"));
+    rig.stub.wait_confirmed(50);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "Rated: could_decide");
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    let edited = edit.params["text"].as_str().unwrap();
+    assert!(
+        edited.contains("1. cos task #1: pick a region = could_decide"),
+        "{edited}"
+    );
+    assert_eq!(keyboard_of(&edit.params).len(), 1);
+    let rated = rig.srv().ok(&["ask", "list", "--json"]);
+    let asks: Vec<Value> = serde_json::from_str(&rated).unwrap();
+    assert_eq!(asks[0]["rating"], "could_decide");
+    assert_eq!(asks[0]["rated_by"], "owner");
+    assert!(rig.message_wakes().iter().all(|w| w.0 != "button"));
+    assert!(rig.inbound().is_empty());
+
+    // An item not on the card is refused; the last rating closes the card.
+    rig.stub.push(press(51, tg, "rate:t9.1:n"));
+    rig.stub.wait_confirmed(51);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "Not an item on this card");
+    rig.stub.push(press(52, tg, &format!("rate:{card_ask}:n")));
+    rig.stub.wait_confirmed(52);
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    assert!(edit.params["text"]
+        .as_str()
+        .unwrap()
+        .ends_with("All rated. Thanks."));
+    assert!(keyboard_of(&edit.params).is_empty());
+    let out = rig.srv().ok(&["ask", "retro", "--dry"]);
+    assert!(out.contains("no unrated asks"), "{out}");
+}

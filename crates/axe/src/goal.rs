@@ -835,8 +835,9 @@ pub struct Budget {
     /// Estimated USD of the runs attributed to the goal.
     pub cost_spent: f64,
     pub attention_week: Option<i64>,
-    /// Escalation episodes and approvals on linked tasks: one unit each.
-    /// Goal setup (propose, edit, activate) is not counted.
+    /// Escalation episodes and approvals on linked tasks: one unit each,
+    /// except episodes the owner rated wasted ([`attention`]). Goal setup
+    /// (propose, edit, activate) is not counted.
     pub attention_spent: i64,
     /// Bot runs whose wakes mix this goal with other work; not in `cost_spent`.
     pub unattributed_runs: i64,
@@ -920,12 +921,19 @@ pub fn budget(conn: &Connection, g: &Goal, now: i64) -> Result<Budget> {
 /// approval on a task linked to the goal at the time. Goal setup actions
 /// (propose, edit, activate) are the owner steering, not intervening, and are
 /// not counted.
+///
+/// The counting rule for rated asks (`ask.rs`): an episode the owner rated
+/// `needed`, or did not rate, counts; an episode rated `could_decide` or
+/// `should_not_exist` counts 0, and so does an approval given inside it. A
+/// wasted ask already shows in the bot's wasted-ask share, so it is not also
+/// charged to the goal's budget. Approvals outside any episode always count.
 pub fn attention(
     conn: &Connection,
     since: i64,
     until: i64,
 ) -> Result<std::collections::HashMap<String, i64>> {
     let mut out: std::collections::HashMap<String, i64> = Default::default();
+    let wasted = crate::ask::wasted_episodes(conn)?;
     let in_window = |at: &str| -> Result<bool> {
         let t = crate::usage::epoch(at)?;
         Ok(t >= since && t < until)
@@ -937,11 +945,16 @@ pub fn attention(
     let mut rows = stmt.query([])?;
     let mut task = None;
     let mut goal: Option<String> = None;
+    // Episodes so far on this task, and whether the latest is still open.
+    let mut episode = 0i64;
+    let mut open = false;
     while let Some(r) = rows.next()? {
         let id: i64 = r.get(0)?;
         if task != Some(id) {
             task = Some(id);
             goal = None;
+            episode = 0;
+            open = false;
         }
         let kind: String = r.get(2)?;
         let from: Option<String> = r.get(3)?;
@@ -950,13 +963,22 @@ pub fn attention(
             goal = to;
             continue;
         }
-        let Some(g) = &goal else { continue };
         let body: Option<String> = r.get(5)?;
-        let counts = match kind.as_str() {
-            "created" => body.unwrap_or_default().starts_with("state=escalated"),
-            "state" => to.as_deref() == Some("escalated") && from != to,
-            _ => true,
+        let opens =
+            crate::ask::opens_episode(&kind, from.as_deref(), to.as_deref(), body.as_deref());
+        let counts = if opens {
+            episode += 1;
+            open = true;
+            !wasted.contains(&(id, episode))
+        } else if kind == "approval" {
+            !(open && wasted.contains(&(id, episode)))
+        } else {
+            if kind == "state" && from.as_deref() == Some("escalated") && from != to {
+                open = false;
+            }
+            false
         };
+        let Some(g) = &goal else { continue };
         if counts && in_window(&r.get::<_, String>(1)?)? {
             *out.entry(g.clone()).or_default() += 1;
         }
