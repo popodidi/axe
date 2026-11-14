@@ -591,7 +591,7 @@ impl Gateway {
                     text,
                     None,
                     json!([]),
-                    json!({}),
+                    json!({"system": true}),
                 ) {
                     eprintln!("telegram: bot {}: record alert: {e:#}", b.name);
                 }
@@ -1040,7 +1040,7 @@ impl Gateway {
                     &reply,
                     None,
                     json!([]),
-                    json!({}),
+                    json!({"system": true}),
                 ) {
                     eprintln!("telegram: bot {}: record /{cmd} reply: {e:#}", b.name);
                 }
@@ -1173,6 +1173,9 @@ impl Gateway {
                 json!([]),
                 flags,
             )?;
+            if board::default_on(&mut store.conn(), name, id)? {
+                store.changed();
+            }
             out.push(json!({"id": id, "message_id": sent["message_id"]}));
         }
         Ok(out)

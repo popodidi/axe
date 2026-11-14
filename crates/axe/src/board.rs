@@ -108,6 +108,37 @@ pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Resul
     )
 }
 
+/// Turns the inbox on by default: a bot that never had a board message
+/// gets its first plain text message (`msg`, just sent with `bot tg send`)
+/// as one, so its chat gets cards and goal pins without a manual
+/// `board set-message`. A bot with any earlier plain text message of its
+/// own (every existing bot, or one whose inbox was turned off) is left as it
+/// is. Server alerts and command replies (`flags.system`) and cards (with
+/// buttons) do not count. Returns whether the inbox was turned on.
+pub fn default_on(conn: &mut Connection, name: &str, msg: i64) -> Result<bool> {
+    let b = bot_id(conn, name)?;
+    let earlier: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bot_messages WHERE bot_id=?1 AND id<>?2 AND (
+            json_extract(flags,'$.board') IS NOT NULL
+            OR json_extract(flags,'$.board_retired') IS NOT NULL
+            OR (direction='out' AND kind='text'
+                AND json_extract(flags,'$.buttons') IS NULL
+                AND json_extract(flags,'$.system') IS NULL)))",
+        params![b, msg],
+        |r| r.get(0),
+    )?;
+    let stored = get_message(conn, name, msg)?;
+    if earlier
+        || stored.direction != "out"
+        || stored.kind != "text"
+        || !stored.flags["buttons"].is_null()
+    {
+        return Ok(false);
+    }
+    set_message(conn, name, Some(msg))?;
+    Ok(true)
+}
+
 /// Makes `msg` the one message of bot `name` with `flags.<flag>` (removing
 /// `clear` from the previous one), or with `None` unsets it. A board is
 /// never a card, and one message is never both boards (`other`).
