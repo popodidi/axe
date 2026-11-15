@@ -18,6 +18,8 @@ use crate::config::Config;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(180);
+/// A first clone can be a large repository.
+const CLONE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// A project whose canonical clone can host task worktrees.
 #[derive(Debug, Clone)]
@@ -50,7 +52,72 @@ pub fn readiness(cfg: &Config, project: &str) -> Result<Ready, String> {
 pub fn repo_readiness(cfg: &Config, name: &str) -> Result<Ready, String> {
     let canonical = cfg.repo_path(name);
     let gap = |detail: String| format!("repo {name} has no worktree base: {detail}");
+    if !canonical.exists() && cfg.repo_url(name).is_none() {
+        return Err(gap(format!(
+            "{} does not exist and [repos.{name}] has no url to clone it from",
+            canonical.display()
+        )));
+    }
     check(cfg, canonical.clone(), canonical, gap)
+}
+
+/// Clones repo `name` from `[repos.<name>] url` into its canonical path
+/// (`[repos.<name>] path`) when nothing is there yet, with the host's own Git
+/// credentials; `true` when this call cloned it. An existing path, a clone or
+/// not, is never touched, and a repo without a `url` is left to
+/// [`repo_readiness`] to report. Callers naming the same missing repo at once
+/// clone it once: each takes an exclusive lock (under `log_dir`) and the ones
+/// that waited find the clone in place. The clone goes to a temporary sibling
+/// and is renamed into place, so an interrupted clone leaves no partial
+/// canonical clone.
+pub fn ensure_clone(cfg: &Config, name: &str) -> Result<bool> {
+    use fs2::FileExt;
+    let Some(url) = cfg.repo_url(name) else {
+        return Ok(false);
+    };
+    let canonical = cfg.repo_path(name);
+    if std::fs::symlink_metadata(&canonical).is_ok() {
+        return Ok(false);
+    }
+    let locks = cfg.log_dir().join(".clones");
+    std::fs::create_dir_all(&locks).with_context(|| format!("create {}", locks.display()))?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(locks.join(format!("{name}.lock")))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("lock the clone of repo {name}"))?;
+    if std::fs::symlink_metadata(&canonical).is_ok() {
+        return Ok(false);
+    }
+    let parent = canonical
+        .parent()
+        .context("canonical clone path has no parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let leaf = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("non-UTF-8 canonical clone path")?;
+    let tmp = parent.join(format!(".{leaf}.axe-clone-{}", uuid::Uuid::new_v4()));
+    let tmp_str = tmp.to_str().context("non-UTF-8 canonical clone path")?;
+    let cloned = git_timeout(
+        parent,
+        &["clone", "--quiet", "--", url, tmp_str],
+        CLONE_TIMEOUT,
+    )
+    .and_then(|_| {
+        std::fs::rename(&tmp, &canonical)
+            .with_context(|| format!("move the clone to {}", canonical.display()))
+    });
+    if let Err(e) = cloned {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e.context(format!(
+            "clone repo {name} from {url} into {}",
+            canonical.display()
+        )));
+    }
+    Ok(true)
 }
 
 fn check(

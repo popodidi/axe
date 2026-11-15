@@ -600,6 +600,33 @@ impl Default for Worktrees {
 pub struct Repo {
     /// Its canonical clone; omitted means `<workspace_root>/<name>`.
     pub path: Option<String>,
+    /// Where to clone it from when the canonical clone is missing on first
+    /// use (`worktree::ensure_clone`), with the host's own Git credentials;
+    /// omitted means a missing clone is an error. Never embeds a password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl Repo {
+    fn validate(&self) -> Result<()> {
+        let Some(url) = self.url.as_deref() else {
+            return Ok(());
+        };
+        if url.trim().is_empty() || url.starts_with('-') {
+            bail!("url must be a Git remote URL");
+        }
+        // `scheme://user:secret@host/...`: credentials stay in the host's
+        // Git credential store, never in config.
+        if let Some((_, rest)) = url.split_once("://") {
+            let authority = rest.split('/').next().unwrap_or_default();
+            if let Some((userinfo, _)) = authority.rsplit_once('@') {
+                if userinfo.contains(':') {
+                    bail!("url must not embed credentials; use the host's Git credentials");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_branch_prefix() -> String {
@@ -932,6 +959,9 @@ impl Config {
         if self.poll_seconds == 0 {
             bail!("poll_seconds must be >= 1");
         }
+        for (name, r) in &self.repos {
+            r.validate().with_context(|| format!("repos.{name}"))?;
+        }
         for (name, a) in &self.agents {
             if a.resume_cmd.as_ref().is_some_and(|c| c.is_empty()) {
                 bail!("agents.{name}.resume_cmd is empty");
@@ -1036,6 +1066,10 @@ impl Config {
             Some(p) => expand_tilde(p),
             None => self.workspace_root().join(name),
         }
+    }
+    /// `[repos.<name>] url`: where a missing canonical clone is cloned from.
+    pub fn repo_url(&self, name: &str) -> Option<&str> {
+        self.repos.get(name).and_then(|r| r.url.as_deref())
     }
     /// Parent of task run workspaces (`[worktrees] run_root`).
     pub fn run_root(&self) -> PathBuf {

@@ -122,9 +122,10 @@ impl Dispatcher {
         // with its attached skills written in full. Its worktrees are refreshed
         // first: the claim guarantees no other run of this bot is live.
         let mut refreshed = Vec::new();
+        let mut repos_cloned = Vec::new();
         let worktree = match &self.cfg.worktrees {
             _ if b.repos.as_ref().is_some_and(|r| !r.is_empty()) => {
-                let (dir, r) = crate::run_workspace::build_bot(
+                let (dir, r, cloned) = crate::run_workspace::build_bot(
                     &self.cfg,
                     &b.name,
                     b.repos.as_deref().unwrap(),
@@ -140,6 +141,7 @@ impl Dispatcher {
                     }
                 }
                 refreshed = r;
+                repos_cloned = cloned;
                 Some(dir)
             }
             Some(_) => {
@@ -237,7 +239,7 @@ impl Dispatcher {
         let event = json!({"run":c.run,"mode":mode,"agent":b.agent,"session_id":session_id,
             "log":log_path,"prompt_file":prompt_path,"system_prompt_file":system_file,
             "settings_file":settings_file,"cmd":agent_proc::logged_cmd(&argv, &prompt_path),
-            "worktree":worktree,"repos_refresh":refreshed,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>()});
+            "worktree":worktree,"repos_refresh":refreshed,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>()});
         self.store.request::<serde_json::Value>(
             "bot_started",
             json!({"run":c.run,"mode":mode,"session_id":session_id,"log":log_path,"event":event}),
