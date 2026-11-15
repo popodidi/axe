@@ -383,7 +383,7 @@ fn schedule_wakes_carry_the_goal_label() {
     goal::propose(&mut c, &human(), &new_goal("g"), None, T0).unwrap();
     // Consume the "bot created" wake.
     let tx = c.transaction().unwrap();
-    let run = bot::claim(&tx, "a", "bot:1", "d", "g", T0)
+    let run = bot::claim(&tx, "a", None, "bot:1", "d", "g", T0)
         .unwrap()
         .unwrap()
         .run;
@@ -455,7 +455,7 @@ fn v15_database_migrates_to_v16_additively() {
     let version: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 19);
     assert_eq!(db::get_task(&c, 1).unwrap().title, "t");
     let s = &schedule::list(&c, "a").unwrap()[0];
     assert_eq!((s.name.as_str(), s.goal.as_deref()), ("s", None));

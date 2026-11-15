@@ -178,7 +178,7 @@ const T0: i64 = 1_800_000_000;
 /// Claims `name` at `now` directly in the database.
 fn claim(conn: &mut rusqlite::Connection, name: &str, now: i64) -> Option<bot::Claimed> {
     let tx = conn.transaction().unwrap();
-    let c = bot::claim(&tx, name, &format!("bot:{now}"), "d", "g", now).unwrap();
+    let c = bot::claim(&tx, name, None, &format!("bot:{now}"), "d", "g", now).unwrap();
     tx.commit().unwrap();
     c
 }

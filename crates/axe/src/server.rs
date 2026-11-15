@@ -1361,6 +1361,31 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 ok(200, &routine::get(&conn, id)?)
             }
         }
+        ("GET", ["api", "rules"]) => ok(200, &crate::rule::list(&st.conn())?),
+        ("GET", ["api", "rules", "events"]) => {
+            let before = req
+                .query("before")
+                .map(str::parse)
+                .transpose()?
+                .unwrap_or(i64::MAX);
+            ok(200, &crate::rule::events(&st.conn(), before)?)
+        }
+        ("POST", ["api", "rules"]) => {
+            #[derive(Deserialize)]
+            struct Add {
+                rule: crate::rule::NewRule,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: Add = req.json()?;
+            let rule = crate::rule::add(&mut st.conn(), &b.who.actor(), &b.rule)?;
+            ok(200, &rule)
+        }
+        ("POST", ["api", "rules", id, "remove"]) => {
+            let b: Who = req.json()?;
+            let rule = crate::rule::remove(&mut st.conn(), &b.actor(), task_id(id)?)?;
+            ok(200, &rule)
+        }
         ("GET", ["healthz"]) => ok(200, &json!({ "ok": true })),
         ("GET", ["api", "tasks"]) => {
             let state = req.query("state");

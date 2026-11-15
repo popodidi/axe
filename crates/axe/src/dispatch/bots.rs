@@ -10,16 +10,18 @@ use std::process::Child;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use super::Dispatcher;
+use super::{Dispatcher, Pick};
 use crate::activity;
 use crate::agent_proc::{self, kill_child, kill_tree, render};
 use crate::bot::{self, Claimed};
 use crate::config::SessionMode;
+use crate::rule;
 use crate::worktree;
 
 pub(super) struct BotRun {
     run_id: i64,
     name: String,
+    pub(super) agent: String,
     session_mode: SessionMode,
     session_id: Option<String>,
     log_path: PathBuf,
@@ -77,13 +79,30 @@ impl Dispatcher {
                 }
             }
             let claim = format!("bot:{}", uuid::Uuid::new_v4());
-            let Some(c) = self
-                .store
-                .request::<Option<Claimed>>("bot_claim", json!({"bot":name,"claim":claim}))?
+            // A stored rule that names this bot picks its agent; otherwise the
+            // bot's own agent runs, with its own defaults.
+            let pick = match self.stored_rules {
+                true => self
+                    .store
+                    .request::<Option<rule::Rule>>("rule_select", json!({"bot":name}))?
+                    .and_then(|r| match self.pick_from(Some(&r), true) {
+                        Ok(p) => Some(p),
+                        Err(note) => {
+                            eprintln!("axe dispatcher: bot {name}: {note}; using its own agent");
+                            None
+                        }
+                    }),
+                false => None,
+            };
+            let agent = pick.as_ref().map(|p| p.agent.clone());
+            let Some(c) = self.store.request::<Option<Claimed>>(
+                "bot_claim",
+                json!({"bot":name,"claim":claim,"agent":agent}),
+            )?
             else {
                 continue;
             };
-            if let Err(e) = self.spawn_bot(&c) {
+            if let Err(e) = self.spawn_bot(&c, pick.as_ref()) {
                 self.store.request::<serde_json::Value>(
                     "bot_finish",
                     json!({"run":c.run,"code":null,"reason":"error","note":format!("{e:#}")}),
@@ -93,7 +112,7 @@ impl Dispatcher {
         Ok(())
     }
 
-    fn spawn_bot(&mut self, c: &Claimed) -> Result<()> {
+    fn spawn_bot(&mut self, c: &Claimed, pick: Option<&Pick>) -> Result<()> {
         let b = &c.bot;
         let agent = self
             .cfg
@@ -194,7 +213,14 @@ impl Dispatcher {
             Some(_) => agent.resume_cmd.as_ref().expect("resume template checked"),
             None => &agent.cmd,
         };
-        let argv: Vec<String> = splice_bot_args(template, &bot_args)
+        let with = pick
+            .and_then(|p| p.with.as_ref())
+            .filter(|u| agent.harness() == Some(u.harness.as_str()));
+        let mut extra = bot_args;
+        if let Some(u) = with {
+            extra.extend(u.args());
+        }
+        let argv: Vec<String> = splice_bot_args(template, &extra)
             .iter()
             .map(|a| render(a, &vars))
             .collect();
@@ -239,7 +265,8 @@ impl Dispatcher {
         let event = json!({"run":c.run,"mode":mode,"agent":b.agent,"session_id":session_id,
             "log":log_path,"prompt_file":prompt_path,"system_prompt_file":system_file,
             "settings_file":settings_file,"cmd":agent_proc::logged_cmd(&argv, &prompt_path),
-            "worktree":worktree,"repos_refresh":refreshed,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>()});
+            "worktree":worktree,"repos_refresh":refreshed,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>(),
+            "rule":pick.map(|p| p.rule.clone()),"use":with.map(|u| u.to_string())});
         self.store.request::<serde_json::Value>(
             "bot_started",
             json!({"run":c.run,"mode":mode,"session_id":session_id,"log":log_path,"event":event}),
@@ -260,6 +287,7 @@ impl Dispatcher {
         self.bots.push(BotRun {
             run_id: c.run,
             name: b.name.clone(),
+            agent: b.agent.clone(),
             session_mode,
             session_id,
             log_path,

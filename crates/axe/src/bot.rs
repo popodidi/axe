@@ -878,10 +878,13 @@ pub struct Claimed {
 }
 
 /// Claims a ready bot: inserts its run, delivers its due wakes, and returns the
-/// payload, or `None` when the bot is not ready.
+/// payload, or `None` when the bot is not ready. `agent`, when given, is the
+/// agent a selection rule picked for this run instead of the bot's own; the
+/// payload's `bot.agent` is the run's agent.
 pub fn claim(
     tx: &Transaction,
     name: &str,
+    agent: Option<&str>,
     claim: &str,
     dispatcher: &str,
     generation: &str,
@@ -897,7 +900,10 @@ pub fn claim(
     let Some(bot_id) = ready else {
         return Ok(None);
     };
-    let b = get(tx, name)?;
+    let mut b = get(tx, name)?;
+    if let Some(a) = agent {
+        b.agent = a.to_string();
+    }
     let session = match (&b.session_agent, &b.session_id) {
         (Some(agent), Some(id)) => Some(Session {
             agent: agent.clone(),

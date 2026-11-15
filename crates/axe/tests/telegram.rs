@@ -759,7 +759,7 @@ fn typing_is_refreshed_while_a_woken_run_is_live() {
     });
     let mut conn = rig.db();
     let tx = conn.transaction().unwrap();
-    let c = bot::claim(&tx, "cos", "c1", "d", "g", axe::remote::epoch() + 30)
+    let c = bot::claim(&tx, "cos", None, "c1", "d", "g", axe::remote::epoch() + 30)
         .unwrap()
         .expect("the message wake is due");
     tx.commit().unwrap();
@@ -1240,7 +1240,7 @@ fn owner_commands_are_handled_without_waking_the_bot() {
     {
         let mut conn = rig.db();
         let tx = conn.transaction().unwrap();
-        bot::claim(&tx, "cos", "c1", "d", "g", axe::remote::epoch())
+        bot::claim(&tx, "cos", None, "c1", "d", "g", axe::remote::epoch())
             .unwrap()
             .unwrap();
         tx.commit().unwrap();
@@ -1454,7 +1454,7 @@ fn pausing_after_repeated_failures_alerts_the_owner() {
     for i in 0..3 {
         let now = axe::remote::epoch();
         let tx = conn.transaction().unwrap();
-        let c = bot::claim(&tx, "cos", &format!("c{i}"), "d", "g", now)
+        let c = bot::claim(&tx, "cos", None, &format!("c{i}"), "d", "g", now)
             .unwrap()
             .expect("ready: failed wakes return to the queue");
         tx.commit().unwrap();
