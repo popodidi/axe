@@ -343,6 +343,12 @@ enum Cmd {
         #[command(subcommand)]
         command: Option<AdmissionCmd>,
     },
+    /// The dispatcher's runtimes (a harness plus one login): state, limit,
+    /// last failure and quota, as it last reported them
+    Runtimes {
+        #[arg(long)]
+        json: bool,
+    },
     /// Download a consistent server-side snapshot of the database to a new file
     Backup { to: PathBuf },
     /// Immutable, content-addressed files kept by the server, shared through
@@ -3249,6 +3255,14 @@ pub fn run() -> Result<()> {
                     );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        Cmd::Runtimes { json } => {
+            let v: Value = client().get("/api/runtimes", &[])?;
+            if *json {
+                print_json(&v)?;
+            } else {
+                println!("{}", crate::runtime::render(&v));
             }
         }
         Cmd::Admission {

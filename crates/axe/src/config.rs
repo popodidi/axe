@@ -137,6 +137,10 @@ pub struct Config {
     pub defaults: Defaults,
     #[serde(default)]
     pub agents: BTreeMap<String, Agent>,
+    /// `[runtimes]`: the dispatcher's runtime registry (`runtime.rs`);
+    /// omitted means each agent is a runtime on the default login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtimes: Option<crate::runtime::Section>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
     #[serde(default)]
@@ -529,6 +533,10 @@ pub struct Telegram {
     /// last week has unrated asks.
     #[serde(default)]
     pub retro: RetroSend,
+    /// The bot that sends the owner runtime cards (a runtime needs a login
+    /// or hit its limit); default the first `[[telegram.bot]]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops_bot: Option<String>,
 }
 
 /// `telegram.retro`: when and from which bot the weekly retro card goes out.
@@ -1022,6 +1030,9 @@ impl Config {
             Ok(())
         };
         check_agents(&self.defaults.agents, "defaults")?;
+        if self.runtimes.is_some() {
+            crate::runtime::Registry::load(self).context("runtimes")?;
+        }
         for (i, r) in self.rules.iter().enumerate() {
             if let Some(a) = &r.agents {
                 check_agents(a, &format!("rule[{i}] ({})", r.matcher.key()))?;
@@ -1060,6 +1071,11 @@ impl Config {
             if let Some(name) = &t.retro.bot {
                 if !t.bots.iter().any(|b| &b.name == name) {
                     bail!("telegram.retro.bot {name:?} is not a [[telegram.bot]]");
+                }
+            }
+            if let Some(name) = &t.ops_bot {
+                if !t.bots.iter().any(|b| &b.name == name) {
+                    bail!("telegram.ops_bot {name:?} is not a [[telegram.bot]]");
                 }
             }
             let mut names = std::collections::BTreeSet::new();
