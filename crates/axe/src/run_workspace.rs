@@ -25,6 +25,10 @@
 //! is fast-forwarded to its base branch's origin commit when that is safe
 //! ([`worktree::refresh`]: clean, no local commits) and left unchanged, with
 //! the reason, when it is not.
+//!
+//! A repo whose canonical clone is missing but has `[repos.<name>] url` is
+//! cloned first ([`worktree::ensure_clone`]), for a task or a bot alike; the
+//! run's `run_start` event lists it in `repos_cloned`.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -40,15 +44,20 @@ const DOCS_MAX: usize = 200;
 
 /// Builds or refreshes the run workspace of `task`, which must have `repos`,
 /// with the docs and skills attached to its scopes from `store` (none when
-/// `None` or when the store cannot be read).
-pub fn build(cfg: &Config, task: &Task, store: Option<&dyn context::Source>) -> Result<PathBuf> {
+/// `None` or when the store cannot be read). Also returns the repos whose
+/// canonical clone was cloned first ([`worktree::ensure_clone`]).
+pub fn build(
+    cfg: &Config,
+    task: &Task,
+    store: Option<&dyn context::Source>,
+) -> Result<(PathBuf, Vec<String>)> {
     let repos = task
         .repos
         .as_deref()
         .context("task has no repos; it runs in its project worktree")?;
     let dir = cfg.run_root().join(format!("task-{}", task.id));
     let branch = format!("{}task-{}--work", branch_prefix(cfg), task.id);
-    let built = checkout(cfg, &dir, repos, &branch)?;
+    let (built, cloned) = checkout(cfg, &dir, repos, &branch)?;
     let skills = link_skills(&dir, &built)?;
     let attached = match store {
         Some(src) => context::resolve_or_empty(src, &context::task_scopes(task), &own(&skills)),
@@ -64,14 +73,14 @@ pub fn build(cfg: &Config, task: &Task, store: Option<&dyn context::Source>) -> 
         &docs,
         &agents_md(task, &branch, &built, &skills, &attached),
     )?;
-    Ok(dir)
+    Ok((dir, cloned))
 }
 
 /// The run folder of bot `name` with `repos` (non-empty): `<run_root>/bot-<name>`,
 /// laid out like a task's, each repo on branch `<branch_prefix>bot-<name>--work`.
 /// Worktrees persist across runs and are refreshed before each one
 /// ([`worktree::refresh`]); the outcome per repo is returned for the run's
-/// start event. The caller guarantees the bot has no live run. The skills
+/// start event, with the repos cloned first. The caller guarantees the bot has no live run. The skills
 /// attached to the bot's scopes (`attached`, read from `store`) are written
 /// into `skills/` like a task's; attached docs and bundles stay in the bot's
 /// system prompt.
@@ -81,10 +90,10 @@ pub fn build_bot(
     repos: &[String],
     attached: &context::Resolution,
     store: &dyn context::Source,
-) -> Result<(PathBuf, Vec<RepoRefresh>)> {
+) -> Result<(PathBuf, Vec<RepoRefresh>, Vec<String>)> {
     let dir = cfg.run_root().join(format!("bot-{name}"));
     let branch = format!("{}bot-{name}--work", branch_prefix(cfg));
-    let built = checkout(cfg, &dir, repos, &branch)?;
+    let (built, cloned) = checkout(cfg, &dir, repos, &branch)?;
     let mut refreshed = Vec::new();
     for (repo, path) in &built {
         let ready = worktree::repo_readiness(cfg, repo).map_err(anyhow::Error::msg)?;
@@ -110,7 +119,7 @@ pub fn build_bot(
         &docs_index(&built)?,
         &bot_agents_md(name, &branch, &built, &skills, &attached),
     )?;
-    Ok((dir, refreshed))
+    Ok((dir, refreshed, cloned))
 }
 
 /// What [`build_bot`] did to one repo's worktree before the run.
@@ -125,26 +134,39 @@ fn branch_prefix(cfg: &Config) -> String {
     cfg.worktrees.clone().unwrap_or_default().branch_prefix
 }
 
-/// Creates `dir` and a worktree of each repo under `dir/repos/<name>` on `branch`.
+/// Each repo's name and worktree path, in the task's order.
+type Built = Vec<(String, PathBuf)>;
+
+/// Creates `dir` and a worktree of each repo under `dir/repos/<name>` on
+/// `branch`, first cloning a missing canonical clone that has a `url`; also
+/// returns the repos it cloned.
 fn checkout(
     cfg: &Config,
     dir: &Path,
     repos: &[String],
     branch: &str,
-) -> Result<Vec<(String, PathBuf)>> {
+) -> Result<(Built, Vec<String>)> {
     match std::fs::symlink_metadata(dir) {
         Ok(m) if !m.is_dir() => bail!("{} exists and is not a directory", dir.display()),
         _ => {}
     }
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let mut built = Vec::new();
+    let mut cloned = Vec::new();
     for name in repos {
         crate::db::validate_name("repo", name)?;
+        if worktree::ensure_clone(cfg, name)? {
+            eprintln!(
+                "axe dispatcher: cloned repo {name} into {}",
+                cfg.repo_path(name).display()
+            );
+            cloned.push(name.clone());
+        }
         let ready = worktree::repo_readiness(cfg, name).map_err(anyhow::Error::msg)?;
         let path = worktree::allocate_at(&ready, &dir.join("repos").join(name), branch)?;
         built.push((name.clone(), path));
     }
-    Ok(built)
+    Ok((built, cloned))
 }
 
 /// Writes `docs/index.md`, the `.agents`/`.claude` skill links and `AGENTS.md`.

@@ -584,4 +584,155 @@ fn missing_repo_escalates_the_claimed_task() {
     assert_eq!(t["state"], "escalated", "{t}");
     let log = srv.ok(&["log", &ids[0], "--full"]);
     assert!(log.contains("repo ghost has no worktree base"), "{log}");
+    assert!(
+        log.contains("does not exist and [repos.ghost] has no url to clone it from"),
+        "{log}"
+    );
+}
+
+/// A bare origin `<base>/<name>.git` with one commit on `main`, not cloned
+/// anywhere in the workspace.
+fn bare_origin(base: &Path, name: &str) -> PathBuf {
+    let origin = base.join(format!("{name}.git"));
+    let seed = base.join(format!("seed-{name}"));
+    std::fs::create_dir_all(&seed).unwrap();
+    git(
+        base,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(&seed, &["init", "-q", "-b", "main"]);
+    std::fs::write(seed.join("README.md"), format!("{name}\n")).unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-qm", "base"]);
+    git(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+    std::fs::remove_dir_all(&seed).unwrap();
+    origin
+}
+
+impl Fixture {
+    fn append_config(&self, text: &str) {
+        let mut c = std::fs::read_to_string(&self.config).unwrap();
+        c.push_str(text);
+        std::fs::write(&self.config, c).unwrap();
+    }
+}
+
+#[test]
+fn missing_clone_with_url_is_cloned_then_worktree_built() {
+    let f = Fixture::new(&["proj"]);
+    let origin = bare_origin(&f.base(), "three");
+    f.append_config(&format!("[repos.three]\nurl = \"{}\"\n", origin.display()));
+    let canonical = f.base().join("ws/three");
+    assert!(!canonical.exists());
+    let (srv, ids) = f.run(&[&["--project", "proj", "--repo", "three"]]);
+    assert_eq!(show(&srv, &ids[0])["state"], "done");
+    // A canonical clone with its default branch, like a hand-made one.
+    assert_eq!(
+        git(&canonical, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+        "refs/remotes/origin/main"
+    );
+    assert_eq!(
+        std::fs::read_to_string(canonical.join("README.md")).unwrap(),
+        "three\n"
+    );
+    let wt = f.run_dir(&ids[0]).join("repos/three");
+    assert_eq!(
+        git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        format!("axe/task-{}--work", ids[0])
+    );
+    let log = srv.ok(&["log", &ids[0], "--full"]);
+    assert!(log.contains(r#""repos_cloned":["three"]"#), "{log}");
+    // No temporary clone is left beside it.
+    let leftovers: Vec<_> = std::fs::read_dir(f.base().join("ws"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("axe-clone"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn existing_clone_with_url_is_left_untouched() {
+    let f = Fixture::new(&["proj", "one"]);
+    // A url that cannot be cloned: any clone attempt would fail the run.
+    f.append_config(&format!(
+        "[repos.one]\nurl = \"{}\"\n",
+        f.base().join("nowhere.git").display()
+    ));
+    let canonical = f.base().join("ws/one");
+    let marker = canonical.join("local-only.txt");
+    std::fs::write(&marker, "keep\n").unwrap();
+    let head = git(&canonical, &["rev-parse", "HEAD"]);
+    let (srv, ids) = f.run(&[&["--project", "proj", "--repo", "one"]]);
+    assert_eq!(show(&srv, &ids[0])["state"], "done");
+    assert_eq!(git(&canonical, &["rev-parse", "HEAD"]), head);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "keep\n");
+    let log = srv.ok(&["log", &ids[0], "--full"]);
+    assert!(log.contains(r#""repos_cloned":[]"#), "{log}");
+}
+
+#[test]
+fn failed_clone_escalates_and_leaves_no_partial_clone() {
+    let f = Fixture::new(&["proj"]);
+    f.append_config(&format!(
+        "[repos.four]\nurl = \"{}\"\n",
+        f.base().join("nowhere.git").display()
+    ));
+    let (srv, ids) = f.run(&[&["--project", "proj", "--repo", "four"]]);
+    assert_eq!(show(&srv, &ids[0])["state"], "escalated");
+    let log = srv.ok(&["log", &ids[0], "--full"]);
+    assert!(log.contains("clone repo four from"), "{log}");
+    let names: Vec<String> = std::fs::read_dir(f.base().join("ws"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n == "four" || n.contains("axe-clone")),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn concurrent_first_uses_clone_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let origin = bare_origin(&base, "five");
+    let cfg = axe::config::Config::parse(&format!(
+        r#"
+workspace_root = "{ws}"
+log_dir = "{logs}"
+[agents.a]
+cmd = ["true"]
+[repos.five]
+url = "{origin}"
+"#,
+        ws = base.join("ws").display(),
+        logs = base.join("logs").display(),
+        origin = origin.display(),
+    ))
+    .unwrap();
+    let barrier = std::sync::Barrier::new(4);
+    let cloned: Vec<bool> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                s.spawn(|| {
+                    barrier.wait();
+                    axe::worktree::ensure_clone(&cfg, "five").unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(cloned.iter().filter(|c| **c).count(), 1, "{cloned:?}");
+    // Every caller finds the clone ready for worktrees.
+    axe::worktree::repo_readiness(&cfg, "five").unwrap();
+    assert!(!axe::worktree::ensure_clone(&cfg, "five").unwrap());
 }

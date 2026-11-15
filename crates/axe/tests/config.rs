@@ -309,3 +309,27 @@ fn worktrees_table_is_optional_and_ignores_retired_keys() {
 fn args(c: &[String]) -> Vec<&str> {
     c.iter().map(String::as_str).collect()
 }
+
+#[test]
+fn repo_url_is_optional_and_never_embeds_credentials() {
+    let cfg = Config::parse(
+        "[repos.a]\nurl = \"https://github.com/o/a.git\"\n[repos.b]\npath = \"/x/b\"\n[repos.c]\nurl = \"git@github.com:o/c.git\"",
+    )
+    .unwrap();
+    assert_eq!(cfg.repo_url("a"), Some("https://github.com/o/a.git"));
+    assert_eq!(cfg.repo_url("b"), None);
+    assert_eq!(cfg.repo_url("c"), Some("git@github.com:o/c.git"));
+    assert_eq!(cfg.repo_url("unlisted"), None);
+    let back = Config::parse(&toml::to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(back.repos, cfg.repos);
+    for bad in [
+        "https://user:ghp_secret@github.com/o/a.git",
+        "",
+        "--upload-pack=x",
+    ] {
+        let err = Config::parse(&format!("[repos.a]\nurl = \"{bad}\"")).unwrap_err();
+        assert!(format!("{err:#}").contains("repos.a"), "{bad}: {err:#}");
+    }
+    // A user name alone (no secret) is an ordinary remote.
+    Config::parse("[repos.a]\nurl = \"ssh://git@github.com/o/a.git\"").unwrap();
+}

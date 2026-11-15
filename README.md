@@ -128,6 +128,12 @@ per repo under `repos/<name>`, all on the task branch, plus a generated
 repo's `.agents/skills` and a `docs/index.md`, plus attached docs (see Run
 context below). A repo's canonical clone is
 `[repos.<name>] path`, default `<workspace_root>/<name>` (`run_workspace.rs`).
+When that clone is missing and the repo has `[repos.<name>] url`, the
+dispatcher clones it there on first use, with the host's own Git credentials
+(never a token in config), before building the worktree; concurrent first uses
+clone once, and the run's `run_start` event lists it in `repos_cloned`
+(`worktree::ensure_clone`). A missing clone without `url` stops the run with
+that reason.
 Tasks without `repos` keep the project worktree. A bot with a repo list
 (`axe bot edit <name> --repo <r>`, `--no-repos` clears it) runs in
 `<run_root>/bot-<name>` the same way, on branch `bot-<name>--work`; a bot

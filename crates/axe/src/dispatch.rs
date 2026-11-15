@@ -703,12 +703,14 @@ impl Dispatcher {
             .with_context(|| format!("unknown agent {agent_name}"))?
             .clone();
         let session_mode = agent.session_mode()?;
+        let mut repos_cloned = Vec::new();
         let task_worktree = match &self.cfg.worktrees {
-            _ if task.repos.is_some() => Some(crate::run_workspace::build(
-                &self.cfg,
-                task,
-                Some(&self.store.client),
-            )?),
+            _ if task.repos.is_some() => {
+                let (dir, cloned) =
+                    crate::run_workspace::build(&self.cfg, task, Some(&self.store.client))?;
+                repos_cloned = cloned;
+                Some(dir)
+            }
             Some(_) => {
                 let ready =
                     worktree::readiness(&self.cfg, &task.project).map_err(anyhow::Error::msg)?;
@@ -816,7 +818,7 @@ impl Dispatcher {
             session_id: id.clone(),
             resume_count,
         });
-        let body = json!({"mode":mode,"agent":agent_name,"rule":rule,"session_id":session_id,"log":log_path,"prompt_file":prompt_path,"cmd":logged_cmd,"worktree":task_worktree});
+        let body = json!({"mode":mode,"agent":agent_name,"rule":rule,"session_id":session_id,"log":log_path,"prompt_file":prompt_path,"cmd":logged_cmd,"worktree":task_worktree,"repos_cloned":repos_cloned});
         let run_id=self.store.request::<i64>("prepare",json!({"task":task.id,"claim":claim,"agent":agent_name,"mode":mode,"session_id":session_id,"log":log_path,"session":session,"event":body}))?;
         self.store.log(run_id, log_path.clone(), false)?;
         let mut child = match command.spawn() {
