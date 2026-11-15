@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -157,14 +157,15 @@ pub fn default_path() -> Result<PathBuf> {
         .context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v18 schema, or migrates v8-v17 to v18. Older
+/// Opens the database: creates a fresh v19 schema, or migrates v8-v18 to v19. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
 /// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
 /// tables (`usage::SCHEMA`), v16 only adds goal tables and a nullable column
 /// (`goal::migrate`), v17 only adds the task field columns
-/// ([`migrate_task_fields`]) and v18 only adds `bots.repos`
-/// ([`migrate_bot_repos`]), so a database lowered to `user_version` 17, 16, 15,
-/// 14, 13, 12 or 11 still opens with that binary and upgrades again in place.
+/// ([`migrate_task_fields`]), v18 only adds `bots.repos`
+/// ([`migrate_bot_repos`]) and v19 only adds the rule tables (`rule::SCHEMA`),
+/// so a database lowered to `user_version` 18, 17, 16, 15, 14, 13, 12 or 11
+/// still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -189,6 +190,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA)?;
         tx.execute_batch(crate::routine::SCHEMA)?;
+        tx.execute_batch(crate::rule::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
@@ -198,8 +200,9 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=17).contains(&version) {
+    if (11..=18).contains(&version) {
         let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(crate::rule::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
@@ -221,6 +224,7 @@ pub fn open(path: &Path) -> Result<Connection> {
             tx.execute_batch("ALTER TABLE tasks ADD COLUMN agent TEXT")?;
         }
         tx.execute_batch(crate::routine::SCHEMA)?;
+        tx.execute_batch(crate::rule::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
         tx.execute_batch(crate::usage::SCHEMA)?;
         crate::goal::migrate(&tx)?;
@@ -245,6 +249,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     tx.execute_batch(MIGRATE_V8)?;
     tx.execute_batch(SCHEMA)?;
     tx.execute_batch(crate::routine::SCHEMA)?;
+    tx.execute_batch(crate::rule::SCHEMA)?;
     tx.execute_batch(crate::bot::SCHEMA)?;
     tx.execute_batch(crate::usage::SCHEMA)?;
     crate::goal::migrate(&tx)?;
@@ -469,17 +474,20 @@ fn json_list(text: &str) -> rusqlite::Result<Vec<String>> {
 /// Checks a repo or label name: a letter or digit, then letters, digits, `.`,
 /// `_` or `-`, at most 64 characters. Repo names are directory names in a run
 /// workspace.
+/// Labels may also hold ':' (as in `runtime:<name>`, `rule.rs`).
 pub fn validate_name(kind: &str, name: &str) -> Result<()> {
+    let colon = kind == "label";
     let ok = name.len() <= 64
         && name
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') || (colon && c == ':')
+        });
     if !ok {
-        bail!("invalid {kind} {name:?}: use letters, digits, '.', '_' or '-', starting with a letter or digit, at most 64 characters");
+        let colon = if colon { ", ':'" } else { "" };
+        bail!("invalid {kind} {name:?}: use letters, digits, '.', '_'{colon} or '-', starting with a letter or digit, at most 64 characters");
     }
     Ok(())
 }

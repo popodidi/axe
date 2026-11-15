@@ -36,7 +36,7 @@ fn rig() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
 
 fn claim(c: &mut Connection, now: i64) -> Option<bot::Claimed> {
     let tx = c.transaction().unwrap();
-    let out = bot::claim(&tx, "b", &format!("bot:{now}"), "d", "g", now).unwrap();
+    let out = bot::claim(&tx, "b", None, &format!("bot:{now}"), "d", "g", now).unwrap();
     tx.commit().unwrap();
     out
 }

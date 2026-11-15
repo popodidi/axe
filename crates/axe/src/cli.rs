@@ -38,6 +38,13 @@ enum Cmd {
         #[command(subcommand)]
         command: RoutineCmd,
     },
+    /// Selection rules: which harness, model and effort runs a task or bot.
+    /// The most specific matching rule wins, then the higher priority, then
+    /// the newer rule; its use entries are tried in order
+    Rule {
+        #[command(subcommand)]
+        command: RuleCmd,
+    },
     /// Manage bots: persistent agents woken by messages, wakes and schedules.
     /// NAME defaults to $AXE_BOT
     Bot {
@@ -961,6 +968,122 @@ fn format_admission(a: &Value) -> String {
         ));
     }
     s
+}
+
+#[derive(Subcommand, Clone)]
+enum RuleCmd {
+    /// Add a rule, e.g. `--match workload=prod-bug --use claude-code:opus:high
+    /// --use codex::high`, or `--default --use claude-code`
+    Add {
+        /// KEY=VALUE, repeatable; keys: workload, repo, goal, label (the
+        /// project counts as a label), bot (a bot's runs), owner
+        #[arg(
+            long = "match",
+            value_name = "KEY=VALUE",
+            required_unless_present = "default"
+        )]
+        matches: Vec<String>,
+        /// Match everything: the default rule
+        #[arg(long, conflicts_with = "matches")]
+        default: bool,
+        /// HARNESS[:MODEL[:EFFORT]], repeatable, tried in order; harnesses:
+        /// claude-code, codex; an empty part is the harness's default
+        #[arg(long = "use", value_name = "HARNESS[:MODEL[:EFFORT]]", required = true)]
+        uses: Vec<String>,
+        /// Breaks ties between equally specific rules; higher wins
+        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+        priority: i64,
+    },
+    /// Rules in the order they win
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a rule
+    Rm { id: i64 },
+    /// Rule edits (added, removed, imported), newest first
+    Log {
+        #[arg(long)]
+        before: Option<i64>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn run_rule(c: &Client, command: RuleCmd) -> Result<()> {
+    match command {
+        RuleCmd::Add {
+            matches,
+            default: _,
+            uses,
+            priority,
+        } => {
+            let mut matcher = crate::rule::Match::default();
+            for m in &matches {
+                matcher.set(m)?;
+            }
+            let rule = crate::rule::NewRule {
+                matcher,
+                uses: uses.iter().map(|u| u.parse()).collect::<Result<_>>()?,
+                priority,
+            };
+            rule.validate()?;
+            let r: crate::rule::Rule = c.send("POST", "/api/rules", json!({"rule":rule}))?;
+            println!("rule {} added: {}", r.id, format_rule(&r));
+        }
+        RuleCmd::List { json } => {
+            let rules: Vec<crate::rule::Rule> = c.get("/api/rules", &[])?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rules)?);
+            } else if rules.is_empty() {
+                println!("no rules: new sessions use claude-code");
+            } else {
+                for r in &rules {
+                    println!("{}", format_rule(r));
+                }
+            }
+        }
+        RuleCmd::Rm { id } => {
+            let r: crate::rule::Rule =
+                c.send("POST", &format!("/api/rules/{id}/remove"), json!({}))?;
+            println!("rule {} removed: {}", r.id, format_rule(&r));
+        }
+        RuleCmd::Log { before, json } => {
+            let events: Vec<Value> = c.get(
+                "/api/rules/events",
+                &[("before", &before.unwrap_or(i64::MAX).to_string())],
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&events)?);
+            } else {
+                for e in &events {
+                    let rule = e["rule_id"]
+                        .as_i64()
+                        .map_or(String::new(), |id| format!(" rule {id}"));
+                    println!(
+                        "{} {} {}{rule}: {}",
+                        e["at"].as_str().unwrap_or(""),
+                        e["actor"].as_str().unwrap_or(""),
+                        e["kind"].as_str().unwrap_or(""),
+                        e["body"]
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `#<id> priority <p> match <match> use <a>, <b>`.
+fn format_rule(r: &crate::rule::Rule) -> String {
+    let uses: Vec<String> = r.uses.iter().map(ToString::to_string).collect();
+    format!(
+        "#{} priority {} match {} use {}",
+        r.id,
+        r.priority,
+        r.matcher,
+        uses.join(", ")
+    )
 }
 
 #[derive(Subcommand)]
@@ -2816,6 +2939,7 @@ pub fn run() -> Result<()> {
         }
         Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Ask { command } => run_ask(&client(), command)?,
+        Cmd::Rule { command } => run_rule(&client(), command.clone())?,
         Cmd::Routine { command } => {
             let c = client();
             let value: Value = match command {

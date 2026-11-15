@@ -252,6 +252,7 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
         "bot_claim" => json!(crate::bot::claim(
             &tx,
             field(b, "bot")?,
+            b["agent"].as_str(),
             claim()?,
             id,
             generation,
@@ -329,6 +330,19 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             field(b, "project")?,
             field(b, "note")?,
         )?),
+        "rule_import" => {
+            let rules: Vec<crate::rule::NewRule> = serde_json::from_value(b["rules"].clone())?;
+            crate::rule::import(&tx, &actor, &rules, field(b, "source")?)?
+        }
+        "rule_select" => {
+            let subject = match b["bot"].as_str() {
+                Some(bot) => crate::rule::bot_subject(&tx, bot)?,
+                None => crate::rule::task_subject(&tx, task()?)?,
+            };
+            json!(crate::rule::select(&crate::rule::list(&tx)?, &subject))
+        }
+        // Dispatchers before stored rules (`rule.rs`) pick round-robin agents
+        // here; kept while such a dispatcher may still talk to this server.
         "round_robin" => {
             let len = number(b, "len")?;
             if len <= 0 {
@@ -391,6 +405,14 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                     log_path: field(b, "log")?,
                 },
             )?;
+            // The runtime a stored rule picked, as a task label for stats and cost.
+            if let Some(label) = b["label"].as_str() {
+                let add = Changes {
+                    add_labels: vec![label.to_string()],
+                    ..Default::default()
+                };
+                db::apply_changes(&tx, &actor, t.id, &add, Some(claim()?))?;
+            }
             tx.execute(
                 "INSERT INTO dispatch_runs VALUES(?1,?2,?3,'prepared')",
                 params![run, id, generation],
@@ -654,7 +676,7 @@ fn now_unix() -> i64 {
 fn read_only(op: &str) -> bool {
     matches!(
         op,
-        "pending" | "events" | "task" | "session" | "bot_ready" | "bot_control"
+        "pending" | "events" | "task" | "session" | "bot_ready" | "bot_control" | "rule_select"
     )
 }
 

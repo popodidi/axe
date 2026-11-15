@@ -11,6 +11,9 @@ pub enum Strategy {
     RoundRobin,
 }
 
+/// `[defaults]`. `agents` and `strategy` are deprecated: stored rules pick
+/// agents (`rule.rs`) once the dispatcher has imported them
+/// ([`Config::rules_to_import`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
@@ -49,6 +52,11 @@ pub struct Agent {
     /// `{settings_file}`. Agents without it cannot run bots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_args: Option<Vec<String>>,
+    /// The harness this agent drives (`rule::HARNESSES`), so selection rules
+    /// can pick it. Omitted: `claude-code` when `cmd` runs `claude`, `codex`
+    /// when it runs `codex`, else none (only a task or bot pin selects it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +67,19 @@ pub enum SessionMode {
 }
 
 impl Agent {
+    /// The configured or inferred harness (see [`Agent::harness`]).
+    pub fn harness(&self) -> Option<&str> {
+        if let Some(h) = &self.harness {
+            return Some(h);
+        }
+        let bin = self.cmd.first()?;
+        match Path::new(bin).file_name()?.to_str()? {
+            "claude" => Some("claude-code"),
+            "codex" => Some("codex"),
+            _ => None,
+        }
+    }
+
     pub fn session_mode(&self) -> Result<SessionMode> {
         match self.session.as_str() {
             "preset" => Ok(SessionMode::Preset),
@@ -87,6 +108,8 @@ impl Match {
     }
 }
 
+/// `[[rule]]`, matched on project. `agents` and `strategy` are deprecated
+/// like those of [`Defaults`]; `max_runs` and `max_resumes` still apply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
@@ -868,6 +891,7 @@ fn builtin_claude() -> Agent {
             .map(String::from)
             .to_vec(),
         ),
+        harness: None,
     }
 }
 
@@ -971,6 +995,14 @@ impl Config {
             }
             a.session_mode()
                 .with_context(|| format!("agents.{name}.session"))?;
+            if let Some(h) = &a.harness {
+                if !crate::rule::HARNESSES.contains(&h.as_str()) {
+                    bail!(
+                        "agents.{name}.harness: unknown harness {h:?} (expected one of {})",
+                        crate::rule::HARNESSES.join(", ")
+                    );
+                }
+            }
             for arg in a.cmd.iter().chain(a.resume_cmd.iter().flatten()) {
                 check_vars(arg, &[]).with_context(|| format!("agents.{name}"))?;
             }
@@ -1087,6 +1119,86 @@ impl Config {
             Some(p) => expand_tilde(p),
             None => self.workspace_root(),
         }
+    }
+
+    /// True when `[defaults]` or a `[[rule]]` sets `agents` or `strategy`:
+    /// deprecated selection settings, replaced by stored rules (`rule.rs`).
+    pub fn sets_legacy_selection(&self) -> bool {
+        let d = Defaults::default();
+        self.defaults.agents != d.agents
+            || self.defaults.strategy != d.strategy
+            || self
+                .rules
+                .iter()
+                .any(|r| r.agents.is_some() || r.strategy.is_some())
+    }
+
+    /// `[defaults]` and `[[rule]]` agent lists as stored rules, for the one-time
+    /// import: the default rule, then one rule per `[[rule]]` with `agents`
+    /// (`match.project` becomes `match.label`; its file position is its
+    /// priority, so the last applicable rule still wins). Each agent becomes
+    /// its harness. Refused, with the reason, when that could change
+    /// selection: an agent with no harness, an agent that is not the only
+    /// agent of its harness, or a round-robin strategy.
+    pub fn rules_to_import(&self) -> std::result::Result<Vec<crate::rule::NewRule>, String> {
+        let harness = |a: &str| -> std::result::Result<String, String> {
+            let agent = self.agents.get(a).ok_or(format!("unknown agent {a:?}"))?;
+            let h = agent
+                .harness()
+                .ok_or(format!("agent {a:?} has no harness"))?;
+            let shared: Vec<&String> = self
+                .agents
+                .iter()
+                .filter(|(_, x)| x.harness() == Some(h))
+                .map(|(n, _)| n)
+                .collect();
+            if shared.len() > 1 {
+                return Err(format!(
+                    "agents {} share harness {h}",
+                    shared
+                        .iter()
+                        .map(|n| format!("{n:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            Ok(h.to_string())
+        };
+        let uses = |agents: &[String]| -> std::result::Result<Vec<crate::rule::Use>, String> {
+            agents
+                .iter()
+                .map(|a| {
+                    Ok(crate::rule::Use {
+                        harness: harness(a)?,
+                        model: None,
+                        effort: None,
+                    })
+                })
+                .collect()
+        };
+        let round_robin = |s: Option<Strategy>, at: &str| match s {
+            Some(Strategy::RoundRobin) => Err(format!("{at} uses strategy round_robin")),
+            _ => Ok(()),
+        };
+        round_robin(Some(self.defaults.strategy), "[defaults]")?;
+        let mut out = vec![crate::rule::NewRule {
+            matcher: crate::rule::Match::default(),
+            uses: uses(&self.defaults.agents)?,
+            priority: 0,
+        }];
+        for (i, r) in self.rules.iter().enumerate() {
+            round_robin(r.strategy, &format!("rule[{i}] ({})", r.matcher.key()))?;
+            let Some(agents) = &r.agents else { continue };
+            out.push(crate::rule::NewRule {
+                matcher: crate::rule::Match {
+                    label: r.matcher.project.clone(),
+                    ..Default::default()
+                },
+                uses: uses(agents)?,
+                priority: i as i64 + 1,
+            });
+        }
+        Ok(out)
     }
 
     pub fn resolve(&self, project: &str) -> Resolved {

@@ -86,9 +86,23 @@ runs refuses to start until `axe dispatch --reconcile-note` escalates them.
 Worker logs stay on the dispatcher host and the server relays reads over the
 dispatcher's WebSocket without storing them (`run_log.rs`, `relay_log` in `server.rs`).
 
-**Session continuity.** A task's first run starts fresh with the agent from
-its `--agent` pin or the matching `[[rule]]`; every later run resumes that
-session with the agent's `resume_cmd`. A failed resume with no axe change
+**Selection rules.** A task's first run starts fresh with the agent from its
+`--agent` pin, or else from the stored rule that matches it (`axe rule
+add/list/rm/log`, `rule.rs`). A rule matches any of workload, repo, goal,
+label (the project counts), bot and owner; the most specific matching rule
+wins, then the higher priority, then the newer rule. Its ordered `use` list
+of `harness[:model[:effort]]` (`claude-code`, `codex`) is walked down to the
+first harness the dispatcher has an agent for (an agent's `harness`, or
+inferred from its command), least used first; the model and effort go to the
+CLI, and the task gets a `runtime:<agent>` label. A bot runs its own agent
+unless a rule names it (`bot=`). Every edit is a logged event. The
+dispatcher imports the config's `[defaults]`/`[[rule]]` agent lists once
+(`Config::rules_to_import`); those keys are deprecated and keep picking only
+when stored rules cannot express them (an agent with no harness, two agents
+of one harness, round-robin), with a startup line saying why.
+
+**Session continuity.** Every later run resumes the first run's session with
+the agent's `resume_cmd`. A failed resume with no axe change
 retries fresh in the same pass. Prompts are one line (`[prompts]`); the agent
 reads the task itself.
 

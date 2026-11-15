@@ -333,3 +333,66 @@ fn repo_url_is_optional_and_never_embeds_credentials() {
     // A user name alone (no secret) is an ordinary remote.
     Config::parse("[repos.a]\nurl = \"ssh://git@github.com/o/a.git\"").unwrap();
 }
+
+#[test]
+fn agents_infer_their_harness_and_configs_import_as_rules() {
+    // A claude agent and a codex agent, claude by default: one default rule.
+    let cfg = Config::parse(
+        r#"
+[defaults]
+agents = ["claude"]
+strategy = "fixed"
+max_runs = 20
+
+[agents.codex]
+cmd = ["codex", "exec", "--json", "{prompt}"]
+session = "jsonl:thread_id"
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.agents["claude"].harness(), Some("claude-code"));
+    assert_eq!(cfg.agents["codex"].harness(), Some("codex"));
+    let rules = cfg.rules_to_import().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].matcher, axe::rule::Match::default());
+    assert_eq!(rules[0].uses, ["claude-code".parse().unwrap()]);
+    assert!(!cfg.sets_legacy_selection(), "the built-in default");
+
+    // CFG: a project rule becomes a label rule; round-robin cannot import.
+    let cfg = Config::parse(CFG).unwrap();
+    let err = cfg.rules_to_import().unwrap_err();
+    assert!(err.contains("round_robin"), "{err}");
+    assert!(cfg.sets_legacy_selection());
+    let cfg = Config::parse(&CFG.replace("strategy = \"round_robin\"", "")).unwrap();
+    let rules = cfg.rules_to_import().unwrap();
+    let got: Vec<(Option<&str>, Vec<String>, i64)> = rules
+        .iter()
+        .map(|r| {
+            (
+                r.matcher.label.as_deref(),
+                r.uses.iter().map(|u| u.to_string()).collect(),
+                r.priority,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (None, vec!["claude-code".to_string()], 0),
+            (Some("ivy-ops"), vec!["codex".to_string()], 1),
+            (
+                None,
+                vec!["claude-code".to_string(), "codex".to_string()],
+                2
+            ),
+        ]
+    );
+
+    // A custom command has no harness unless it says so.
+    let cfg = Config::parse("[agents.x]\ncmd = [\"sh\"]\n[defaults]\nagents = [\"x\"]").unwrap();
+    assert_eq!(cfg.agents["x"].harness(), None);
+    assert!(cfg.rules_to_import().unwrap_err().contains("no harness"));
+    let cfg = Config::parse("[agents.x]\ncmd = [\"/opt/bin/codex\"]\n").unwrap();
+    assert_eq!(cfg.agents["x"].harness(), Some("codex"));
+    assert!(Config::parse("[agents.x]\ncmd = [\"sh\"]\nharness = \"claude\"").is_err());
+}

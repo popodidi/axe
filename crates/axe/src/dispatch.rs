@@ -16,6 +16,7 @@ use crate::agent_proc::{self, kill_child, kill_tree};
 pub use crate::agent_proc::{otel_resource_attributes, parse_jsonl_session, render};
 use crate::config::{Config, Prompts, SessionMode, Strategy};
 use crate::db::{self, Changes, Claim, Task};
+use crate::rule::{self, Use};
 use crate::worktree;
 
 mod bots;
@@ -31,16 +32,24 @@ const DRAIN_BOT_GRACE: Duration = Duration::from_secs(60);
 /// `finish` note of a run aborted by a bounded drain.
 const DRAIN_ABORT_NOTE: &str = "aborted by rollout drain";
 
+/// The agent of a new run, what picked it, and the `use` entry whose model and
+/// effort it runs with (none: the agent's own defaults).
+#[derive(Debug, Clone)]
+struct Pick {
+    agent: String,
+    rule: String,
+    with: Option<Use>,
+}
+
 struct Run {
     resume_count: u64,
     resumed: bool,
     task_id: i64,
     claim: String,
-    agent: String,
     session_mode: SessionMode,
     session_id: Option<String>,
     log_path: PathBuf,
-    rule: String,
+    pick: Pick,
     child: Child,
     /// Row in the `runs` table.
     run_id: i64,
@@ -81,14 +90,16 @@ pub struct Dispatcher {
     /// The server refused bot operations (an older server); logged once.
     bots_unsupported: bool,
     drain: Option<Drain>,
+    /// Stored rules pick agents (`rule.rs`); false while the deprecated
+    /// `[defaults]`/`[[rule]]` config does (see [`Dispatcher::init_rules`]).
+    stored_rules: bool,
 }
 
 /// A resume-to-fresh fallback waiting for resource admission.
 struct Deferred {
     task_id: i64,
-    agent: String,
     claim: String,
-    rule: String,
+    pick: Pick,
 }
 
 /// Escalates a dispatcher-claimed task; its session resumes once ops resolves the cause.
@@ -264,7 +275,87 @@ impl Dispatcher {
             bots: Vec::new(),
             bots_unsupported: false,
             drain: None,
+            stored_rules: false,
         }
+    }
+
+    /// Chooses how new sessions pick their agent, once at start. The config's
+    /// `[defaults]`/`[[rule]]` agent lists are imported as stored rules the
+    /// first time (`rule::import`); from then on stored rules pick. The config
+    /// keeps picking (deprecated) when stored rules cannot express it
+    /// ([`Config::rules_to_import`]) or the server has no rules.
+    fn init_rules(&mut self) {
+        let rules = match self.cfg.rules_to_import() {
+            Ok(r) => r,
+            Err(reason) => {
+                eprintln!(
+                    "axe dispatcher: agents picked by the deprecated [defaults]/[[rule]] config: \
+                     stored rules cannot express it ({reason})"
+                );
+                return;
+            }
+        };
+        let body = json!({"rules":rules,"source":"dispatcher config [defaults]/[[rule]]"});
+        match self.store.request::<Value>("rule_import", body) {
+            Ok(v) => {
+                self.stored_rules = true;
+                if v["already"] != true {
+                    eprintln!("axe dispatcher: imported config rules once: {v}");
+                }
+                eprintln!("axe dispatcher: agents picked by stored rules (axe rule list)");
+                if self.cfg.sets_legacy_selection() {
+                    eprintln!(
+                        "axe dispatcher: [defaults] and [[rule]] agents/strategy are deprecated \
+                         and no longer pick agents; edit selection with axe rule"
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "axe dispatcher: stored rules unavailable ({e:#}); agents picked by the \
+                 deprecated [defaults]/[[rule]] config"
+            ),
+        }
+    }
+
+    /// Live task and bot runs of `agent`.
+    fn in_use(&self, agent: &str) -> usize {
+        self.runs.iter().filter(|r| r.pick.agent == agent).count()
+            + self.bots.iter().filter(|b| b.agent == agent).count()
+    }
+
+    /// Walks a rule's `use` list: the first entry with an agent of its harness
+    /// wins, the least used such agent first (then by name). No matching rule
+    /// means `claude-code`. Bots also need `bot_args`. `Err` names what was
+    /// tried.
+    fn pick_from(&self, rule: Option<&rule::Rule>, bot: bool) -> std::result::Result<Pick, String> {
+        let fallback = [Use {
+            harness: "claude-code".into(),
+            model: None,
+            effort: None,
+        }];
+        let uses = rule.map_or(&fallback[..], |r| &r.uses);
+        let key = rule.map_or("no rule".to_string(), rule::Rule::key);
+        for u in uses {
+            let best = self
+                .cfg
+                .agents
+                .iter()
+                .filter(|(_, a)| a.harness() == Some(u.harness.as_str()))
+                .filter(|(_, a)| !bot || a.bot_args.is_some())
+                .min_by_key(|(n, _)| self.in_use(n));
+            if let Some((name, _)) = best {
+                return Ok(Pick {
+                    agent: name.clone(),
+                    rule: key,
+                    with: Some(u.clone()),
+                });
+            }
+        }
+        let tried: Vec<String> = uses.iter().map(Use::to_string).collect();
+        Err(format!(
+            "{key}: no configured agent for any use entry ({})",
+            tried.join(", ")
+        ))
     }
 
     /// Replaces the resource gate (tests use controlled samples and clocks).
@@ -405,6 +496,7 @@ impl Dispatcher {
     }
 
     pub fn run(&mut self, once: bool, stop: Arc<AtomicBool>) -> Result<()> {
+        self.init_rules();
         let bots = self
             .cfg
             .pool_bots()
@@ -562,7 +654,7 @@ impl Dispatcher {
             if task.state != "in_progress" || task.claimed_by.as_deref() != Some(&d.claim) {
                 continue;
             }
-            if let Err(e) = self.spawn(&task, &d.agent, &d.claim, None, &d.rule, false) {
+            if let Err(e) = self.spawn(&task, &d.pick, &d.claim, None, false) {
                 self.block_claimed(task.id, &d.claim, format!("{e:#}"))?;
             }
         }
@@ -650,30 +742,63 @@ impl Dispatcher {
                 resume = None;
             }
         }
-        let agent = if let Some(session) = &resume {
-            session.agent.clone()
-        } else if let Some(agent) = &task.agent {
-            agent.clone()
+        let pick = if !self.stored_rules {
+            let agent = if let Some(session) = &resume {
+                session.agent.clone()
+            } else if let Some(agent) = &task.agent {
+                agent.clone()
+            } else {
+                match res.strategy {
+                    Strategy::Fixed => res.agents[0].clone(),
+                    Strategy::RoundRobin => {
+                        let i = self.store.request::<usize>(
+                            "round_robin",
+                            json!({"rule":res.rule_key,"len":res.agents.len()}),
+                        )?;
+                        res.agents[i].clone()
+                    }
+                }
+            };
+            Pick {
+                agent,
+                rule: res.rule_key.clone(),
+                with: None,
+            }
         } else {
-            match res.strategy {
-                Strategy::Fixed => res.agents[0].clone(),
-                Strategy::RoundRobin => {
-                    let i = self.store.request::<usize>(
-                        "round_robin",
-                        json!({"rule":res.rule_key,"len":res.agents.len()}),
-                    )?;
-                    res.agents[i].clone()
+            let matched = self
+                .store
+                .request::<Option<rule::Rule>>("rule_select", json!({"task":task.id}))?;
+            if let Some(session) = &resume {
+                // The stored session resumes on its own agent, with the model
+                // and effort the rule gives that agent's harness.
+                let harness = self.cfg.agents[&session.agent].harness();
+                Pick {
+                    agent: session.agent.clone(),
+                    rule: matched.as_ref().map_or("no rule".into(), rule::Rule::key),
+                    with: matched.as_ref().and_then(|r| {
+                        r.uses
+                            .iter()
+                            .find(|u| Some(u.harness.as_str()) == harness)
+                            .cloned()
+                    }),
+                }
+            } else if let Some(agent) = &task.agent {
+                Pick {
+                    agent: agent.clone(),
+                    rule: "task agent".into(),
+                    with: None,
+                }
+            } else {
+                match self.pick_from(matched.as_ref(), false) {
+                    Ok(p) => p,
+                    Err(note) => {
+                        self.block_claimed(task.id, &claim_id, note)?;
+                        return Ok(true);
+                    }
                 }
             }
         };
-        if let Err(e) = self.spawn(
-            &task,
-            &agent,
-            &claim_id,
-            resume.as_ref(),
-            &res.rule_key,
-            interrupted,
-        ) {
+        if let Err(e) = self.spawn(&task, &pick, &claim_id, resume.as_ref(), interrupted) {
             self.block_claimed(task.id, &claim_id, format!("{e:#}"))?;
         }
         Ok(true)
@@ -690,12 +815,12 @@ impl Dispatcher {
     fn spawn(
         &mut self,
         task: &Task,
-        agent_name: &str,
+        pick: &Pick,
         claim: &str,
         resume: Option<&db::Session>,
-        rule: &str,
         interrupted: bool,
     ) -> Result<()> {
+        let agent_name = pick.agent.as_str();
         let agent = self
             .cfg
             .agents
@@ -777,6 +902,14 @@ impl Dispatcher {
         } else {
             &agent.cmd
         };
+        let with = pick
+            .with
+            .as_ref()
+            .filter(|u| agent.harness() == Some(u.harness.as_str()));
+        let template = match with {
+            Some(u) => splice_bot_args(template, &u.args()),
+            None => template.clone(),
+        };
         let argv: Vec<String> = template.iter().map(|a| render(a, &vars)).collect();
 
         let log = OpenOptions::new()
@@ -818,8 +951,16 @@ impl Dispatcher {
             session_id: id.clone(),
             resume_count,
         });
-        let body = json!({"mode":mode,"agent":agent_name,"rule":rule,"session_id":session_id,"log":log_path,"prompt_file":prompt_path,"cmd":logged_cmd,"worktree":task_worktree,"repos_cloned":repos_cloned});
-        let run_id=self.store.request::<i64>("prepare",json!({"task":task.id,"claim":claim,"agent":agent_name,"mode":mode,"session_id":session_id,"log":log_path,"session":session,"event":body}))?;
+        let mut body = json!({"mode":mode,"agent":agent_name,"rule":pick.rule,"session_id":session_id,"log":log_path,"prompt_file":prompt_path,"cmd":logged_cmd,"worktree":task_worktree,"repos_cloned":repos_cloned});
+        if let Some(u) = with {
+            body["use"] = json!(u.to_string());
+        }
+        // With stored rules, the task carries the runtime (today: the agent)
+        // it ran on as a `runtime:<agent>` label.
+        let label = format!("runtime:{agent_name}");
+        let label =
+            (self.stored_rules && db::validate_name("label", &label).is_ok()).then_some(label);
+        let run_id=self.store.request::<i64>("prepare",json!({"task":task.id,"claim":claim,"agent":agent_name,"mode":mode,"session_id":session_id,"log":log_path,"session":session,"event":body,"label":label}))?;
         self.store.log(run_id, log_path.clone(), false)?;
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -842,11 +983,10 @@ impl Dispatcher {
             resumed: resume.is_some(),
             task_id: task.id,
             claim: claim.to_string(),
-            agent: agent_name.to_string(),
             session_mode,
             session_id,
             log_path,
-            rule: rule.to_string(),
+            pick: pick.clone(),
             child,
             run_id,
             activity: None,
@@ -914,7 +1054,7 @@ impl Dispatcher {
             }
         }
         let session = run.session_id.as_ref().map(|id| db::Session {
-            agent: run.agent.clone(),
+            agent: run.pick.agent.clone(),
             session_id: id.clone(),
             resume_count: run.resume_count,
         });
@@ -924,13 +1064,21 @@ impl Dispatcher {
             .then(|| crate::failure::classify(&run.log_path))
             .flatten()
             .map(|f| f.to_json());
-        let retry=self.store.request::<bool>("finish",json!({"api_error":api_error,"usage":usage,"run":run.run_id,"aborted":block_note == "remote abort confirmed","drained":block_note == DRAIN_ABORT_NOTE,"resumed":run.resumed,"code":code,"note":block_note,"session":session,"session_id":run.session_id,"event":{"exit_code":code,"log":run.log_path,"agent":run.agent,"session_id":run.session_id}}))?;
+        let retry=self.store.request::<bool>("finish",json!({"api_error":api_error,"usage":usage,"run":run.run_id,"aborted":block_note == "remote abort confirmed","drained":block_note == DRAIN_ABORT_NOTE,"resumed":run.resumed,"code":code,"note":block_note,"session":session,"session_id":run.session_id,"event":{"exit_code":code,"log":run.log_path,"agent":run.pick.agent,"session_id":run.session_id}}))?;
         self.store.log(run.run_id, run.log_path.clone(), true)?;
         if retry {
             let task = self
                 .store
                 .request::<Task>("task", json!({"task":run.task_id}))?;
-            let agent = task.agent.as_deref().unwrap_or(&run.agent).to_owned();
+            // The fresh fallback keeps the run's pick unless the task's pin changed.
+            let pick = match &task.agent {
+                Some(a) if *a != run.pick.agent => Pick {
+                    agent: a.clone(),
+                    rule: "task agent".into(),
+                    with: None,
+                },
+                _ => run.pick.clone(),
+            };
             // The fallback is a new process: it needs its own admission decision.
             if let Some(g) = &mut self.gate {
                 if !g.check() {
@@ -941,9 +1089,8 @@ impl Dispatcher {
                     self.store.request::<serde_json::Value>("note",json!({"task":run.task_id,"claim":run.claim,"note":format!("fresh session fallback deferred: resume exited non-zero without task changes; resource admission paused ({reason}); claim and slot kept, starts when pressure clears")}))?;
                     self.deferred.push(Deferred {
                         task_id: run.task_id,
-                        agent: agent.clone(),
                         claim: run.claim.clone(),
-                        rule: run.rule.clone(),
+                        pick,
                     });
                     return Ok(());
                 }
@@ -952,7 +1099,7 @@ impl Dispatcher {
             let task = self
                 .store
                 .request::<Task>("task", json!({"task":run.task_id}))?;
-            if let Err(e) = self.spawn(&task, &agent, &run.claim, None, &run.rule, false) {
+            if let Err(e) = self.spawn(&task, &pick, &run.claim, None, false) {
                 self.block_claimed(task.id, &run.claim, format!("{e:#}"))?;
             }
         }

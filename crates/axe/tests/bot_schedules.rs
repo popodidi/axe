@@ -47,7 +47,7 @@ fn add(c: &mut Connection, name: &str, cron: &str) {
 
 fn claim(c: &mut Connection, now: i64) -> Option<bot::Claimed> {
     let tx = c.transaction().unwrap();
-    let got = bot::claim(&tx, "b", &format!("bot:{now}"), "d", "g", now).unwrap();
+    let got = bot::claim(&tx, "b", None, &format!("bot:{now}"), "d", "g", now).unwrap();
     tx.commit().unwrap();
     got
 }
