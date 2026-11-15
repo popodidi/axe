@@ -257,6 +257,9 @@ pub enum Target {
     /// A git credential for `https://<host>` (fields `token`, optional
     /// `username`), used by the dispatcher's clones and fetches.
     Git { host: String },
+    /// A login of one of the dispatcher's runtimes (`runtime::login_methods`);
+    /// one field, `secret`.
+    Runtime { runtime: String, login: String },
 }
 
 impl Target {
@@ -265,6 +268,7 @@ impl Target {
             Target::Task { task } => format!("task {task}"),
             Target::Bot { bot } => format!("bot {bot}"),
             Target::Git { host } => format!("git credential for {host}"),
+            Target::Runtime { runtime, login } => format!("runtime {runtime} login ({login})"),
         }
     }
 
@@ -285,6 +289,22 @@ impl Target {
                     bail!("a git credential is not an environment variable");
                 }
                 Ok(())
+            }
+            Target::Runtime { runtime, login } => {
+                crate::db::validate_name("runtime", runtime)?;
+                if !matches!(login.as_str(), "api_key" | "token") {
+                    bail!("unknown runtime login {login:?}");
+                }
+                match fields {
+                    [f] if f.name == "secret"
+                        && f.kind == Kind::Secret
+                        && f.required
+                        && f.env.is_none() =>
+                    {
+                        Ok(())
+                    }
+                    _ => bail!("a runtime login form has one required secret field, secret"),
+                }
             }
         }
     }
@@ -770,7 +790,7 @@ pub fn secrets_dir(run_root: &Path, target: &Target) -> Option<PathBuf> {
     match target {
         Target::Task { task } => Some(run_root.join(format!("task-{task}")).join(".secrets")),
         Target::Bot { bot } => Some(run_root.join(format!("bot-{bot}")).join(".secrets")),
-        Target::Git { .. } => None,
+        Target::Git { .. } | Target::Runtime { .. } => None,
     }
 }
 
@@ -785,6 +805,14 @@ fn private_dir(dir: &Path) -> Result<()> {
         .with_context(|| format!("create {}", dir.display()))?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+/// Writes `bytes` to `path` as a 0600 file in a 0700 folder.
+pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        private_dir(dir)?;
+    }
+    write_private(path, bytes)
 }
 
 /// Writes `bytes` to `path` as a 0600 file, replacing it atomically.
@@ -887,7 +915,14 @@ pub struct Desk {
     /// Delivered forms and their expiry (Unix seconds), so each is used once.
     used_path: PathBuf,
     used: Mutex<BTreeMap<String, i64>>,
+    /// The dispatcher config, for runtime logins.
+    cfg: Option<crate::config::Config>,
+    /// Runtimes with a device login in progress.
+    logins: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
 }
+
+/// How long a device login's first output is collected for the owner.
+pub const DEVICE_OUTPUT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Desk {
     pub fn new(
@@ -908,7 +943,15 @@ impl Desk {
             git_credentials,
             used_path,
             used: Mutex::new(used),
+            cfg: None,
+            logins: Default::default(),
         }
+    }
+
+    /// The desk with the dispatcher config, which runtime logins need.
+    pub fn with_config(mut self, cfg: crate::config::Config) -> Desk {
+        self.cfg = Some(cfg);
+        self
     }
 
     /// Opens the desk of `cfg`'s dispatcher `id`, making its key on first use.
@@ -920,7 +963,8 @@ impl Desk {
             cfg.run_root(),
             cfg.forms.git_credentials_path(),
             cfg.log_dir().join(".dispatcher").join("forms-used.json"),
-        ))
+        )
+        .with_config(cfg.clone()))
     }
 
     pub fn key(&self) -> &Key {
@@ -938,6 +982,7 @@ impl Desk {
         let r = match q["kind"].as_str() {
             Some("form_sign") => self.sign(q, now),
             Some("form_deliver") => self.deliver(q, now),
+            Some("runtime_login") => self.device_login(q),
             _ => Err(anyhow::anyhow!("unknown form job")),
         };
         r.unwrap_or_else(|e| json!({"error": format!("{e:#}")}))
@@ -950,6 +995,51 @@ impl Desk {
             json!({"form": spec.form, "expires": spec.expires, "signed": signed,
                   "fingerprint": self.key.fingerprint()}),
         )
+    }
+
+    fn runtime(&self, name: &str) -> Result<(crate::config::Config, crate::runtime::Runtime)> {
+        let cfg = self
+            .cfg
+            .clone()
+            .context("runtime logins need the dispatcher config")?;
+        let reg = crate::runtime::Registry::load(&cfg)?;
+        if !reg.managed {
+            bail!("this dispatcher has no runtime registry ([runtimes] dir)");
+        }
+        let rt = reg
+            .get(name)
+            .cloned()
+            .with_context(|| format!("no runtime {name} on this dispatcher"))?;
+        Ok((cfg, rt))
+    }
+
+    /// Starts a runtime's device code login; returns what the CLI printed.
+    fn device_login(&self, q: &Value) -> Result<Value> {
+        let name = q["runtime"].as_str().context("missing runtime")?;
+        let (cfg, rt) = self.runtime(name)?;
+        if !self
+            .logins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string())
+        {
+            bail!("a login of runtime {name} is already in progress");
+        }
+        let logins = std::sync::Arc::clone(&self.logins);
+        let key = name.to_string();
+        let r = rt.device_login(&cfg, DEVICE_OUTPUT_WAIT, move |_| {
+            logins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+        });
+        if r.is_err() {
+            self.logins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(name);
+        }
+        Ok(json!({"output": r?}))
     }
 
     fn deliver(&self, q: &Value, now: i64) -> Result<Value> {
@@ -1005,6 +1095,16 @@ impl Desk {
                 };
                 write_git_credential(&self.git_credentials, host, user, token)?;
                 Ok(json!({"target": spec.target.describe(), "host": host}))
+            }
+            Target::Runtime { runtime, login } => {
+                let value = match vals.get("secret") {
+                    Some(Val::Text(t)) => t,
+                    _ => bail!("a runtime login needs its secret"),
+                };
+                let (cfg, rt) = self.runtime(runtime)?;
+                rt.login(&cfg, login, value)?;
+                Ok(json!({"target": spec.target.describe(), "runtime": runtime,
+                          "note": "the runtime is ok again at its next login check"}))
             }
         }
     }
@@ -1302,6 +1402,50 @@ mod tests {
         );
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn runtime_login_target() {
+        let field = |s: &str| Field::parse(s).unwrap();
+        let mut r = Request {
+            purpose: "Log in".into(),
+            target: Target::Runtime {
+                runtime: "claude-1".into(),
+                login: "token".into(),
+            },
+            fields: vec![field("secret:secret:required")],
+            ttl: None,
+            from: String::new(),
+        };
+        r.validate().unwrap();
+        r.fields = vec![field("key:secret:required")];
+        assert!(r.validate().is_err());
+        r.fields = vec![field("secret:secret:required"), field("note:text")];
+        assert!(r.validate().is_err());
+        r.fields = vec![field("secret:secret:required")];
+        r.target = Target::Runtime {
+            runtime: "claude-1".into(),
+            login: "device".into(),
+        };
+        assert!(r.validate().is_err());
+        // A desk without a runtime registry refuses the delivery.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = desk(tmp.path());
+        r.target = Target::Runtime {
+            runtime: "claude-1".into(),
+            login: "token".into(),
+        };
+        let (spec, s) = signed(&d, &r, 1000);
+        let e = deliver(
+            &d,
+            &s,
+            &seal(&spec, &json!({"secret": "oat"})).unwrap(),
+            1001,
+        );
+        assert!(
+            e["error"].as_str().unwrap().contains("dispatcher config"),
+            "{e}"
+        );
     }
 
     #[test]

@@ -142,6 +142,9 @@ impl channel::Store for State {
         let f = self.forms.submit(sealed, remote::epoch())?;
         Ok(deliver_form(self, &f.spec.form).unwrap_or(f))
     }
+    fn runtime_login(&self, bot: &str, runtime: &str, method: &str) -> Result<String> {
+        runtime_login(self, bot, runtime, method)
+    }
 }
 
 impl State {
@@ -2719,21 +2722,14 @@ fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
     match (req.method.as_str(), path) {
         ("POST", ["api", "forms"]) => {
             let b: Ask = req.json()?;
-            b.request
-                .validate()
-                .map_err(|e| HttpError(400, format!("{e:#}")))?;
-            let job = json!({"kind": "form_sign", "request": b.request});
-            let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT)
-                .map_err(|e| HttpError(503, format!("cannot sign the form: {e}")))?;
-            if let Some(e) = v["error"].as_str() {
-                return Err(HttpError(400, format!("the dispatcher refused the form: {e}")).into());
+            if matches!(b.request.target, crate::sealed::Target::Runtime { .. }) {
+                return Err(HttpError(
+                    400,
+                    "runtime logins start from the owner's Telegram /runtimes".into(),
+                )
+                .into());
             }
-            let signed: crate::sealed::Signed = serde_json::from_value(v["signed"].clone())
-                .map_err(|e| HttpError(502, format!("invalid signed form: {e}")))?;
-            let f = st
-                .forms
-                .add(&b.request, signed, now)
-                .map_err(|e| HttpError(502, format!("{e:#}")))?;
+            let f = sign_form(st, &b.request, now)?;
             let mut out = f.view(page);
             out["telegram"] = form_prompt(st, &f, b.telegram, b.bot.as_deref());
             let fields: Vec<String> = f
@@ -2805,6 +2801,88 @@ fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
             format!("no route for {} /{}", req.method, path.join("/")),
         )
         .into()),
+    }
+}
+
+/// Validates `req`, has the dispatcher sign it and keeps the form.
+fn sign_form(st: &State, req: &crate::sealed::Request, now: i64) -> Result<form::Form> {
+    req.validate()
+        .map_err(|e| HttpError(400, format!("{e:#}")))?;
+    let job = json!({"kind": "form_sign", "request": req});
+    let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT)
+        .map_err(|e| HttpError(503, format!("cannot sign the form: {e}")))?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(HttpError(400, format!("the dispatcher refused the form: {e}")).into());
+    }
+    let signed: crate::sealed::Signed = serde_json::from_value(v["signed"].clone())
+        .map_err(|e| HttpError(502, format!("invalid signed form: {e}")))?;
+    Ok(st
+        .forms
+        .add(req, signed, now)
+        .map_err(|e| HttpError(502, format!("{e:#}")))?)
+}
+
+/// A login of a dispatcher runtime started from the owner's Telegram: a
+/// sealed form for a credential, or the device code the CLI printed.
+fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<String> {
+    let view = crate::runtime::view(&st.admission());
+    let harness = view["runtimes"]
+        .as_array()
+        .and_then(|l| l.iter().find(|r| r["name"] == runtime))
+        .and_then(|r| r["harness"].as_str())
+        .with_context(|| format!("the dispatcher reports no runtime {runtime}"))?
+        .to_string();
+    let Some((_, _, label)) = crate::runtime::login_methods(&harness)
+        .iter()
+        .find(|(m, _, _)| *m == method)
+    else {
+        bail!("runtime {runtime} ({harness}) has no {method} login");
+    };
+    if method == "device" {
+        let job = json!({"kind": "runtime_login", "runtime": runtime, "method": method});
+        let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT).map_err(anyhow::Error::msg)?;
+        if let Some(e) = v["error"].as_str() {
+            bail!("{e}");
+        }
+        eprintln!("axe server: runtime {runtime}: device login started");
+        return Ok(format!(
+            "Log in runtime {runtime} ({harness}) with a device code: open the link below and              enter the code. The runtime is ok again at its next login check.\n\n{}",
+            v["output"].as_str().unwrap_or("")
+        ));
+    }
+    let req = crate::sealed::Request {
+        purpose: format!("Log in runtime {runtime} ({harness}) with a {label}"),
+        target: crate::sealed::Target::Runtime {
+            runtime: runtime.into(),
+            login: method.into(),
+        },
+        fields: vec![crate::sealed::Field {
+            name: "secret".into(),
+            label: (*label).to_string(),
+            kind: crate::sealed::Kind::Secret,
+            required: true,
+            max: None,
+            choices: vec![],
+            env: None,
+        }],
+        ttl: None,
+        from: "/runtimes".into(),
+    };
+    let f = sign_form(st, &req, remote::epoch())?;
+    let sent = form_prompt(st, &f, Some(true), Some(bot));
+    eprintln!(
+        "axe server: form {}: asked for {}",
+        f.spec.form,
+        f.spec.target.describe()
+    );
+    match sent["sent"].as_bool() {
+        Some(true) => Ok(format!(
+            "Sealed form sent for runtime {runtime}: tap \"Open sealed form\"."
+        )),
+        _ => bail!(
+            "the form could not be sent: {}",
+            sent["reason"].as_str().unwrap_or("unknown")
+        ),
     }
 }
 

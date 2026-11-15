@@ -38,6 +38,12 @@ pub trait Store: Send + Sync + 'static {
     fn form_submit(&self, _sealed: &str) -> anyhow::Result<crate::form::Form> {
         anyhow::bail!("sealed forms need an axe server")
     }
+    /// Starts a login of a dispatcher runtime by `method`
+    /// (`runtime::login_methods`) on behalf of the owner, prompted through
+    /// `bot`; returns the text for the owner.
+    fn runtime_login(&self, _bot: &str, _runtime: &str, _method: &str) -> anyhow::Result<String> {
+        anyhow::bail!("runtime logins need an axe server")
+    }
 }
 
 /// Options of `axe bot tg send`.

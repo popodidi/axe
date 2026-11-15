@@ -122,6 +122,19 @@ or needs_login sends the owner one card (`[telegram] ops_bot`, default the
 first bot). Without `[runtimes]`, every agent is a runtime on the default
 login and always healthy.
 
+**Logins from Telegram.** `/runtimes` has a *Log in* button per registered
+runtime (`runtime::login_methods`):
+
+- **Claude Code.** A `claude setup-token` token or an API key arrives in a
+  sealed form (see below). It is kept as `<name>/login/CLAUDE_CODE_OAUTH_TOKEN`
+  or `ANTHROPIC_API_KEY` (0600) and set in the runtime's environment, where it
+  takes precedence over the login directory.
+- **Codex.** An API key arrives in a sealed form and goes to `codex login
+  --with-api-key` on stdin. Or `codex login --device-auth` runs on the
+  dispatcher, and its link and code are relayed to the owner.
+
+A runtime that needs a login is ok again at its next login check.
+
 **Session continuity.** Every later run resumes the first run's session with
 the agent's `resume_cmd`. A failed resume with no axe change
 retries fresh in the same pass. Prompts are one line (`[prompts]`); the agent

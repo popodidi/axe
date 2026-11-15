@@ -3158,3 +3158,112 @@ fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
         rig.srv().ok(&["runtimes"]).contains(&fp)
     });
 }
+
+#[test]
+fn runtimes_log_in_from_telegram_through_a_sealed_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let reg = dir.path().join("runtimes");
+    std::fs::create_dir_all(reg.join("claude-1")).unwrap();
+    std::fs::write(
+        reg.join("claude-1/runtime.toml"),
+        "harness = \"claude-code\"\nprobe = [\"false\"]\n",
+    )
+    .unwrap();
+    let rig = Rig::with(&format!(
+        "[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"true\"]\nharness = \"claude-code\"\nbot_args = []\n",
+        reg.display()
+    ));
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    let _disp = rig.srv().dispatcher(&[], &[]);
+    wait_for("the runtime report", 30, || {
+        rig.srv()
+            .ok(&["runtimes"])
+            .contains("claude-1 (claude-code)")
+    });
+
+    // /runtimes lists the runtime with a login button.
+    rig.stub.push(text_msg(100, 200, OWNER, OWNER, "/runtimes"));
+    wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
+    let list = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        keyboard_of(&list),
+        vec![vec![(
+            "Log in claude-1".to_string(),
+            "rtlogin:claude-1".to_string()
+        )]]
+    );
+    wait_for("the list recorded", 20, || rig.messages().len() == 1);
+    let list_tg = rig.messages().last().unwrap().3;
+
+    // The button offers the harness's methods.
+    let press_on = |update: i64, tg: i64, data: &str| {
+        rig.stub.push(press(update, tg, data));
+        rig.stub.wait_confirmed(update);
+    };
+    press_on(101, list_tg, "rtlogin:claude-1");
+    wait_for("the menu", 20, || rig.sent_to(OWNER).len() >= 2);
+    let menu = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        keyboard_of(&menu),
+        vec![
+            vec![(
+                "Setup-token token".to_string(),
+                "rtlogin:claude-1:token".to_string()
+            )],
+            vec![(
+                "API key".to_string(),
+                "rtlogin:claude-1:api_key".to_string()
+            )],
+        ]
+    );
+    wait_for("the menu recorded", 20, || rig.messages().len() == 2);
+    let menu_tg = rig.messages().last().unwrap().3;
+
+    // A method sends a sealed form for that runtime's login.
+    press_on(102, menu_tg, "rtlogin:claude-1:token");
+    wait_for("the form and its note", 20, || {
+        rig.sent_to(OWNER).len() >= 4
+    });
+    let sent = rig.sent_to(OWNER);
+    let prompt = sent
+        .iter()
+        .find(|p| p["reply_markup"]["keyboard"].is_array())
+        .unwrap();
+    let link = prompt["reply_markup"]["keyboard"][0][0]["web_app"]["url"]
+        .as_str()
+        .unwrap();
+    assert!(sent.iter().any(|p| p["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Sealed form sent for runtime claude-1")));
+    let spec = form_spec(&json!({ "link": link }));
+    assert_eq!(
+        spec.target,
+        axe::sealed::Target::Runtime {
+            runtime: "claude-1".into(),
+            login: "token".into()
+        }
+    );
+    let sealed = axe::sealed::seal(&spec, &json!({"secret": "oat-dummy-4411"})).unwrap();
+    rig.stub.push(json!({"update_id": 103, "message": {
+        "message_id": 600, "date": 0, "from": user(OWNER),
+        "chat": {"id": OWNER, "type": "private"},
+        "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}));
+    rig.stub.wait_confirmed(103);
+    wait_for("the delivery", 20, || {
+        rig.sent_to(OWNER)
+            .iter()
+            .any(|p| p["text"] == "Sealed form delivered: runtime claude-1 login (token).")
+    });
+    let file = reg.join("claude-1/login/CLAUDE_CODE_OAUTH_TOKEN");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "oat-dummy-4411");
+    assert!(rig.message_wakes().is_empty(), "no bot was woken");
+
+    // Runtime login forms come only from the owner's Telegram.
+    let r = ureq::post(&format!("{}/api/forms", rig.srv().url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .send_json(json!({"request": {"purpose": "x", "fields": [
+            {"name": "secret", "type": "secret", "required": true}],
+            "target": {"kind": "runtime", "runtime": "claude-1", "login": "token"}}}));
+    assert!(matches!(r, Err(ureq::Error::Status(400, _))), "{r:?}");
+}

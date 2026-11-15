@@ -118,6 +118,9 @@ pub struct Runtime {
     probe: Vec<String>,
     /// `state.json`; `None` for implicit runtimes (nothing is persisted).
     state_path: Option<PathBuf>,
+    /// `<name>/login/`: credentials a sealed form login wrote (0600 files
+    /// named by the variable the CLI reads); `None` for implicit runtimes.
+    login_secrets: Option<PathBuf>,
     pub health: Health,
 }
 
@@ -148,6 +151,33 @@ fn login_var(harness: &str) -> Option<(&'static str, &'static str)> {
         "claude-code" => Some(("CLAUDE_CONFIG_DIR", "~/.claude")),
         "codex" => Some(("CODEX_HOME", "~/.codex")),
         _ => None,
+    }
+}
+
+/// How each harness can be logged in from a sealed form or a relayed
+/// device code: (method, the environment variable it stores, or `None` for
+/// the CLI's own login; label).
+pub fn login_methods(
+    harness: &str,
+) -> &'static [(&'static str, Option<&'static str>, &'static str)] {
+    match harness {
+        // Claude Code reads an API key, or a `claude setup-token` token, from
+        // the environment ahead of its login directory.
+        "claude-code" => &[
+            (
+                "token",
+                Some("CLAUDE_CODE_OAUTH_TOKEN"),
+                "setup-token token",
+            ),
+            ("api_key", Some("ANTHROPIC_API_KEY"), "API key"),
+        ],
+        // `codex login --with-api-key` reads the key on stdin;
+        // `codex login --device-auth` prints a URL and a code.
+        "codex" => &[
+            ("device", None, "device code"),
+            ("api_key", None, "API key"),
+        ],
+        _ => &[],
     }
 }
 
@@ -189,10 +219,204 @@ impl Runtime {
         let Some((var, _)) = login_var(&self.harness) else {
             return (vec![], vec![]);
         };
-        match &self.login_dir {
+        let (mut set, remove) = match &self.login_dir {
             Some(d) => (vec![(var, d.display().to_string())], vec![]),
             None => (vec![], vec![var]),
+        };
+        // A credential from a sealed form login: the CLI reads it from the
+        // environment, ahead of its login directory.
+        if let Some(dir) = &self.login_secrets {
+            for (_, v, _) in login_methods(&self.harness) {
+                let Some(v) = v else { continue };
+                if let Ok(value) = std::fs::read_to_string(dir.join(v)) {
+                    set.push((v, value.trim().to_string()));
+                }
+            }
         }
+        (set, remove)
+    }
+
+    /// Logs this runtime in with `value` by `method` ([`login_methods`]):
+    /// stores the credential the CLI reads from the environment (replacing
+    /// the other one), or runs the CLI's own login with the value on stdin.
+    /// The value is never in an argument, a log or an error.
+    pub fn login(&self, cfg: &Config, method: &str, value: &str) -> Result<()> {
+        let Some(dir) = &self.login_secrets else {
+            bail!("runtime {} is not in the runtime registry", self.name);
+        };
+        let Some((_, var, _)) = login_methods(&self.harness)
+            .iter()
+            .find(|(m, _, _)| *m == method)
+        else {
+            bail!(
+                "runtime {} ({}) has no {method} login",
+                self.name,
+                self.harness
+            );
+        };
+        if method == "device" {
+            bail!("a device code login takes no value");
+        }
+        if value.is_empty() || value.contains(['\n', '\r', '\0']) {
+            bail!("the credential must be one line");
+        }
+        match var {
+            Some(var) => {
+                crate::sealed::write_private_file(&dir.join(var), value.as_bytes())?;
+                for (_, other, _) in login_methods(&self.harness) {
+                    if let Some(o) = other.filter(|o| o != var) {
+                        let _ = std::fs::remove_file(dir.join(o));
+                    }
+                }
+                Ok(())
+            }
+            None => self.cli_login(cfg, &["login", "--with-api-key"], value),
+        }
+    }
+
+    /// Starts `codex login --device-auth` and returns what it printed in the
+    /// first `wait` (the URL and the one-time code, ANSI codes removed). The
+    /// login keeps running in the background until the owner approves it or
+    /// it gives up; `done` gets its outcome.
+    pub fn device_login(
+        &self,
+        cfg: &Config,
+        wait: Duration,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) -> Result<String> {
+        if !login_methods(&self.harness)
+            .iter()
+            .any(|(m, _, _)| *m == "device")
+        {
+            bail!(
+                "runtime {} ({}) has no device code login",
+                self.name,
+                self.harness
+            );
+        }
+        if self.login_secrets.is_none() {
+            bail!("runtime {} is not in the runtime registry", self.name);
+        }
+        let mut child = self
+            .cli(cfg, &["login", "--device-auth"])?
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("runtime {}: start the device login", self.name))?;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        for pipe in [
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead as _;
+                for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        let end = Instant::now() + wait;
+        let mut lines = Vec::new();
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(l) => {
+                    let l = strip_ansi(&l);
+                    if !l.trim().is_empty() && lines.len() < 20 {
+                        lines.push(l.trim_end().to_string());
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let name = self.name.clone();
+        std::thread::spawn(move || {
+            // Drain the rest so the CLI never blocks on a full pipe.
+            let drain = std::thread::spawn(move || for _ in rx {});
+            let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            let _ = drain.join();
+            eprintln!(
+                "axe dispatcher: runtime {name}: device login {}",
+                if ok { "succeeded" } else { "failed" }
+            );
+            done(ok);
+        });
+        if lines.is_empty() {
+            bail!("runtime {}: the device login printed nothing", self.name);
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// The CLI this runtime's agent template runs (its first argument).
+    pub fn program(&self, cfg: &Config) -> Result<String> {
+        cfg.agents
+            .get(&self.agent)
+            .and_then(|a| a.cmd.first().cloned())
+            .with_context(|| format!("runtime {}: agent {} has no command", self.name, self.agent))
+    }
+
+    /// The runtime's CLI with `args` in its login environment.
+    pub fn cli(&self, cfg: &Config, args: &[&str]) -> Result<Command> {
+        let mut cmd = Command::new(self.program(cfg)?);
+        cmd.args(args);
+        let (set, remove) = self.env();
+        for v in remove {
+            cmd.env_remove(v);
+        }
+        for (k, v) in set {
+            cmd.env(k, v);
+        }
+        Ok(cmd)
+    }
+
+    fn cli_login(&self, cfg: &Config, args: &[&str], value: &str) -> Result<()> {
+        use std::io::Write as _;
+        let mut child = self
+            .cli(cfg, args)?
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("runtime {}: start the login", self.name))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(value.as_bytes())?;
+        }
+        let started = Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait()? {
+                break s;
+            }
+            if started.elapsed() > PROBE_TIMEOUT {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("runtime {}: the login timed out", self.name);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        if !status.success() {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                use std::io::Read as _;
+                let _ = e.read_to_string(&mut err);
+            }
+            let err = err.replace(value, "<redacted>");
+            let err: String = err.trim().chars().take(MAX_MESSAGE).collect();
+            bail!("runtime {}: the login failed ({status}): {err}", self.name);
+        }
+        Ok(())
     }
 
     fn save(&self) -> Result<()> {
@@ -230,6 +454,7 @@ impl Registry {
                     disabled: false,
                     probe: vec![],
                     state_path: None,
+                    login_secrets: None,
                     health: Health::default(),
                 })
                 .collect();
@@ -565,10 +790,32 @@ impl Runtime {
             plan: f.plan,
             disabled: f.disabled,
             probe,
+            login_secrets: Some(path.with_file_name("login")),
             state_path: Some(state_path),
             health,
         })
     }
+}
+
+/// `s` without ANSI escape sequences.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The latest quota window a Claude Code run reported (its last
@@ -698,5 +945,133 @@ pub fn alert_text(a: &Value) -> String {
     match message.is_empty() {
         true => head,
         false => format!("{head}\n\n{} {message}", a["class"].as_str().unwrap_or("")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A fake Codex: `login --with-api-key` keeps stdin in `$CODEX_HOME/key`
+    /// (and refuses `bad`, echoing it); `login --device-auth` prints a link
+    /// and a code in colour, then exits 0 after a moment.
+    const FAKE_CODEX: &str = r#"#!/bin/sh
+case "$1 $2" in
+"login --with-api-key")
+  read -r key
+  if [ "$key" = "bad-key-1" ]; then echo "invalid key $key" >&2; exit 1; fi
+  printf '%s' "$key" > "$CODEX_HOME/key"; exit 0;;
+"login --device-auth")
+  printf '\033[1mOpen https://example.test/device\033[0m\nCode: ABCD-1234\n'; sleep 1; exit 0;;
+esac
+exit 2
+"#;
+
+    fn registry(dir: &Path) -> (Config, Registry) {
+        let codex = dir.join("fake-codex");
+        std::fs::write(&codex, FAKE_CODEX).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let reg = dir.join("runtimes");
+        for (name, toml) in [
+            ("claude-1", "harness = \"claude-code\"\n"),
+            (
+                "codex-1",
+                &format!(
+                    "harness = \"codex\"\nlogin_dir = \"{}\"\n",
+                    dir.join("codex-home").display()
+                ),
+            ),
+        ] {
+            std::fs::create_dir_all(reg.join(name)).unwrap();
+            std::fs::write(
+                reg.join(name).join("runtime.toml"),
+                format!("{toml}probe = [\"false\"]\n"),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(dir.join("codex-home")).unwrap();
+        let cfg = Config::parse(&format!(
+            "[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"claude\"]\nharness = \"claude-code\"\n\
+             [agents.codex]\ncmd = [\"{}\"]\nsession = \"none\"\nharness = \"codex\"\n",
+            reg.display(),
+            codex.display()
+        ))
+        .unwrap();
+        let r = Registry::load(&cfg).unwrap();
+        (cfg, r)
+    }
+
+    #[test]
+    fn a_claude_login_is_a_private_env_credential_replacing_the_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, reg) = registry(tmp.path());
+        let rt = reg.get("claude-1").unwrap();
+        rt.login(&cfg, "token", "oat-123").unwrap();
+        let file = tmp
+            .path()
+            .join("runtimes/claude-1/login/CLAUDE_CODE_OAUTH_TOKEN");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "oat-123");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (set, _) = rt.env();
+        assert!(set.contains(&("CLAUDE_CODE_OAUTH_TOKEN", "oat-123".into())));
+        rt.login(&cfg, "api_key", "sk-1").unwrap();
+        let (set, _) = rt.env();
+        assert!(set.contains(&("ANTHROPIC_API_KEY", "sk-1".into())));
+        assert!(!set.iter().any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"));
+        assert!(rt.login(&cfg, "device", "").is_err());
+        assert!(rt.login(&cfg, "bogus", "x").is_err());
+        assert!(rt.login(&cfg, "token", "a\nb").is_err());
+        // Without a registry there is nowhere to keep a login.
+        let plain =
+            Config::parse("[agents.claude]\ncmd = [\"claude\"]\nharness = \"claude-code\"\n")
+                .unwrap();
+        let implicit = Registry::load(&plain).unwrap();
+        assert!(implicit
+            .get("claude")
+            .unwrap()
+            .login(&plain, "token", "x")
+            .is_err());
+    }
+
+    #[test]
+    fn a_codex_api_key_goes_to_its_cli_on_stdin_and_errors_hide_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, reg) = registry(tmp.path());
+        let rt = reg.get("codex-1").unwrap();
+        rt.login(&cfg, "api_key", "sk-codex-9").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("codex-home/key")).unwrap(),
+            "sk-codex-9"
+        );
+        let e = rt
+            .login(&cfg, "api_key", "bad-key-1")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("login failed"), "{e}");
+        assert!(e.contains("<redacted>") && !e.contains("bad-key-1"), "{e}");
+    }
+
+    #[test]
+    fn a_codex_device_login_relays_its_link_and_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, reg) = registry(tmp.path());
+        let rt = reg.get("codex-1").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = rt
+            .device_login(&cfg, Duration::from_millis(500), move |ok| {
+                tx.send(ok).unwrap();
+            })
+            .unwrap();
+        assert_eq!(out, "Open https://example.test/device\nCode: ABCD-1234");
+        assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap());
+        assert!(reg
+            .get("claude-1")
+            .unwrap()
+            .device_login(&cfg, Duration::ZERO, |_| {})
+            .is_err());
     }
 }
