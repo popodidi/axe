@@ -126,6 +126,24 @@ pub struct Dispatcher {
     runtime_hold_logged: Option<String>,
     /// Bots held for runtime health, with the reason last logged.
     bots_held: BTreeMap<String, String>,
+    /// The sealed form key's public half (`sealed::Desk::public`), reported
+    /// to the server; null when the key does not exist.
+    form_key: Value,
+}
+
+/// The public half of the sealed form key at `path`, when it exists (the
+/// control connection makes it at start).
+fn form_key(path: &std::path::Path) -> Value {
+    if !path.exists() {
+        return Value::Null;
+    }
+    match crate::sealed::Key::load_or_create(path) {
+        Ok(k) => json!({"pubkey": k.pubkey(), "fingerprint": k.fingerprint()}),
+        Err(e) => {
+            eprintln!("axe dispatcher: sealed form key: {e:#}");
+            Value::Null
+        }
+    }
 }
 
 /// A resume-to-fresh fallback waiting for resource admission.
@@ -286,6 +304,7 @@ pub fn interrupted_notice() -> String {
 impl Dispatcher {
     pub fn new(cfg: Config, store: Store) -> Self {
         let url = store.client.base().to_string();
+        let cfg_forms_path = cfg.forms.key_path();
         let gate = cfg
             .resources
             .clone()
@@ -322,6 +341,7 @@ impl Dispatcher {
             alert_failed: false,
             runtime_hold_logged: None,
             bots_held: BTreeMap::new(),
+            form_key: form_key(&cfg_forms_path),
         }
     }
 
@@ -690,6 +710,7 @@ impl Dispatcher {
         admission::apply_hold(&mut view, &hold);
         view["pools"] = self.pools();
         view["runtimes"] = runtimes;
+        view["forms"] = self.form_key.clone();
         let body = json!({"id":id,"generation":generation,"admission":view});
         let failed = self
             .store
@@ -1211,6 +1232,15 @@ impl Dispatcher {
         // The runtime's login: its directory variable, or none for the default.
         let (login, unset) = rt.env();
         env.extend(login);
+        // Sealed form values for this task: the folder, and the env ones.
+        let secrets = crate::sealed::secrets_dir(
+            &self.cfg.run_root(),
+            &crate::sealed::Target::Task { task: task.id },
+        )
+        .expect("a task has a secrets folder");
+        env.push(("AXE_SECRETS_DIR", secrets.display().to_string()));
+        let secret_env = crate::sealed::launch_env(&secrets);
+        env.extend(secret_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
         let mut remove = vec!["AXE_WORKTREE"];
         remove.extend(unset);
         let mut command = agent_proc::command(&argv, &cwd, &remove, &env, log)?;

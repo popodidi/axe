@@ -33,6 +33,11 @@ pub trait Store: Send + Sync + 'static {
     fn runtimes(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
+    /// Takes a channel's sealed form reply and delivers it to the dispatcher
+    /// (`form.rs`); returns the form after the attempt.
+    fn form_submit(&self, _sealed: &str) -> anyhow::Result<crate::form::Form> {
+        anyhow::bail!("sealed forms need an axe server")
+    }
 }
 
 /// Options of `axe bot tg send`.

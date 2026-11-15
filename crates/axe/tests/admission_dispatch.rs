@@ -50,9 +50,13 @@ max_runs = 2
 [pool]
 total = {total}
 {extra}
+[forms]
+key_file = "{key}"
 "#,
         ws = ws.display(),
         logs = dir.path().join("logs").display(),
+        // The control connection makes the sealed form key: never in $HOME.
+        key = dir.path().join("dispatcher.key").display(),
     ))
     .unwrap();
     let db = dir.path().join("t.db");

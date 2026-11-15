@@ -3011,3 +3011,150 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     assert_eq!(rig.stub.calls("answerCallbackQuery").len(), 1);
     assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
 }
+
+/// `axe form ask` once the dispatcher is connected (it signs the form).
+fn form_ask(rig: &Rig, args: &[&str]) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut a = vec!["form", "ask", "--json"];
+        a.extend_from_slice(args);
+        let out = rig.srv().run(&a);
+        if out.status.success() {
+            return serde_json::from_slice(&out.stdout).unwrap();
+        }
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            err.contains("not connected") && Instant::now() < deadline,
+            "form ask: {err}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn form_spec(v: &Value) -> axe::sealed::Spec {
+    let token = v["link"].as_str().unwrap().split_once("#f=").unwrap().1;
+    let (spec, sig) = token.split_once('.').unwrap();
+    axe::sealed::Signed {
+        spec: spec.into(),
+        sig: sig.into(),
+    }
+    .decode()
+    .unwrap()
+}
+
+#[test]
+fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
+    let rig = Rig::new();
+    // The dispatcher here only signs and delivers forms: no bot runs.
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    let _disp = rig.srv().dispatcher(&[], &[]);
+    let v = form_ask(
+        &rig,
+        &[
+            "--task",
+            "5",
+            "--purpose",
+            "API key for a test",
+            "--field",
+            "key:secret:required",
+        ],
+    );
+    assert_eq!(v["telegram"]["sent"], true, "{v}");
+    assert_eq!(v["telegram"]["bot"], "cos");
+    let spec = form_spec(&v);
+    let prompt = rig.sent_to(OWNER).pop().unwrap();
+    let text = prompt["text"].as_str().unwrap();
+    assert!(text.contains("API key for a test"), "{text}");
+    assert!(text.contains(v["fingerprint"].as_str().unwrap()), "{text}");
+    assert_eq!(prompt["parse_mode"], "HTML");
+    let button = &prompt["reply_markup"]["keyboard"][0][0];
+    assert_eq!(button["text"], "Open sealed form");
+    assert_eq!(button["web_app"]["url"], v["link"]);
+    assert_eq!(prompt["reply_markup"]["one_time_keyboard"], true);
+
+    // A stranger's Mini App data is dropped by the sender filter.
+    let sealed = axe::sealed::seal(&spec, &json!({"key": "dummy-key-55aa"})).unwrap();
+    let app = |update: i64, from: i64| {
+        json!({"update_id": update, "message": {
+            "message_id": 300 + update, "date": 0, "from": user(from),
+            "chat": {"id": from, "type": "private"},
+            "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}})
+    };
+    rig.stub.push(app(10, STRANGER));
+    rig.stub.wait_confirmed(10);
+    let shown: Value =
+        serde_json::from_str(&rig.srv().ok(&["form", "show", &spec.form, "--json"])).unwrap();
+    assert_eq!(shown["state"], "open");
+
+    // The owner's comes back through the hook and is delivered.
+    let before = rig.sent_to(OWNER).len();
+    rig.stub.push(app(11, OWNER));
+    rig.stub.wait_confirmed(11);
+    wait_for("the form reply", 20, || rig.sent_to(OWNER).len() > before);
+    let reply = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        reply["text"].as_str().unwrap(),
+        "Sealed form delivered to task 5: key."
+    );
+    assert_eq!(reply["reply_markup"], json!({"remove_keyboard": true}));
+    assert_eq!(reply["reply_parameters"]["message_id"], 311);
+    let secret = rig.dir.path().join("ws/.runs/task-5/.secrets/key");
+    assert_eq!(std::fs::read_to_string(secret).unwrap(), "dummy-key-55aa");
+    assert!(rig.inbound().is_empty(), "a form reply is not stored");
+    assert!(rig.message_wakes().is_empty(), "and wakes no bot");
+
+    // A pasted sealed reply works the same; a second one is refused.
+    let v2 = form_ask(
+        &rig,
+        &[
+            "--task",
+            "5",
+            "--purpose",
+            "Code",
+            "--field",
+            "code:code:required",
+        ],
+    );
+    let spec2 = form_spec(&v2);
+    let pasted = axe::sealed::seal(&spec2, &json!({"code": "123456"}))
+        .unwrap()
+        .text();
+    for (i, update) in [20, 21].into_iter().enumerate() {
+        let before = rig.sent_to(OWNER).len();
+        rig.stub
+            .push(text_msg(update, 400 + update, OWNER, OWNER, &pasted));
+        rig.stub.wait_confirmed(update);
+        wait_for("the paste reply", 20, || rig.sent_to(OWNER).len() > before);
+        let r = rig.sent_to(OWNER).pop().unwrap();
+        let t = r["text"].as_str().unwrap();
+        if i == 0 {
+            assert_eq!(t, "Sealed form delivered to task 5: code.");
+        } else {
+            assert!(t.contains("already used"), "{t}");
+        }
+    }
+    assert!(rig.inbound().is_empty());
+
+    // Neither ciphertext nor value is in the database.
+    let db = std::fs::read(&rig.srv().db).unwrap();
+    let wal = std::fs::read(rig.srv().db.with_extension("db-wal")).unwrap_or_default();
+    for needle in [
+        "dummy-key-55aa",
+        "123456",
+        &sealed.text()[..40],
+        &pasted[..40],
+    ] {
+        for bytes in [&db, &wal] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{needle} is stored"
+            );
+        }
+    }
+
+    // /runtimes shows the dispatcher key's fingerprint.
+    let fp = v["fingerprint"].as_str().unwrap().to_string();
+    wait_for("the key in axe runtimes", 20, || {
+        rig.srv().ok(&["runtimes"]).contains(&fp)
+    });
+}

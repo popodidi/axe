@@ -613,6 +613,7 @@ pub fn view(admission: &Value) -> Value {
         "runtimes": admission["runtimes"]["list"].as_array().cloned().unwrap_or_default(),
         "report_age_seconds": age,
         "stale": stale,
+        "key": admission["forms"],
     })
 }
 
@@ -665,6 +666,11 @@ pub fn render(v: &Value) -> String {
         out.push(format!(
             "(stale: the dispatcher last reported {}s ago)",
             v["report_age_seconds"].as_u64().unwrap_or(0)
+        ));
+    }
+    if let Some(fp) = v["key"]["fingerprint"].as_str() {
+        out.push(format!(
+            "dispatcher key {fp} (sealed forms show it; compare once)"
         ));
     }
     out.join("\n")

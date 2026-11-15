@@ -900,6 +900,24 @@ impl Store {
         let base = self.client.base().to_owned();
         let token = self.client.token()?;
         let control = self.client.clone();
+        // Sealed forms: the dispatcher key is made on first start.
+        let desk = {
+            let id = self.journal.lock().unwrap().id.clone();
+            match crate::sealed::Desk::open(cfg, &id) {
+                Ok(d) => {
+                    eprintln!(
+                        "axe dispatcher: sealed form key {} ({})",
+                        d.key().fingerprint(),
+                        cfg.forms.key_path().display()
+                    );
+                    Some(Arc::new(d))
+                }
+                Err(e) => {
+                    eprintln!("axe dispatcher: sealed forms disabled: {e:#}");
+                    None
+                }
+            }
+        };
         std::thread::spawn(move || {
             let mut first = true;
             while !stop.load(Ordering::SeqCst) {
@@ -1016,6 +1034,13 @@ impl Store {
                                 },
                                 None => {
                                     json!({"unavailable":"Log not registered on this dispatcher"})
+                                }
+                            }
+                        } else if q["kind"] == "form_sign" || q["kind"] == "form_deliver" {
+                            match &desk {
+                                Some(d) => d.handle(&q, epoch()),
+                                None => {
+                                    json!({"error":"sealed forms are disabled on this dispatcher (see its log)"})
                                 }
                             }
                         } else {

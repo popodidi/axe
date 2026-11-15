@@ -101,15 +101,51 @@ pub fn ensure_clone(cfg: &Config, name: &str) -> Result<bool> {
         .context("non-UTF-8 canonical clone path")?;
     let tmp = parent.join(format!(".{leaf}.axe-clone-{}", uuid::Uuid::new_v4()));
     let tmp_str = tmp.to_str().context("non-UTF-8 canonical clone path")?;
-    let cloned = git_timeout(
-        parent,
-        &["clone", "--quiet", "--", url, tmp_str],
-        CLONE_TIMEOUT,
-    )
-    .and_then(|_| {
-        std::fs::rename(&tmp, &canonical)
-            .with_context(|| format!("move the clone to {}", canonical.display()))
-    });
+    let clone = |extra: &[&str]| {
+        let mut args = extra.to_vec();
+        args.extend(["clone", "--quiet", "--", url, tmp_str]);
+        git_timeout(parent, &args, CLONE_TIMEOUT)
+    };
+    let mut cloned = clone(&[]);
+    // A clone the usual credentials cannot make is tried again with only
+    // the git credential a sealed form stored for its host (`sealed.rs`),
+    // and that clone keeps using it.
+    let helper = form_credential_helper(cfg, url);
+    let mut with_form = false;
+    if let (Err(_), Some(h)) = (&cloned, &helper) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        cloned = clone(&[
+            "-c",
+            "credential.helper=",
+            "-c",
+            &format!("credential.helper={h}"),
+        ]);
+        with_form = cloned.is_ok();
+    }
+    let cloned = cloned
+        .and_then(|_| {
+            if let (true, Some(h)) = (with_form, &helper) {
+                git(
+                    &tmp,
+                    &[
+                        "config",
+                        "--local",
+                        "--replace-all",
+                        "credential.helper",
+                        "",
+                    ],
+                )?;
+                git(
+                    &tmp,
+                    &["config", "--local", "--add", "credential.helper", h],
+                )?;
+            }
+            Ok(())
+        })
+        .and_then(|_| {
+            std::fs::rename(&tmp, &canonical)
+                .with_context(|| format!("move the clone to {}", canonical.display()))
+        });
     if let Err(e) = cloned {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e.context(format!(
@@ -118,6 +154,23 @@ pub fn ensure_clone(cfg: &Config, name: &str) -> Result<bool> {
         )));
     }
     Ok(true)
+}
+
+/// The `credential.helper` value that reads the sealed form git credentials
+/// file, when it has a credential for `url`'s host (`https://` only).
+fn form_credential_helper(cfg: &Config, url: &str) -> Option<String> {
+    let host = url
+        .strip_prefix("https://")?
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?;
+    let path = cfg.forms.git_credentials_path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let suffix = format!("@{host}");
+    text.lines()
+        .any(|l| l.trim_end().ends_with(&suffix))
+        .then(|| format!("store --file={}", path.display()))
 }
 
 fn check(
@@ -341,4 +394,40 @@ fn try_refresh(ready: &Ready, path: &Path) -> Result<Refresh> {
     }
     git(path, &["merge", "--ff-only", "--quiet", base])?;
     Ok(Refresh::Updated { from: head, to })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_form_credential_applies_to_its_host_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("git-credentials");
+        let cfg = crate::config::Config::parse(&format!(
+            "[forms]\ngit_credentials = \"{}\"\n",
+            path.display()
+        ))
+        .unwrap();
+        assert_eq!(
+            super::form_credential_helper(&cfg, "https://github.com/o/r.git"),
+            None
+        );
+        crate::sealed::write_git_credential(&path, "github.com", "x-access-token", "t").unwrap();
+        let want = Some(format!("store --file={}", path.display()));
+        assert_eq!(
+            super::form_credential_helper(&cfg, "https://github.com/o/r.git"),
+            want
+        );
+        assert_eq!(
+            super::form_credential_helper(&cfg, "https://u@github.com/o/r"),
+            want
+        );
+        assert_eq!(
+            super::form_credential_helper(&cfg, "https://gitlab.com/o/r.git"),
+            None
+        );
+        assert_eq!(
+            super::form_credential_helper(&cfg, "git@github.com:o/r.git"),
+            None
+        );
+    }
 }
