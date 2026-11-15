@@ -200,7 +200,11 @@ fn least_used_healthy_runtime_runs_each_task_on_its_own_login() {
     ]);
     std::fs::write(rig.out().join("sleep"), "").unwrap();
     let (a, b) = (rig.add(), rig.add());
-    rig.dispatch();
+    let stderr = rig.dispatch();
+    assert!(
+        stderr.contains("axe dispatcher: runtimes claude-1 (claude-code, ok), claude-2 (claude-code, ok), codex-1 (codex, ok)"),
+        "{stderr}"
+    );
     let mut calls = rig.calls();
     calls.sort();
     assert_eq!(

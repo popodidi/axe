@@ -718,6 +718,16 @@ impl Dispatcher {
             "axe dispatcher: pool total={} bots={bots}",
             self.cfg.pool_total()
         );
+        if self.runtimes.managed {
+            let now = now_unix();
+            let list: Vec<String> = self
+                .runtimes
+                .runtimes
+                .iter()
+                .map(|r| format!("{} ({}, {})", r.name, r.harness, r.state(now)))
+                .collect();
+            eprintln!("axe dispatcher: runtimes {}", list.join(", "));
+        }
         match &self.gate {
             Some(g) => eprintln!("axe dispatcher: resource admission {}", g.summary()),
             None => eprintln!("axe dispatcher: resource admission off (no [resources])"),
