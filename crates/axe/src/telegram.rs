@@ -66,6 +66,10 @@ const OWNER_COMMANDS: [&str; 7] = [
 ];
 /// Callback data of the button on a runtime card.
 const RUNTIMES_BUTTON: &str = "runtimes";
+/// Callback data prefix of the runtime login buttons:
+/// `rtlogin:<runtime>` opens the method menu, `rtlogin:<runtime>:<method>`
+/// starts that login.
+const LOGIN_BUTTON: &str = "rtlogin:";
 /// First wait after a failed board edit; it doubles up to [`BOARD_RETRY_MAX`].
 const BOARD_RETRY: Duration = Duration::from_secs(5);
 const BOARD_RETRY_MAX: Duration = Duration::from_secs(300);
@@ -1005,7 +1009,8 @@ impl Gateway {
         data: &str,
         query: Option<&str>,
     ) -> Result<bool> {
-        if data != RUNTIMES_BUTTON {
+        let login = data.strip_prefix(LOGIN_BUTTON);
+        if data != RUNTIMES_BUTTON && login.is_none() {
             return Ok(false);
         }
         let stored = {
@@ -1016,7 +1021,12 @@ impl Gateway {
                 None => None,
             }
         };
-        if !stored.is_some_and(|m| m.flags["runtime_alert"] == true) {
+        let flags = stored.map(|m| m.flags).unwrap_or_default();
+        let ours = match login {
+            None => flags["runtime_alert"] == true,
+            Some(_) => flags["runtimes_list"] == true || flags["runtime_menu"] == true,
+        };
+        if !ours {
             return Ok(false);
         }
         if let Some(qid) = query {
@@ -1027,11 +1037,94 @@ impl Gateway {
                 eprintln!("telegram: bot {}: {e}", b.name);
             }
         }
-        let text = crate::runtime::render(&store.runtimes());
-        let p = json!({"chat_id": chat, "text": text, "reply_parameters": {"message_id": tg_msg}});
+        let thread = None;
+        match login.map(|l| l.split_once(':')) {
+            None => self.runtimes_reply(b, store, chat, Some(tg_msg), thread),
+            Some(None) => {
+                let name = login.unwrap_or_default();
+                let view = store.runtimes();
+                let harness = view["runtimes"]
+                    .as_array()
+                    .and_then(|l| l.iter().find(|r| r["name"] == name))
+                    .and_then(|r| r["harness"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let buttons: Vec<(String, String)> = crate::runtime::login_methods(&harness)
+                    .iter()
+                    .map(|(m, _, label)| (capitalize(label), format!("{LOGIN_BUTTON}{name}:{m}")))
+                    .filter(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT)
+                    .collect();
+                let text = if buttons.is_empty() {
+                    format!("Runtime {name} cannot be logged in from here.")
+                } else {
+                    format!(
+                        "Log in runtime {name} ({harness}). A credential goes through a sealed \
+                         form, so only the dispatcher reads it."
+                    )
+                };
+                let rows = vec![1; buttons.len()];
+                self.system_say(
+                    b,
+                    store,
+                    chat,
+                    tg_msg,
+                    &text,
+                    &buttons,
+                    &rows,
+                    json!({"runtime_menu": true}),
+                );
+            }
+            Some(Some((name, method))) => {
+                let text = store
+                    .runtime_login(&b.name, name, method)
+                    .unwrap_or_else(|e| format!("Login of runtime {name} not started: {e:#}"));
+                self.system_say(b, store, chat, tg_msg, &text, &[], &[], json!({}));
+            }
+        }
+        Ok(true)
+    }
+
+    /// The runtime list, with a login button per runtime the dispatcher
+    /// manages, in reply to `reply_to`.
+    fn runtimes_reply(
+        &self,
+        b: &TgBot,
+        store: &dyn Store,
+        chat: i64,
+        reply_to: Option<i64>,
+        thread: Option<i64>,
+    ) {
+        let view = store.runtimes();
+        let text = crate::runtime::render(&view);
+        let buttons: Vec<(String, String)> = if view["managed"] == true {
+            view["runtimes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter(|r| {
+                    !crate::runtime::login_methods(r["harness"].as_str().unwrap_or("")).is_empty()
+                })
+                .filter_map(|r| r["name"].as_str().map(String::from))
+                .map(|n| (format!("Log in {n}"), format!("{LOGIN_BUTTON}{n}")))
+                .filter(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut p = json!({"chat_id": chat, "text": text});
+        if let Some(r) = reply_to {
+            p["reply_parameters"] = json!({"message_id": r, "allow_sending_without_reply": true});
+        }
+        if let Some(t) = thread {
+            p["message_thread_id"] = json!(t);
+        }
+        if !buttons.is_empty() {
+            p["reply_markup"] = keyboard(&buttons, &[]);
+        }
         match b.paced(chat, || b.api.call("sendMessage", &p)) {
             Ok(sent) => {
-                record_out(
+                let r = record_out(
                     store,
                     &b.name,
                     &sent,
@@ -1039,12 +1132,49 @@ impl Gateway {
                     &text,
                     None,
                     json!([]),
-                    json!({"system": true}),
-                )?;
+                    json!({"system": true, "runtimes_list": true}),
+                );
+                if let Err(e) = r {
+                    eprintln!("telegram: bot {}: record runtimes reply: {e:#}", b.name);
+                }
             }
             Err(e) => eprintln!("telegram: bot {}: runtimes reply: {e}", b.name),
         }
-        Ok(true)
+    }
+
+    /// A system reply with optional inline buttons and extra flags.
+    #[allow(clippy::too_many_arguments)]
+    fn system_say(
+        &self,
+        b: &TgBot,
+        store: &dyn Store,
+        chat: i64,
+        reply_to: i64,
+        text: &str,
+        buttons: &[(String, String)],
+        rows: &[usize],
+        extra: Value,
+    ) {
+        let mut p = json!({"chat_id": chat, "text": text,
+            "reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": true},
+            "link_preview_options": {"is_disabled": true}});
+        if !buttons.is_empty() {
+            p["reply_markup"] = keyboard(buttons, rows);
+        }
+        let mut flags = json!({"system": true});
+        if let (Some(f), Some(e)) = (flags.as_object_mut(), extra.as_object()) {
+            f.extend(e.clone());
+        }
+        match b.paced(chat, || b.api.call("sendMessage", &p)) {
+            Ok(sent) => {
+                if let Err(e) =
+                    record_out(store, &b.name, &sent, "text", text, None, json!([]), flags)
+                {
+                    eprintln!("telegram: bot {}: record reply: {e:#}", b.name);
+                }
+            }
+            Err(e) => eprintln!("telegram: bot {}: reply: {e}", b.name),
+        }
     }
 
     /// Downloads a `.sealed` document's text.
@@ -1459,6 +1589,10 @@ impl Gateway {
         cmd: &str,
         arg: &str,
     ) -> Result<()> {
+        if cmd == "runtimes" {
+            self.runtimes_reply(b, store, chat, Some(tg_id), m["message_thread_id"].as_i64());
+            return Ok(());
+        }
         let actor = owner_actor();
         let reply = {
             let mut conn = store.conn();
@@ -2423,6 +2557,14 @@ fn button_label(flags: &Value, data: &str) -> String {
 }
 
 /// At most `limit` characters.
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
 fn truncate(s: &str, limit: usize) -> String {
     if s.chars().count() <= limit {
         return s.to_string();
