@@ -221,3 +221,57 @@ pub fn allocate_at(ready: &Ready, path: &Path, branch: &str) -> Result<PathBuf> 
     }
     Ok(path)
 }
+
+/// What [`refresh`] did to a persistent worktree.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Refresh {
+    /// Already at the base branch's origin commit (or ahead of nothing).
+    Current { head: String },
+    /// Fast-forwarded from `from` to `to`.
+    Updated { from: String, to: String },
+    /// Left unchanged; `reason` says why.
+    Skipped { reason: String },
+}
+
+/// Brings the persistent worktree at `path` up to `ready.base_ref` after a
+/// fetch, only by fast-forward and only when it is safe: the worktree is clean
+/// (no changed or untracked files) and has no commits the base lacks.
+/// Otherwise it changes nothing and says why. Never resets, discards or
+/// forces anything; the caller guarantees no run is using the worktree.
+pub fn refresh(ready: &Ready, path: &Path) -> Refresh {
+    match try_refresh(ready, path) {
+        Ok(r) => r,
+        Err(e) => Refresh::Skipped {
+            reason: format!("{e:#}"),
+        },
+    }
+}
+
+fn try_refresh(ready: &Ready, path: &Path) -> Result<Refresh> {
+    git_timeout(&ready.canonical, &["fetch", "origin"], FETCH_TIMEOUT)?;
+    let base = &ready.base_ref;
+    let short = base.strip_prefix("refs/remotes/").unwrap_or(base);
+    let dirty = git(path, &["status", "--porcelain"])?;
+    if !dirty.is_empty() {
+        return Ok(Refresh::Skipped {
+            reason: format!(
+                "worktree has uncommitted or untracked changes ({} paths)",
+                dirty.lines().count()
+            ),
+        });
+    }
+    let ahead = git(path, &["rev-list", "--count", &format!("{base}..HEAD")])?;
+    if ahead != "0" {
+        return Ok(Refresh::Skipped {
+            reason: format!("worktree has {ahead} local commits not on {short}"),
+        });
+    }
+    let head = git(path, &["rev-parse", "HEAD"])?;
+    let to = git(path, &["rev-parse", &format!("{base}^{{commit}}")])?;
+    if head == to {
+        return Ok(Refresh::Current { head });
+    }
+    git(path, &["merge", "--ff-only", "--quiet", base])?;
+    Ok(Refresh::Updated { from: head, to })
+}
