@@ -26,3 +26,10 @@ Only the latest release receives security fixes.
 - Telegram bot tokens are read from files by the server and never stored in
   the config, the database or the API. Only the configured owner's messages
   in allowlisted chats are accepted.
+- Sealed forms (`axe form`) carry owner input to the dispatcher encrypted to
+  the dispatcher key (`dispatcher.key`, 0600). The channel and the server see
+  only the form's metadata and ciphertext, which the server keeps in memory
+  until delivery. The form page's code is the trust root; a server could swap
+  the key on the first form a browser sees, so compare the fingerprint once
+  (`axe form key`). Values are files readable by the dispatcher's user, like
+  its logins: every task run as that user can read them.

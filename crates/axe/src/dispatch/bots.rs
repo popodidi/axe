@@ -310,6 +310,17 @@ impl Dispatcher {
         }
         let (login, unset) = rt.env();
         env.extend(login);
+        // Sealed form values for this bot: the folder, and the env ones.
+        let secrets = crate::sealed::secrets_dir(
+            &self.cfg.run_root(),
+            &crate::sealed::Target::Bot {
+                bot: b.name.clone(),
+            },
+        )
+        .expect("a bot has a secrets folder");
+        env.push(("AXE_SECRETS_DIR", secrets.display().to_string()));
+        let secret_env = crate::sealed::launch_env(&secrets);
+        env.extend(secret_env.iter().map(|(k, v)| (k.as_str(), v.clone())));
         let mut remove = vec!["AXE_TASK", "AXE_WORKTREE"];
         remove.extend(unset);
         let log = OpenOptions::new()

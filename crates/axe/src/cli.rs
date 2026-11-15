@@ -349,6 +349,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Sealed forms: ask the owner for values (secrets, codes, files) only the
+    /// dispatcher can read. They are encrypted in the owner's browser, relayed
+    /// as ciphertext and written to the target as 0600 files ($AXE_SECRETS_DIR)
+    Form {
+        #[command(subcommand)]
+        command: FormCmd,
+    },
     /// Download a consistent server-side snapshot of the database to a new file
     Backup { to: PathBuf },
     /// Immutable, content-addressed files kept by the server, shared through
@@ -974,6 +981,292 @@ fn format_admission(a: &Value) -> String {
         ));
     }
     s
+}
+
+#[derive(Subcommand, Clone)]
+enum FormCmd {
+    /// Ask for a form: prints its one-off link and sends the owner a Telegram
+    /// Mini App button. The values go to this task ($AXE_TASK) or bot
+    /// ($AXE_BOT) as files in $AXE_SECRETS_DIR, or to a git credential
+    Ask {
+        /// What the values are for, shown to the owner
+        #[arg(long)]
+        purpose: String,
+        /// NAME:TYPE[:FLAG...], repeatable. TYPE: secret, text, code,
+        /// choice=A|B, file. FLAG: required, max=BYTES, env=VAR (also set on
+        /// the target's later runs), label=TEXT. Example:
+        /// token:secret:required:env=DEPLOY_TOKEN
+        #[arg(long = "field", value_name = "NAME:TYPE[:FLAG...]", required = true)]
+        fields: Vec<String>,
+        /// A git credential for https://HOST instead, used by the
+        /// dispatcher's clones and fetches (fields token and, optionally, username)
+        #[arg(long, value_name = "HOST")]
+        git: Option<String>,
+        /// The task the values go to
+        #[arg(long, env = "AXE_TASK")]
+        task: Option<i64>,
+        /// The bot the values go to, when there is no task
+        #[arg(long = "for-bot", env = "AXE_BOT")]
+        for_bot: Option<String>,
+        /// How long the form stays open: 1m to 1h (default 15m)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// The Telegram bot that sends the prompt (default: the target bot,
+        /// else the server's ops bot)
+        #[arg(long)]
+        bot: Option<String>,
+        /// Send no Telegram prompt; share the link yourself
+        #[arg(long)]
+        no_telegram: bool,
+        /// Then wait for the reply (as `axe form wait`)
+        #[arg(long)]
+        wait: bool,
+        /// How long --wait waits (default: until the form expires)
+        #[arg(long)]
+        timeout: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// A form's state and, once delivered, where the values went
+    Show {
+        form: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait until the form is delivered (exit 0) or expires (exit 1)
+    Wait {
+        form: String,
+        /// Longest wait (default 15m)
+        #[arg(long, default_value = "15m")]
+        timeout: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forms the server holds (open, and finished in the last hour)
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hand in a sealed reply (`sealed.v1.<form>.<data>`, or `-` for stdin)
+    /// from a channel without its own hook
+    Submit { sealed: String },
+    /// The dispatcher key's fingerprint, read on the dispatcher host (the key
+    /// is made on first use). Compare it once with the one a form shows
+    Key {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn form_line(v: &Value) -> String {
+    let mut out = format!(
+        "form {}: {} for {}, expires {}",
+        v["form"].as_str().unwrap_or("?"),
+        v["state"].as_str().unwrap_or("?"),
+        target_text(&v["target"]),
+        v["expires"].as_str().unwrap_or("?"),
+    );
+    let d = &v["delivered"];
+    if d.is_object() {
+        if let Some(dir) = d["dir"].as_str() {
+            let files: Vec<&str> = d["files"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            out.push_str(&format!("\n  files {} in {dir}", files.join(", ")));
+            let env: Vec<&str> = d["env"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !env.is_empty() {
+                out.push_str(&format!(
+                    "\n  env {} on the target's later runs",
+                    env.join(", ")
+                ));
+            }
+        }
+    }
+    if let Some(e) = v["error"].as_str() {
+        out.push_str(&format!("\n  last error: {e}"));
+    }
+    out
+}
+
+fn target_text(t: &Value) -> String {
+    serde_json::from_value::<crate::sealed::Target>(t.clone())
+        .map(|t| t.describe())
+        .unwrap_or_else(|_| t.to_string())
+}
+
+/// Polls a form until it leaves open/submitted or `timeout` seconds pass.
+fn form_wait(c: &Client, form: &str, timeout: i64) -> Result<Value> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(timeout.max(0) as u64);
+    loop {
+        let left = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs();
+        let wait = left.clamp(1, 50).to_string();
+        let v: Value = c.get_private(&format!("/api/forms/{form}"), &[("wait", wait.as_str())])?;
+        let state = v["state"].as_str().unwrap_or("");
+        if !matches!(state, crate::form::OPEN | crate::form::SUBMITTED) || left == 0 {
+            return Ok(v);
+        }
+    }
+}
+
+fn print_form_result(v: &Value, json: bool) -> Result<()> {
+    if json {
+        print_json(v)?;
+    } else {
+        println!("{}", form_line(v));
+    }
+    if v["state"] != crate::form::DELIVERED {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_form(c: &Client, command: FormCmd) -> Result<()> {
+    match command {
+        FormCmd::Ask {
+            purpose,
+            fields,
+            git,
+            task,
+            for_bot,
+            ttl,
+            bot,
+            no_telegram,
+            wait,
+            timeout,
+            json,
+        } => {
+            let fields = fields
+                .iter()
+                .map(|f| crate::sealed::Field::parse(f))
+                .collect::<Result<Vec<_>>>()?;
+            let from = match (task, &for_bot) {
+                (Some(t), _) => format!("task {t}"),
+                (None, Some(b)) => format!("bot {b}"),
+                (None, None) => String::new(),
+            };
+            let target = match (git, task, for_bot) {
+                (Some(host), _, _) => crate::sealed::Target::Git { host },
+                (None, Some(task), _) => crate::sealed::Target::Task { task },
+                (None, None, Some(bot)) => crate::sealed::Target::Bot { bot },
+                (None, None, None) => anyhow::bail!(
+                    "no target: run inside a task ($AXE_TASK) or bot ($AXE_BOT), or pass --task, --for-bot or --git"
+                ),
+            };
+            let ttl = ttl.as_deref().map(crate::bot::parse_duration).transpose()?;
+            let request = crate::sealed::Request {
+                purpose,
+                target,
+                fields,
+                ttl,
+                from,
+            };
+            request.validate()?;
+            let v: Value = c.send(
+                "POST",
+                "/api/forms",
+                json!({"request": request, "telegram": !no_telegram, "bot": bot}),
+            )?;
+            if json && !wait {
+                return print_json(&v);
+            }
+            if !json {
+                println!("{}", form_line(&v));
+                println!("key {}", v["fingerprint"].as_str().unwrap_or("?"));
+                println!("link {}", v["link"].as_str().unwrap_or("?"));
+                match v["telegram"]["sent"].as_bool() {
+                    Some(true) => println!(
+                        "telegram: prompt sent by bot {}",
+                        v["telegram"]["bot"].as_str().unwrap_or("?")
+                    ),
+                    _ => println!(
+                        "telegram: not sent ({})",
+                        v["telegram"]["reason"].as_str().unwrap_or("?")
+                    ),
+                }
+            }
+            if wait {
+                let form = v["form"].as_str().context("no form id")?.to_string();
+                let secs = match timeout.as_deref() {
+                    Some(t) => crate::bot::parse_duration(t)?,
+                    None => {
+                        let exp = crate::sealed::parse_time(v["expires"].as_str().unwrap_or(""))?;
+                        exp - crate::remote::epoch() + 5
+                    }
+                };
+                let done = form_wait(c, &form, secs)?;
+                return print_form_result(&done, json);
+            }
+            Ok(())
+        }
+        FormCmd::Show { form, json } => {
+            let v: Value = c.get_private(&format!("/api/forms/{form}"), &[])?;
+            if json {
+                print_json(&v)
+            } else {
+                println!("{}", form_line(&v));
+                Ok(())
+            }
+        }
+        FormCmd::Wait {
+            form,
+            timeout,
+            json,
+        } => {
+            let secs = crate::bot::parse_duration(&timeout)?;
+            let v = form_wait(c, &form, secs)?;
+            print_form_result(&v, json)
+        }
+        FormCmd::List { json } => {
+            let v: Vec<Value> = c.get_private("/api/forms", &[])?;
+            if json {
+                return print_json(&json!(v));
+            }
+            if v.is_empty() {
+                println!("no forms");
+            }
+            for f in &v {
+                println!("{}  {}", form_line(f), f["purpose"].as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        FormCmd::Submit { sealed } => {
+            let text = if sealed == "-" {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                s
+            } else {
+                sealed
+            };
+            let parsed = crate::sealed::Sealed::parse(&text)?;
+            let v: Value = c.send(
+                "POST",
+                &format!("/api/forms/{}/submit", parsed.form),
+                json!({"sealed": text.trim()}),
+            )?;
+            println!("{}", form_line(&v));
+            Ok(())
+        }
+        FormCmd::Key { json } => {
+            let cfg = Config::load(&config::default_path()?).unwrap_or_default();
+            let path = cfg.forms.key_path();
+            let k = crate::sealed::Key::load_or_create(&path)?;
+            if json {
+                print_json(
+                    &json!({"fingerprint": k.fingerprint(), "pubkey": k.pubkey(), "path": path}),
+                )
+            } else {
+                println!("{}", k.fingerprint());
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Subcommand, Clone)]
@@ -2946,6 +3239,7 @@ pub fn run() -> Result<()> {
         Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Ask { command } => run_ask(&client(), command)?,
         Cmd::Rule { command } => run_rule(&client(), command.clone())?,
+        Cmd::Form { command } => run_form(&client(), command.clone())?,
         Cmd::Routine { command } => {
             let c = client();
             let value: Value = match command {

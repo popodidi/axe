@@ -179,6 +179,60 @@ pub struct Config {
     /// `[docs]`: the server's versioned doc store (`doc.rs`).
     #[serde(default)]
     pub docs: Docs,
+    /// `[forms]`: sealed forms (`sealed.rs`, `form.rs`).
+    #[serde(default)]
+    pub forms: Forms,
+}
+
+/// The static sealed form page every form link opens.
+pub const DEFAULT_FORM_PAGE: &str = "https://popodidi.github.io/sealed-form/";
+
+/// `[forms]`: sealed forms. The server uses `page_url`; the dispatcher its
+/// key and git credential files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Forms {
+    /// The static form page (default [`DEFAULT_FORM_PAGE`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_url: Option<String>,
+    /// The dispatcher's private key (default `dispatcher.key` next to the
+    /// config file, `~/.config/axe/dispatcher.key`; made on first start, 0600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<String>,
+    /// The `git credential-store` file a git credential form writes and the
+    /// dispatcher's clones and fetches read (default `git-credentials` next
+    /// to the config file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_credentials: Option<String>,
+}
+
+impl Forms {
+    pub fn page(&self) -> &str {
+        self.page_url.as_deref().unwrap_or(DEFAULT_FORM_PAGE)
+    }
+    /// `key_file`, else `dispatcher.key` next to the config file.
+    pub fn key_path(&self) -> PathBuf {
+        match &self.key_file {
+            Some(p) => expand_tilde(p),
+            None => beside_config("dispatcher.key"),
+        }
+    }
+    /// `git_credentials`, else `git-credentials` next to the config file.
+    pub fn git_credentials_path(&self) -> PathBuf {
+        match &self.git_credentials {
+            Some(p) => expand_tilde(p),
+            None => beside_config("git-credentials"),
+        }
+    }
+}
+
+/// `name` in the config file's directory (`~/.config/axe` by default).
+fn beside_config(name: &str) -> PathBuf {
+    default_path()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| expand_tilde("~/.config/axe"))
+        .join(name)
 }
 
 /// `[docs]`: where `axe server` keeps versioned docs (a bare git repository).

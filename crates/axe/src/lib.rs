@@ -15,12 +15,14 @@ pub mod dispatch;
 pub mod doc;
 pub mod failure;
 pub mod flow;
+pub mod form;
 pub mod goal;
 pub mod goal_board;
 pub mod housekeeping;
 pub mod run_log;
 pub mod run_workspace;
 pub mod schedule;
+pub mod sealed;
 pub mod server;
 pub mod subscription;
 #[cfg(feature = "telegram")]

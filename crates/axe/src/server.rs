@@ -23,6 +23,7 @@ use crate::channel;
 use crate::config::{self, Config};
 use crate::db::{self, Actor, Changes, Claim, Filter, NewTask, RunFilter};
 use crate::doc;
+use crate::form;
 use crate::goal;
 use crate::remote;
 use crate::routine;
@@ -114,6 +115,8 @@ struct State {
     blobs: blob::Store,
     /// The doc store; `None` when it could not open (no `git`).
     docs: Option<doc::Store>,
+    /// Sealed forms, in memory only (`form.rs`).
+    forms: form::Forms,
 }
 
 impl channel::Store for State {
@@ -134,6 +137,10 @@ impl channel::Store for State {
     }
     fn runtimes(&self) -> serde_json::Value {
         crate::runtime::view(&self.admission())
+    }
+    fn form_submit(&self, sealed: &str) -> Result<form::Form> {
+        let f = self.forms.submit(sealed, remote::epoch())?;
+        Ok(deliver_form(self, &f.spec.form).unwrap_or(f))
     }
 }
 
@@ -206,7 +213,12 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         telegram: None,
         blobs,
         docs,
+        forms: form::Forms::default(),
     });
+    {
+        let st = Arc::clone(&state);
+        std::thread::spawn(move || form_loop(&st));
+    }
     #[cfg(feature = "telegram")]
     if let Some(gw) = &state.telegram {
         eprintln!("axe server: telegram gateway for bots {:?}", gw.names());
@@ -489,7 +501,7 @@ fn private_read(path: &[String]) -> bool {
     (path.len() >= 4 && path[0] == "api" && path[1] == "bots" && path[3] == "tg")
         || (path.len() >= 2
             && path[0] == "api"
-            && matches!(path[1].as_str(), "blobs" | "docs" | "asks"))
+            && matches!(path[1].as_str(), "blobs" | "docs" | "asks" | "forms"))
 }
 
 fn write_head(
@@ -1305,6 +1317,9 @@ fn route(st: &State, req: &Request) -> Result<Response> {
         if let Some(r) = goal_route(st, req, &path)? {
             return Ok(r);
         }
+    }
+    if path.get(1) == Some(&"forms") && path[0] == "api" {
+        return form_route(st, req, &path);
     }
     match (req.method.as_str(), path.as_slice()) {
         ("GET", ["api", "routines"]) => ok(200, &routine::list(&st.conn())?),
@@ -2565,6 +2580,271 @@ fn tg_route(st: &State, req: &Request, name: &str, action: &str) -> Result<Respo
         }
         _ => Err(HttpError(404, format!("no telegram action {action:?}")).into()),
     }
+}
+
+/// Sends one job to the connected dispatcher (`dispatcher`: only when it is
+/// that one) and waits up to `timeout` for its answer. `Err` means no
+/// dispatcher answered.
+fn relay_job(
+    st: &State,
+    query: serde_json::Value,
+    dispatcher: Option<&str>,
+    timeout: Duration,
+) -> std::result::Result<serde_json::Value, String> {
+    let sender = st
+        .relay
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(id, _, _)| dispatcher.is_none_or(|d| d == id))
+        .map(|(_, _, s)| s.clone());
+    let Some(sender) = sender else {
+        return Err("the dispatcher is not connected".into());
+    };
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    sender
+        .try_send(remote::LogJob { query, reply: tx })
+        .map_err(|_| "the dispatcher is busy".to_string())?;
+    rx.recv_timeout(timeout)
+        .map_err(|_| "the dispatcher did not answer".to_string())
+}
+
+/// How long the server waits for the dispatcher to sign or deliver a form.
+const FORM_RELAY_TIMEOUT: Duration = Duration::from_secs(8);
+/// Longest `GET /api/forms/<id>?wait=` hold.
+const FORM_WAIT_MAX: u64 = 60;
+
+/// Delivers a submitted form through the dispatcher and records the outcome
+/// (a task event for a task target). `None` when it is not submitted.
+fn deliver_form(st: &State, id: &str) -> Option<form::Form> {
+    let job = st.forms.job(id)?;
+    let dispatcher = st.forms.get(id, remote::epoch())?.spec.dispatcher;
+    let d = match relay_job(st, job, Some(&dispatcher), FORM_RELAY_TIMEOUT) {
+        Ok(v) => match v["error"].as_str() {
+            Some(e) => form::Delivery::Refused(e.to_string()),
+            None => form::Delivery::Done(v["delivered"].clone()),
+        },
+        Err(e) => form::Delivery::Unavailable(e),
+    };
+    let f = st.forms.finish(id, &d, remote::epoch())?;
+    match &d {
+        form::Delivery::Done(_) => {
+            eprintln!(
+                "axe server: form {id}: delivered to {}",
+                f.spec.target.describe()
+            );
+            form_event(st, &f, &form::outcome_text(&f));
+        }
+        form::Delivery::Refused(e) => eprintln!("axe server: form {id}: refused: {e}"),
+        form::Delivery::Unavailable(e) => eprintln!("axe server: form {id}: held: {e}"),
+    }
+    st.notifier.bump();
+    Some(f)
+}
+
+/// A `form` event on the form's task (names and outcome only, never a value).
+fn form_event(st: &State, f: &form::Form, body: &str) {
+    let crate::sealed::Target::Task { task } = f.spec.target else {
+        return;
+    };
+    let r = (|| -> Result<()> {
+        let conn = st.conn();
+        let tx = conn.unchecked_transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+            [task],
+            |r| r.get(0),
+        )?;
+        if exists {
+            let actor = Actor::new("forms");
+            let body = format!("{body} (form {})", f.spec.form);
+            db::write_event(&tx, &actor, task, "form", None, Some(f.state), Some(&body))?;
+            tx.commit()?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = r {
+        eprintln!("axe server: form {}: event: {e:#}", f.spec.form);
+    }
+}
+
+/// Expires forms and retries deliveries held for an offline dispatcher.
+fn form_loop(st: &State) {
+    while !st.stop.load(Ordering::SeqCst) {
+        st.forms.sweep(remote::epoch());
+        for id in st.forms.undelivered() {
+            if let Some(f) = deliver_form(st, &id) {
+                if f.state != form::SUBMITTED {
+                    form_notify(st, &f);
+                }
+            }
+        }
+        for _ in 0..50 {
+            if st.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Tells the owner a held reply's outcome where its prompt went.
+#[cfg(feature = "telegram")]
+fn form_notify(st: &State, f: &form::Form) {
+    if let (Some(gw), Some(p)) = (&st.telegram, &f.prompt) {
+        gw.form_outcome(st, &p.bot, p.chat, f);
+    }
+}
+
+#[cfg(not(feature = "telegram"))]
+fn form_notify(_: &State, _: &form::Form) {}
+
+/// `/api/forms` routes (the token was checked: forms are private reads).
+fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
+    #[derive(Deserialize)]
+    struct Ask {
+        request: crate::sealed::Request,
+        /// Send the owner a Telegram prompt (default true when configured).
+        telegram: Option<bool>,
+        /// The Telegram bot to send it from (default: the target bot, else
+        /// the ops bot).
+        bot: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Submit {
+        sealed: String,
+    }
+    let now = remote::epoch();
+    let page = st.cfg.forms.page();
+    match (req.method.as_str(), path) {
+        ("POST", ["api", "forms"]) => {
+            let b: Ask = req.json()?;
+            b.request
+                .validate()
+                .map_err(|e| HttpError(400, format!("{e:#}")))?;
+            let job = json!({"kind": "form_sign", "request": b.request});
+            let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT)
+                .map_err(|e| HttpError(503, format!("cannot sign the form: {e}")))?;
+            if let Some(e) = v["error"].as_str() {
+                return Err(HttpError(400, format!("the dispatcher refused the form: {e}")).into());
+            }
+            let signed: crate::sealed::Signed = serde_json::from_value(v["signed"].clone())
+                .map_err(|e| HttpError(502, format!("invalid signed form: {e}")))?;
+            let f = st
+                .forms
+                .add(&b.request, signed, now)
+                .map_err(|e| HttpError(502, format!("{e:#}")))?;
+            let mut out = f.view(page);
+            out["telegram"] = form_prompt(st, &f, b.telegram, b.bot.as_deref());
+            let fields: Vec<String> = f
+                .spec
+                .fields
+                .iter()
+                .map(|x| format!("{} ({})", x.name, x.kind.as_str()))
+                .collect();
+            form_event(
+                st,
+                &f,
+                &format!(
+                    "asked: {}; fields {}; expires {}",
+                    f.spec.purpose,
+                    fields.join(", "),
+                    f.spec.expires
+                ),
+            );
+            eprintln!(
+                "axe server: form {}: asked for {}",
+                f.spec.form,
+                f.spec.target.describe()
+            );
+            ok(201, &out)
+        }
+        ("GET", ["api", "forms"]) => ok(
+            200,
+            &st.forms
+                .list(now)
+                .iter()
+                .map(|f| f.view(page))
+                .collect::<Vec<_>>(),
+        ),
+        ("GET", ["api", "forms", id]) => {
+            let wait = match req.query("wait") {
+                Some(w) => w
+                    .parse::<u64>()
+                    .map_err(|_| HttpError(400, format!("invalid wait {w:?}")))?
+                    .min(FORM_WAIT_MAX),
+                None => 0,
+            };
+            let f = if wait > 0 {
+                st.forms.wait(id, Duration::from_secs(wait), remote::epoch)
+            } else {
+                st.forms.get(id, now)
+            };
+            match f {
+                Some(f) => ok(200, &f.view(page)),
+                None => Err(HttpError(
+                    404,
+                    format!("no form {id} (unknown, or finished over an hour ago)"),
+                )
+                .into()),
+            }
+        }
+        ("POST", ["api", "forms", id, "submit"]) => {
+            let b: Submit = req.json()?;
+            let parsed = crate::sealed::Sealed::parse(&b.sealed)
+                .map_err(|e| HttpError(400, format!("{e:#}")))?;
+            if parsed.form != *id {
+                return Err(HttpError(400, "the sealed reply is for another form".into()).into());
+            }
+            let f = channel::Store::form_submit(st, &b.sealed)
+                .map_err(|e| HttpError(409, format!("{e:#}")))?;
+            ok(200, &f.view(page))
+        }
+        _ => Err(HttpError(
+            404,
+            format!("no route for {} /{}", req.method, path.join("/")),
+        )
+        .into()),
+    }
+}
+
+/// Sends the form's Telegram prompt when asked (or by default, when
+/// Telegram is configured); returns what happened.
+#[cfg(feature = "telegram")]
+fn form_prompt(
+    st: &State,
+    f: &form::Form,
+    want: Option<bool>,
+    bot: Option<&str>,
+) -> serde_json::Value {
+    let Some(gw) = &st.telegram else {
+        return json!({"sent": false, "reason": "telegram is not configured on this server"});
+    };
+    if want == Some(false) {
+        return json!({"sent": false, "reason": "not asked"});
+    }
+    let target_bot = match &f.spec.target {
+        crate::sealed::Target::Bot { bot } => Some(bot.as_str()),
+        _ => None,
+    };
+    let page = st.cfg.forms.page();
+    match gw.form_prompt(
+        st,
+        bot.or(target_bot),
+        f,
+        &crate::sealed::link(page, &f.signed),
+    ) {
+        Ok((v, prompt)) => {
+            st.forms.set_prompt(&f.spec.form, prompt);
+            v
+        }
+        Err(e) => json!({"sent": false, "reason": format!("{e:#}")}),
+    }
+}
+
+#[cfg(not(feature = "telegram"))]
+fn form_prompt(_: &State, _: &form::Form, _: Option<bool>, _: Option<&str>) -> serde_json::Value {
+    json!({"sent": false, "reason": NO_TELEGRAM})
 }
 
 fn connect_dispatcher(

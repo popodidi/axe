@@ -219,6 +219,35 @@ opens without the token, for example from a phone; it renders inline in a
 sandbox. The signing key is created on first start; `[blobs]` sets the
 directory, size limit, link base URL and key file.
 
+## Sealed forms
+
+`axe form ask` (`sealed.rs`, `form.rs`) asks the owner for values (secret,
+text, code, choice and file fields) that only the dispatcher can read, for
+any task or bot session:
+
+```sh
+axe form ask --purpose "Deploy token" --field token:secret:required:env=DEPLOY_TOKEN --wait
+```
+
+- The dispatcher signs the form with its key (`dispatcher.key`, P-256, 0600,
+  made on first start next to the config file; `axe form key` prints its
+  fingerprint, as do `axe runtimes`, `/runtimes` and every form). Compare it
+  once.
+- The link opens a static page (`[forms] page_url`, default
+  [`DEFAULT_FORM_PAGE`](crates/axe/src/config.rs)) with the signed spec in its
+  URL fragment. The page encrypts the values in the browser to the dispatcher
+  key and returns `sealed.v1.<form>.<ciphertext>`: through the Telegram Mini
+  App button the server sends the owner, pasted into the chat, a `.sealed`
+  file, or `axe form submit`.
+- The server keeps forms and ciphertext in memory only, until the dispatcher
+  takes the reply (or 15 minutes pass), and records only names and outcomes.
+  The dispatcher checks its signature, the expiry and one use, decrypts, and
+  writes each value as a 0600 file in the target: the task's or bot's
+  `$AXE_SECRETS_DIR` (`<run_root>/task-<id>/.secrets`, outside `repos/`;
+  `env=VAR` fields are also set on its later runs), or a git credential for
+  `--git <host>` that the dispatcher's clones fall back to
+  (`[forms] git_credentials`).
+
 ## Docs
 
 `axe doc put/get/ls/log/diff/attach/detach` (`doc.rs`) keeps versioned text

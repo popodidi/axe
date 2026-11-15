@@ -796,6 +796,25 @@ impl Gateway {
         let plain = m["text"].is_string()
             && m["forward_origin"].is_null()
             && m["is_automatic_forward"].is_null();
+        // A sealed form reply (Mini App data, pasted text or a `.sealed`
+        // file) goes to the dispatcher; it is not stored and wakes no bot.
+        if !edit {
+            if let Some(data) = m["web_app_data"]["data"].as_str() {
+                return self.form_reply(b, store, chat, tg_id, Ok(data.to_string()));
+            }
+            if plain && crate::sealed::Sealed::looks_like(&text) {
+                return self.form_reply(b, store, chat, tg_id, Ok(text));
+            }
+            let doc = &m["document"];
+            if m["forward_origin"].is_null()
+                && doc["file_name"]
+                    .as_str()
+                    .is_some_and(|n| n.ends_with(".sealed"))
+            {
+                let data = self.sealed_file(b, doc);
+                return self.form_reply(b, store, chat, tg_id, data);
+            }
+        }
         if !edit && plain {
             let me = b.username.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some((cmd, arg)) = command(&text, me.as_deref()) {
@@ -1026,6 +1045,144 @@ impl Gateway {
             Err(e) => eprintln!("telegram: bot {}: runtimes reply: {e}", b.name),
         }
         Ok(true)
+    }
+
+    /// Downloads a `.sealed` document's text.
+    fn sealed_file(&self, b: &TgBot, doc: &Value) -> Result<String> {
+        let limit = crate::sealed::MAX_SEALED as u64;
+        if doc["file_size"].as_u64().is_some_and(|s| s > limit) {
+            bail!("the .sealed file is over {limit} bytes");
+        }
+        let id = doc["file_id"]
+            .as_str()
+            .context("document without file_id")?;
+        let f = b.api.call("getFile", &json!({"file_id": id}))?;
+        let path = f["file_path"]
+            .as_str()
+            .context("getFile returned no file_path")?;
+        let bytes = b.api.download(path, limit)?;
+        String::from_utf8(bytes).context("the .sealed file is not text")
+    }
+
+    /// Hands a sealed reply to the dispatcher and tells the owner the
+    /// outcome, removing the form keyboard once the form is done.
+    fn form_reply(
+        &self,
+        b: &TgBot,
+        store: &dyn Store,
+        chat: i64,
+        tg_id: i64,
+        data: Result<String>,
+    ) -> Result<()> {
+        let outcome = data.and_then(|d| store.form_submit(&d));
+        let (text, done) = match &outcome {
+            Ok(f) => (crate::form::outcome_text(f), f.state != crate::form::OPEN),
+            Err(e) => (format!("Sealed form reply refused: {e:#}."), false),
+        };
+        self.form_say(b, store, chat, Some(tg_id), &text, done);
+        Ok(())
+    }
+
+    /// Sends a system message about a form; `done` removes its keyboard.
+    fn form_say(
+        &self,
+        b: &TgBot,
+        store: &dyn Store,
+        chat: i64,
+        reply_to: Option<i64>,
+        text: &str,
+        done: bool,
+    ) {
+        let mut p = json!({"chat_id": chat, "text": text});
+        if let Some(r) = reply_to {
+            p["reply_parameters"] = json!({"message_id": r, "allow_sending_without_reply": true});
+        }
+        if done {
+            p["reply_markup"] = json!({"remove_keyboard": true});
+        }
+        match b.paced(chat, || b.api.call("sendMessage", &p)) {
+            Ok(sent) => {
+                let r = record_out(
+                    store,
+                    &b.name,
+                    &sent,
+                    "text",
+                    text,
+                    None,
+                    json!([]),
+                    json!({"system": true}),
+                );
+                if let Err(e) = r {
+                    eprintln!("telegram: bot {}: record form reply: {e:#}", b.name);
+                }
+            }
+            Err(e) => eprintln!("telegram: bot {}: form reply: {e}", b.name),
+        }
+    }
+
+    /// Sends the owner a form's prompt with a reply-keyboard Mini App button
+    /// (`web_app`, private chats only) from `bot` (default: the ops bot).
+    pub fn form_prompt(
+        &self,
+        store: &dyn Store,
+        bot: Option<&str>,
+        f: &crate::form::Form,
+        link: &str,
+    ) -> Result<(Value, crate::form::Prompt)> {
+        let name = bot
+            .filter(|n| self.bots.contains_key(*n))
+            .map(String::from)
+            .or_else(|| self.ops.clone())
+            .context("no telegram bot to send sealed forms")?;
+        let b = self.bot(&name)?;
+        if !b.chats.contains(&self.owner) {
+            bail!(
+                "bot {name} cannot write to the owner's private chat, which a Mini App button needs"
+            );
+        }
+        bot_id(&store.conn(), &name)?;
+        let chat = self.owner;
+        let text = crate::form::prompt_text(f);
+        let html = format!(
+            "{}\n\nNot in Telegram? <a href=\"{}\">Open the form in a browser</a> and paste the sealed reply here.",
+            html_escape(&text),
+            html_escape(link)
+        );
+        let p = json!({
+            "chat_id": chat,
+            "text": html,
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": true},
+            "reply_markup": {
+                "keyboard": [[{"text": "Open sealed form", "web_app": {"url": link}}]],
+                "resize_keyboard": true,
+                "one_time_keyboard": true,
+                "input_field_placeholder": "Sealed form",
+            },
+        });
+        let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+        let id = record_out(
+            store,
+            &name,
+            &sent,
+            "text",
+            &text,
+            None,
+            json!([]),
+            json!({"system": true, "form": f.spec.form}),
+        )?;
+        Ok((
+            json!({"sent": true, "bot": name, "id": id}),
+            crate::form::Prompt { bot: name, chat },
+        ))
+    }
+
+    /// Tells the owner the outcome of a reply delivered after a wait.
+    pub fn form_outcome(&self, store: &dyn Store, bot: &str, chat: i64, f: &crate::form::Form) {
+        if let Ok(b) = self.bot(bot) {
+            let done = f.state != crate::form::OPEN;
+            self.form_say(b, store, chat, None, &crate::form::outcome_text(f), done);
+        }
     }
 
     /// Sends the owner one card for a runtime alert (`runtime::Alert`) from
