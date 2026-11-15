@@ -94,12 +94,33 @@ wins, then the higher priority, then the newer rule. Its ordered `use` list
 of `harness[:model[:effort]]` (`claude-code`, `codex`) is walked down to the
 first harness the dispatcher has an agent for (an agent's `harness`, or
 inferred from its command), least used first; the model and effort go to the
-CLI, and the task gets a `runtime:<agent>` label. A bot runs its own agent
+CLI, and the task gets a `runtime:<name>` label. A bot runs its own agent
 unless a rule names it (`bot=`). Every edit is a logged event. The
 dispatcher imports the config's `[defaults]`/`[[rule]]` agent lists once
 (`Config::rules_to_import`); those keys are deprecated and keep picking only
 when stored rules cannot express them (an agent with no harness, two agents
 of one harness, round-robin), with a startup line saying why.
+
+**Runtimes.** A runtime is a harness plus exactly one login on the
+dispatcher (`runtime.rs`). With `[runtimes] dir`, each `<dir>/<name>/runtime.toml`
+names its `harness`, optionally the `agent` template that drives it, a
+`login_dir` (the CLI's own default, `~/.claude` or `~/.codex`, is adopted in
+place: the dispatcher only sets `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for any
+other directory and never touches the login), `plan` and `disabled`. Rules
+pick a harness; the dispatcher takes its least-used healthy runtime, skips to
+the next `use` entry when none is healthy, and otherwise returns the task to
+pending until one may be (run refunded). A stored session resumes on its own
+runtime while it is healthy; sessions recorded before runtimes resolve to the
+runtime on the default login. Quota, login and provider failures
+(`failure.rs`) mark the runtime limited, needs_login or degraded
+(`<name>/state.json`); a needs_login runtime is probed with `claude auth
+status` / `codex login status` until it passes. The dispatcher reports each
+runtime's state, last failure and quota with its admission report, never a
+login directory or credential: `axe runtimes`, `GET /api/runtimes` and the
+Telegram owner command `/runtimes` show them, and a runtime turning limited
+or needs_login sends the owner one card (`[telegram] ops_bot`, default the
+first bot). Without `[runtimes]`, every agent is a runtime on the default
+login and always healthy.
 
 **Session continuity.** Every later run resumes the first run's session with
 the agent's `resume_cmd`. A failed resume with no axe change

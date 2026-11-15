@@ -372,6 +372,25 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             )?;
             Value::Null
         }
+        // No runtime the task may use is healthy: back to pending until one
+        // may be, the run refunded (`runtime.rs`).
+        "release" => {
+            check_claim()?;
+            let changes = Changes {
+                state: Some("pending".into()),
+                not_before: Some(format!("+{}s", number(b, "wait")?.max(1))),
+                note: Some(field(b, "note")?.into()),
+                ..Default::default()
+            };
+            let released = db::apply_changes(&tx, &actor, task()?, &changes, Some(claim()?))?;
+            if released {
+                tx.execute(
+                    "UPDATE tasks SET runs = MAX(runs - 1, 0) WHERE id = ?1",
+                    [task()?],
+                )?;
+            }
+            json!(released)
+        }
         "block" => {
             check_claim()?;
             let changes = Changes {

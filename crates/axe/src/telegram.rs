@@ -61,7 +61,11 @@ const MAX_RETRY_AFTER: u64 = 60;
 const ALERT_INTERVAL: Duration = Duration::from_secs(60);
 /// Attempts at one update before it is skipped (recorded as an event).
 const UPDATE_ATTEMPTS: u32 = 3;
-const OWNER_COMMANDS: [&str; 6] = ["status", "stop", "pause", "resume", "reset", "wake"];
+const OWNER_COMMANDS: [&str; 7] = [
+    "status", "stop", "pause", "resume", "reset", "wake", "runtimes",
+];
+/// Callback data of the button on a runtime card.
+const RUNTIMES_BUTTON: &str = "runtimes";
 /// First wait after a failed board edit; it doubles up to [`BOARD_RETRY_MAX`].
 const BOARD_RETRY: Duration = Duration::from_secs(5);
 const BOARD_RETRY_MAX: Duration = Duration::from_secs(300);
@@ -266,6 +270,8 @@ pub struct Gateway {
     bots: HashMap<String, Arc<TgBot>>,
     /// The weekly retro send: the bot and the weekly slot (`ask::parse_weekly`).
     retro: Option<(String, i64)>,
+    /// The bot that sends runtime cards (`telegram.ops_bot`).
+    ops: Option<String>,
 }
 
 /// How often the weekly retro send checks whether its slot came.
@@ -449,11 +455,17 @@ impl Gateway {
                 bots.contains_key(&name).then_some((name, at))
             })
             .flatten();
+        let ops = cfg
+            .ops_bot
+            .clone()
+            .or(cfg.bots.first().map(|b| b.name.clone()))
+            .filter(|n| bots.contains_key(n));
         Gateway {
             owner: cfg.owner_user_id,
             poll_timeout: cfg.poll_timeout,
             bots,
             retro,
+            ops,
         }
     }
 
@@ -888,6 +900,9 @@ impl Gateway {
             if self.retro_press(b, store, chat, t, &data, cq["id"].as_str())? {
                 return Ok(());
             }
+            if self.runtimes_press(b, store, chat, t, &data, cq["id"].as_str())? {
+                return Ok(());
+            }
         }
         let (target, answered) = {
             let mut conn = store.conn();
@@ -958,6 +973,90 @@ impl Gateway {
         }
         b.typing(chat, thread);
         Ok(())
+    }
+
+    /// A press on a runtime card's button: replies with the runtime list and
+    /// wakes no bot. False when the message is not a runtime card.
+    fn runtimes_press(
+        &self,
+        b: &TgBot,
+        store: &dyn Store,
+        chat: i64,
+        tg_msg: i64,
+        data: &str,
+        query: Option<&str>,
+    ) -> Result<bool> {
+        if data != RUNTIMES_BUTTON {
+            return Ok(false);
+        }
+        let stored = {
+            let conn = store.conn();
+            let id = bot_id(&conn, &b.name)?;
+            match local_id(&conn, id, chat, tg_msg)? {
+                Some(l) => Some(get_message(&conn, &b.name, l)?),
+                None => None,
+            }
+        };
+        if !stored.is_some_and(|m| m.flags["runtime_alert"] == true) {
+            return Ok(false);
+        }
+        if let Some(qid) = query {
+            if let Err(e) = b
+                .api
+                .call("answerCallbackQuery", &json!({"callback_query_id": qid}))
+            {
+                eprintln!("telegram: bot {}: {e}", b.name);
+            }
+        }
+        let text = crate::runtime::render(&store.runtimes());
+        let p = json!({"chat_id": chat, "text": text, "reply_parameters": {"message_id": tg_msg}});
+        match b.paced(chat, || b.api.call("sendMessage", &p)) {
+            Ok(sent) => {
+                record_out(
+                    store,
+                    &b.name,
+                    &sent,
+                    "text",
+                    &text,
+                    None,
+                    json!([]),
+                    json!({"system": true}),
+                )?;
+            }
+            Err(e) => eprintln!("telegram: bot {}: runtimes reply: {e}", b.name),
+        }
+        Ok(true)
+    }
+
+    /// Sends the owner one card for a runtime alert (`runtime::Alert`) from
+    /// the ops bot, in the owner's private chat when the bot may write there.
+    pub fn runtime_alert(&self, store: &dyn Store, a: &Value) -> Result<Value> {
+        let Some(name) = self.ops.clone() else {
+            return Ok(json!({"sent": false, "reason": "no telegram bot to send runtime cards"}));
+        };
+        // The bot exists once it was created; until then the dispatcher retries.
+        bot_id(&store.conn(), &name)?;
+        let chat = self
+            .bot(&name)?
+            .chats
+            .contains(&self.owner)
+            .then_some(self.owner);
+        let opts = SendOpts {
+            chat,
+            buttons: vec![("Runtimes".into(), RUNTIMES_BUTTON.into())],
+            ..SendOpts::default()
+        };
+        let out = self.send(store, &name, &crate::runtime::alert_text(a), &opts)?;
+        let id = out
+            .last()
+            .and_then(|m| m["id"].as_i64())
+            .context("runtime card was not recorded")?;
+        store.conn().execute(
+            "UPDATE bot_messages SET flags=json_set(flags,'$.runtime_alert',json('true')) WHERE id=?1",
+            [id],
+        )?;
+        store.changed();
+        Ok(json!({"sent": true, "bot": name, "id": id}))
     }
 
     /// A press on a weekly retro card (`flags.retro`): rates an item or a
@@ -1208,6 +1307,7 @@ impl Gateway {
             let mut conn = store.conn();
             let r = match cmd {
                 "status" => status(&conn, &b.name),
+                "runtimes" => Ok(crate::runtime::render(&store.runtimes())),
                 "stop" => bot::change(&mut conn, &actor, &b.name, "stop")
                     .map(|_| "stopping the live run; queued wakes are kept".to_string()),
                 "pause" => bot::change(&mut conn, &actor, &b.name, "pause")

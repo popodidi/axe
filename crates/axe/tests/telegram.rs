@@ -2919,3 +2919,95 @@ fn the_weekly_retro_goes_out_at_its_slot_once_and_only_with_asks() {
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(retro_sends(&rig), 1);
 }
+
+fn post(rig: &Rig, path: &str, body: Value) -> Value {
+    ureq::post(&format!("{}{path}", rig.srv().url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .send_json(body)
+        .unwrap()
+        .into_json()
+        .unwrap()
+}
+
+#[test]
+fn runtimes_command_and_one_card_per_runtime_alert() {
+    let rig = Rig::new();
+    // A dispatcher reporting one runtime that needs a login.
+    let g = post(
+        &rig,
+        "/api/dispatcher/register",
+        json!({"id":"d1","generation":""}),
+    );
+    let g = g["generation"].as_str().unwrap();
+    let runtimes = json!({"managed": true, "list": [
+        {"name":"claude-1","harness":"claude-code","plan":null,"state":"needs_login","healthy":false,
+         "until":null,"last_failure":{"class":"auth_invalid","message":"401","at":1800000000},
+         "quota":null,"in_use":0},
+        {"name":"codex-1","harness":"codex","plan":"pro","state":"ok","healthy":true,
+         "until":null,"last_failure":null,"quota":null,"in_use":1}]});
+    post(
+        &rig,
+        "/api/dispatcher/admission",
+        json!({"id":"d1","generation":g,"admission":{"runtimes":runtimes}}),
+    );
+
+    rig.stub.push(text_msg(100, 200, OWNER, OWNER, "/runtimes"));
+    rig.stub.wait_confirmed(100);
+    wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
+    let reply = rig.sent_to(OWNER)[0]["text"].as_str().unwrap().to_string();
+    assert!(
+        reply.contains("claude-1 (claude-code): needs_login, 0 live"),
+        "{reply}"
+    );
+    assert!(reply.contains("last failure auth_invalid"), "{reply}");
+    assert!(
+        reply.contains("codex-1 (codex): ok, plan pro, 1 live"),
+        "{reply}"
+    );
+    assert!(rig.message_wakes().is_empty(), "the command wakes no bot");
+
+    // The dispatcher's alert becomes one card to the owner from the first bot.
+    let v = post(
+        &rig,
+        "/api/dispatcher/runtime-alert",
+        json!({"runtime":"claude-1","harness":"claude-code","state":"needs_login",
+               "class":"auth_invalid","message":"OAuth token has expired","until":null}),
+    );
+    assert_eq!(
+        (&v["sent"], &v["bot"]),
+        (&json!(true), &json!("cos")),
+        "{v}"
+    );
+    let card = rig.sent_to(OWNER).pop().unwrap();
+    let text = card["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Runtime claude-1 (claude-code) needs a new login."),
+        "{text}"
+    );
+    assert!(
+        text.contains("auth_invalid OAuth token has expired"),
+        "{text}"
+    );
+    assert_eq!(
+        card["reply_markup"],
+        json!({"inline_keyboard":[[{"text":"Runtimes","callback_data":"runtimes"}]]})
+    );
+
+    // Its button lists the runtimes in place of waking the bot.
+    let tg_id = rig.messages().last().unwrap().3;
+    rig.stub.push(
+        json!({"update_id": 101, "callback_query": {"id": "q1", "from": user(OWNER),
+        "chat_instance": "ci", "data": "runtimes",
+        "message": {"message_id": tg_id, "date": 0, "chat": {"id": OWNER, "type": "private"}}}}),
+    );
+    rig.stub.wait_confirmed(101);
+    wait_for("the button reply", 20, || rig.sent_to(OWNER).len() >= 3);
+    let listed = rig.sent_to(OWNER).pop().unwrap();
+    assert!(listed["text"]
+        .as_str()
+        .unwrap()
+        .contains("claude-1 (claude-code): needs_login"));
+    assert_eq!(listed["reply_parameters"]["message_id"], tg_id);
+    assert_eq!(rig.stub.calls("answerCallbackQuery").len(), 1);
+    assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
+}

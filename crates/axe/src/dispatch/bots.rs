@@ -10,7 +10,7 @@ use std::process::Child;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use super::{Dispatcher, Pick};
+use super::{now_unix, Dispatcher, NoPick, Pick};
 use crate::activity;
 use crate::agent_proc::{self, kill_child, kill_tree, render};
 use crate::bot::{self, Claimed};
@@ -79,20 +79,26 @@ impl Dispatcher {
                 }
             }
             let claim = format!("bot:{}", uuid::Uuid::new_v4());
-            // A stored rule that names this bot picks its agent; otherwise the
-            // bot's own agent runs, with its own defaults.
-            let pick = match self.stored_rules {
-                true => self
-                    .store
-                    .request::<Option<rule::Rule>>("rule_select", json!({"bot":name}))?
-                    .and_then(|r| match self.pick_from(Some(&r), true) {
-                        Ok(p) => Some(p),
-                        Err(note) => {
-                            eprintln!("axe dispatcher: bot {name}: {note}; using its own agent");
-                            None
-                        }
-                    }),
-                false => None,
+            let pick = match self.bot_pick(&name)? {
+                Ok(p) => {
+                    if self.bots_held.remove(&name).is_some() {
+                        eprintln!(
+                            "axe dispatcher: bot {name}: runtime {} healthy; running",
+                            p.agent
+                        );
+                    }
+                    Some(p)
+                }
+                // Its wakes wait; nothing is claimed.
+                Err(NoPick::Unhealthy { note, .. }) => {
+                    if self.bots_held.get(&name) != Some(&note) {
+                        eprintln!("axe dispatcher: bot {name} held: {note}");
+                        self.bots_held.insert(name.clone(), note);
+                    }
+                    continue;
+                }
+                // Spawning reports what is missing.
+                Err(NoPick::Missing(_)) => None,
             };
             let agent = pick.as_ref().map(|p| p.agent.clone());
             let Some(c) = self.store.request::<Option<Claimed>>(
@@ -112,23 +118,70 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// The runtime of bot `name`'s next run: its stored session's runtime
+    /// while healthy, else a stored rule that names the bot, else the bot's
+    /// own agent (or another healthy runtime of its harness).
+    fn bot_pick(&self, name: &str) -> Result<std::result::Result<Pick, NoPick>> {
+        let rule = match self.stored_rules {
+            true => self
+                .store
+                .request::<Option<rule::Rule>>("rule_select", json!({"bot":name}))?,
+            false => None,
+        };
+        let key = rule.as_ref().map(rule::Rule::key);
+        let bot = self
+            .store
+            .client
+            .get::<serde_json::Value>(&format!("/api/bots/{name}"), &[])?;
+        let now = now_unix();
+        let session = bot["session_agent"]
+            .as_str()
+            .and_then(|a| self.runtimes.resolve(a))
+            .filter(|r| r.healthy(now) && self.can_run(&r.name, true, true));
+        if let Some(rt) = session {
+            return Ok(Ok(Pick {
+                agent: rt.name.clone(),
+                rule: key.unwrap_or_else(|| "bot session".into()),
+                with: rule
+                    .as_ref()
+                    .and_then(|r| r.uses.iter().find(|u| u.harness == rt.harness).cloned()),
+            }));
+        }
+        if let Some(r) = &rule {
+            match self.pick_from(Some(r), true) {
+                Ok(p) => return Ok(Ok(p)),
+                Err(NoPick::Missing(note)) => {
+                    eprintln!("axe dispatcher: bot {name}: {note}; using its own agent");
+                }
+                Err(e) => return Ok(Err(e)),
+            }
+        }
+        let own = bot["agent"].as_str().unwrap_or("claude");
+        Ok(self.pin_pick(own, "bot agent", true))
+    }
+
     fn spawn_bot(&mut self, c: &Claimed, pick: Option<&Pick>) -> Result<()> {
         let b = &c.bot;
+        let rt = self
+            .runtimes
+            .resolve(&b.agent)
+            .with_context(|| format!("unknown agent {}", b.agent))?
+            .clone();
         let agent = self
             .cfg
             .agents
-            .get(&b.agent)
-            .with_context(|| format!("unknown agent {}", b.agent))?
+            .get(&rt.agent)
+            .with_context(|| format!("unknown agent {}", rt.agent))?
             .clone();
         let bot_args = agent
             .bot_args
             .clone()
-            .with_context(|| format!("agent {} has no bot_args", b.agent))?;
+            .with_context(|| format!("agent {} has no bot_args", rt.agent))?;
         let session_mode = agent.session_mode()?;
-        let resume = c
-            .session
-            .as_ref()
-            .filter(|s| s.agent == b.agent && agent.resume_cmd.is_some());
+        let resume = c.session.as_ref().filter(|s| {
+            self.runtimes.resolve(&s.agent).map(|r| &r.name) == Some(&rt.name)
+                && agent.resume_cmd.is_some()
+        });
         // Docs attached to the bot (owner `bot:<name>`), its project and global:
         // bundles with a prompt part (the bot protocol, a channel) are inlined,
         // everything else is listed.
@@ -215,7 +268,7 @@ impl Dispatcher {
         };
         let with = pick
             .and_then(|p| p.with.as_ref())
-            .filter(|u| agent.harness() == Some(u.harness.as_str()));
+            .filter(|u| u.harness == rt.harness);
         let mut extra = bot_args;
         if let Some(u) = with {
             extra.extend(u.args());
@@ -228,7 +281,7 @@ impl Dispatcher {
         let attrs = self.cfg.otel.attributes(&[
             ("bot", &b.name),
             ("project", &b.project),
-            ("agent", &b.agent),
+            ("agent", &rt.name),
             ("mode", mode),
             ("bot_run", &c.run.to_string()),
         ]);
@@ -255,14 +308,17 @@ impl Dispatcher {
         if let Some(path) = &worktree {
             env.push(("AXE_WORKTREE", path.display().to_string()));
         }
+        let (login, unset) = rt.env();
+        env.extend(login);
+        let mut remove = vec!["AXE_TASK", "AXE_WORKTREE"];
+        remove.extend(unset);
         let log = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&log_path)
             .with_context(|| format!("create log {}", log_path.display()))?;
-        let mut command =
-            agent_proc::command(&argv, &cwd, &["AXE_TASK", "AXE_WORKTREE"], &env, log)?;
-        let event = json!({"run":c.run,"mode":mode,"agent":b.agent,"session_id":session_id,
+        let mut command = agent_proc::command(&argv, &cwd, &remove, &env, log)?;
+        let event = json!({"run":c.run,"mode":mode,"agent":rt.name,"session_id":session_id,
             "log":log_path,"prompt_file":prompt_path,"system_prompt_file":system_file,
             "settings_file":settings_file,"cmd":agent_proc::logged_cmd(&argv, &prompt_path),
             "worktree":worktree,"repos_refresh":refreshed,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>(),
@@ -287,7 +343,7 @@ impl Dispatcher {
         self.bots.push(BotRun {
             run_id: c.run,
             name: b.name.clone(),
-            agent: b.agent.clone(),
+            agent: rt.name.clone(),
             session_mode,
             session_id,
             log_path,
@@ -371,6 +427,7 @@ impl Dispatcher {
         let outage = (reason == "exit" && code != Some(0))
             .then(|| crate::failure::classify(&run.log_path))
             .flatten();
+        self.note_runtime(&run.agent, outage.as_ref(), &run.log_path);
         let (reason, note) = match &outage {
             Some(f) => ("api_error", Some(format!("model API error {}", f.note()))),
             None => (reason, note),

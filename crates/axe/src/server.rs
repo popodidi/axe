@@ -132,6 +132,9 @@ impl channel::Store for State {
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
+    fn runtimes(&self) -> serde_json::Value {
+        crate::runtime::view(&self.admission())
+    }
 }
 
 impl State {
@@ -1701,6 +1704,12 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             ok(200, &v)
         }
         ("GET", ["api", "admission"]) => ok(200, &st.admission()),
+        ("GET", ["api", "runtimes"]) => ok(200, &crate::runtime::view(&st.admission())),
+        // A runtime turned needs_login or limited: one card to the owner.
+        ("POST", ["api", "dispatcher", "runtime-alert"]) => {
+            let b: serde_json::Value = req.json()?;
+            ok(200, &runtime_alert(st, &b)?)
+        }
         ("GET", ["api", "sessions", sid]) => match db::find_session(&st.conn(), sid)? {
             Some(s) => ok(200, &s),
             None => Err(HttpError(404, format!("session {sid} not found")).into()),
@@ -2418,6 +2427,20 @@ fn asks_until(req: &Request, now: i64) -> Result<i64> {
             Ok(crate::flow::parse_bound(s, now).map_err(|e| HttpError(400, format!("{e:#}")))?)
         }
         None => Ok(now + 1),
+    }
+}
+
+#[cfg(not(feature = "telegram"))]
+fn runtime_alert(_: &State, _: &serde_json::Value) -> Result<serde_json::Value> {
+    Ok(json!({"sent": false, "reason": NO_TELEGRAM}))
+}
+
+/// Sends a runtime card through the gateway, when one is configured.
+#[cfg(feature = "telegram")]
+fn runtime_alert(st: &State, b: &serde_json::Value) -> Result<serde_json::Value> {
+    match &st.telegram {
+        Some(gw) => gw.runtime_alert(st, b),
+        None => Ok(json!({"sent": false, "reason": "telegram is not configured on this server"})),
     }
 }
 

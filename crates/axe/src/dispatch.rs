@@ -17,6 +17,7 @@ pub use crate::agent_proc::{otel_resource_attributes, parse_jsonl_session, rende
 use crate::config::{Config, Prompts, SessionMode, Strategy};
 use crate::db::{self, Changes, Claim, Task};
 use crate::rule::{self, Use};
+use crate::runtime::{self, Registry};
 use crate::worktree;
 
 mod bots;
@@ -32,13 +33,35 @@ const DRAIN_BOT_GRACE: Duration = Duration::from_secs(60);
 /// `finish` note of a run aborted by a bounded drain.
 const DRAIN_ABORT_NOTE: &str = "aborted by rollout drain";
 
-/// The agent of a new run, what picked it, and the `use` entry whose model and
-/// effort it runs with (none: the agent's own defaults).
+/// The runtime of a new run (`runtime.rs`), what picked it, and the `use`
+/// entry whose model and effort it runs with (none: the agent's own defaults).
 #[derive(Debug, Clone)]
 struct Pick {
+    /// The runtime's name; without `[runtimes]`, the agent's.
     agent: String,
     rule: String,
     with: Option<Use>,
+}
+
+/// Why no runtime was picked.
+#[derive(Debug)]
+enum NoPick {
+    /// Nothing configured can run it: the task escalates.
+    Missing(String),
+    /// Runtimes exist but none is healthy now: the task waits until `until`.
+    Unhealthy { until: i64, note: String },
+}
+
+impl NoPick {
+    fn note(self) -> String {
+        match self {
+            NoPick::Missing(n) | NoPick::Unhealthy { note: n, .. } => n,
+        }
+    }
+}
+
+fn now_unix() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 struct Run {
@@ -93,6 +116,16 @@ pub struct Dispatcher {
     /// Stored rules pick agents (`rule.rs`); false while the deprecated
     /// `[defaults]`/`[[rule]]` config does (see [`Dispatcher::init_rules`]).
     stored_rules: bool,
+    /// The runtimes runs go to, with their health (`runtime.rs`).
+    runtimes: Registry,
+    /// Cards to the owner not yet accepted by the server.
+    alerts: Vec<runtime::Alert>,
+    /// The last alert send failed; logged once per streak.
+    alert_failed: bool,
+    /// Why claims are held for runtime health, as last logged.
+    runtime_hold_logged: Option<String>,
+    /// Bots held for runtime health, with the reason last logged.
+    bots_held: BTreeMap<String, String>,
 }
 
 /// A resume-to-fresh fallback waiting for resource admission.
@@ -261,6 +294,14 @@ impl Dispatcher {
             Some(g) => g.handle(),
             None => admission::handle(None),
         };
+        // The config was validated with its registry; a registry that broke
+        // since then leaves runs on the default logins, loudly.
+        let runtimes = Registry::load(&cfg).unwrap_or_else(|e| {
+            eprintln!("axe dispatcher: runtimes unavailable ({e:#}); each agent runs on the default login");
+            let mut plain = cfg.clone();
+            plain.runtimes = None;
+            Registry::load(&plain).expect("implicit runtimes always load")
+        });
         Dispatcher {
             cfg,
             store,
@@ -276,6 +317,11 @@ impl Dispatcher {
             bots_unsupported: false,
             drain: None,
             stored_rules: false,
+            runtimes,
+            alerts: Vec::new(),
+            alert_failed: false,
+            runtime_hold_logged: None,
+            bots_held: BTreeMap::new(),
         }
     }
 
@@ -317,17 +363,56 @@ impl Dispatcher {
         }
     }
 
-    /// Live task and bot runs of `agent`.
-    fn in_use(&self, agent: &str) -> usize {
-        self.runs.iter().filter(|r| r.pick.agent == agent).count()
-            + self.bots.iter().filter(|b| b.agent == agent).count()
+    /// Live task and bot runs of runtime `name`.
+    fn in_use(&self, name: &str) -> usize {
+        self.runs.iter().filter(|r| r.pick.agent == name).count()
+            + self.bots.iter().filter(|b| b.agent == name).count()
     }
 
-    /// Walks a rule's `use` list: the first entry with an agent of its harness
-    /// wins, the least used such agent first (then by name). No matching rule
-    /// means `claude-code`. Bots also need `bot_args`. `Err` names what was
-    /// tried.
-    fn pick_from(&self, rule: Option<&rule::Rule>, bot: bool) -> std::result::Result<Pick, String> {
+    /// Whether runtime `name` can run a bot (its agent has `bot_args`) or, with
+    /// `resume`, resume a session.
+    fn can_run(&self, name: &str, bot: bool, resume: bool) -> bool {
+        self.runtimes
+            .get(name)
+            .and_then(|r| self.cfg.agents.get(&r.agent))
+            .is_some_and(|a| (!bot || a.bot_args.is_some()) && (!resume || a.resume_cmd.is_some()))
+    }
+
+    /// The least-used healthy runtime of `harness` (then by name); bots also
+    /// need `bot_args`. `Err(true)`: the harness has runtimes, none healthy.
+    fn least_used(&self, harness: &str, bot: bool, now: i64) -> std::result::Result<String, bool> {
+        let fit: Vec<&runtime::Runtime> = self
+            .runtimes
+            .of(harness)
+            .filter(|r| self.can_run(&r.name, bot, false))
+            .collect();
+        fit.iter()
+            .filter(|r| r.healthy(now))
+            .min_by_key(|r| self.in_use(&r.name))
+            .map(|r| r.name.clone())
+            .ok_or(!fit.is_empty())
+    }
+
+    /// `name: state` of every unhealthy runtime of `harnesses`, for notes.
+    fn unhealthy_states(&self, harnesses: &[&str], now: i64) -> String {
+        let s: Vec<String> = self
+            .runtimes
+            .runtimes
+            .iter()
+            .filter(|r| harnesses.contains(&r.harness.as_str()) && !r.healthy(now))
+            .map(|r| match r.health.until {
+                Some(u) => format!("{} {} until {}", r.name, r.state(now), crate::bot::ts(u)),
+                None => format!("{} {}", r.name, r.state(now)),
+            })
+            .collect();
+        s.join(", ")
+    }
+
+    /// Walks a rule's `use` list: the first entry with a healthy runtime of
+    /// its harness wins, the least used such runtime first (then by name). An
+    /// entry whose runtimes are all unhealthy is skipped for the next. No
+    /// matching rule means `claude-code`. Bots also need `bot_args`.
+    fn pick_from(&self, rule: Option<&rule::Rule>, bot: bool) -> std::result::Result<Pick, NoPick> {
         let fallback = [Use {
             harness: "claude-code".into(),
             model: None,
@@ -335,27 +420,152 @@ impl Dispatcher {
         }];
         let uses = rule.map_or(&fallback[..], |r| &r.uses);
         let key = rule.map_or("no rule".to_string(), rule::Rule::key);
+        let now = now_unix();
+        let mut unhealthy = Vec::new();
         for u in uses {
-            let best = self
-                .cfg
-                .agents
-                .iter()
-                .filter(|(_, a)| a.harness() == Some(u.harness.as_str()))
-                .filter(|(_, a)| !bot || a.bot_args.is_some())
-                .min_by_key(|(n, _)| self.in_use(n));
-            if let Some((name, _)) = best {
-                return Ok(Pick {
-                    agent: name.clone(),
-                    rule: key,
-                    with: Some(u.clone()),
-                });
+            match self.least_used(&u.harness, bot, now) {
+                Ok(name) => {
+                    return Ok(Pick {
+                        agent: name,
+                        rule: key,
+                        with: Some(u.clone()),
+                    })
+                }
+                Err(true) => unhealthy.push(u.harness.as_str()),
+                Err(false) => {}
             }
         }
         let tried: Vec<String> = uses.iter().map(Use::to_string).collect();
-        Err(format!(
+        if !unhealthy.is_empty() {
+            return Err(NoPick::Unhealthy {
+                until: self.runtimes.next_healthy(&unhealthy, now),
+                note: format!(
+                    "{key}: no healthy runtime for any use entry ({}): {}",
+                    tried.join(", "),
+                    self.unhealthy_states(&unhealthy, now)
+                ),
+            });
+        }
+        Err(NoPick::Missing(format!(
             "{key}: no configured agent for any use entry ({})",
             tried.join(", ")
-        ))
+        )))
+    }
+
+    /// A pinned agent (task or bot): its runtime while healthy, else the
+    /// least-used healthy runtime of the same harness.
+    fn pin_pick(&self, name: &str, why: &str, bot: bool) -> std::result::Result<Pick, NoPick> {
+        let Some(rt) = self.runtimes.resolve(name) else {
+            return Err(NoPick::Missing(format!("unknown agent {name}")));
+        };
+        let now = now_unix();
+        let pick = |agent: String| Pick {
+            agent,
+            rule: why.to_string(),
+            with: None,
+        };
+        if rt.healthy(now) {
+            return Ok(pick(rt.name.clone()));
+        }
+        let harness = rt.harness.as_str();
+        match self.least_used(harness, bot, now) {
+            Ok(other) => Ok(pick(other)),
+            Err(_) => Err(NoPick::Unhealthy {
+                until: self.runtimes.next_healthy(&[harness], now),
+                note: format!(
+                    "{why} {name}: no healthy {harness} runtime: {}",
+                    self.unhealthy_states(&[harness], now)
+                ),
+            }),
+        }
+    }
+
+    /// Returns a claimed task to pending until `until` (Unix seconds),
+    /// refunding the run: no runtime it may use is healthy now.
+    fn release(&mut self, task_id: i64, claim: &str, until: i64, note: String) -> Result<()> {
+        let wait = (until - now_unix()).max(60);
+        self.store.request::<bool>(
+            "release",
+            json!({"task":task_id,"claim":claim,"wait":wait,
+                   "note":format!("held for a healthy runtime, retrying in {wait}s: {note}")}),
+        )?;
+        Ok(())
+    }
+
+    /// Lapses limits, probes logins and sends pending runtime cards.
+    fn runtime_tick(&mut self) {
+        if !self.runtimes.managed {
+            return;
+        }
+        self.runtimes.tick(now_unix());
+        self.runtimes.probe();
+        let mut i = 0;
+        while i < self.alerts.len() {
+            let a = self.alerts[i].clone();
+            // The runtime recovered before the card went out: no card.
+            if self
+                .runtimes
+                .get(&a.runtime)
+                .map(|r| r.health.state.as_str())
+                != Some(a.state.as_str())
+            {
+                self.alerts.remove(i);
+                continue;
+            }
+            match self.store.client.send::<Value>(
+                "POST",
+                "/api/dispatcher/runtime-alert",
+                a.to_json(),
+            ) {
+                Ok(v) => {
+                    eprintln!(
+                        "axe dispatcher: runtime {} turned {}: card {v}",
+                        a.runtime, a.state
+                    );
+                    self.runtimes.alerted(&a.runtime, &a.state);
+                    self.alerts.remove(i);
+                    self.alert_failed = false;
+                }
+                Err(e) => {
+                    if !self.alert_failed {
+                        eprintln!(
+                            "axe dispatcher: runtime {} card not sent yet: {e:#}",
+                            a.runtime
+                        );
+                    }
+                    self.alert_failed = true;
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// Records what a finished run of runtime `name` said about its login:
+    /// the latest quota, and a failure class that marks the runtime.
+    fn note_runtime(
+        &mut self,
+        name: &str,
+        failure: Option<&crate::failure::Failure>,
+        log: &std::path::Path,
+    ) {
+        if let Some(q) = runtime::quota_from_log(log) {
+            self.runtimes.set_quota(name, q);
+        }
+        let Some(f) = failure else {
+            return;
+        };
+        let backoff = agent_proc::api_backoff_seconds(1);
+        if let Some(alert) = self.runtimes.mark(name, f, backoff, now_unix()) {
+            self.alerts.push(alert);
+        }
+        if self.runtimes.managed {
+            let r = self.runtimes.get(name);
+            eprintln!(
+                "axe dispatcher: runtime {name}: {} -> {}",
+                f.class,
+                r.map_or("?", |r| r.health.state.as_str())
+            );
+        }
     }
 
     /// Replaces the resource gate (tests use controlled samples and clocks).
@@ -444,6 +654,7 @@ impl Dispatcher {
         if let Some(g) = &mut self.gate {
             g.tick();
         }
+        self.runtime_tick();
         self.schedule()?;
         self.report_admission();
         Ok(())
@@ -464,7 +675,8 @@ impl Dispatcher {
         let used = (self.runs.len() + self.deferred.len(), self.bots.len());
         // So is a hold being set, released or expiring.
         let hold = self.hold();
-        let held = hold.json();
+        let runtimes = self.runtimes.heartbeat(|n| self.in_use(n), now_unix());
+        let held = json!([hold.json(), runtimes]);
         if self.reported.as_ref().is_some_and(|(n, u, h, at)| {
             *n == samples && *u == used && *h == held && at.elapsed() < REPORT_EVERY
         }) {
@@ -477,6 +689,7 @@ impl Dispatcher {
         let mut view = admission::view(&self.admission);
         admission::apply_hold(&mut view, &hold);
         view["pools"] = self.pools();
+        view["runtimes"] = runtimes;
         let body = json!({"id":id,"generation":generation,"admission":view});
         let failed = self
             .store
@@ -522,6 +735,7 @@ impl Dispatcher {
             self.reap_bots()?;
             self.update_activity()?;
             let reopened = self.gate.as_mut().is_some_and(|g| g.tick());
+            self.runtime_tick();
             self.report_admission();
             if self.store.draining.load(Ordering::SeqCst) {
                 if self.drain_step()? {
@@ -673,6 +887,31 @@ impl Dispatcher {
             if self.hold().reason().is_some() {
                 return Ok(());
             }
+            // No healthy runtime: claim nothing (no run budget spent).
+            if self.runtimes.managed {
+                let now = now_unix();
+                let held = (!self.runtimes.any_healthy(now)).then(|| {
+                    let all: Vec<&str> = self
+                        .runtimes
+                        .runtimes
+                        .iter()
+                        .map(|r| r.harness.as_str())
+                        .collect();
+                    self.unhealthy_states(&all, now)
+                });
+                if held != self.runtime_hold_logged {
+                    match &held {
+                        Some(why) => {
+                            eprintln!("axe dispatcher: claims held: no healthy runtime ({why})")
+                        }
+                        None => eprintln!("axe dispatcher: a runtime is healthy again; claiming"),
+                    }
+                    self.runtime_hold_logged = held.clone();
+                }
+                if held.is_some() {
+                    return Ok(());
+                }
+            }
             // Fresh resource sample before every claim, so each slot gets its own
             // decision and a paused gate claims nothing (no run budget spent).
             if let Some(g) = &mut self.gate {
@@ -724,80 +963,94 @@ impl Dispatcher {
             .rev()
             .find(|e| matches!(e.kind.as_str(), "run_start" | "run_interrupted"))
             .is_some_and(|e| e.kind == "run_interrupted");
-        if let Some(session) = &resume {
-            let reason = if !self.cfg.agents.contains_key(&session.agent) {
-                Some("stored agent no longer exists")
-            } else if res
-                .max_resumes
-                .is_some_and(|max| !interrupted && session.resume_count >= max)
-            {
-                Some("max_resumes reached")
-            } else if self.cfg.agents[&session.agent].resume_cmd.is_none() {
-                Some("stored agent has no resume_cmd")
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                self.store.request::<serde_json::Value>("note",json!({"task":task.id,"claim":claim_id,"note":format!("fresh session fallback: {reason}")}))?;
-                resume = None;
-            }
-        }
-        let pick = if !self.stored_rules {
-            let agent = if let Some(session) = &resume {
-                session.agent.clone()
-            } else if let Some(agent) = &task.agent {
-                agent.clone()
-            } else {
-                match res.strategy {
-                    Strategy::Fixed => res.agents[0].clone(),
-                    Strategy::RoundRobin => {
-                        let i = self.store.request::<usize>(
-                            "round_robin",
-                            json!({"rule":res.rule_key,"len":res.agents.len()}),
-                        )?;
-                        res.agents[i].clone()
-                    }
+        let now = now_unix();
+        // The runtime the stored session resumes on, or why it starts fresh.
+        let mut fallback = None;
+        let resume_on = resume.as_ref().and_then(|session| {
+            let rt = self.runtimes.resolve(&session.agent);
+            fallback = match rt {
+                None => Some("stored agent no longer exists".to_string()),
+                Some(_)
+                    if res
+                        .max_resumes
+                        .is_some_and(|max| !interrupted && session.resume_count >= max) =>
+                {
+                    Some("max_resumes reached".into())
                 }
+                Some(rt) if !self.can_run(&rt.name, false, true) => {
+                    Some("stored agent has no resume_cmd".into())
+                }
+                Some(rt) if !rt.healthy(now) => {
+                    Some(format!("stored runtime {} is {}", rt.name, rt.state(now)))
+                }
+                Some(_) => None,
             };
-            Pick {
-                agent,
-                rule: res.rule_key.clone(),
-                with: None,
-            }
-        } else {
-            let matched = self
+            rt.filter(|_| fallback.is_none()).map(|r| r.name.clone())
+        });
+        let matched = match self.stored_rules {
+            true => self
                 .store
-                .request::<Option<rule::Rule>>("rule_select", json!({"task":task.id}))?;
-            if let Some(session) = &resume {
-                // The stored session resumes on its own agent, with the model
-                // and effort the rule gives that agent's harness.
-                let harness = self.cfg.agents[&session.agent].harness();
-                Pick {
-                    agent: session.agent.clone(),
+                .request::<Option<rule::Rule>>("rule_select", json!({"task":task.id}))?,
+            false => None,
+        };
+        let picked = if let Some(name) = resume_on {
+            // The stored session resumes on its own runtime, with the model
+            // and effort the rule gives that runtime's harness.
+            let harness = self.runtimes.get(&name).map(|r| r.harness.clone());
+            Ok(match self.stored_rules {
+                true => Pick {
+                    agent: name,
                     rule: matched.as_ref().map_or("no rule".into(), rule::Rule::key),
                     with: matched.as_ref().and_then(|r| {
                         r.uses
                             .iter()
-                            .find(|u| Some(u.harness.as_str()) == harness)
+                            .find(|u| Some(&u.harness) == harness.as_ref())
                             .cloned()
                     }),
-                }
-            } else if let Some(agent) = &task.agent {
-                Pick {
-                    agent: agent.clone(),
-                    rule: "task agent".into(),
+                },
+                false => Pick {
+                    agent: name,
+                    rule: res.rule_key.clone(),
                     with: None,
-                }
+                },
+            })
+        } else if let Some(agent) = &task.agent {
+            let why = if self.stored_rules {
+                "task agent"
             } else {
-                match self.pick_from(matched.as_ref(), false) {
-                    Ok(p) => p,
-                    Err(note) => {
-                        self.block_claimed(task.id, &claim_id, note)?;
-                        return Ok(true);
-                    }
+                &res.rule_key
+            };
+            self.pin_pick(agent, why, false)
+        } else if !self.stored_rules {
+            let agent = match res.strategy {
+                Strategy::Fixed => res.agents[0].clone(),
+                Strategy::RoundRobin => {
+                    let i = self.store.request::<usize>(
+                        "round_robin",
+                        json!({"rule":res.rule_key,"len":res.agents.len()}),
+                    )?;
+                    res.agents[i].clone()
                 }
+            };
+            self.pin_pick(&agent, &res.rule_key, false)
+        } else {
+            self.pick_from(matched.as_ref(), false)
+        };
+        let pick = match picked {
+            Ok(p) => p,
+            Err(NoPick::Unhealthy { until, note }) => {
+                self.release(task.id, &claim_id, until, note)?;
+                return Ok(true);
+            }
+            Err(e) => {
+                self.block_claimed(task.id, &claim_id, e.note())?;
+                return Ok(true);
             }
         };
+        if let Some(reason) = fallback {
+            self.store.request::<serde_json::Value>("note",json!({"task":task.id,"claim":claim_id,"note":format!("fresh session fallback: {reason}")}))?;
+            resume = None;
+        }
         if let Err(e) = self.spawn(&task, &pick, &claim_id, resume.as_ref(), interrupted) {
             self.block_claimed(task.id, &claim_id, format!("{e:#}"))?;
         }
@@ -821,11 +1074,16 @@ impl Dispatcher {
         interrupted: bool,
     ) -> Result<()> {
         let agent_name = pick.agent.as_str();
+        let rt = self
+            .runtimes
+            .get(agent_name)
+            .with_context(|| format!("unknown agent {agent_name}"))?
+            .clone();
         let agent = self
             .cfg
             .agents
-            .get(agent_name)
-            .with_context(|| format!("unknown agent {agent_name}"))?
+            .get(&rt.agent)
+            .with_context(|| format!("unknown agent {}", rt.agent))?
             .clone();
         let session_mode = agent.session_mode()?;
         let mut repos_cloned = Vec::new();
@@ -902,10 +1160,7 @@ impl Dispatcher {
         } else {
             &agent.cmd
         };
-        let with = pick
-            .with
-            .as_ref()
-            .filter(|u| agent.harness() == Some(u.harness.as_str()));
+        let with = pick.with.as_ref().filter(|u| u.harness == rt.harness);
         let template = match with {
             Some(u) => splice_bot_args(template, &u.args()),
             None => template.clone(),
@@ -943,7 +1198,12 @@ impl Dispatcher {
         if let Some(path) = &task_worktree {
             env.push(("AXE_WORKTREE", path.display().to_string()));
         }
-        let mut command = agent_proc::command(&argv, &cwd, &["AXE_WORKTREE"], &env, log)?;
+        // The runtime's login: its directory variable, or none for the default.
+        let (login, unset) = rt.env();
+        env.extend(login);
+        let mut remove = vec!["AXE_WORKTREE"];
+        remove.extend(unset);
+        let mut command = agent_proc::command(&argv, &cwd, &remove, &env, log)?;
         let logged_cmd = agent_proc::logged_cmd(&argv, &prompt_path);
         let resume_count = resume.map_or(0, |s| s.resume_count + u64::from(!interrupted));
         let session = session_id.as_ref().map(|id| db::Session {
@@ -955,11 +1215,16 @@ impl Dispatcher {
         if let Some(u) = with {
             body["use"] = json!(u.to_string());
         }
-        // With stored rules, the task carries the runtime (today: the agent)
-        // it ran on as a `runtime:<agent>` label.
+        if self.runtimes.managed {
+            body["runtime"] = json!(rt.name);
+            body["harness"] = json!(rt.harness);
+        }
+        // With stored rules or runtimes, the task carries the runtime it ran
+        // on as a `runtime:<name>` label.
         let label = format!("runtime:{agent_name}");
-        let label =
-            (self.stored_rules && db::validate_name("label", &label).is_ok()).then_some(label);
+        let label = ((self.stored_rules || self.runtimes.managed)
+            && db::validate_name("label", &label).is_ok())
+        .then_some(label);
         let run_id=self.store.request::<i64>("prepare",json!({"task":task.id,"claim":claim,"agent":agent_name,"mode":mode,"session_id":session_id,"log":log_path,"session":session,"event":body,"label":label}))?;
         self.store.log(run_id, log_path.clone(), false)?;
         let mut child = match command.spawn() {
@@ -1060,10 +1325,11 @@ impl Dispatcher {
         });
         let usage = crate::usage::parse_log(&run.log_path);
         // Only a plain non-zero exit is classified; stops, drains and aborts keep their path.
-        let api_error = (code.is_some_and(|c| c != 0) && block_note.starts_with("session exited"))
+        let failure = (code.is_some_and(|c| c != 0) && block_note.starts_with("session exited"))
             .then(|| crate::failure::classify(&run.log_path))
-            .flatten()
-            .map(|f| f.to_json());
+            .flatten();
+        self.note_runtime(&run.pick.agent.clone(), failure.as_ref(), &run.log_path);
+        let api_error = failure.map(|f| f.to_json());
         let retry=self.store.request::<bool>("finish",json!({"api_error":api_error,"usage":usage,"run":run.run_id,"aborted":block_note == "remote abort confirmed","drained":block_note == DRAIN_ABORT_NOTE,"resumed":run.resumed,"code":code,"note":block_note,"session":session,"session_id":run.session_id,"event":{"exit_code":code,"log":run.log_path,"agent":run.pick.agent,"session_id":run.session_id}}))?;
         self.store.log(run.run_id, run.log_path.clone(), true)?;
         if retry {
@@ -1071,12 +1337,17 @@ impl Dispatcher {
                 .store
                 .request::<Task>("task", json!({"task":run.task_id}))?;
             // The fresh fallback keeps the run's pick unless the task's pin changed.
+            let pinned = |a: &String| self.runtimes.resolve(a).map(|r| r.name.clone());
             let pick = match &task.agent {
-                Some(a) if *a != run.pick.agent => Pick {
-                    agent: a.clone(),
-                    rule: "task agent".into(),
-                    with: None,
-                },
+                Some(a) if pinned(a).as_ref() != Some(&run.pick.agent) => {
+                    match self.pin_pick(a, "task agent", false) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.block_claimed(task.id, &run.claim, e.note())?;
+                            return Ok(());
+                        }
+                    }
+                }
                 _ => run.pick.clone(),
             };
             // The fallback is a new process: it needs its own admission decision.

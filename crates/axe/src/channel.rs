@@ -29,6 +29,10 @@ pub trait Store: Send + Sync + 'static {
     /// the counter.
     fn wait_changed(&self, seen: u64, timeout: std::time::Duration) -> u64;
     fn stopping(&self) -> bool;
+    /// The dispatcher's runtimes (`runtime::view`); none outside a server.
+    fn runtimes(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
 }
 
 /// Options of `axe bot tg send`.
