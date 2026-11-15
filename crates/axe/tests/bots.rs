@@ -1857,3 +1857,127 @@ fn bot_with_repos_runs_in_a_run_folder_and_an_empty_list_keeps_the_project_folde
     );
     assert!(!rig.file("env-3").contains("AXE_WORKTREE="));
 }
+
+#[test]
+fn bot_worktrees_fast_forward_before_each_run_unless_dirty_or_ahead() {
+    let rig = Rig::new(1);
+    let base = rig._dir.path().canonicalize().unwrap();
+    let git = |dir: &Path, args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    for name in ["one", "two", "three"] {
+        canonical_clone(&base, name);
+    }
+    rig.create(json!({}));
+    rig.srv.ok(&[
+        "bot",
+        "edit",
+        "b",
+        "--repo",
+        "one,two,three",
+        "--why",
+        "repos",
+    ]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let run = base.join("ws/.runs/bot-b");
+    let wt = |r: &str| run.join("repos").join(r);
+    let before: Vec<String> = ["one", "two", "three"]
+        .iter()
+        .map(|r| git(&wt(r), &["rev-parse", "HEAD"]))
+        .collect();
+
+    // Origin moves on for every repo, from another clone.
+    for name in ["one", "two", "three"] {
+        let other = base.join(format!("other-{name}"));
+        git(
+            &base,
+            &[
+                "clone",
+                "-q",
+                base.join(format!("{name}.git")).to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(other.join("NEW.md"), "new\n").unwrap();
+        git(&other, &["add", "."]);
+        git(&other, &["commit", "-qm", "upstream"]);
+        git(&other, &["push", "-q", "origin", "main"]);
+    }
+    let upstream = git(&base.join("other-one"), &["rev-parse", "HEAD"]);
+    // `two` is dirty; `three` has a local commit.
+    std::fs::write(wt("two").join("README.md"), "edited\n").unwrap();
+    std::fs::write(wt("three").join("LOCAL.md"), "mine\n").unwrap();
+    git(&wt("three"), &["add", "."]);
+    git(&wt("three"), &["commit", "-qm", "local"]);
+    let three_head = git(&wt("three"), &["rev-parse", "HEAD"]);
+
+    rig.srv
+        .ok(&["bot", "wake", "b", "--now", "--note", "again"]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+
+    // Behind and clean: fast-forwarded before the run, on its branch.
+    assert_eq!(git(&wt("one"), &["rev-parse", "HEAD"]), upstream);
+    assert_eq!(head_branch(&wt("one")), "axe/bot-b--work");
+    assert!(wt("one").join("NEW.md").is_file());
+    // Dirty: unchanged, edit kept. Ahead: unchanged, commit kept.
+    assert_eq!(git(&wt("two"), &["rev-parse", "HEAD"]), before[1]);
+    assert_eq!(
+        std::fs::read_to_string(wt("two").join("README.md")).unwrap(),
+        "edited\n"
+    );
+    assert!(!wt("two").join("NEW.md").exists());
+    assert_eq!(git(&wt("three"), &["rev-parse", "HEAD"]), three_head);
+    assert!(!wt("three").join("NEW.md").exists());
+
+    // The run's start event records each outcome and why a repo was skipped.
+    let starts: Vec<Value> = rig
+        .db()
+        .prepare("SELECT body FROM bot_events WHERE kind='run_start' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|b| serde_json::from_str(&b.unwrap()).unwrap())
+        .collect();
+    assert_eq!(starts.len(), 2);
+    let first = &starts[0]["repos_refresh"];
+    for (i, r) in ["one", "two", "three"].iter().enumerate() {
+        assert_eq!(first[i]["repo"], *r);
+        assert_eq!(first[i]["outcome"], "current", "{first}");
+        assert_eq!(first[i]["head"], before[i].as_str());
+    }
+    let second = &starts[1]["repos_refresh"];
+    assert_eq!(second[0]["outcome"], "updated", "{second}");
+    assert_eq!(second[0]["from"], before[0].as_str());
+    assert_eq!(second[0]["to"], upstream.as_str());
+    assert_eq!(second[1]["outcome"], "skipped", "{second}");
+    assert!(
+        second[1]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("uncommitted or untracked changes"),
+        "{second}"
+    );
+    assert_eq!(second[2]["outcome"], "skipped", "{second}");
+    assert!(
+        second[2]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("1 local commits not on origin/main"),
+        "{second}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bot b: repos/two not refreshed")
+            && stderr.contains("bot b: repos/three not refreshed"),
+        "{stderr}"
+    );
+}

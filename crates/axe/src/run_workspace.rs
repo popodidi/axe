@@ -13,15 +13,18 @@
 //! ```
 //!
 //! Every repo worktree is on the same branch, `<branch_prefix>task-<id>--work`.
-//! Worktrees are created once and never reset; `AGENTS.md`, `skills/` and
-//! `docs/` are generated again at the start of every session. A task with an
+//! A task's worktrees are created once and never reset; `AGENTS.md`, `skills/`
+//! and `docs/` are generated again at the start of every session. A task with an
 //! empty repo list gets the folder without `repos/`. Tasks without `repos`
 //! keep the project worktree (`worktree.rs`).
 //!
 //! A bot with a repo list gets the same layout at `<run_root>/bot-<name>`
 //! ([`build_bot`]), on branch `<branch_prefix>bot-<name>--work`, with the
 //! skills attached to the bot's scopes; a bot without one keeps its project
-//! worktree.
+//! worktree. A bot's worktrees outlive many runs, so before each run every one
+//! is fast-forwarded to its base branch's origin commit when that is safe
+//! ([`worktree::refresh`]: clean, no local commits) and left unchanged, with
+//! the reason, when it is not.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -66,19 +69,30 @@ pub fn build(cfg: &Config, task: &Task, store: Option<&dyn context::Source>) -> 
 
 /// The run folder of bot `name` with `repos` (non-empty): `<run_root>/bot-<name>`,
 /// laid out like a task's, each repo on branch `<branch_prefix>bot-<name>--work`.
-/// Worktrees persist across runs. The skills attached to the bot's scopes
-/// (`attached`, read from `store`) are written into `skills/` like a task's;
-/// attached docs and bundles stay in the bot's system prompt.
+/// Worktrees persist across runs and are refreshed before each one
+/// ([`worktree::refresh`]); the outcome per repo is returned for the run's
+/// start event. The caller guarantees the bot has no live run. The skills
+/// attached to the bot's scopes (`attached`, read from `store`) are written
+/// into `skills/` like a task's; attached docs and bundles stay in the bot's
+/// system prompt.
 pub fn build_bot(
     cfg: &Config,
     name: &str,
     repos: &[String],
     attached: &context::Resolution,
     store: &dyn context::Source,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Vec<RepoRefresh>)> {
     let dir = cfg.run_root().join(format!("bot-{name}"));
     let branch = format!("{}bot-{name}--work", branch_prefix(cfg));
     let built = checkout(cfg, &dir, repos, &branch)?;
+    let mut refreshed = Vec::new();
+    for (repo, path) in &built {
+        let ready = worktree::repo_readiness(cfg, repo).map_err(anyhow::Error::msg)?;
+        refreshed.push(RepoRefresh {
+            repo: repo.clone(),
+            refresh: worktree::refresh(&ready, path),
+        });
+    }
     let skills = link_skills(&dir, &built)?;
     let attached = context::Resolution {
         scopes: attached.scopes.clone(),
@@ -96,7 +110,15 @@ pub fn build_bot(
         &docs_index(&built)?,
         &bot_agents_md(name, &branch, &built, &skills, &attached),
     )?;
-    Ok(dir)
+    Ok((dir, refreshed))
+}
+
+/// What [`build_bot`] did to one repo's worktree before the run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoRefresh {
+    pub repo: String,
+    #[serde(flatten)]
+    pub refresh: worktree::Refresh,
 }
 
 fn branch_prefix(cfg: &Config) -> String {
