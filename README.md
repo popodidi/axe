@@ -95,7 +95,9 @@ reads the task itself.
 **When the dispatcher escalates.** A session that exits with its task still
 `in_progress`, a task over `max_runs`, a missing project directory or
 worktree base, a spawn failure, an orphaned claim after restart, and a
-SIGTERM. Each gets a block note.
+SIGTERM. Each gets a block note. A run that a quota, login or provider
+failure ended goes back to `pending` with a timed retry instead, its run
+refunded and the class named in its note (`failure.rs`).
 
 **Admission.** A task session starts only when a pool slot is free, the
 optional resource gate is open, and no admission hold is set

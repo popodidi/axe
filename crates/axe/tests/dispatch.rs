@@ -1091,12 +1091,12 @@ agents = ["bad_request"]
 
 #[test]
 fn api_outage_detection_reads_only_the_last_structured_result() {
-    use axe::agent_proc::{api_backoff_seconds, api_outage};
+    use axe::agent_proc::api_backoff_seconds;
     let dir = tempfile::tempdir().unwrap();
     let check = |name: &str, text: &str| {
         let p = dir.path().join(name);
         std::fs::write(&p, text).unwrap();
-        api_outage(&p)
+        axe::failure::classify(&p).map(|f| f.to_json())
     };
     let result = |status: &str, is_error: bool, reason: &str| {
         format!(
@@ -1109,7 +1109,10 @@ fn api_outage_detection_reads_only_the_last_structured_result() {
         "api_error",
     );
     let o = check("edge", &format!("{{\"type\":\"system\"}}\n{edge}\n")).expect("403 edge block");
-    assert_eq!(o["status"], 403);
+    assert_eq!(
+        (o["status"].as_i64(), o["class"].as_str()),
+        (Some(403), Some("provider_unavailable"))
+    );
     assert!(o["message"].as_str().unwrap().contains("Cloudflare"));
     for status in [408, 429, 500, 503, 529] {
         let line = result(
@@ -1123,10 +1126,6 @@ fn api_outage_detection_reads_only_the_last_structured_result() {
         (
             "bad request",
             result(r#","api_error_status":400"#, true, "api_error"),
-        ),
-        (
-            "auth",
-            result(r#","api_error_status":401"#, true, "api_error"),
         ),
         ("no status", result("", true, "api_error")),
         (
@@ -1148,7 +1147,78 @@ fn api_outage_detection_reads_only_the_last_structured_result() {
     ] {
         assert_eq!(check("t", &text), None, "{name}");
     }
-    assert_eq!(api_outage(&dir.path().join("missing")), None);
+    let auth = check(
+        "t",
+        &result(r#","api_error_status":401"#, true, "api_error"),
+    )
+    .unwrap();
+    assert_eq!(auth["class"], "auth_invalid");
+    assert_eq!(axe::failure::classify(&dir.path().join("missing")), None);
     let backoff: Vec<i64> = [0, 1, 2, 3, 5, 6, 40].map(api_backoff_seconds).into();
     assert_eq!(backoff, [60, 60, 120, 240, 960, 1800, 1800]);
+}
+
+#[test]
+fn quota_and_auth_failures_retry_without_escalating_and_task_errors_escalate() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/failures");
+    let agent = |name: &str, fixture: &str, session: &str| {
+        let script = format!("cat '{}'; exit 1", fixtures.join(fixture).display());
+        format!(
+            "[agents.{name}]\ncmd = [\"sh\", \"-c\", {}, \"{{prompt}}\"]\nsession = \"{session}\"\n",
+            serde_json::to_string(&script).unwrap()
+        )
+    };
+    let mut cfg = format!(
+        "workspace_root = \"{}\"\nlog_dir = \"{}\"\n[pool]\ntotal = 3\n",
+        ws.display(),
+        dir.path().join("logs").display()
+    );
+    for (project, name, fixture, session) in [
+        ("a", "claude_quota", "claude-usage-limit.jsonl", "preset"),
+        (
+            "b",
+            "codex_auth",
+            "codex-auth-expired.jsonl",
+            "jsonl:thread_id",
+        ),
+        (
+            "c",
+            "codex_error",
+            "codex-task-error.jsonl",
+            "jsonl:thread_id",
+        ),
+    ] {
+        std::fs::create_dir_all(ws.join(project)).unwrap();
+        cfg.push_str(&agent(name, fixture, session));
+        cfg.push_str(&format!(
+            "[[rule]]\nmatch = {{ project = \"{project}\" }}\nagents = [\"{name}\"]\n"
+        ));
+    }
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, cfg).unwrap();
+    let path = dir.path().join("t.db");
+    let mut conn = db::open(&path).unwrap();
+    let quota = add(&mut conn, "a");
+    let auth = add(&mut conn, "b");
+    let real = add(&mut conn, "c");
+    run_dispatch_once(dir.path(), &path, &config);
+
+    for (id, class) in [(quota, "quota_exhausted"), (auth, "auth_invalid")] {
+        let t = db::get_task(&conn, id).unwrap();
+        assert_eq!((t.state.as_str(), t.runs), ("pending", 0), "{class}: {t:?}");
+        assert!(t.not_before.is_some(), "{class}: timed retry");
+        let ev = db::events(&conn, id).unwrap();
+        assert!(!ev
+            .iter()
+            .any(|e| e.kind == "state" && e.to_value.as_deref() == Some("escalated")));
+        let end = ev.iter().rfind(|e| e.kind == "run_end").unwrap();
+        let body: Value = serde_json::from_str(end.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["api_error"]["class"], class);
+        let note = ev.last().unwrap().body.as_deref().unwrap();
+        assert!(note.contains(&format!("{class}: ")), "{note}");
+    }
+    let t = db::get_task(&conn, real).unwrap();
+    assert_eq!((t.state.as_str(), t.runs), ("escalated", 1));
 }

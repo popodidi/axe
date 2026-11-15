@@ -13,6 +13,7 @@ pub mod context;
 pub mod db;
 pub mod dispatch;
 pub mod doc;
+pub mod failure;
 pub mod flow;
 pub mod goal;
 pub mod goal_board;

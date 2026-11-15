@@ -467,8 +467,9 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             let changed = events
                 .iter()
                 .any(|e| e.id > start && e.actor != "dispatcher");
-            // A model-API outage the dispatcher saw end a plain failed exit: keep the
-            // session, refund the run and retry after a backoff instead of escalating.
+            // A quota, login or provider failure the dispatcher saw end a plain failed
+            // exit (`failure.rs`): keep the session, refund the run and retry later
+            // instead of escalating.
             let outage = !aborted && b["drained"] != true && b["api_error"].is_object();
             let retry = !aborted
                 && !outage
@@ -584,16 +585,15 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                             .is_some_and(|v| v["api_error"].is_object())
                     })
                     .count() as i64;
-                let wait = crate::agent_proc::api_backoff_seconds(streak);
+                let wait = retry_wait(&b["api_error"], streak, now_unix());
                 let changes = Changes {
                     state: Some("pending".into()),
                     not_before: Some(format!("+{wait}s")),
                     note: Some(format!(
-                        "run {run} ended on a model API error ({} {}); not counted against the \
+                        "run {run} ended on a model API error ({}); not counted against the \
                          run budget; retrying in the same session in {wait}s \
-                         (outage run {streak} in a row)",
-                        b["api_error"]["status"],
-                        b["api_error"]["message"].as_str().unwrap_or("")
+                         (API failure run {streak} in a row)",
+                        crate::failure::note(&b["api_error"])
                     )),
                     ..Default::default()
                 };
@@ -628,6 +628,26 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
     }
     tx.commit()?;
     Ok(result)
+}
+
+/// Seconds before a task retries after the run ended on `api_error` (a
+/// `failure::Failure` object): an exhausted quota waits for its reset (an hour
+/// when unknown), anything else backs off by `streak`.
+pub fn retry_wait(api_error: &Value, streak: i64, now: i64) -> i64 {
+    if api_error["class"] == crate::failure::QUOTA_EXHAUSTED {
+        return api_error["retry_at"]
+            .as_i64()
+            .map_or(QUOTA_RETRY_SECONDS, |at| at - now)
+            .max(crate::agent_proc::api_backoff_seconds(1));
+    }
+    crate::agent_proc::api_backoff_seconds(streak)
+}
+
+/// Retry delay after an exhausted quota with no reported reset time.
+pub const QUOTA_RETRY_SECONDS: i64 = 3600;
+
+fn now_unix() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 /// Operations that change nothing; they are neither journaled nor retained.

@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll check the task log."}}
+{"type":"error","message":"Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again."}
+{"type":"turn.failed","error":{"message":"Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again."}}
