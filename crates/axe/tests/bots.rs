@@ -1981,3 +1981,34 @@ fn bot_worktrees_fast_forward_before_each_run_unless_dirty_or_ahead() {
         "{stderr}"
     );
 }
+
+#[test]
+fn edit_moves_a_bot_to_another_project_and_keeps_its_subscriptions() {
+    let rig = Rig::new(1);
+    rig.create(json!({}));
+    let before = rig.bot()["project"].as_str().unwrap().to_string();
+    let out = rig.srv.run(&["bot", "subscribe", "b", "--why", "w"]);
+    assert!(out.status.success(), "{out:?}");
+    let out = rig
+        .srv
+        .run(&["bot", "edit", "b", "--project", "q", "--why", "move"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.bot()["project"], "q");
+    let out = rig.srv.run(&["bot", "show", "b"]);
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(shown.contains("project: q"), "{shown}");
+    let out = rig.srv.run(&["bot", "log", "b"]);
+    let log = String::from_utf8_lossy(&out.stdout);
+    assert!(log.contains("project"), "{log}");
+    assert!(log.contains(&format!("{before} -> q")), "{log}");
+    let out = rig.srv.run(&["bot", "subscriptions", "b"]);
+    let subs = String::from_utf8_lossy(&out.stdout);
+    assert!(subs.contains(&before), "old subscription kept: {subs}");
+    for bad in ["", "a b"] {
+        let out = rig
+            .srv
+            .run(&["bot", "edit", "b", "--project", bad, "--why", "w"]);
+        assert!(!out.status.success(), "{bad:?} refused: {out:?}");
+    }
+    assert_eq!(rig.bot()["project"], "q");
+}

@@ -417,6 +417,10 @@ pub struct Edit {
     /// Replaces the repo list; an empty list clears it (the project worktree).
     #[serde(default)]
     pub repos: Option<Vec<String>>,
+    /// Moves the bot to another project. Existing subscriptions keep the
+    /// project they name.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Applies an edit and records each change as a diff event with the reason.
@@ -448,6 +452,22 @@ pub fn edit(conn: &mut Connection, actor: &Actor, name: &str, e: &Edit, why: &st
             &format!("why: {why}\n{}", diff(field, old, new)),
         )?;
         changed = true;
+    }
+    if let Some(new) = e.project.as_deref().map(str::trim) {
+        if new.is_empty() || new.chars().any(char::is_whitespace) {
+            bail!("invalid project {new:?}");
+        }
+        if new != b.project {
+            tx.execute("UPDATE bots SET project=?1 WHERE id=?2", params![new, b.id])?;
+            event(
+                &tx,
+                b.id,
+                actor,
+                "project",
+                &format!("why: {why}\n{} -> {new}", b.project),
+            )?;
+            changed = true;
+        }
     }
     let old = b.nudge_after_seconds;
     let nudge = e.nudge_after.as_deref().map(parse_duration).transpose()?;

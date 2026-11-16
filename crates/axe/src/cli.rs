@@ -1448,10 +1448,13 @@ enum BotCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Change identity, conduct, nudge or repos; each change is recorded with --why
+    /// Change identity, conduct, nudge, repos or project; each change is recorded with --why
     Edit {
         #[arg(env = "AXE_BOT")]
         name: String,
+        /// Move the bot to another project (existing subscriptions keep theirs)
+        #[arg(long)]
+        project: Option<String>,
         #[arg(long)]
         identity_file: Option<PathBuf>,
         #[arg(long)]
@@ -1832,9 +1835,12 @@ enum GoalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Change intent, deadline or budget (an owner decision); "none" clears a value
+    /// Change intent, deadline, budget or project (an owner decision); "none" clears a value
     Edit {
         name: String,
+        /// Move the goal to another project
+        #[arg(long)]
+        project: Option<String>,
         #[arg(long)]
         intent_file: Option<PathBuf>,
         /// YYYY-MM-DD, RFC3339 or +<n>[smhd]
@@ -2274,6 +2280,7 @@ fn run_goal(c: &Client, command: &GoalCmd) -> Result<()> {
         }
         GoalCmd::Edit {
             name,
+            project,
             intent_file,
             deadline,
             budget_cost_week,
@@ -2288,8 +2295,14 @@ fn run_goal(c: &Client, command: &GoalCmd) -> Result<()> {
                 json!({"intent": intent, "deadline": deadline,
                     "budget_cost_week": budget_cost_week,
                     "budget_attention_week": budget_attention_week,
+                    "project": project,
                     "why": why, "owner_ref": owner_ref}),
             )?;
+            if let Some(p) = project {
+                if g.project != p.trim() {
+                    anyhow::bail!("the server did not move the goal; it predates goal projects");
+                }
+            }
             println!("{}", format_goal_line(&g));
         }
         GoalCmd::Activate {
@@ -3056,6 +3069,7 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
         }
         BotCmd::Edit {
             name,
+            project,
             identity_file,
             conduct_file,
             nudge_after,
@@ -3069,8 +3083,13 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 "PATCH",
                 &format!("/api/bots/{name}"),
                 json!({"identity":read(identity_file)?,"conduct":read(conduct_file)?,
-                    "nudge_after":nudge_after,"repos":repos,"why":why}),
+                    "nudge_after":nudge_after,"repos":repos,"project":project,"why":why}),
             )?;
+            if let Some(p) = project {
+                if b.project != p.trim() {
+                    anyhow::bail!("the server did not move the bot; it predates bot projects");
+                }
+            }
             // A server from before bot repos ignores the field.
             if let Some(r) = repos {
                 let mut want: Vec<&String> = Vec::new();
