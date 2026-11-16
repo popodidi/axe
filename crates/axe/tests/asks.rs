@@ -305,7 +305,7 @@ fn stats_give_wasted_share_per_bot_and_week() {
         r.text
     );
     assert!(r.text.ends_with("\nBy kind: decisions 2"), "{}", r.text);
-    assert_eq!(r.rows, [3, 3], "a row of ratings per ask");
+    assert_eq!(r.rows, [3, 3, 1], "a row of ratings per ask, then Dismiss");
     // Bot a's retro has its own ask only; the home bot's has the bot-less one.
     let senders = vec!["a".to_string(), "b".to_string()];
     let mine = |bot: &str, home: bool| {
@@ -406,8 +406,8 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
     assert_eq!(r.items[13].detail, "");
     assert_eq!(
         r.rows,
-        [vec![3; ask::RETRO_PAGE], vec![1]].concat(),
-        "next only"
+        [vec![3; ask::RETRO_PAGE], vec![1, 1]].concat(),
+        "next only, then Dismiss"
     );
     assert!(
         r.text.ends_with("\nBy kind: decisions 13, yes/no checks 1"),
@@ -417,7 +417,7 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
     assert!(r.text.encode_utf16().count() < 4096);
     let page2 = ask::render_retro(&r.items, r.more, &Default::default(), 1, Some("a"));
     assert!(page2.text.contains("page 2/2") && page2.text.contains(&format!("\n14. msg {card}: ")));
-    assert_eq!(page2.rows, [3, 3, 3, 3, 1], "prev only");
+    assert_eq!(page2.rows, [3, 3, 3, 3, 1, 1], "prev only, then Dismiss");
 }
 
 /// Escalates `id` with a class and resolver, as `axe escalate` does.

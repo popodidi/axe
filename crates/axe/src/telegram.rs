@@ -1399,7 +1399,25 @@ impl Gateway {
             serde_json::from_value(stored.flags["retro"]["items"].clone()).unwrap_or_default();
         let more = stored.flags["retro"]["more"].as_u64().unwrap_or(0) as usize;
         let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
-        let (toast, page) = match ask::Press::parse(data) {
+        let press = ask::Press::parse(data);
+        if stored.flags["dismissed"] == true {
+            self.toast(b, query, "This retro was dismissed");
+            return Ok(true);
+        }
+        if press == Some(ask::Press::Dismiss) {
+            // Closes the card: no keyboard, so it is not open, and the inbox
+            // pass unpins it if it was pinned. Its asks stay as they are.
+            let text =
+                ask::dismissed_retro(&items, &ask::ratings(&store.conn(), &ids)?, Some(&b.name));
+            if let Err(e) = self.edit(store, &b.name, stored.id, Some(&text), false, None, &[]) {
+                eprintln!("telegram: bot {}: retro card: {e:#}", b.name);
+            }
+            set_flag(store, stored.id, "$.dismissed", json!(true))?;
+            store.changed();
+            self.toast(b, query, "Dismissed; unrated asks stay unrated");
+            return Ok(true);
+        }
+        let (toast, page) = match press {
             Some(ask::Press::Item(a, rating)) if ids.contains(&a) => {
                 ask::rate(&mut store.conn(), &owner_actor(), &a, rating)?;
                 (format!("Rated: {rating}"), Some(ask::page_of(&items, &a)))
@@ -1430,16 +1448,22 @@ impl Gateway {
                 eprintln!("telegram: bot {}: retro card: {e:#}", b.name);
             }
         }
+        self.toast(b, query, &toast);
+        Ok(true)
+    }
+
+    /// Answers callback query `query` (if any) with a short toast. Best
+    /// effort: the press is already handled.
+    fn toast(&self, b: &TgBot, query: Option<&str>, text: &str) {
         if let Some(qid) = query {
             let r = b.api.call(
                 "answerCallbackQuery",
-                &json!({"callback_query_id": qid, "text": truncate(&toast, TOAST_LIMIT)}),
+                &json!({"callback_query_id": qid, "text": truncate(text, TOAST_LIMIT)}),
             );
             if let Err(e) = r {
                 eprintln!("telegram: bot {}: {e}", b.name);
             }
         }
-        Ok(true)
     }
 
     /// Bot `name`'s weekly retro card (`ask::retro`): the asks it raised,
@@ -1471,6 +1495,7 @@ impl Gateway {
             rows: r.rows.clone(),
             html: false,
             task: None,
+            retro: Some(json!({"items": r.items, "more": r.more})),
             ..o.clone()
         };
         let out = self.send(store, name, &r.text, &opts)?;
@@ -1478,11 +1503,6 @@ impl Gateway {
             .first()
             .and_then(|m| m["id"].as_i64())
             .context("retro card was not recorded")?;
-        store.conn().execute(
-            "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.ask'),'$.retro',json(?1)) WHERE id=?2",
-            params![json!({"items": r.items, "more": r.more}).to_string(), id],
-        )?;
-        store.changed();
         Ok(json!({"sent": true, "id": id, "items": r.items.len(), "more": r.more}))
     }
 
@@ -1787,6 +1807,8 @@ impl Gateway {
                 json!({})
             } else if let Some(t) = o.task {
                 json!({"buttons": o.buttons, "html": o.html, "task": t})
+            } else if let Some(r) = &o.retro {
+                json!({"buttons": o.buttons, "html": o.html, "retro": r})
             } else {
                 // `ask` marks an owner ask for good (`ask.rs`): it stays when
                 // the card closes and its buttons go.
