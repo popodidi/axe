@@ -2707,10 +2707,9 @@ fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
     #[derive(Deserialize)]
     struct Ask {
         request: crate::sealed::Request,
-        /// Send the owner a Telegram prompt (default true when configured).
+        /// Send the owner a Telegram prompt (default true).
         telegram: Option<bool>,
-        /// The Telegram bot to send it from (default: the target bot, else
-        /// the ops bot).
+        /// The Telegram bot that sends it: required unless `telegram` is false.
         bot: Option<String>,
     }
     #[derive(Deserialize)]
@@ -2729,9 +2728,26 @@ fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
                 )
                 .into());
             }
+            let bot =
+                match (b.telegram, b.bot.as_deref()) {
+                    (Some(false), _) => None,
+                    (_, None) => return Err(HttpError(
+                        400,
+                        "name the Telegram bot that sends the prompt (bot), or set telegram false"
+                            .into(),
+                    )
+                    .into()),
+                    (_, Some(bot)) => {
+                        form_sender(st, bot).map_err(|e| HttpError(400, format!("{e:#}")))?;
+                        Some(bot)
+                    }
+                };
             let f = sign_form(st, &b.request, now)?;
             let mut out = f.view(page);
-            out["telegram"] = form_prompt(st, &f, b.telegram, b.bot.as_deref());
+            out["telegram"] = match bot {
+                Some(bot) => form_prompt(st, &f, bot),
+                None => json!({"sent": false, "reason": "not asked"}),
+            };
             let fields: Vec<String> = f
                 .spec
                 .fields
@@ -2869,7 +2885,7 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
         from: "/runtimes".into(),
     };
     let f = sign_form(st, &req, remote::epoch())?;
-    let sent = form_prompt(st, &f, Some(true), Some(bot));
+    let sent = form_prompt(st, &f, bot);
     eprintln!(
         "axe server: form {}: asked for {}",
         f.spec.form,
@@ -2886,32 +2902,29 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
     }
 }
 
-/// Sends the form's Telegram prompt when asked (or by default, when
-/// Telegram is configured); returns what happened.
+/// Checks that bot `name` can send a form's Telegram prompt.
 #[cfg(feature = "telegram")]
-fn form_prompt(
-    st: &State,
-    f: &form::Form,
-    want: Option<bool>,
-    bot: Option<&str>,
-) -> serde_json::Value {
+fn form_sender(st: &State, name: &str) -> Result<()> {
+    let gw = st
+        .telegram
+        .as_ref()
+        .context("telegram is not configured on this server")?;
+    gw.form_sender(name).map(|_| ())
+}
+
+#[cfg(not(feature = "telegram"))]
+fn form_sender(_: &State, _: &str) -> Result<()> {
+    bail!(NO_TELEGRAM)
+}
+
+/// Sends the form's Telegram prompt from bot `name`; returns what happened.
+#[cfg(feature = "telegram")]
+fn form_prompt(st: &State, f: &form::Form, name: &str) -> serde_json::Value {
     let Some(gw) = &st.telegram else {
         return json!({"sent": false, "reason": "telegram is not configured on this server"});
     };
-    if want == Some(false) {
-        return json!({"sent": false, "reason": "not asked"});
-    }
-    let target_bot = match &f.spec.target {
-        crate::sealed::Target::Bot { bot } => Some(bot.as_str()),
-        _ => None,
-    };
     let page = st.cfg.forms.page();
-    match gw.form_prompt(
-        st,
-        bot.or(target_bot),
-        f,
-        &crate::sealed::link(page, &f.signed),
-    ) {
+    match gw.form_prompt(st, name, f, &crate::sealed::link(page, &f.signed)) {
         Ok((v, prompt)) => {
             st.forms.set_prompt(&f.spec.form, prompt);
             v
@@ -2921,7 +2934,7 @@ fn form_prompt(
 }
 
 #[cfg(not(feature = "telegram"))]
-fn form_prompt(_: &State, _: &form::Form, _: Option<bool>, _: Option<&str>) -> serde_json::Value {
+fn form_prompt(_: &State, _: &form::Form, _: &str) -> serde_json::Value {
     json!({"sent": false, "reason": NO_TELEGRAM})
 }
 

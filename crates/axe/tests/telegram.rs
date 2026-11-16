@@ -18,6 +18,10 @@ use common::{Server, TOKEN};
 use serde_json::{json, Value};
 
 const TG_TOKEN: &str = "123456:SECRET-test-token";
+/// A second bot's token, for tests that need two bots.
+const AUX_TOKEN: &str = "654321:SECRET-aux-token";
+/// A third bot's token.
+const GRP_TOKEN: &str = "777777:SECRET-grp-token";
 const OWNER: i64 = 111;
 const STRANGER: i64 = 222;
 const GROUP: i64 = -500;
@@ -25,6 +29,8 @@ const GROUP: i64 = -500;
 /// One recorded Bot API call.
 #[derive(Clone, Debug)]
 struct Call {
+    /// The token of the bot that made the call.
+    token: String,
     method: String,
     params: Value,
     /// Raw body for multipart uploads.
@@ -34,7 +40,8 @@ struct Call {
 
 #[derive(Default)]
 struct StubState {
-    updates: Vec<Value>,
+    /// (bot token, update): each bot polls only its own.
+    updates: Vec<(String, Value)>,
     /// Serve every queued update regardless of `offset`: confirmations are
     /// "lost", as when the server dies before its next poll.
     replay: bool,
@@ -75,7 +82,12 @@ impl Stub {
     }
 
     fn push(&self, u: Value) {
-        self.state.lock().unwrap().updates.push(u);
+        self.push_to(TG_TOKEN, u);
+    }
+
+    /// Queues `u` for the bot with `token`.
+    fn push_to(&self, token: &str, u: Value) {
+        self.state.lock().unwrap().updates.push((token.into(), u));
     }
 
     fn calls(&self, method: &str) -> Vec<Call> {
@@ -128,6 +140,10 @@ fn serve(st: &Mutex<StubState>, stream: TcpStream) -> std::io::Result<()> {
     }
     let mut body = vec![0; len];
     r.read_exact(&mut body)?;
+    let api_call = [TG_TOKEN, AUX_TOKEN, GRP_TOKEN].into_iter().find_map(|t| {
+        path.strip_prefix(&format!("/bot{t}/"))
+            .map(|m| (t, m.to_string()))
+    });
     let (status, out): (u16, Vec<u8>) =
         if let Some(file) = path.strip_prefix(&format!("/file/bot{TG_TOKEN}/")) {
             let s = st.lock().unwrap();
@@ -135,8 +151,8 @@ fn serve(st: &Mutex<StubState>, stream: TcpStream) -> std::io::Result<()> {
                 Some((_, _, bytes)) => (200, bytes.clone()),
                 None => (404, b"not found".to_vec()),
             }
-        } else if let Some(method) = path.strip_prefix(&format!("/bot{TG_TOKEN}/")) {
-            let (status, v) = api(st, method, &body);
+        } else if let Some((token, method)) = api_call {
+            let (status, v) = api(st, token, &method, &body);
             (status, v.to_string().into_bytes())
         } else {
             (
@@ -164,7 +180,7 @@ fn multipart_field(raw: &[u8], name: &str) -> Option<String> {
     Some(s[start..start + end].to_string())
 }
 
-fn api(st: &Mutex<StubState>, method: &str, body: &[u8]) -> (u16, Value) {
+fn api(st: &Mutex<StubState>, token: &str, method: &str, body: &[u8]) -> (u16, Value) {
     let upload = matches!(method, "sendPhoto" | "sendDocument" | "sendVoice");
     let params: Value = if upload {
         json!({"chat_id": multipart_field(body, "chat_id").and_then(|c| c.parse::<i64>().ok())})
@@ -179,17 +195,21 @@ fn api(st: &Mutex<StubState>, method: &str, body: &[u8]) -> (u16, Value) {
             let mut s = st.lock().unwrap();
             let offset = params["offset"].as_i64();
             if let Some(o) = offset.filter(|_| !s.replay) {
-                s.updates.retain(|u| u["update_id"].as_i64().unwrap() >= o);
+                s.updates
+                    .retain(|(t, u)| t != token || u["update_id"].as_i64().unwrap() >= o);
             }
             // Like Telegram: updates from `offset` on, else every unconfirmed one.
             let ready: Vec<Value> = s
                 .updates
                 .iter()
-                .filter(|u| offset.is_none_or(|o| u["update_id"].as_i64().unwrap() >= o))
-                .cloned()
+                .filter(|(t, u)| {
+                    t == token && offset.is_none_or(|o| u["update_id"].as_i64().unwrap() >= o)
+                })
+                .map(|(_, u)| u.clone())
                 .collect();
             if !ready.is_empty() || Instant::now() >= end {
                 s.calls.push(Call {
+                    token: token.into(),
                     method: method.into(),
                     params,
                     raw: Vec::new(),
@@ -203,6 +223,7 @@ fn api(st: &Mutex<StubState>, method: &str, body: &[u8]) -> (u16, Value) {
     }
     let mut s = st.lock().unwrap();
     s.calls.push(Call {
+        token: token.into(),
         method: method.into(),
         params: params.clone(),
         raw: if upload { body.to_vec() } else { Vec::new() },
@@ -329,6 +350,21 @@ chats = [{OWNER}, {GROUP}]
     path
 }
 
+/// `[telegram]` lines that add bot `aux` (may write to the owner's private
+/// chat) and bot `grp` (a group only), with their token files in `dir`, and
+/// keep `cos` the ops bot.
+fn extra_bots(dir: &Path) -> String {
+    let aux = dir.join("aux-token");
+    let grp = dir.join("grp-token");
+    std::fs::write(&aux, AUX_TOKEN).unwrap();
+    std::fs::write(&grp, GRP_TOKEN).unwrap();
+    format!(
+        "ops_bot = \"cos\"\n[[telegram.bot]]\nname = \"aux\"\ntoken_file = \"{}\"\nchats = [{OWNER}]\n[[telegram.bot]]\nname = \"grp\"\ntoken_file = \"{}\"\nchats = [{GROUP}]\n",
+        aux.display(),
+        grp.display()
+    )
+}
+
 impl Rig {
     fn new() -> Rig {
         Rig::with("")
@@ -353,6 +389,16 @@ impl Rig {
         rig.srv()
             .ok(&["bot", "create", "--file", f.to_str().unwrap()]);
         rig
+    }
+
+    /// Creates axe bot `name` for a `[[telegram.bot]]` from `extra_bots`,
+    /// paused so that no session runs.
+    fn add_bot(&self, name: &str) {
+        let f = self.dir.path().join(format!("bot-{name}.json"));
+        std::fs::write(&f, json!({"name": name, "project": "p"}).to_string()).unwrap();
+        self.srv()
+            .ok(&["bot", "create", "--file", f.to_str().unwrap()]);
+        self.srv().ok(&["bot", "pause", name]);
     }
 
     fn start(&mut self) {
@@ -3051,6 +3097,8 @@ fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
     let v = form_ask(
         &rig,
         &[
+            "--bot",
+            "cos",
             "--task",
             "5",
             "--purpose",
@@ -3107,6 +3155,8 @@ fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
     let v2 = form_ask(
         &rig,
         &[
+            "--bot",
+            "cos",
             "--task",
             "5",
             "--purpose",
@@ -3160,6 +3210,79 @@ fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
 }
 
 #[test]
+fn form_ask_sends_its_prompt_only_from_the_named_bot() {
+    let tokens = tempfile::tempdir().unwrap();
+    let rig = Rig::with(&extra_bots(tokens.path()));
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    rig.add_bot("aux");
+    rig.add_bot("grp");
+    let _disp = rig.srv().dispatcher(&[], &[]);
+    let ask = [
+        "--task",
+        "5",
+        "--purpose",
+        "Key",
+        "--field",
+        "key:secret:required",
+    ];
+    let fails = |bot: &[&str]| {
+        let mut a = vec!["form", "ask"];
+        a.extend_from_slice(bot);
+        a.extend_from_slice(&ask);
+        let out = rig.srv().run(&a);
+        assert!(!out.status.success(), "{bot:?}: {out:?}");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    // No sender, an unknown one, or one that cannot reach the owner's
+    // private chat: refused, and no form is made.
+    let err = fails(&[]);
+    assert!(err.contains("--bot"), "{err}");
+    let err = fails(&["--bot", "nope"]);
+    assert!(err.contains("not configured for bot nope"), "{err}");
+    let err = fails(&["--bot", "grp"]);
+    assert!(
+        err.contains("bot grp cannot write to the owner's private chat"),
+        "{err}"
+    );
+    // The API refuses the same without a bot.
+    let r = ureq::post(&format!("{}/api/forms", rig.srv().url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .send_json(json!({"request": {"purpose": "x", "fields": [
+            {"name": "key", "type": "secret", "required": true}],
+            "target": {"kind": "task", "task": 5}}}));
+    match r {
+        Err(ureq::Error::Status(400, resp)) => {
+            let body = resp.into_string().unwrap();
+            assert!(body.contains("name the Telegram bot"), "{body}");
+        }
+        r => panic!("{r:?}"),
+    }
+    let listed: Value = serde_json::from_str(&rig.srv().ok(&["form", "list", "--json"])).unwrap();
+    assert_eq!(listed, json!([]), "no form was made");
+    assert!(rig.sent_to(OWNER).is_empty());
+
+    // The named bot sends it, not the ops bot.
+    let mut a = vec!["--bot", "aux"];
+    a.extend_from_slice(&ask);
+    let v = form_ask(&rig, &a);
+    assert_eq!(v["telegram"]["sent"], true, "{v}");
+    assert_eq!(v["telegram"]["bot"], "aux");
+    let calls = rig.stub.calls("sendMessage");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].token, AUX_TOKEN);
+    assert_eq!(calls[0].params["chat_id"], OWNER);
+    assert!(calls[0].params["reply_markup"]["keyboard"].is_array());
+
+    // --no-telegram needs no sender.
+    let mut a = vec!["--no-telegram"];
+    a.extend_from_slice(&ask);
+    let v = form_ask(&rig, &a);
+    assert_eq!(v["telegram"]["sent"], false, "{v}");
+    assert_eq!(rig.stub.calls("sendMessage").len(), 1);
+}
+
+#[test]
 fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     let dir = tempfile::tempdir().unwrap();
     let reg = dir.path().join("runtimes");
@@ -3169,11 +3292,15 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         "harness = \"claude-code\"\nprobe = [\"false\"]\n",
     )
     .unwrap();
+    // The owner types /runtimes in bot aux, not the ops bot cos.
     let rig = Rig::with(&format!(
-        "[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"true\"]\nharness = \"claude-code\"\nbot_args = []\n",
+        "{}[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"true\"]\nharness = \"claude-code\"\nbot_args = []\n",
+        extra_bots(dir.path()),
         reg.display()
     ));
     rig.srv().ok(&["bot", "pause", "cos"]);
+    rig.add_bot("aux");
+    rig.add_bot("grp");
     let _disp = rig.srv().dispatcher(&[], &[]);
     wait_for("the runtime report", 30, || {
         rig.srv()
@@ -3182,7 +3309,8 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     });
 
     // /runtimes lists the runtime with a login button.
-    rig.stub.push(text_msg(100, 200, OWNER, OWNER, "/runtimes"));
+    rig.stub
+        .push_to(AUX_TOKEN, text_msg(100, 200, OWNER, OWNER, "/runtimes"));
     wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
     let list = rig.sent_to(OWNER).pop().unwrap();
     assert_eq!(
@@ -3197,7 +3325,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
 
     // The button offers the harness's methods.
     let press_on = |update: i64, tg: i64, data: &str| {
-        rig.stub.push(press(update, tg, data));
+        rig.stub.push_to(AUX_TOKEN, press(update, tg, data));
         rig.stub.wait_confirmed(update);
     };
     press_on(101, list_tg, "rtlogin:claude-1");
@@ -3229,6 +3357,15 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         .iter()
         .find(|p| p["reply_markup"]["keyboard"].is_array())
         .unwrap();
+    // It comes from the bot the owner typed /runtimes in.
+    let senders: Vec<String> = rig
+        .stub
+        .calls("sendMessage")
+        .into_iter()
+        .filter(|c| c.params["reply_markup"]["keyboard"].is_array())
+        .map(|c| c.token)
+        .collect();
+    assert_eq!(senders, vec![AUX_TOKEN.to_string()]);
     let link = prompt["reply_markup"]["keyboard"][0][0]["web_app"]["url"]
         .as_str()
         .unwrap();
@@ -3245,10 +3382,13 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         }
     );
     let sealed = axe::sealed::seal(&spec, &json!({"secret": "oat-dummy-4411"})).unwrap();
-    rig.stub.push(json!({"update_id": 103, "message": {
+    rig.stub.push_to(
+        AUX_TOKEN,
+        json!({"update_id": 103, "message": {
         "message_id": 600, "date": 0, "from": user(OWNER),
         "chat": {"id": OWNER, "type": "private"},
-        "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}));
+        "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}),
+    );
     rig.stub.wait_confirmed(103);
     wait_for("the delivery", 20, || {
         rig.sent_to(OWNER)

@@ -239,8 +239,13 @@ text, code, choice and file fields) that only the dispatcher can read, for
 any task or bot session:
 
 ```sh
-axe form ask --purpose "Deploy token" --field token:secret:required:env=DEPLOY_TOKEN --wait
+axe form ask --bot ops --purpose "Deploy token" --field token:secret:required:env=DEPLOY_TOKEN --wait
 ```
+
+- `--bot` names the Telegram bot that sends the owner the prompt; it must be
+  able to write to the owner's private chat. It is required unless
+  `--no-telegram`, which only prints the link. `/runtimes` login forms come
+  from the bot the owner typed `/runtimes` in.
 
 - The dispatcher signs the form with its key (`dispatcher.key`, P-256, 0600,
   made on first start next to the config file; `axe form key` prints its

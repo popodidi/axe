@@ -1250,27 +1250,30 @@ impl Gateway {
         }
     }
 
-    /// Sends the owner a form's prompt with a reply-keyboard Mini App button
-    /// (`web_app`, private chats only) from `bot` (default: the ops bot).
-    pub fn form_prompt(
-        &self,
-        store: &dyn Store,
-        bot: Option<&str>,
-        f: &crate::form::Form,
-        link: &str,
-    ) -> Result<(Value, crate::form::Prompt)> {
-        let name = bot
-            .filter(|n| self.bots.contains_key(*n))
-            .map(String::from)
-            .or_else(|| self.ops.clone())
-            .context("no telegram bot to send sealed forms")?;
-        let b = self.bot(&name)?;
+    /// Checks that `name` can send a form prompt: a configured bot that may
+    /// write to the owner's private chat (a Mini App button needs one).
+    pub fn form_sender(&self, name: &str) -> Result<&Arc<TgBot>> {
+        let b = self.bot(name)?;
         if !b.chats.contains(&self.owner) {
             bail!(
                 "bot {name} cannot write to the owner's private chat, which a Mini App button needs"
             );
         }
-        bot_id(&store.conn(), &name)?;
+        Ok(b)
+    }
+
+    /// Sends the owner a form's prompt with a reply-keyboard Mini App button
+    /// (`web_app`, private chats only) from bot `name`.
+    pub fn form_prompt(
+        &self,
+        store: &dyn Store,
+        name: &str,
+        f: &crate::form::Form,
+        link: &str,
+    ) -> Result<(Value, crate::form::Prompt)> {
+        let b = self.form_sender(name)?;
+        bot_id(&store.conn(), name)?;
+        let name = name.to_string();
         let chat = self.owner;
         let text = crate::form::prompt_text(f);
         let html = format!(
