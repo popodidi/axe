@@ -290,15 +290,17 @@ fn stats_give_wasted_share_per_bot_and_week() {
     let q = ask::stats(&c, Some("q"), end - 14 * DAY, end).unwrap();
     assert_eq!(q.overall.total.asks, 1);
 
-    // The retro card: last week's unrated asks only, one line each.
+    // The retro card: last week's unrated asks only, two lines each.
     let r = ask::retro(&c, end, &RetroScope::default()).unwrap();
     let items: Vec<_> = r.items.iter().map(|i| i.ask.clone()).collect();
     assert_eq!(items, [format!("t{}.1", ids[4]), format!("t{none}.1")]);
-    assert_eq!(r.items[0].line, format!("#{}: x", ids[4]));
-    assert_eq!(r.items[1].line, format!("#{none}: x"));
+    assert_eq!(r.items[0].line, format!("#{}: t4", ids[4]));
+    assert_eq!(r.items[1].line, format!("#{none}: nobody's"));
     assert!(
-        r.text
-            .contains(&format!("\n1. #{}: x\n2. #{none}: x\n", ids[4])),
+        r.text.contains(&format!(
+            "\n1. #{}: t4\n   x Ask: decide\n2. #{none}: nobody's\n   x Ask: decide\n",
+            ids[4]
+        )),
         "{}",
         r.text
     );
@@ -331,7 +333,7 @@ fn stats_give_wasted_share_per_bot_and_week() {
 }
 
 #[test]
-fn a_bots_retro_holds_only_its_asks_one_line_each_paged() {
+fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
     let (_d, mut c) = setup();
     let mut mine = Vec::new();
     for i in 0..13 {
@@ -340,7 +342,7 @@ fn a_bots_retro_holds_only_its_asks_one_line_each_paged() {
             state: Some("escalated".into()),
             note: Some(format!(
                 "blocked: {}\nresolver: owner: decide\nresume: y",
-                format!("need a call on question {i} ").repeat(5)
+                format!("need a call on question {i} ").repeat(8)
             )),
             ..Default::default()
         };
@@ -381,15 +383,27 @@ fn a_bots_retro_holds_only_its_asks_one_line_each_paged() {
         "{}",
         r.text
     );
+    // Line 1 is the task's title, line 2 the blocker (cut) and the ask.
     assert!(
-        r.items[..13].iter().zip(&mine).all(|(i, id)| i
-            .line
-            .starts_with(&format!("#{id}: need a call on question"))
-            && i.line.ends_with('…')),
+        r.items[..13]
+            .iter()
+            .zip(&mine)
+            .all(|(i, id)| i.line == format!("#{id}: title")
+                && i.detail.starts_with("need a call on question")
+                && i.detail.ends_with("… Ask: decide")),
         "{:?}",
         r.items
     );
+    assert!(
+        r.text.contains(&format!(
+            "\n1. #{}: title\n   need a call on question 0 ",
+            mine[0]
+        )),
+        "{}",
+        r.text
+    );
     assert_eq!(r.items[13].line, format!("msg {card}: A's question?"));
+    assert_eq!(r.items[13].detail, "");
     assert_eq!(
         r.rows,
         [vec![3; ask::RETRO_PAGE], vec![1]].concat(),
@@ -576,7 +590,10 @@ fn cli_lists_rates_and_reports_asks() {
         "{list:?}"
     );
     let dry = srv.ok(&["ask", "retro", "--dry"]);
-    assert!(dry.contains(&format!("\n1. #{id}: x\n")), "{dry}");
+    assert!(
+        dry.contains(&format!("\n1. #{id}: decide this\n   x Ask: y\n")),
+        "{dry}"
+    );
     assert!(dry.contains("By kind: decisions 1"), "{dry}");
     assert!(dry.contains("[1 needed] [1 decide] [1 drop]"), "{dry}");
     // A bot's preview holds only its own asks (no gateway: no home bot).

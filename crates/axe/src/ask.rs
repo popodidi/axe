@@ -25,6 +25,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::board::utf16;
 use crate::bot::{epoch_of, ts};
 use crate::db::Actor;
 
@@ -108,6 +109,15 @@ fn asked_of(note: &str) -> String {
         .to_string()
 }
 
+/// The `resolver:` line of an escalation note, without its prefix.
+fn resolver_of(note: &str) -> String {
+    note.lines()
+        .find_map(|l| l.strip_prefix("resolver:"))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 /// The `blocked:` line of an escalation note, without its prefix.
 fn blocked_of(note: &str) -> String {
     note.lines()
@@ -142,6 +152,10 @@ pub struct Ask {
     /// line, a card's first line. Empty when the log holds none.
     #[serde(default)]
     pub question: String,
+    /// What the owner was asked to do: an escalation's `resolver:` line.
+    /// Only the retro card shows it; not part of the API.
+    #[serde(skip)]
+    pub asked: String,
     pub rating: Option<String>,
     pub rated_by: Option<String>,
     pub rated_at: Option<String>,
@@ -306,6 +320,7 @@ fn escalations(conn: &Connection, project: Option<&str>) -> Result<Vec<Ask>> {
                     let note = body.as_deref().unwrap_or_default();
                     ep.2 = asked_of(note);
                     out[ep.0].question = blocked_of(note);
+                    out[ep.0].asked = resolver_of(note);
                 }
                 continue;
             }
@@ -339,6 +354,7 @@ fn escalations(conn: &Connection, project: Option<&str>) -> Result<Vec<Ask>> {
             at: r.get(1)?,
             summary: r.get(7)?,
             question: String::new(),
+            asked: String::new(),
             rating: rating.map(|r| r.rating.clone()),
             rated_by: rating.map(|r| r.by.clone()),
             rated_at: rating.map(|r| r.at.clone()),
@@ -429,6 +445,7 @@ fn cards(conn: &Connection, project: Option<&str>, only: Option<i64>) -> Result<
             at: r.get(3)?,
             summary: first_line(&text, flags["html"] == true),
             question: first_line(&text, flags["html"] == true),
+            asked: String::new(),
             rating: rating.map(|r| r.rating.clone()),
             rated_by: rating.map(|r| r.by.clone()),
             rated_at: rating.map(|r| r.at.clone()),
@@ -666,8 +683,11 @@ pub fn stats(conn: &Connection, project: Option<&str>, since: i64, until: i64) -
 pub const RETRO_ITEMS: usize = 1000;
 /// Asks per page of a retro card: each has its own row of rating buttons.
 pub const RETRO_PAGE: usize = 10;
-/// Characters of an ask's question on its retro line.
-const RETRO_QUESTION: usize = 72;
+/// Length (UTF-16 units, as Telegram counts) of an ask's first retro line:
+/// its id and what it is about.
+const RETRO_TOPIC: usize = 100;
+/// Length of an ask's second retro line: what the owner was asked.
+const RETRO_QUESTION: usize = 160;
 /// Button codes in callback data `rate:<ask>:<code>`.
 pub const CODES: [(&str, &str, &str); 3] = [
     ("n", "needed", "needed"),
@@ -748,7 +768,12 @@ pub fn last_retro(conn: &Connection, bot: &str) -> Result<Option<i64>> {
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetroItem {
     pub ask: String,
+    /// The ask's id and what it is about.
     pub line: String,
+    /// What the owner was asked, summarized. Empty on cards sent before it
+    /// existed: they show one line.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     /// The ask's category, for the footer totals. Empty on cards sent
     /// before kinds existed: counted as `other`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -825,7 +850,7 @@ impl RetroScope<'_> {
 }
 
 /// The weekly retro card of one bot: the asks of the 7 days before `now`
-/// it raised that nobody rated yet, one line each, oldest first. An ask
+/// it raised that nobody rated yet, two lines each, oldest first. An ask
 /// left alone stays unrated; it is never taken as `needed`.
 pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
     let mut asks = list(
@@ -840,34 +865,302 @@ pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
     )?;
     asks.retain(|a| scope.holds(a.bot.as_deref()));
     let more = asks.len().saturating_sub(RETRO_ITEMS);
-    let items = asks
-        .iter()
-        .take(RETRO_ITEMS)
-        .map(|a| RetroItem {
+    let mut items = Vec::new();
+    for a in asks.iter().take(RETRO_ITEMS) {
+        let card = match a.kind.as_str() {
+            "card" => card_text(conn, a)?,
+            _ => CardText::default(),
+        };
+        let (line, detail) = retro_lines(a, &card);
+        items.push(RetroItem {
             ask: a.id.clone(),
-            line: retro_line(a),
+            line,
+            detail,
             kind: a.category.clone(),
             bot: a.bot.clone().unwrap_or_else(|| "-".into()),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
     Ok(render_retro(&items, more, &HashMap::new(), 0, scope.bot))
 }
 
-/// An ask's retro line: its id (`#<task>`, `#<task>.<episode>` after the
-/// first episode, or `msg <id>`) and its question in a few words.
-fn retro_line(a: &Ask) -> String {
-    let what = match a.task {
+/// What a card's retro lines are made of, read from the store.
+#[derive(Debug, Default, Clone)]
+struct CardText {
+    /// The card's whole text, plain.
+    body: String,
+    /// `#<task> <title>` when the card opens with a task id.
+    task: Option<String>,
+    /// The first line of the message the card replies to.
+    reply: Option<String>,
+}
+
+fn card_text(conn: &Connection, a: &Ask) -> Result<CardText> {
+    let Ok(id) = a.id.trim_start_matches('m').parse::<i64>() else {
+        return Ok(CardText::default());
+    };
+    let plain = |text: String, flags: String| {
+        let flags: Value = serde_json::from_str(&flags).unwrap_or_default();
+        if flags["html"] == true {
+            crate::board::strip_html(&text)
+        } else {
+            text
+        }
+    };
+    let row: Option<(String, String, Option<i64>)> = conn
+        .query_row(
+            "SELECT text, flags, reply_to FROM bot_messages WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((text, flags, reply_to)) = row else {
+        return Ok(CardText::default());
+    };
+    let body = plain(text, flags);
+    let task = match leading_task(&body) {
+        Some(t) => conn
+            .query_row("SELECT title FROM tasks WHERE id=?1", [t], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .map(|title| format!("#{t} {title}")),
+        None => None,
+    };
+    let reply = match reply_to {
+        Some(r) => conn
+            .query_row(
+                "SELECT text, flags FROM bot_messages WHERE id=?1",
+                [r],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .map(|(t, f)| first_line(&plain(t, f), false))
+            .filter(|l| !l.is_empty()),
+        None => None,
+    };
+    Ok(CardText { body, task, reply })
+}
+
+/// The task id a text opens with (`#458 reopened: ...`).
+fn leading_task(text: &str) -> Option<i64> {
+    let rest = text.trim_start().strip_prefix('#')?;
+    let n: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let after = rest[n.len()..].chars().next();
+    if after.is_some_and(|c| c.is_alphanumeric() || c == '.') {
+        return None;
+    }
+    n.parse().ok()
+}
+
+/// An ask's two retro lines. The first is its id (`#<task>`,
+/// `#<task>.<episode>` after the first episode, or `msg <id>`) and what it
+/// is about: the task's title; for a card, the task it opens with, else
+/// the message it replies to, else its first sentence. The second is what
+/// was asked: an escalation's `blocked:` and `resolver:` lines, a card's
+/// text (its question kept). Both are summarized: whitespace folded, links
+/// shortened to a label, commit ids to 7 characters, credentials masked,
+/// cut at a sentence or word.
+fn retro_lines(a: &Ask, card: &CardText) -> (String, String) {
+    let id = match a.task {
         Some(t) if a.id.ends_with(".1") => format!("#{t}"),
         Some(_) => format!("#{}", a.id.trim_start_matches('t')),
         None => format!("msg {}", a.id.trim_start_matches('m')),
     };
-    let q = if a.question.trim().is_empty() {
-        &a.summary
+    let room = RETRO_TOPIC - utf16(&id) - 2;
+    let (topic, detail) = if a.kind == "escalation" {
+        (shorten(&a.summary), asked_line(&a.question, &a.asked))
     } else {
-        &a.question
+        let body = if card.body.trim().is_empty() {
+            &a.question
+        } else {
+            &card.body
+        };
+        let body = shorten(&flatten(body));
+        if let Some(t) = &card.task {
+            (shorten(t), question_line(&body, RETRO_QUESTION))
+        } else if let Some(r) = &card.reply {
+            let r = shorten(r);
+            let first = sentences(&r).into_iter().next().unwrap_or_default();
+            (format!("re: {first}"), question_line(&body, RETRO_QUESTION))
+        } else {
+            let mut s = sentences(&body).into_iter();
+            let first = s.next().unwrap_or_default();
+            let rest = s.collect::<Vec<_>>().join(" ");
+            (first, question_line(&rest, RETRO_QUESTION))
+        }
     };
-    let q = scrub(&q.split_whitespace().collect::<Vec<_>>().join(" "));
-    format!("{what}: {}", crate::board::cap(&q, RETRO_QUESTION))
+    (format!("{id}: {}", clip(&topic, room)), detail)
+}
+
+/// An escalation's second line: the blocker, then what the owner was asked
+/// to do (`Ask: ...`, the resolver without its leading `who:`).
+fn asked_line(blocked: &str, resolver: &str) -> String {
+    let b = shorten(blocked);
+    let mut r = resolver.trim();
+    if let Some((who, rest)) = r.split_once(':') {
+        if who.chars().count() <= 30 && !who.contains('/') && who.split_whitespace().count() <= 3 {
+            r = rest.trim();
+        }
+    }
+    let r = shorten(r);
+    if r.is_empty() || b.is_empty() {
+        let only = if b.is_empty() { r } else { b };
+        return question_line(&only, RETRO_QUESTION);
+    }
+    // The blocker gets at least 100, the ask the rest.
+    let ask = utf16(&r) + 6;
+    let b = clip(&b, RETRO_QUESTION - ask.min(RETRO_QUESTION - 100));
+    let room = RETRO_QUESTION - utf16(&b);
+    if room < ask.min(30) {
+        return b;
+    }
+    format!("{b} Ask: {}", clip(&r, room - 6))
+}
+
+/// Text cut to `limit`, keeping its first question (`...?`) when the cut
+/// would drop it.
+fn question_line(text: &str, limit: usize) -> String {
+    if utf16(text) <= limit {
+        return text.to_string();
+    }
+    let head = clip(text, limit);
+    let q = sentences(text).into_iter().find(|s| s.ends_with('?'));
+    match q {
+        Some(q) if !head.contains(&q) && utf16(&q) <= limit / 2 => {
+            let mut head = clip(text, limit - utf16(&q) - 3);
+            if !head.ends_with('…') {
+                head.push_str(" …");
+            }
+            format!("{head} {q}")
+        }
+        _ => head,
+    }
+}
+
+/// A text's lines as one: each line ends as a sentence, list markers
+/// dropped.
+fn flatten(text: &str) -> String {
+    let mut out = String::new();
+    for l in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let l = l.trim_start_matches(['-', '*', '•', '·']).trim_start();
+        if l.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            if !out.ends_with(['.', '?', '!', ':', ';', ',']) {
+                out.push('.');
+            }
+            out.push(' ');
+        }
+        out.push_str(l);
+    }
+    out
+}
+
+/// A text's sentences: split after `.`, `?` or `!` and a space.
+fn sentences(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let b = text.as_bytes();
+    for (i, c) in text.char_indices() {
+        if matches!(c, '.' | '?' | '!') && b.get(i + 1) == Some(&b' ') {
+            out.push(text[start..=i].trim().to_string());
+            start = i + 1;
+        }
+    }
+    let last = text[start..].trim();
+    if !last.is_empty() {
+        out.push(last.to_string());
+    }
+    out
+}
+
+/// Text cut to `limit` UTF-16 units: after the last sentence that fits
+/// when that keeps at least half, else at a word, marked `…`.
+fn clip(text: &str, limit: usize) -> String {
+    if utf16(text) <= limit {
+        return text.to_string();
+    }
+    let mut end = 0;
+    let mut units = 0;
+    for (i, c) in text.char_indices() {
+        units += c.len_utf16();
+        if units > limit.saturating_sub(1) {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    let fits = &text[..end];
+    let sentence = fits
+        .char_indices()
+        .rfind(|&(i, c)| {
+            matches!(c, '.' | '?' | '!' | ';') && text.as_bytes().get(i + 1) == Some(&b' ')
+        })
+        .map(|(i, _)| i + 1);
+    if let Some(i) = sentence.filter(|&i| utf16(&text[..i]) >= limit / 2) {
+        return text[..i].to_string();
+    }
+    let cut = match fits.rfind(' ') {
+        Some(i) if utf16(&fits[..i]) >= limit / 2 => &fits[..i],
+        _ => fits,
+    };
+    format!("{}…", cut.trim_end_matches([' ', ',', ';', ':']))
+}
+
+/// Text made short for a retro line: whitespace folded, each link a short
+/// label ([`link_label`]), a long commit id its first 7 characters, and
+/// credentials masked ([`scrub`]).
+fn shorten(text: &str) -> String {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            if let Some(i) = w.find("http://").or_else(|| w.find("https://")) {
+                let (pre, url) = w.split_at(i);
+                let core = url.trim_end_matches(|c: char| ").,;:!?'\"]>".contains(c));
+                return format!("{pre}{}{}", link_label(core), &url[core.len()..]);
+            }
+            let start = w.find(|c: char| c.is_ascii_hexdigit()).unwrap_or(0);
+            let run: String = w[start..]
+                .chars()
+                .take_while(char::is_ascii_hexdigit)
+                .collect();
+            let hex = run.len() >= 20
+                && run.chars().any(|c| c.is_ascii_digit())
+                && run.chars().any(|c| c.is_ascii_alphabetic())
+                && !w[start + run.len()..].starts_with(|c: char| c.is_alphanumeric());
+            if hex {
+                return format!("{}{}{}", &w[..start], &run[..7], &w[start + run.len()..]);
+            }
+            w.to_string()
+        })
+        .collect();
+    scrub(&words.join(" "))
+}
+
+/// A short label for a link: `repo#12` for a GitHub pull request or issue,
+/// `repo@abc1234` for a commit, `repo` for a repository, else a file name
+/// at the end of the path, else the host.
+fn link_label(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |x| x.1);
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.trim_start_matches("www.");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if host == "github.com" {
+        match segs.as_slice() {
+            [_, repo, "pull" | "issues", n, ..] => return format!("{repo}#{n}"),
+            [_, repo, "commit", sha, ..] => {
+                return format!("{repo}@{}", sha.chars().take(7).collect::<String>())
+            }
+            [_, repo, ..] => return repo.to_string(),
+            _ => {}
+        }
+    }
+    match segs.last() {
+        Some(f) if f.contains('.') && f.chars().count() <= 32 => f.to_string(),
+        _ if host.is_empty() => "link".into(),
+        _ => host.to_string(),
+    }
 }
 
 /// Masks what looks like a credential in text shown on a retro card: the
@@ -951,7 +1244,7 @@ pub fn page_of(items: &[RetroItem], ask: &str) -> usize {
 }
 
 /// Renders page `page` of a retro card from its items, with `rated` (ask id
-/// to rating) marked: one line and one row of rating buttons per ask (a
+/// to rating) marked: two lines and one row of rating buttons per ask (a
 /// rated ask can be re-rated), prev / next, and the kind totals as a
 /// footer. `bot` names whose retro it is. Pure, so presses re-render the
 /// stored items.
@@ -996,6 +1289,9 @@ pub fn render_retro(
         match mine {
             Some(r) => text.push_str(&format!("\n{n}. {} = {}", it.line, rating_label(r))),
             None => text.push_str(&format!("\n{n}. {}", it.line)),
+        }
+        if !it.detail.is_empty() {
+            text.push_str(&format!("\n   {}", it.detail));
         }
         for (code, rating, label) in CODES {
             let label = if mine == Some(rating) {
@@ -1048,6 +1344,7 @@ mod tests {
             line: format!("#{i}: thing {i}"),
             kind: kind.into(),
             bot: bot.into(),
+            ..Default::default()
         }
     }
 
@@ -1062,6 +1359,7 @@ mod tests {
             at: ts(0),
             summary: String::new(),
             question: String::new(),
+            asked: String::new(),
             rating: None,
             rated_by: None,
             rated_at: None,
@@ -1110,49 +1408,164 @@ mod tests {
         assert!(r.text.contains("All rated. Thanks."), "{}", r.text);
     }
 
+    fn lines(a: &Ask) -> (String, String) {
+        retro_lines(a, &CardText::default())
+    }
+
     #[test]
-    fn retro_lines_hold_the_id_and_the_question() {
+    fn retro_lines_hold_the_topic_then_the_question() {
+        // An escalation: its title, then the blocker and the ask.
         let a = Ask {
             kind: "escalation".into(),
-            bot: Some("a".into()),
+            task: Some(452),
+            summary: "web: render performance fixes".into(),
+            question: "Merge decision for https://github.com/acme/web/pull/1814 at head \
+                       d12b8497183262fe63119d6601f3804c3bd87a80 (all checks green)."
+                .into(),
+            asked: "owner (Sam): approve with axe approve 452 --scope pr-merge, \
+                    or request changes"
+                .into(),
+            ..ask("t452.1")
+        };
+        let (l1, l2) = lines(&a);
+        assert_eq!(l1, "#452: web: render performance fixes");
+        assert_eq!(
+            l2,
+            "Merge decision for web#1814 at head d12b849 (all checks green). \
+             Ask: approve with axe approve 452 --scope pr-merge, or request changes"
+        );
+        // A later episode is `#<task>.<n>`; a long blocker is cut at a
+        // sentence and keeps room for the ask.
+        let long = Ask {
+            kind: "escalation".into(),
             task: Some(903),
-            summary: "the task title".into(),
-            question: "merge   PR 12\nafter ".to_string() + &"word ".repeat(30),
+            summary: "the task title ".repeat(20),
+            question: "First the situation in brief. ".to_string() + &"more words ".repeat(40),
+            asked: "Sam: reply A or B".into(),
             ..ask("t903.2")
         };
-        let line = retro_line(&a);
+        let (l1, l2) = lines(&long);
         assert!(
-            line.starts_with("#903.2: merge PR 12 after word word"),
-            "{line}"
+            l1.starts_with("#903.2: the task title") && l1.ends_with('…'),
+            "{l1}"
         );
-        assert!(line.chars().count() <= RETRO_QUESTION + 10, "{line}");
-        assert!(line.ends_with('…'));
-        // The first episode is the task id alone; a card is its message id.
-        let first = Ask {
-            task: Some(7),
-            question: "pick a host".into(),
-            ..ask("t7.1")
-        };
-        assert_eq!(retro_line(&first), "#7: pick a host");
-        let card = Ask {
-            question: "Ship it?".into(),
-            ..ask("m55")
-        };
-        assert_eq!(retro_line(&card), "msg 55: Ship it?");
-        // No question in the log: the title stands in.
+        assert!(utf16(&l1) <= RETRO_TOPIC, "{l1}");
+        assert!(
+            l2.starts_with("First the situation in brief. more words"),
+            "{l2}"
+        );
+        assert!(l2.ends_with("… Ask: reply A or B"), "{l2}");
+        assert!(utf16(&l2) <= RETRO_QUESTION, "{l2}");
+        // No blocked line: the resolver alone; nothing at all: one line.
         let bare = Ask {
+            kind: "escalation".into(),
             task: Some(8),
             summary: "title".into(),
+            asked: "owner: pick a host".into(),
             ..ask("t8.1")
         };
-        assert_eq!(retro_line(&bare), "#8: title");
+        assert_eq!(lines(&bare), ("#8: title".into(), "pick a host".into()));
+        let none = Ask {
+            asked: String::new(),
+            ..bare
+        };
+        assert_eq!(lines(&none), ("#8: title".into(), String::new()));
+
+        // A card: the task it opens with, else what it replies to, else
+        // its first sentence; then its text, question kept.
+        let card = ask("m55");
+        let text = |body: &str, task: Option<&str>, reply: Option<&str>| {
+            retro_lines(
+                &card,
+                &CardText {
+                    body: body.into(),
+                    task: task.map(String::from),
+                    reply: reply.map(String::from),
+                },
+            )
+        };
+        assert_eq!(
+            text(
+                "#479: docs PR 152 ready.\nMerge it?",
+                Some("#479 Sync release docs"),
+                None
+            ),
+            (
+                "msg 55: #479 Sync release docs".into(),
+                "#479: docs PR 152 ready. Merge it?".into()
+            )
+        );
+        assert_eq!(
+            text(
+                "Which ones? I won't guess.",
+                None,
+                Some("Merge the ready PRs. Thanks")
+            ),
+            (
+                "msg 55: re: Merge the ready PRs.".into(),
+                "Which ones? I won't guess.".into()
+            )
+        );
+        assert_eq!(
+            text(
+                "Weekly focus draft.\n- item one\n- item two\nPost it?",
+                None,
+                None
+            ),
+            (
+                "msg 55: Weekly focus draft.".into(),
+                "item one. item two. Post it?".into()
+            )
+        );
+        let (_, q) = text(&("Context. ".repeat(40) + "Ship it on Friday?"), None, None);
+        assert!(q.ends_with("… Ship it on Friday?"), "{q}");
+        assert!(utf16(&q) <= RETRO_QUESTION, "{q}");
+        // No stored text: the question alone.
+        let old = Ask {
+            question: "Ship it?".into(),
+            ..ask("m56")
+        };
+        assert_eq!(lines(&old), ("msg 56: Ship it?".into(), String::new()));
         // Credentials never reach the card.
         let leak = Ask {
+            kind: "escalation".into(),
+            task: Some(1),
             question: "login failed with token=abc123SECRET and ghp_0123456789abcdef".into(),
-            ..ask("m1")
+            ..ask("t1.1")
         };
-        let line = retro_line(&leak);
-        assert!(!line.contains("abc123") && !line.contains("ghp_"), "{line}");
+        let (_, l2) = lines(&leak);
+        assert!(!l2.contains("abc123") && !l2.contains("ghp_"), "{l2}");
+    }
+
+    #[test]
+    fn links_become_short_labels() {
+        assert_eq!(
+            shorten("PR https://github.com/acme/web/pull/1815 ready"),
+            "PR web#1815 ready"
+        );
+        assert_eq!(
+            shorten("(https://github.com/acme/web/issues/9)."),
+            "(web#9)."
+        );
+        assert_eq!(
+            shorten("see https://github.com/acme/api/commit/0123456789abcdef0123"),
+            "see api@0123456"
+        );
+        assert_eq!(shorten("repo https://github.com/acme/api"), "repo api");
+        assert_eq!(
+            shorten("report: http://files.lan/proj/task-7/report.md?x=1"),
+            "report: report.md"
+        );
+        assert_eq!(
+            shorten("dash https://grafana.example.com/d/abc/x?from=now"),
+            "dash grafana.example.com"
+        );
+        // A full commit id becomes 7 characters, not a redaction.
+        assert_eq!(
+            shorten("at 0123456789abcdef0123456789abcdef01234567,"),
+            "at 0123456,"
+        );
+        assert_eq!(shorten("v38.12 at 0dc72e1"), "v38.12 at 0dc72e1");
     }
 
     #[test]
@@ -1178,7 +1591,12 @@ mod tests {
             for i in 0..(k + 1) * 4 {
                 items.push(RetroItem {
                     ask: format!("t{}.{}", 100_000 + k * 1000 + i, 12),
-                    line: format!("#{}.12: {long}…", 100_000 + k * 1000 + i),
+                    line: format!(
+                        "#{}.12: {}",
+                        100_000 + k * 1000 + i,
+                        "t".repeat(RETRO_TOPIC - 12)
+                    ),
+                    detail: long.clone(),
                     kind: kind.to_string(),
                     bot: "a-very-long-bot-name-indeed".into(),
                 });
@@ -1242,9 +1660,12 @@ mod tests {
         assert_eq!(page_of(&items, "t0.1"), 0);
         // A stored card for RETRO_ITEMS asks stays a modest flags value.
         let full: Vec<_> = (0..RETRO_ITEMS)
-            .map(|i| kitem(i, "decision", "bot"))
+            .map(|i| RetroItem {
+                detail: "d".repeat(RETRO_QUESTION),
+                ..kitem(i, "decision", "bot")
+            })
             .collect();
-        assert!(serde_json::to_string(&full).unwrap().len() < 200_000);
+        assert!(serde_json::to_string(&full).unwrap().len() < 300_000);
     }
 
     #[test]

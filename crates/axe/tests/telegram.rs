@@ -2739,10 +2739,11 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
         dry.starts_with(&text),
         "the preview is the card:\n{dry}\n{text}"
     );
-    // One line per ask: its id and its question; kinds only in the footer.
+    // Two lines per ask: its id and title, then its question; kinds only
+    // in the footer.
     assert!(
         text.starts_with(&format!(
-            "Weekly retro, cos: last week's asks (4, 4 unrated)\n\n1. #1: needs a call\n2. #2: needs a call\n3. msg {card}: Decided: yes\n4. msg {card2}: Archive the logs?\n\n"
+            "Weekly retro, cos: last week's asks (4, 4 unrated)\n\n1. #1: pick a region\n   needs a call Ask: decide\n2. #2: pick a name\n   needs a call Ask: decide\n3. msg {card}: Decided: yes\n4. msg {card2}: Archive the logs?\n\n"
         )),
         "{text}"
     );
@@ -2782,7 +2783,7 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     let edit = rig.stub.calls("editMessageText").pop().unwrap();
     let edited = edit.params["text"].as_str().unwrap();
     assert!(
-        edited.contains("\n1. #1: needs a call = decide\n"),
+        edited.contains("\n1. #1: pick a region = decide\n   needs a call Ask: decide\n"),
         "{edited}"
     );
     assert!(edited.contains("(4, 3 unrated)"), "{edited}");
@@ -2901,7 +2902,7 @@ fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
     let edited = edit.params["text"].as_str().unwrap();
     assert!(
         edited.contains("page 2/2")
-            && edited.contains("\n11. #11: needs a call\n12. #12: needs a call\n"),
+            && edited.contains("\n11. #11: aux 11\n   needs a call Ask: decide\n12. #12: aux 12\n"),
         "{edited}"
     );
     let kb = keyboard_of(&edit.params);
@@ -2915,7 +2916,7 @@ fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
         .unwrap()
         .to_string();
     assert!(
-        edited.contains("page 2/2") && edited.contains("#12: needs a call = drop"),
+        edited.contains("page 2/2") && edited.contains("#12: aux 12 = drop"),
         "{edited}"
     );
 }
@@ -3037,14 +3038,14 @@ fn the_weekly_retro_goes_out_at_its_slot_once_and_only_with_asks() {
     let cos = of(TG_TOKEN);
     assert!(
         cos.starts_with(
-            "Weekly retro, cos: last week's asks (1, 1 unrated)\n\n1. #1: needs a call\n"
+            "Weekly retro, cos: last week's asks (1, 1 unrated)\n\n1. #1: ask me\n   needs a call Ask: decide\n"
         ),
         "{cos}"
     );
     let aux = of(AUX_TOKEN);
     assert!(
         aux.starts_with(
-            "Weekly retro, aux: last week's asks (1, 1 unrated)\n\n1. #2: needs a call\n"
+            "Weekly retro, aux: last week's asks (1, 1 unrated)\n\n1. #2: ask aux\n   needs a call Ask: decide\n"
         ),
         "{aux}"
     );
