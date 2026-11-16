@@ -2835,6 +2835,94 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
 }
 
 #[test]
+fn the_retro_card_accepts_a_pages_recs_in_one_tap() {
+    let rig = Rig::new();
+    for title in ["pick a region", "pick a name", "pick a host"] {
+        rig.srv().ok(&[
+            "add",
+            "--project",
+            "p",
+            "--title",
+            title,
+            "--owner",
+            "bot:cos",
+        ]);
+    }
+    for id in ["1", "2", "3"] {
+        escalate(&rig, id);
+    }
+    // The asking bot recommends for two of its three asks.
+    rig.srv().ok(&[
+        "--actor",
+        "bot:cos",
+        "ask",
+        "rec",
+        "t1.1",
+        "decide",
+        "--why",
+        "reversible",
+    ]);
+    rig.srv()
+        .ok(&["--actor", "bot:cos", "ask", "rec", "t2.1", "needed"]);
+    let out = rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
+    assert!(out.starts_with("sent #"), "{out}");
+    let sent = rig.stub.calls("sendMessage").pop().unwrap();
+    let text = sent.params["text"].as_str().unwrap();
+    assert!(
+        text.contains(
+            "\n1. #1: pick a region\n   needs a call Ask: decide\n   rec: decide (reversible)\n"
+        ),
+        "{text}"
+    );
+    let kb = keyboard_of(&sent.params);
+    assert_eq!(kb[0][1].0, "1 decide (rec)");
+    assert_eq!(kb[1][0].0, "2 needed (rec)");
+    assert_eq!(
+        kb[3],
+        [("Accept recs on this page".to_string(), "ra:0".to_string())]
+    );
+    let tg = tg_id(&rig, rig.messages().len() as i64);
+
+    // Accept: the two recs become the owner's ratings, the third stays
+    // unrated, the card re-renders without the button, no bot wakes.
+    rig.stub.push(press(61, tg, "ra:0"));
+    rig.stub.wait_confirmed(61);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "Accepted 2 recs");
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    let edited = edit.params["text"].as_str().unwrap();
+    assert!(edited.contains("1. #1: pick a region = decide"), "{edited}");
+    assert!(edited.contains("(3, 1 unrated)"), "{edited}");
+    assert!(keyboard_of(&edit.params)
+        .iter()
+        .flatten()
+        .all(|b| !b.1.starts_with("ra:")));
+    let asks: Vec<Value> = serde_json::from_str(&rig.srv().ok(&["ask", "list", "--json"])).unwrap();
+    assert_eq!(asks[0]["rating"], "could_decide");
+    assert_eq!(asks[0]["rated_by"], "owner");
+    assert_eq!(asks[0]["accepted"], true);
+    assert_eq!(asks[1]["rating"], "needed");
+    assert!(asks[2]["rating"].is_null());
+    assert!(rig.message_wakes().iter().all(|w| w.0 != "button"));
+
+    // Overriding one ask after accepting wins.
+    rig.stub.push(press(62, tg, "rate:t1.1:x"));
+    rig.stub.wait_confirmed(62);
+    let asks: Vec<Value> = serde_json::from_str(&rig.srv().ok(&["ask", "list", "--json"])).unwrap();
+    assert_eq!(asks[0]["rating"], "should_not_exist");
+    assert!(asks[0]["accepted"].is_null());
+    let v: Value = serde_json::from_str(&rig.srv().ok(&["ask", "stats", "--since", "7d"])).unwrap();
+    assert_eq!(v["overall"]["rated"], 2);
+    assert_eq!(v["overall"]["accepted"], 1);
+    assert_eq!(v["overall"]["overridden"], 1);
+    // A second accept on the page has nothing left to take.
+    rig.stub.push(press(63, tg, "ra:0"));
+    rig.stub.wait_confirmed(63);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "Nothing left to accept on this page");
+}
+
+#[test]
 fn the_retro_card_is_never_pinned_and_dismiss_closes_it_unrated() {
     let rig = Rig::new();
     rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);

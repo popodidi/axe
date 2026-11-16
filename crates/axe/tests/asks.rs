@@ -642,3 +642,271 @@ fn cli_lists_rates_and_reports_asks() {
     let r = ureq::get(&format!("{}/api/asks", srv.url)).call();
     assert!(matches!(r, Err(ureq::Error::Status(401, _))));
 }
+
+fn rec(ask: &str, rating: &str, why: Option<&str>) -> ask::Rec {
+    ask::Rec {
+        ask: ask.into(),
+        rating: rating.into(),
+        why: why.map(String::from),
+    }
+}
+
+#[test]
+fn recs_are_stored_apart_accepted_per_page_and_overridden() {
+    let (_d, mut c) = setup();
+    let mut ids = Vec::new();
+    for i in 0..12 {
+        let id = task(&mut c, "p", &format!("ask {i}"), Some("bot:a"));
+        set_state(&mut c, id, "escalated");
+        ids.push(format!("t{id}.1"));
+    }
+    let card = message(
+        &mut c,
+        "a",
+        70,
+        "Rotate the key?",
+        json!({"buttons": [["Yes","y"],["No","n"]], "ask": true}),
+    );
+    let card = format!("m{card}");
+    let theirs = task(&mut c, "q", "theirs", Some("bot:b"));
+    set_state(&mut c, theirs, "escalated");
+    let bot_a = Actor::new("bot:a");
+    let err = |r: anyhow::Result<Vec<ask::Ask>>| format!("{:#}", r.unwrap_err());
+
+    // The asking bot recommends, one or many at once; the label `decide`
+    // is `could_decide`. A rec is stored, not a rating.
+    let one = ask::recommend(
+        &mut c,
+        &bot_a,
+        &[rec(&ids[0], "decide", Some("reversible,\n in scope"))],
+    )
+    .unwrap();
+    assert_eq!(one[0].rec.as_deref(), Some("could_decide"));
+    assert_eq!(one[0].rec_why.as_deref(), Some("reversible, in scope"));
+    assert_eq!(one[0].rec_by.as_deref(), Some("bot:a"));
+    assert!(one[0].rating.is_none() && !one[0].accepted);
+    let mut bulk: Vec<_> = ids[1..].iter().map(|i| rec(i, "needed", None)).collect();
+    bulk.push(rec(&card, "drop", Some("asked twice")));
+    assert_eq!(ask::recommend(&mut c, &bot_a, &bulk).unwrap().len(), 12);
+    // A later rec replaces the earlier one.
+    ask::recommend(&mut c, &bot_a, &[rec(&ids[2], "drop", None)]).unwrap();
+    let a2 = ask::find(&c, &ids[2]).unwrap();
+    assert_eq!(a2.rec.as_deref(), Some("should_not_exist"));
+    assert!(a2.rec_why.is_none());
+    // Every listed ask is still unrated.
+    let unrated = ask::list(
+        &c,
+        &Filter {
+            since: 0,
+            until: now() + 1,
+            unrated: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(unrated.len(), 14);
+
+    // Refusals: another bot's ask (all or none), task sessions, bad input.
+    let mixed = [
+        rec(&ids[3], "drop", None),
+        rec(&format!("t{theirs}.1"), "needed", None),
+    ];
+    assert!(err(ask::recommend(&mut c, &bot_a, &mixed)).contains("raised by b, not bot a"));
+    assert_eq!(
+        ask::find(&c, &ids[3]).unwrap().rec.as_deref(),
+        Some("needed"),
+        "nothing of a refused batch is kept"
+    );
+    assert!(err(ask::recommend(
+        &mut c,
+        &Actor::new("agent"),
+        &[rec(&ids[3], "needed", None)]
+    ))
+    .contains("task sessions cannot recommend"));
+    assert!(err(ask::recommend(
+        &mut c,
+        &bot_a,
+        &[rec(&ids[3], "maybe", None)]
+    ))
+    .contains("invalid rating"));
+    let long = "w".repeat(ask::REC_WHY + 1);
+    assert!(err(ask::recommend(
+        &mut c,
+        &bot_a,
+        &[rec(&ids[3], "needed", Some(&long))]
+    ))
+    .contains("a few words"));
+    assert!(err(ask::recommend(&mut c, &bot_a, &[])).contains("no recommendations"));
+    // A person may recommend for any ask.
+    ask::recommend(
+        &mut c,
+        &Actor::new("human"),
+        &[rec(&format!("t{theirs}.1"), "needed", None)],
+    )
+    .unwrap();
+
+    // The retro card carries the recs and marks them.
+    let senders = vec!["a".to_string(), "b".to_string()];
+    let scope = RetroScope {
+        bot: Some("a"),
+        home: false,
+        senders: &senders,
+    };
+    let r = ask::retro(&c, now() + 1, &scope).unwrap();
+    assert_eq!(r.items.len(), 13);
+    assert_eq!(r.items[0].rec, "could_decide");
+    assert_eq!(r.items[0].why, "reversible, in scope");
+    assert!(
+        r.text.contains("\n   rec: decide (reversible, in scope)\n"),
+        "{}",
+        r.text
+    );
+    assert!(r.text.encode_utf16().count() < 4096);
+    assert!(r
+        .buttons
+        .contains(&("1 decide (rec)".into(), format!("rate:{}:c", ids[0]))));
+    assert!(r
+        .buttons
+        .contains(&(ask::ACCEPT_LABEL.into(), "ra:0".into())));
+
+    // The owner rates one ask by hand first, then accepts page 1: only the
+    // page's other, unrated asks take their recs; page 2 is untouched.
+    ask::rate(&mut c, &owner(), &ids[1], "could_decide").unwrap();
+    let n = ask::accept(&mut c, &owner(), ask::page_items(&r.items, 0)).unwrap();
+    assert_eq!(n, ask::RETRO_PAGE - 1);
+    let a1 = ask::find(&c, &ids[1]).unwrap();
+    assert_eq!(
+        a1.rating.as_deref(),
+        Some("could_decide"),
+        "rated by hand stays"
+    );
+    assert!(!a1.accepted);
+    for id in &ids[..ask::RETRO_PAGE] {
+        let a = ask::find(&c, id).unwrap();
+        assert_eq!(a.rated_by.as_deref(), Some("owner"));
+        if id != &ids[1] {
+            assert!(a.accepted, "{id}");
+            assert_eq!(a.rating, a.rec, "{id}");
+        }
+    }
+    for id in &ids[ask::RETRO_PAGE..] {
+        assert!(
+            ask::find(&c, id).unwrap().rating.is_none(),
+            "{id} on page 2"
+        );
+    }
+    assert!(ask::find(&c, &card).unwrap().rating.is_none());
+    // Accepting again rates nothing: every rec on the page is rated.
+    assert_eq!(
+        ask::accept(&mut c, &owner(), ask::page_items(&r.items, 0)).unwrap(),
+        0
+    );
+    let shown = ask::render_retro(
+        &r.items,
+        r.more,
+        &ask::ratings(&c, &ids).unwrap(),
+        0,
+        Some("a"),
+    );
+    assert!(shown.buttons.iter().all(|b| b.0 != ask::ACCEPT_LABEL));
+
+    // A single override after accepting wins.
+    ask::rate(&mut c, &owner(), &ids[0], "needed").unwrap();
+    let a0 = ask::find(&c, &ids[0]).unwrap();
+    assert_eq!(a0.rating.as_deref(), Some("needed"));
+    assert!(!a0.accepted);
+    assert_eq!(a0.rec.as_deref(), Some("could_decide"));
+    // Task sessions cannot accept.
+    assert!(ask::accept(&mut c, &Actor::new("agent"), ask::page_items(&r.items, 1)).is_err());
+
+    // Stats count only the owner's ratings, and how recs fared: ids[0]
+    // overridden, ids[1] overridden by hand before, ids[2..10] accepted.
+    // A rec alone (page 2, the card, theirs) is no rating.
+    let end = now() + 1;
+    let s = ask::stats(&c, None, end - 7 * DAY, end).unwrap();
+    let t = &s.overall.total;
+    assert_eq!((t.asks, t.rated, t.recommended), (14, 10, 14));
+    assert_eq!((t.accepted, t.agreed, t.overridden), (8, 0, 2));
+    // ids[2] accepted `should_not_exist`, the rest of the page `needed`.
+    assert_eq!((t.needed, t.could_decide, t.should_not_exist), (8, 1, 1));
+    // By hand, the same as the rec: agreed.
+    ask::rate(&mut c, &owner(), &ids[11], "needed").unwrap();
+    let s = ask::stats(&c, None, end - 7 * DAY, end + 1).unwrap();
+    assert_eq!(s.bots["a"].total.agreed, 1);
+    assert_eq!(s.bots["b"].total.recommended, 1);
+    // Wasted-ask budgets read the episode ratings as before.
+    assert!(ask::wasted_episodes(&c).unwrap().len() >= 2);
+}
+
+#[test]
+fn cli_recommends_one_or_many() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = common::Server::start(dir.path());
+    let mut ids = Vec::new();
+    for t in ["one", "two"] {
+        let out = srv.ok(&["add", "--project", "p", "--title", t, "--detail", "x"]);
+        let id: i64 = out
+            .split_whitespace()
+            .find_map(|w| w.trim_start_matches('#').parse().ok())
+            .unwrap();
+        srv.ok(&[
+            "escalate",
+            &id.to_string(),
+            "--blocked",
+            "x",
+            "--resolver",
+            "owner: y",
+            "--resume",
+            "z",
+            "--class",
+            "decision",
+        ]);
+        ids.push(id);
+    }
+    let out = srv.ok(&[
+        "ask",
+        "rec",
+        &format!("t{}.1", ids[0]),
+        "decide",
+        "--why",
+        "in scope",
+    ]);
+    assert!(out.contains("unrated (rec could_decide)"), "{out}");
+    let file = dir.path().join("recs.json");
+    std::fs::write(
+        &file,
+        json!([{"ask": format!("#{}", ids[1]), "rating": "needed"}]).to_string(),
+    )
+    .unwrap();
+    let out = srv.ok(&["ask", "rec", "--file", file.to_str().unwrap()]);
+    assert!(
+        out.contains(&format!("t{}.1", ids[1])) && out.contains("(rec needed)"),
+        "{out}"
+    );
+    let bad = srv.run(&["ask", "rec", &format!("t{}.1", ids[0]), "maybe"]);
+    assert!(!bad.status.success());
+    // A bot may recommend only for its own asks.
+    let other = srv.run(&[
+        "--actor",
+        "bot:x",
+        "ask",
+        "rec",
+        &format!("t{}.1", ids[0]),
+        "needed",
+    ]);
+    assert!(!other.status.success());
+    assert!(String::from_utf8_lossy(&other.stderr).contains("not bot x"));
+
+    let dry = srv.ok(&["ask", "retro", "--dry"]);
+    assert!(dry.contains("\n   rec: decide (in scope)\n"), "{dry}");
+    assert!(dry.contains("[1 decide (rec)]"), "{dry}");
+    assert!(dry.contains("[2 needed (rec)]"), "{dry}");
+    assert!(dry.contains(&format!("[{}]", ask::ACCEPT_LABEL)), "{dry}");
+    let list: Vec<Value> = serde_json::from_str(&srv.ok(&["ask", "list", "--json"])).unwrap();
+    assert_eq!(list[0]["rec"], "could_decide");
+    assert_eq!(list[0]["rec_why"], "in scope");
+    assert!(list[0]["rating"].is_null());
+    let v: Value = serde_json::from_str(&srv.ok(&["ask", "stats", "--since", "7d"])).unwrap();
+    assert_eq!(v["overall"]["recommended"], 2);
+    assert_eq!(v["overall"]["rated"], 0);
+}

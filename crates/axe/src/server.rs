@@ -1545,6 +1545,38 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 .map_err(|e| HttpError(400, format!("{e:#}")))?;
             ok(200, &a)
         }
+        ("POST", ["api", "asks", id, "rec"]) => {
+            #[derive(Deserialize)]
+            struct One {
+                rating: String,
+                why: Option<String>,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: One = req.json()?;
+            let rec = crate::ask::Rec {
+                ask: id.to_string(),
+                rating: b.rating,
+                why: b.why,
+            };
+            let mut conn = st.conn();
+            let mut a = crate::ask::recommend(&mut conn, &b.who.actor(), &[rec])
+                .map_err(|e| HttpError(400, format!("{e:#}")))?;
+            ok(200, &a.pop())
+        }
+        ("POST", ["api", "asks", "recs"]) => {
+            #[derive(Deserialize)]
+            struct Many {
+                recs: Vec<crate::ask::Rec>,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: Many = req.json()?;
+            let mut conn = st.conn();
+            let a = crate::ask::recommend(&mut conn, &b.who.actor(), &b.recs)
+                .map_err(|e| HttpError(400, format!("{e:#}")))?;
+            ok(200, &a)
+        }
         ("GET", ["api", "stats", "flow"]) => {
             let now = crate::routine::now();
             let project = req

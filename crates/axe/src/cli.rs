@@ -1702,6 +1702,15 @@ enum ScheduleCmd {
     },
 }
 
+/// Ratings `axe ask rec` takes: the ids and the retro button labels.
+const REC_VALUES: [&str; 5] = [
+    "needed",
+    "decide",
+    "drop",
+    "could_decide",
+    "should_not_exist",
+];
+
 #[derive(Subcommand)]
 enum AskCmd {
     /// List asks made in a window, oldest first
@@ -1735,8 +1744,27 @@ enum AskCmd {
         #[arg(value_parser = PossibleValuesParser::new(crate::ask::RATINGS))]
         rating: String,
     },
+    /// Recommend a rating for an ask you raised (a bot, $AXE_BOT): shown
+    /// on the weekly retro card, marked (rec), for the owner to accept or
+    /// override. Never a rating itself. --file takes many at once
+    Rec {
+        /// t<task>.<episode> (or a task id: its latest episode) or m<message>
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        ask: Option<String>,
+        /// needed, decide (could_decide) or drop (should_not_exist)
+        #[arg(required_unless_present = "file", value_parser = PossibleValuesParser::new(REC_VALUES))]
+        rating: Option<String>,
+        /// Why, in a few words (at most 120 characters)
+        #[arg(long, conflicts_with = "file")]
+        why: Option<String>,
+        /// A JSON array of {"ask", "rating", "why"} ('-' reads stdin),
+        /// recorded all or none
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
     /// Asks, rated and wasted-ask share per bot, per kind and overall, per
-    /// week (JSON)
+    /// week, and how often recommendations were accepted, agreed with or
+    /// overridden (JSON)
     Stats {
         #[arg(long, default_value = "28d")]
         since: String,
@@ -1929,10 +1957,14 @@ fn format_goal_event(e: &crate::goal::Event, full: bool) -> String {
 }
 
 fn format_ask(a: &crate::ask::Ask) -> String {
-    let rating = match (&a.rating, &a.rated_by) {
+    let mut rating = match (&a.rating, &a.rated_by) {
+        (Some(r), Some(by)) if a.accepted => format!("{r} by {by} (accepted rec)"),
         (Some(r), Some(by)) => format!("{r} by {by}"),
         _ => "unrated".into(),
     };
+    if let (Some(r), false) = (&a.rec, a.accepted) {
+        rating.push_str(&format!(" (rec {r})"));
+    }
     format!(
         "{:<10} {:<10} {:<9} {:<14} {}  {}  {}",
         a.id,
@@ -2022,6 +2054,41 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
                 json!({ "rating": rating }),
             )?;
             println!("{}", format_ask(&a));
+        }
+        AskCmd::Rec {
+            ask,
+            rating,
+            why,
+            file,
+        } => {
+            let asks: Vec<Ask> = match (file, ask, rating) {
+                (Some(f), _, _) => {
+                    let raw = if f.as_os_str() == "-" {
+                        let mut s = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                        s
+                    } else {
+                        std::fs::read_to_string(f)
+                            .with_context(|| format!("read {}", f.display()))?
+                    };
+                    let recs: Vec<crate::ask::Rec> = serde_json::from_str(&raw).context(
+                        "--file: expected a JSON array of {\"ask\", \"rating\", \"why\"}",
+                    )?;
+                    c.send("POST", "/api/asks/recs", json!({ "recs": recs }))?
+                }
+                (None, Some(ask), Some(rating)) => {
+                    let a: Ask = c.send(
+                        "POST",
+                        &format!("/api/asks/{}/rec", ask.trim_start_matches('#')),
+                        json!({ "rating": rating, "why": why }),
+                    )?;
+                    vec![a]
+                }
+                _ => anyhow::bail!("give <ask> <rating>, or --file"),
+            };
+            for a in &asks {
+                println!("{}", format_ask(a));
+            }
         }
         AskCmd::Stats {
             since,

@@ -14,6 +14,13 @@
 //! own log (`ask_rating`: a task event with `episode=N`, or a bot event); the
 //! latest one wins. Nothing new is stored, so every count is computed on read.
 //!
+//! An ask may also carry a **recommendation**: the rating the bot that raised
+//! it suggests, with a few words why (`ask_rec`, logged the same way). It is
+//! never a rating: the owner confirms it, one ask at a time or every ask on a
+//! retro page at once ([`accept`], which logs ratings marked `via=rec`), or
+//! overrides it. Stats count only the owner's ratings and report how often a
+//! recommendation was accepted, agreed with or overridden.
+//!
 //! Each ask also has a **category** (its kind, [`KINDS`]), derived from what
 //! the logs already hold: an escalation's class and resolver line, a card's
 //! button labels. The rules are fixed so a category means the same thing week
@@ -32,6 +39,10 @@ use crate::db::Actor;
 pub const RATINGS: [&str; 3] = ["needed", "could_decide", "should_not_exist"];
 /// The event kind of a rating, in `events` and `bot_events`.
 pub const EVENT: &str = "ask_rating";
+/// The event kind of a recommendation, in `events` and `bot_events`.
+pub const REC_EVENT: &str = "ask_rec";
+/// The longest recommendation reason, in characters.
+pub const REC_WHY: usize = 120;
 const WEEK: i64 = 7 * 86_400;
 
 /// Ask categories, in display order: `(id, label)`. The ids are stable API
@@ -159,6 +170,20 @@ pub struct Ask {
     pub rating: Option<String>,
     pub rated_by: Option<String>,
     pub rated_at: Option<String>,
+    /// Whether the rating is an accepted recommendation (the retro card's
+    /// accept button) rather than one the owner picked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accepted: bool,
+    /// The rating the asking bot recommends, if any; never a rating itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rec: Option<String>,
+    /// Why, in a few words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rec_why: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rec_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rec_at: Option<String>,
 }
 
 /// An ask id: `t<task>.<episode>` or `m<message>`. A bare `<task>` or
@@ -203,26 +228,37 @@ pub struct Filter<'a> {
     pub unrated: bool,
 }
 
+/// A rating or a recommendation as logged: `via_rec` marks an accepted
+/// recommendation, `why` is a recommendation's reason.
+#[derive(Default)]
 struct Rating {
     rating: String,
     by: String,
     at: String,
+    via_rec: bool,
+    why: Option<String>,
 }
 
-/// Episode ratings per `(task, episode)`, latest first wins.
-fn task_ratings(conn: &Connection) -> Result<HashMap<(i64, i64), Rating>> {
+/// The episode a task event body names (`episode=N`, more after a space or
+/// a line), and the rest of its first line and later lines.
+fn episode_body(body: &str) -> Option<(i64, &str, &str)> {
+    let rest = body.strip_prefix("episode=")?;
+    let (first, more) = rest.split_once('\n').unwrap_or((rest, ""));
+    let (n, tail) = first.trim().split_once(' ').unwrap_or((first.trim(), ""));
+    Some((n.parse().ok()?, tail.trim(), more.trim()))
+}
+
+/// Episode ratings (`kind` [`EVENT`]) or recommendations ([`REC_EVENT`]) per
+/// `(task, episode)`, the latest winning.
+fn task_ratings_of(conn: &Connection, kind: &str) -> Result<HashMap<(i64, i64), Rating>> {
     let mut stmt = conn.prepare(
         "SELECT task_id, body, to_value, actor, at FROM events WHERE kind=?1 ORDER BY id",
     )?;
-    let mut rows = stmt.query([EVENT])?;
+    let mut rows = stmt.query([kind])?;
     let mut out = HashMap::new();
     while let Some(r) = rows.next()? {
         let body: Option<String> = r.get(1)?;
-        let Some(n) = body
-            .as_deref()
-            .and_then(|b| b.strip_prefix("episode="))
-            .and_then(|n| n.trim().parse().ok())
-        else {
+        let Some((n, tail, more)) = body.as_deref().and_then(episode_body) else {
             continue;
         };
         out.insert(
@@ -231,10 +267,16 @@ fn task_ratings(conn: &Connection) -> Result<HashMap<(i64, i64), Rating>> {
                 rating: r.get(2)?,
                 by: r.get(3)?,
                 at: r.get(4)?,
+                via_rec: tail.split_whitespace().any(|w| w == "via=rec"),
+                why: (!more.is_empty()).then(|| more.to_string()),
             },
         );
     }
     Ok(out)
+}
+
+fn task_ratings(conn: &Connection) -> Result<HashMap<(i64, i64), Rating>> {
+    task_ratings_of(conn, EVENT)
 }
 
 /// The set of task escalation episodes rated wasted, for the goal budget.
@@ -257,6 +299,7 @@ pub fn opens_episode(kind: &str, from: Option<&str>, to: Option<&str>, body: Opt
 
 fn escalations(conn: &Connection, project: Option<&str>) -> Result<Vec<Ask>> {
     let ratings = task_ratings(conn)?;
+    let recs = task_ratings_of(conn, REC_EVENT)?;
     // The bot that posted a card standing for the task, when it has no bot owner.
     let mut card_bot: HashMap<i64, String> = HashMap::new();
     let mut stmt = conn.prepare(
@@ -343,6 +386,7 @@ fn escalations(conn: &Connection, project: Option<&str>) -> Result<Vec<Ask>> {
             .map(str::to_string)
             .or_else(|| card_bot.get(&id).cloned());
         let rating = ratings.get(&(id, n));
+        let rec = recs.get(&(id, n));
         eps.push((out.len(), None, String::new()));
         out.push(Ask {
             id: format!("t{id}.{n}"),
@@ -355,10 +399,16 @@ fn escalations(conn: &Connection, project: Option<&str>) -> Result<Vec<Ask>> {
             summary: r.get(7)?,
             question: String::new(),
             asked: String::new(),
-            rating: rating.map(|r| r.rating.clone()),
-            rated_by: rating.map(|r| r.by.clone()),
-            rated_at: rating.map(|r| r.at.clone()),
+            rating: None,
+            rated_by: None,
+            rated_at: None,
+            accepted: false,
+            rec: None,
+            rec_why: None,
+            rec_by: None,
+            rec_at: None,
         });
+        out.last_mut().unwrap().apply(rating, rec);
     }
     finish(&mut out, &mut eps);
     Ok(out)
@@ -374,10 +424,12 @@ const CARD_ASK: &str = "m.direction='out' AND m.kind='text'
     AND json_type(m.flags,'$.retro') IS NULL
     AND json_type(m.flags,'$.board') IS NULL";
 
-fn card_ratings(conn: &Connection) -> Result<HashMap<i64, Rating>> {
+/// Card ratings ([`EVENT`]) or recommendations ([`REC_EVENT`]) per message,
+/// the latest winning.
+fn card_ratings_of(conn: &Connection, kind: &str) -> Result<HashMap<i64, Rating>> {
     let mut stmt =
         conn.prepare("SELECT body, actor, at FROM bot_events WHERE kind=?1 ORDER BY id")?;
-    let mut rows = stmt.query([EVENT])?;
+    let mut rows = stmt.query([kind])?;
     let mut out = HashMap::new();
     while let Some(r) = rows.next()? {
         let body: String = r.get(0)?;
@@ -391,10 +443,26 @@ fn card_ratings(conn: &Connection) -> Result<HashMap<i64, Rating>> {
                 rating: rating.into(),
                 by: r.get(1)?,
                 at: r.get(2)?,
+                via_rec: v["via"] == "rec",
+                why: v["why"].as_str().map(String::from),
             },
         );
     }
     Ok(out)
+}
+
+impl Ask {
+    /// Sets the ask's latest rating and recommendation.
+    fn apply(&mut self, rating: Option<&Rating>, rec: Option<&Rating>) {
+        self.rating = rating.map(|r| r.rating.clone());
+        self.rated_by = rating.map(|r| r.by.clone());
+        self.rated_at = rating.map(|r| r.at.clone());
+        self.accepted = rating.is_some_and(|r| r.via_rec);
+        self.rec = rec.map(|r| r.rating.clone());
+        self.rec_why = rec.and_then(|r| r.why.clone());
+        self.rec_by = rec.map(|r| r.by.clone());
+        self.rec_at = rec.map(|r| r.at.clone());
+    }
 }
 
 fn first_line(text: &str, html: bool) -> String {
@@ -412,7 +480,8 @@ fn first_line(text: &str, html: bool) -> String {
 }
 
 fn cards(conn: &Connection, project: Option<&str>, only: Option<i64>) -> Result<Vec<Ask>> {
-    let ratings = card_ratings(conn)?;
+    let ratings = card_ratings_of(conn, EVENT)?;
+    let recs = card_ratings_of(conn, REC_EVENT)?;
     let mut stmt = conn.prepare(&format!(
         "SELECT m.id, m.text, m.flags, m.at, b.name, b.project FROM bot_messages m
          JOIN bots b ON b.id=m.bot_id
@@ -425,7 +494,6 @@ fn cards(conn: &Connection, project: Option<&str>, only: Option<i64>) -> Result<
         let id: i64 = r.get(0)?;
         let text: String = r.get(1)?;
         let flags: Value = serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default();
-        let rating = ratings.get(&id);
         let mut labels: Vec<String> = flags["buttons"]
             .as_array()
             .into_iter()
@@ -446,10 +514,18 @@ fn cards(conn: &Connection, project: Option<&str>, only: Option<i64>) -> Result<
             summary: first_line(&text, flags["html"] == true),
             question: first_line(&text, flags["html"] == true),
             asked: String::new(),
-            rating: rating.map(|r| r.rating.clone()),
-            rated_by: rating.map(|r| r.by.clone()),
-            rated_at: rating.map(|r| r.at.clone()),
+            rating: None,
+            rated_by: None,
+            rated_at: None,
+            accepted: false,
+            rec: None,
+            rec_why: None,
+            rec_by: None,
+            rec_at: None,
         });
+        out.last_mut()
+            .unwrap()
+            .apply(ratings.get(&id), recs.get(&id));
     }
     Ok(out)
 }
@@ -475,9 +551,10 @@ pub fn list(conn: &Connection, f: &Filter) -> Result<Vec<Ask>> {
 pub fn rate(conn: &mut Connection, actor: &Actor, id: &str, rating: &str) -> Result<Ask> {
     check_rater(actor, rating)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let ask_id = write_rating(&tx, actor, id, rating)?;
+    let target = resolve(&tx, id)?;
+    write(&tx, actor, &target, EVENT, rating, Extra::None)?;
     tx.commit()?;
-    find(conn, &ask_id)
+    find(conn, &target.id())
 }
 
 fn check_rater(actor: &Actor, rating: &str) -> Result<()> {
@@ -493,16 +570,128 @@ fn check_rater(actor: &Actor, rating: &str) -> Result<()> {
     Ok(())
 }
 
-/// Writes one rating event; returns the ask's canonical id.
-fn write_rating(
-    tx: &rusqlite::Transaction,
-    actor: &Actor,
-    id: &str,
-    rating: &str,
-) -> Result<String> {
+/// A rating as given: a rating id or its button label (`decide`, `drop`).
+pub fn parse_rating(s: &str) -> Result<&'static str> {
+    let s = s.trim();
+    RATINGS
+        .iter()
+        .copied()
+        .find(|r| *r == s)
+        .or_else(|| CODES.iter().find(|c| c.2 == s).map(|c| c.1))
+        .with_context(|| {
+            format!(
+                "invalid rating {s:?} (expected {} or needed, decide, drop)",
+                RATINGS.join(", ")
+            )
+        })
+}
+
+/// One recommendation: the rating the asking bot suggests for `ask`, and
+/// why in a few words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Rec {
+    pub ask: String,
+    pub rating: String,
+    #[serde(default)]
+    pub why: Option<String>,
+}
+
+/// Records recommendations, all or none, and returns the asks. Only the bot
+/// that raised an ask (actor `bot:<name>`) or a person may recommend for
+/// it; task sessions may not. A later recommendation replaces the earlier
+/// one. A recommendation is never a rating.
+pub fn recommend(conn: &mut Connection, actor: &Actor, recs: &[Rec]) -> Result<Vec<Ask>> {
+    if actor.name == "agent" {
+        bail!("task sessions cannot recommend ratings; the bot that raised the ask does");
+    }
+    if recs.is_empty() {
+        bail!("no recommendations given");
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let bots: HashMap<String, Option<String>> = {
+        let mut all = escalations(&tx, None)?;
+        all.extend(cards(&tx, None, None)?);
+        all.into_iter().map(|a| (a.id, a.bot)).collect()
+    };
+    let mut ids = Vec::new();
+    for r in recs {
+        let rating = parse_rating(&r.rating).with_context(|| format!("ask {}", r.ask))?;
+        let why = r.why.as_deref().map(flatten).filter(|w| !w.is_empty());
+        if why.as_ref().is_some_and(|w| w.chars().count() > REC_WHY) {
+            bail!(
+                "ask {}: --why is over {REC_WHY} characters; a few words",
+                r.ask
+            );
+        }
+        let target = resolve(&tx, &r.ask)?;
+        let id = target.id();
+        if let Some(me) = actor.name.strip_prefix("bot:") {
+            let asker = bots.get(&id).cloned().flatten();
+            if asker.as_deref() != Some(me) {
+                bail!(
+                    "ask {id} was raised by {}, not bot {me}: only the bot that raised an ask recommends its rating",
+                    asker.as_deref().unwrap_or("no bot")
+                );
+            }
+        }
+        write(
+            &tx,
+            actor,
+            &target,
+            REC_EVENT,
+            rating,
+            Extra::Why(why.as_deref()),
+        )?;
+        ids.push(id);
+    }
+    tx.commit()?;
+    let mut all = escalations(conn, None)?;
+    all.extend(cards(conn, None, None)?);
+    let mut by: HashMap<String, Ask> = all.into_iter().map(|a| (a.id.clone(), a)).collect();
+    Ok(ids.iter().filter_map(|i| by.remove(i)).collect())
+}
+
+/// Accepts the recommendation of each of `items` nobody rated yet, in one
+/// transaction, as the owner's ratings marked `via=rec`. Items without a
+/// recommendation, or rated meanwhile, are left alone. Returns how many
+/// were rated.
+pub fn accept(conn: &mut Connection, actor: &Actor, items: &[RetroItem]) -> Result<usize> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
+    let rated = ratings(&tx, &ids)?;
+    let mut n = 0;
+    for it in items.iter().filter(|i| !i.rec.is_empty()) {
+        if rated.contains_key(&it.ask) {
+            continue;
+        }
+        check_rater(actor, &it.rec)?;
+        let target = resolve(&tx, &it.ask)?;
+        write(&tx, actor, &target, EVENT, &it.rec, Extra::ViaRec)?;
+        n += 1;
+    }
+    tx.commit()?;
+    Ok(n)
+}
+
+/// The ask an id names, checked to exist.
+enum Target {
+    Task(i64, i64),
+    Message(i64, i64),
+}
+
+impl Target {
+    fn id(&self) -> String {
+        match self {
+            Target::Task(t, n) => format!("t{t}.{n}"),
+            Target::Message(m, _) => format!("m{m}"),
+        }
+    }
+}
+
+fn resolve(conn: &Connection, id: &str) -> Result<Target> {
     Ok(match AskId::parse(id)? {
         AskId::Task(task, n) => {
-            let episodes: i64 = tx
+            let episodes: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM events WHERE task_id=?1 AND (
                        (kind='state' AND to_value='escalated' AND from_value IS NOT 'escalated')
@@ -518,35 +707,59 @@ fn write_rating(
             if n > episodes {
                 bail!("task {task} has escalation episodes 1..={episodes}, not {n}");
             }
-            crate::db::write_event(
-                tx,
-                actor,
-                task,
-                EVENT,
-                None,
-                Some(rating),
-                Some(&format!("episode={n}")),
-            )?;
-            format!("t{task}.{n}")
+            Target::Task(task, n)
         }
         AskId::Message(m) => {
-            let bot: i64 = tx
+            let bot: i64 = conn
                 .query_row(
                     &format!("SELECT m.bot_id FROM bot_messages m WHERE m.id=?1 AND {CARD_ASK}"),
                     [m],
                     |r| r.get(0),
                 )
                 .map_err(|_| anyhow::anyhow!("message {m} is not a card ask"))?;
-            crate::bot::event(
-                tx,
-                bot,
-                actor,
-                EVENT,
-                &json!({"message": m, "rating": rating}).to_string(),
-            )?;
-            format!("m{m}")
+            Target::Message(m, bot)
         }
     })
+}
+
+/// What a logged rating carries besides its value.
+#[derive(Clone, Copy)]
+enum Extra<'a> {
+    None,
+    /// An accepted recommendation.
+    ViaRec,
+    /// A recommendation's reason.
+    Why(Option<&'a str>),
+}
+
+/// Logs one rating or recommendation (`kind`) of `target`.
+fn write(
+    tx: &rusqlite::Transaction,
+    actor: &Actor,
+    target: &Target,
+    kind: &str,
+    rating: &str,
+    extra: Extra,
+) -> Result<()> {
+    match *target {
+        Target::Task(task, n) => {
+            let body = match extra {
+                Extra::None | Extra::Why(None) => format!("episode={n}"),
+                Extra::ViaRec => format!("episode={n} via=rec"),
+                Extra::Why(Some(w)) => format!("episode={n}\n{w}"),
+            };
+            crate::db::write_event(tx, actor, task, kind, None, Some(rating), Some(&body))
+        }
+        Target::Message(m, bot) => {
+            let mut body = json!({"message": m, "rating": rating});
+            match extra {
+                Extra::ViaRec => body["via"] = json!("rec"),
+                Extra::Why(Some(w)) => body["why"] = json!(w),
+                _ => {}
+            }
+            crate::bot::event(tx, bot, actor, kind, &body.to_string())
+        }
+    }
 }
 
 /// One ask by its canonical id.
@@ -581,11 +794,26 @@ pub struct Tally {
     pub should_not_exist: u64,
     /// `(could_decide + should_not_exist) / rated`; `None` with nothing rated.
     pub wasted_share: Option<f64>,
+    /// Asks with a recommendation, rated or not. A recommendation alone is
+    /// never counted as a rating: `rated` and the counts above are the
+    /// owner's ratings only.
+    pub recommended: u64,
+    /// Rated asks whose rating is the recommendation, accepted in one tap
+    /// (the retro card's accept button). The owner picked the other
+    /// `rated - accepted` themselves.
+    pub accepted: u64,
+    /// Asks the owner rated themselves the same as recommended.
+    pub agreed: u64,
+    /// Asks the owner rated otherwise than recommended.
+    pub overridden: u64,
 }
 
 impl Tally {
     fn add(&mut self, a: &Ask) {
         self.asks += 1;
+        if a.rec.is_some() {
+            self.recommended += 1;
+        }
         match a.rating.as_deref() {
             Some("needed") => self.needed += 1,
             Some("could_decide") => self.could_decide += 1,
@@ -595,6 +823,12 @@ impl Tally {
         self.rated += 1;
         self.wasted_share =
             Some((self.could_decide + self.should_not_exist) as f64 / self.rated as f64);
+        match &a.rec {
+            Some(_) if a.accepted => self.accepted += 1,
+            Some(r) if Some(r) == a.rating.as_ref() => self.agreed += 1,
+            Some(_) => self.overridden += 1,
+            None => {}
+        }
     }
 }
 
@@ -688,6 +922,10 @@ pub const RETRO_PAGE: usize = 10;
 const RETRO_TOPIC: usize = 100;
 /// Length of an ask's second retro line: what the owner was asked.
 const RETRO_QUESTION: usize = 160;
+/// Length of a recommendation's reason on its retro line.
+const RETRO_WHY: usize = 48;
+/// The label of the button that accepts a page's recommendations.
+pub const ACCEPT_LABEL: &str = "Accept recs on this page";
 /// Button codes in callback data `rate:<ask>:<code>`.
 pub const CODES: [(&str, &str, &str); 3] = [
     ("n", "needed", "needed"),
@@ -696,6 +934,7 @@ pub const CODES: [(&str, &str, &str); 3] = [
 ];
 const NOTE: &str =
     "Rate each ask: needed = right to ask, decide = the bot could have decided, drop = should not exist. Skipped asks stay unrated.";
+const REC_NOTE: &str = "(rec) marks the bot's recommendation; accept them or pick your own.";
 
 /// The rating a button code stands for.
 pub fn rating_of(code: &str) -> Option<&'static str> {
@@ -780,6 +1019,13 @@ pub struct RetroItem {
     pub kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bot: String,
+    /// The rating its bot recommends, as when the card was sent; empty for
+    /// none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rec: String,
+    /// Why, summarized.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
 }
 
 /// A rendered retro card: plain text and its buttons. No items means
@@ -800,6 +1046,8 @@ pub enum Press {
     Item(String, &'static str),
     /// `rp:<page>`: show a page.
     Page(usize),
+    /// `ra:<page>`: accept the recommendations of the unrated asks on a page.
+    Accept(usize),
     /// `rd` ([`DISMISS`]): close the card, leaving its asks as they are.
     Dismiss,
     /// A button of a card sent when asks were rated by kind (`rk:`, `ro:`,
@@ -818,6 +1066,7 @@ impl Press {
         let (head, rest) = data.split_once(':')?;
         match head {
             "rp" => rest.parse().ok().map(Press::Page),
+            "ra" => rest.parse().ok().map(Press::Accept),
             "rate" => {
                 let (ask, code) = rest.rsplit_once(':')?;
                 Some(Press::Item(ask.into(), rating_of(code)?))
@@ -886,6 +1135,12 @@ pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
             detail,
             kind: a.category.clone(),
             bot: a.bot.clone().unwrap_or_else(|| "-".into()),
+            rec: a.rec.clone().unwrap_or_default(),
+            why: a
+                .rec_why
+                .as_deref()
+                .map(|w| clip(&shorten(&flatten(w)), RETRO_WHY))
+                .unwrap_or_default(),
         });
     }
     Ok(render_retro(&items, more, &HashMap::new(), 0, scope.bot))
@@ -1255,6 +1510,14 @@ pub fn page_of(items: &[RetroItem], ask: &str) -> usize {
         .map_or(0, |p| p / RETRO_PAGE)
 }
 
+/// The items on page `page` of a retro card (a page past the end is the
+/// last one, as [`render_retro`] shows it).
+pub fn page_items(items: &[RetroItem], page: usize) -> &[RetroItem] {
+    let pages = items.len().div_ceil(RETRO_PAGE).max(1);
+    let start = page.min(pages - 1) * RETRO_PAGE;
+    &items[start.min(items.len())..(start + RETRO_PAGE).min(items.len())]
+}
+
 /// A retro card's title: whose retro it is.
 fn retro_title(bot: Option<&str>) -> String {
     match bot {
@@ -1280,8 +1543,11 @@ pub fn dismissed_retro(
 
 /// Renders page `page` of a retro card from its items, with `rated` (ask id
 /// to rating) marked: two lines and one row of rating buttons per ask (a
-/// rated ask can be re-rated), prev / next, a Dismiss row, and the kind
-/// totals as a footer. `bot` names whose retro it is. Pure, so presses re-render the
+/// rated ask can be re-rated), a recommended rating marked `(rec)` on its
+/// button and shown as a third line with its reason, an accept button while
+/// an unrated ask on the page has a recommendation, prev / next, a Dismiss
+/// row, and the kind totals as a footer. `bot` names whose retro it is.
+/// Pure, so presses re-render the
 /// stored items.
 pub fn render_retro(
     items: &[RetroItem],
@@ -1325,15 +1591,30 @@ pub fn render_retro(
         if !it.detail.is_empty() {
             text.push_str(&format!("\n   {}", it.detail));
         }
+        if !it.rec.is_empty() {
+            text.push_str(&format!("\n   rec: {}", rating_label(&it.rec)));
+            if !it.why.is_empty() {
+                text.push_str(&format!(" ({})", scrub(&it.why)));
+            }
+        }
         for (code, rating, label) in CODES {
             let label = if mine == Some(rating) {
                 format!("{n} {label} ✓")
+            } else if it.rec == rating {
+                format!("{n} {label} (rec)")
             } else {
                 format!("{n} {label}")
             };
             buttons.push((label, format!("rate:{}:{code}", it.ask)));
         }
         rows.push(CODES.len());
+    }
+    let open_recs = page_items(items, page)
+        .iter()
+        .any(|i| !i.rec.is_empty() && !rated.contains_key(&i.ask));
+    if open_recs {
+        buttons.push((ACCEPT_LABEL.into(), format!("ra:{page}")));
+        rows.push(1);
     }
     let before = buttons.len();
     if page > 0 {
@@ -1358,6 +1639,10 @@ pub fn render_retro(
     } else {
         NOTE
     });
+    if open_recs {
+        text.push(' ');
+        text.push_str(REC_NOTE);
+    }
     text.push_str(&format!("\nBy kind: {}", kind_totals(items)));
     Retro {
         text,
@@ -1397,7 +1682,100 @@ mod tests {
             rating: None,
             rated_by: None,
             rated_at: None,
+            accepted: false,
+            rec: None,
+            rec_why: None,
+            rec_by: None,
+            rec_at: None,
         }
+    }
+
+    #[test]
+    fn recs_are_marked_on_their_button_with_an_accept_button() {
+        let rec = |i: usize, rec: &str, why: &str| RetroItem {
+            rec: rec.into(),
+            why: why.into(),
+            ..kitem(i, "decision", "a")
+        };
+        let items = [
+            rec(1, "could_decide", "reversible, in scope"),
+            kitem(2, "decision", "a"),
+            rec(3, "needed", ""),
+        ];
+        let r = render_retro(&items, 0, &HashMap::new(), 0, Some("a"));
+        assert!(
+            r.text.contains(
+                "\n1. #1: thing 1\n   rec: decide (reversible, in scope)\n2. #2: thing 2\n3. #3: thing 3\n   rec: needed\n"
+            ),
+            "{}",
+            r.text
+        );
+        assert!(r.text.contains(REC_NOTE), "{}", r.text);
+        let labels: Vec<&str> = r.buttons.iter().map(|b| b.0.as_str()).collect();
+        assert_eq!(
+            labels[..9],
+            [
+                "1 needed",
+                "1 decide (rec)",
+                "1 drop",
+                "2 needed",
+                "2 decide",
+                "2 drop",
+                "3 needed (rec)",
+                "3 decide",
+                "3 drop"
+            ]
+        );
+        assert_eq!(r.buttons[9], (ACCEPT_LABEL.into(), "ra:0".into()));
+        assert_eq!(r.rows, [3, 3, 3, 1, 1], "accept, then Dismiss");
+
+        // A rated ask shows its own rating; once every rec on the page is
+        // rated, the accept button goes.
+        let rated = HashMap::from([
+            ("t1.1".to_string(), "needed".to_string()),
+            ("t3.1".to_string(), "needed".to_string()),
+        ]);
+        let r = render_retro(&items, 0, &rated, 0, Some("a"));
+        assert!(r.buttons.iter().any(|b| b.0 == "1 needed ✓"));
+        assert!(r.buttons.iter().any(|b| b.0 == "1 decide (rec)"));
+        assert!(r.buttons.iter().any(|b| b.0 == "3 needed ✓"));
+        assert!(r.buttons.iter().all(|b| b.0 != ACCEPT_LABEL));
+        assert!(!r.text.contains(REC_NOTE));
+        assert_eq!(r.rows, [3, 3, 3, 1]);
+
+        // No recs: as before, no accept button.
+        let plain = render_retro(&[kitem(2, "decision", "a")], 0, &HashMap::new(), 0, None);
+        assert!(plain.buttons.iter().all(|b| !b.1.starts_with("ra:")));
+        assert!(!plain.text.contains("rec"), "{}", plain.text);
+
+        // The accept button covers only its page.
+        let many: Vec<_> = (0..15).map(|i| rec(i, "needed", "")).collect();
+        let p2 = render_retro(&many, 0, &HashMap::new(), 1, None);
+        assert!(p2.buttons.contains(&(ACCEPT_LABEL.into(), "ra:1".into())));
+        assert_eq!(page_items(&many, 1).len(), 5);
+        assert_eq!(page_items(&many, 1)[0].ask, "t10.1");
+        assert_eq!(
+            page_items(&many, 9)[0].ask,
+            "t10.1",
+            "past the end: the last"
+        );
+        assert!(page_items(&[], 0).is_empty());
+    }
+
+    #[test]
+    fn rec_bodies_parse() {
+        assert_eq!(episode_body("episode=2"), Some((2, "", "")));
+        assert_eq!(episode_body("episode=2 via=rec"), Some((2, "via=rec", "")));
+        assert_eq!(
+            episode_body("episode=3\nreversible, in scope"),
+            Some((3, "", "reversible, in scope"))
+        );
+        assert_eq!(episode_body("episode=x"), None);
+        assert_eq!(episode_body("other"), None);
+        assert_eq!(parse_rating("decide").unwrap(), "could_decide");
+        assert_eq!(parse_rating("drop").unwrap(), "should_not_exist");
+        assert_eq!(parse_rating("needed").unwrap(), "needed");
+        assert!(parse_rating("maybe").is_err());
     }
 
     #[test]
@@ -1646,6 +2024,8 @@ mod tests {
                     detail: long.clone(),
                     kind: kind.to_string(),
                     bot: "a-very-long-bot-name-indeed".into(),
+                    rec: "should_not_exist".into(),
+                    why: "w".repeat(RETRO_WHY),
                 });
             }
         }
@@ -1667,8 +2047,12 @@ mod tests {
                 r.text.len()
             );
             for (label, data) in &r.buttons {
-                assert!(data.len() <= 64 && label.len() <= 20, "{label} {data}");
+                assert!(
+                    data.len() <= 64 && (label.len() <= 20 || label == ACCEPT_LABEL),
+                    "{label} {data}"
+                );
             }
+            assert!(r.text.contains("\n   rec: drop (www"), "{}", r.text);
             let n = r.rows.iter().filter(|n| **n == 3).count();
             assert!(n <= RETRO_PAGE);
             seen += n;
@@ -1747,11 +2131,12 @@ mod tests {
             Some(Press::Item("m12".into(), "should_not_exist"))
         );
         assert_eq!(Press::parse("rp:3"), Some(Press::Page(3)));
+        assert_eq!(Press::parse("ra:2"), Some(Press::Accept(2)));
         // Buttons of a card that rated by kind.
         assert_eq!(Press::parse("rk:approval:c"), Some(Press::Retired));
         assert_eq!(Press::parse("ro:decision:3"), Some(Press::Retired));
         assert_eq!(Press::parse("rb"), Some(Press::Retired));
-        for bad in ["rate:t7.1:q", "rk:approval", "rp:x", "zz:a:b", ""] {
+        for bad in ["rate:t7.1:q", "rk:approval", "rp:x", "ra:", "zz:a:b", ""] {
             assert_eq!(Press::parse(bad), None, "{bad}");
         }
     }
@@ -1778,6 +2163,34 @@ mod tests {
         }
         assert_eq!((t.asks, t.rated, t.needed), (5, 4, 2));
         assert_eq!(t.wasted_share, Some(0.5));
+        assert_eq!(
+            (t.recommended, t.accepted, t.agreed, t.overridden),
+            (0, 0, 0, 0)
+        );
+
+        // Recommendations: unrated, accepted, agreed by hand, overridden.
+        let mut t = Tally::default();
+        let rec = |rating: Option<&str>, accepted: bool| Ask {
+            rating: rating.map(String::from),
+            accepted,
+            rec: Some("needed".into()),
+            ..ask("m2")
+        };
+        for a in [
+            rec(None, false),
+            rec(Some("needed"), true),
+            rec(Some("needed"), false),
+            rec(Some("could_decide"), false),
+        ] {
+            t.add(&a);
+        }
+        assert_eq!((t.asks, t.rated, t.recommended), (4, 3, 4));
+        assert_eq!((t.accepted, t.agreed, t.overridden), (1, 1, 1));
+        assert_eq!(
+            (t.needed, t.could_decide),
+            (2, 1),
+            "only owner ratings count"
+        );
     }
 
     fn s(v: &[&str]) -> Vec<String> {
