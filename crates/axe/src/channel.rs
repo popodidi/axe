@@ -38,6 +38,12 @@ pub trait Store: Send + Sync + 'static {
     fn form_submit(&self, _sealed: &str) -> anyhow::Result<crate::form::Form> {
         anyhow::bail!("sealed forms need an axe server")
     }
+    /// Claims closing a finished form's prompt from the reply's `bot` and
+    /// `chat` (`form::Forms::claim_close`): `Some(remove)` when the caller
+    /// removes the keyboard, `None` when it does nothing.
+    fn form_close(&self, _form: &str, _bot: &str, _chat: i64) -> Option<bool> {
+        None
+    }
     /// Starts a login of a dispatcher runtime by `method`
     /// (`runtime::login_methods`) on behalf of the owner, prompted through
     /// `bot`; returns the text for the owner.

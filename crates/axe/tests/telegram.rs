@@ -3374,6 +3374,68 @@ fn form_ask_sends_its_prompt_only_from_the_named_bot() {
 }
 
 #[test]
+fn a_finished_form_removes_its_button_and_no_telegram_forms_send_nothing() {
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    let _disp = rig.srv().dispatcher(&[], &[]);
+    let ask = |extra: &[&str]| {
+        let mut a = vec![
+            "--task",
+            "5",
+            "--purpose",
+            "Key",
+            "--field",
+            "key:secret:required",
+        ];
+        a.extend_from_slice(extra);
+        form_ask(&rig, &a)
+    };
+    let submit = |v: &Value| {
+        let sealed = axe::sealed::seal(&form_spec(v), &json!({"key": "k"})).unwrap();
+        rig.srv().ok(&["form", "submit", &sealed.text()]);
+    };
+
+    // A test form with --no-telegram, submitted outside Telegram (as the
+    // browser page or `axe form submit` does): nothing reaches the chat.
+    let quiet = ask(&["--no-telegram"]);
+    assert_eq!(quiet["telegram"]["sent"], false, "{quiet}");
+    submit(&quiet);
+    // Past the server's form loop (5 s) and the close delay.
+    std::thread::sleep(Duration::from_secs(8));
+    assert!(
+        rig.stub.calls("sendMessage").is_empty(),
+        "no prompt, no outcome"
+    );
+
+    // Two prompted forms; the first one expires (1m), the second is
+    // delivered outside Telegram. Its outcome keeps the keyboard, which
+    // still holds the first form's button.
+    let first = ask(&["--bot", "cos", "--ttl", "1m"]);
+    let second = ask(&["--bot", "cos"]);
+    assert_eq!(rig.sent_to(OWNER).len(), 2);
+    submit(&second);
+    wait_for("the delivered outcome", 20, || {
+        rig.sent_to(OWNER).len() == 3
+    });
+    let out = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(out["text"], "Sealed form delivered to task 5: key.");
+    assert!(out.get("reply_markup").is_none(), "{out}");
+
+    // The first one expires: its outcome removes the keyboard.
+    let shown = || -> Value {
+        let id = form_spec(&first).form;
+        serde_json::from_str(&rig.srv().ok(&["form", "show", &id, "--json"])).unwrap()
+    };
+    wait_for("the expiry", 90, || shown()["state"] == "expired");
+    wait_for("the expired outcome", 20, || rig.sent_to(OWNER).len() == 4);
+    let out = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(out["text"], "Sealed form not delivered: it expired.");
+    assert_eq!(out["reply_markup"], json!({"remove_keyboard": true}));
+    std::thread::sleep(Duration::from_secs(6));
+    assert_eq!(rig.sent_to(OWNER).len(), 4, "each form closes once");
+}
+
+#[test]
 fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     let dir = tempfile::tempdir().unwrap();
     let reg = dir.path().join("runtimes");
