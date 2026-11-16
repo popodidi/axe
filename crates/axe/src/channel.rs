@@ -75,6 +75,10 @@ pub struct SendOpts {
     /// inbox item and closes when the task leaves escalated. Needs buttons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<i64>,
+    /// Server side only: a weekly retro card's `flags.retro`, recorded with
+    /// the message so it is never taken for an open card (`board.rs`).
+    #[serde(skip)]
+    pub retro: Option<Value>,
 }
 
 /// One stored message, as `bot tg history` returns it.

@@ -8,6 +8,8 @@
 //!   buttons. A press (`flags.answered`), an edit that removes the keyboard,
 //!   or a delete closes a card. A card sent with `--task N` (`flags.task`)
 //!   stands for escalated task N, and closes when the task leaves escalated.
+//!   A weekly retro card (`flags.retro`) is never one: it is not pinned, and
+//!   one pinned before is unpinned like a closed card.
 //!
 //! An escalated task with no card since its escalation gets one: the bot is
 //! woken to post it with its real options, and [`CARD_WAIT`] after that wake
@@ -266,7 +268,8 @@ const OPEN_CARD: &str = "direction='out' AND kind='text'
     AND json_type(flags,'$.buttons')='array' AND json_array_length(flags,'$.buttons')>0
     AND json_type(flags,'$.answered') IS NULL
     AND json_type(flags,'$.deleted') IS NULL
-    AND json_type(flags,'$.board') IS NULL";
+    AND json_type(flags,'$.board') IS NULL
+    AND json_type(flags,'$.retro') IS NULL";
 
 /// The bot's open cards, oldest first.
 fn open_cards(conn: &Connection, bot: i64) -> Result<Vec<Line>> {

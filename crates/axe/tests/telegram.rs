@@ -2764,7 +2764,8 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
             row(1, "t1.1"),
             row(2, "t2.1"),
             row(3, &format!("m{card}")),
-            row(4, &format!("m{card2}"))
+            row(4, &format!("m{card2}")),
+            vec![("Dismiss".to_string(), "rd".to_string())]
         ]
     );
     let retro = rig.messages().len() as i64;
@@ -2831,6 +2832,91 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     assert_eq!(m2["rating"], "should_not_exist");
     let out = rig.srv().ok(&["ask", "retro", "--dry"]);
     assert!(out.contains("no unrated asks"), "{out}");
+}
+
+#[test]
+fn the_retro_card_is_never_pinned_and_dismiss_closes_it_unrated() {
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    let (board, _) = make_board(&rig);
+    wait_for("board retired", 20, || {
+        flags_of(&rig, board)["board_retired"] == true
+    });
+    // One ask: a card, pinned while open, unpinned once answered.
+    rig.tg_ok(&["send", "--buttons", "Yes=y,No=n", "Rotate the key?"]);
+    let card = rig.messages().len() as i64;
+    wait_for("card pinned", 20, || flags_of(&rig, card)["pinned"] == true);
+    rig.tg_ok(&["edit", &card.to_string(), "Decided: yes"]);
+    wait_for("card unpinned", 20, || {
+        flags_of(&rig, card)["pinned"] == false
+    });
+
+    // The retro card has buttons but is not an open card: never pinned, not
+    // on the inbox, and its last row is Dismiss.
+    let out = rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
+    assert!(out.starts_with("sent #"), "{out}");
+    let sent = rig.stub.calls("sendMessage").pop().unwrap();
+    assert_eq!(
+        keyboard_of(&sent.params).pop().unwrap(),
+        vec![("Dismiss".to_string(), "rd".to_string())]
+    );
+    let retro = rig.messages().len() as i64;
+    let tg = tg_id(&rig, retro);
+    assert!(flags_of(&rig, retro)["retro"].is_object());
+    // A later change runs another inbox pass.
+    rig.tg_ok(&["send", "note"]);
+    std::thread::sleep(Duration::from_secs(2));
+    let pinned = |rig: &Rig, method: &str| {
+        rig.stub
+            .calls(method)
+            .iter()
+            .filter(|c| c.params["message_id"] == tg)
+            .count()
+    };
+    assert_eq!(pinned(&rig, "pinChatMessage"), 0, "a retro is never pinned");
+    assert!(flags_of(&rig, retro)["pinned"].is_null());
+    let show = rig.tg_ok(&["board", "show"]);
+    assert!(show.contains("Nothing waiting on you"), "{show}");
+
+    // A retro pinned before (as an open card) is unpinned on the next pass.
+    rig.db()
+        .execute(
+            "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json('true'),'$.card_pin',json('true')) WHERE id=?1",
+            [retro],
+        )
+        .unwrap();
+    rig.tg_ok(&["send", "another note"]);
+    wait_for("old retro pin unpinned", 20, || {
+        flags_of(&rig, retro)["pinned"] == false
+    });
+    assert_eq!(pinned(&rig, "unpinChatMessage"), 1);
+
+    // Dismiss closes it in place: no keyboard, no bot wake, asks unrated.
+    rig.stub.push(press(61, tg, "rd"));
+    rig.stub.wait_confirmed(61);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "Dismissed; unrated asks stay unrated");
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    assert_eq!(edit.params["message_id"], tg);
+    assert_eq!(
+        edit.params["text"],
+        "Weekly retro, cos: dismissed. 1 of 1 asks left unrated."
+    );
+    assert!(edit.params["reply_markup"].is_null(), "{:?}", edit.params);
+    assert_eq!(flags_of(&rig, retro)["dismissed"], true);
+    assert!(flags_of(&rig, retro)["buttons"].is_null());
+    assert!(rig.message_wakes().iter().all(|w| w.0 != "button"));
+    // A stale press on the dismissed card rates nothing.
+    rig.stub.push(press(62, tg, &format!("rate:m{card}:n")));
+    rig.stub.wait_confirmed(62);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "This retro was dismissed");
+    let asks: Vec<Value> = serde_json::from_str(&rig.srv().ok(&["ask", "list", "--json"])).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(asks[0]["rating"].is_null(), "{asks:?}");
+    let out = rig.srv().ok(&["ask", "list", "--unrated", "--json"]);
+    assert!(out.contains(&format!("m{card}")), "{out}");
+    assert_eq!(pinned(&rig, "pinChatMessage"), 0);
 }
 
 #[test]
@@ -2906,8 +2992,9 @@ fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
         "{edited}"
     );
     let kb = keyboard_of(&edit.params);
-    assert_eq!(kb.len(), 3, "{kb:?}");
+    assert_eq!(kb.len(), 4, "{kb:?}");
     assert_eq!(kb[2], vec![("‹ prev".to_string(), "rp:0".to_string())]);
+    assert_eq!(kb[3], vec![("Dismiss".to_string(), "rd".to_string())]);
     // Rating on page 2 keeps page 2.
     rig.stub.push_to(AUX_TOKEN, press(71, tg, "rate:t12.1:x"));
     rig.stub.wait_confirmed(71);
