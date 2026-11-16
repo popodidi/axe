@@ -1371,8 +1371,8 @@ impl Gateway {
         Ok(json!({"sent": true, "bot": name, "id": id}))
     }
 
-    /// A press on a weekly retro card (`flags.retro`): rates an item or a
-    /// kind's unrated items, or opens a kind's page or goes back, then
+    /// A press on a weekly retro card (`flags.retro`): rates an item, accepts
+    /// the recommendations of a page's unrated items, or turns a page, then
     /// re-renders the card in place and wakes no bot. Returns false when the
     /// message is not a retro card.
     fn retro_press(
@@ -1405,6 +1405,20 @@ impl Gateway {
                 (format!("Rated: {rating}"), Some(ask::page_of(&items, &a)))
             }
             Some(ask::Press::Page(p)) => (format!("Page {}", p + 1), Some(p)),
+            // Accept the shown recommendations of the page's unrated asks.
+            Some(ask::Press::Accept(p)) => {
+                let n = ask::accept(
+                    &mut store.conn(),
+                    &owner_actor(),
+                    ask::page_items(&items, p),
+                )?;
+                let toast = match n {
+                    0 => "Nothing left to accept on this page".to_string(),
+                    1 => "Accepted 1 rec".to_string(),
+                    n => format!("Accepted {n} recs"),
+                };
+                (toast, Some(p))
+            }
             // A card sent when asks were rated by kind: shown per ask now.
             Some(ask::Press::Retired) => ("Rate each ask on its own".to_string(), Some(0)),
             _ => ("Not an item on this card".to_string(), None),
