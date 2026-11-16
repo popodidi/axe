@@ -1749,10 +1749,10 @@ enum AskCmd {
         #[arg(long, value_parser = PossibleValuesParser::new(["kind", "bot"]))]
         by: Option<String>,
     },
-    /// A bot's weekly retro card: last week's unrated asks it raised, one
-    /// line and one row of rating buttons each, paged. Sends it from the bot
-    /// (default $AXE_BOT); --dry prints its first page instead (every bot's
-    /// asks without a bot)
+    /// A bot's weekly retro card: last week's unrated asks it raised, two
+    /// lines (id and topic, then the question) and one row of rating buttons
+    /// each, paged. Sends it from the bot (default $AXE_BOT); --dry prints
+    /// its first page instead (every bot's asks without a bot)
     Retro {
         #[arg(long)]
         bot: Option<String>,
