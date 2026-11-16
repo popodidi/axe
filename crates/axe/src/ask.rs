@@ -108,6 +108,18 @@ fn asked_of(note: &str) -> String {
         .to_string()
 }
 
+/// The `blocked:` line of an escalation note, without its prefix.
+fn blocked_of(note: &str) -> String {
+    note.lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .strip_prefix("blocked:")
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 /// Whether a rating says the owner should not have been asked.
 pub fn wasted(rating: &str) -> bool {
     matches!(rating, "could_decide" | "should_not_exist")
@@ -126,6 +138,10 @@ pub struct Ask {
     pub task: Option<i64>,
     pub at: String,
     pub summary: String,
+    /// What the owner was asked, in their words: an escalation's `blocked:`
+    /// line, a card's first line. Empty when the log holds none.
+    #[serde(default)]
+    pub question: String,
     pub rating: Option<String>,
     pub rated_by: Option<String>,
     pub rated_at: Option<String>,
@@ -287,7 +303,9 @@ fn escalations(conn: &Connection, project: Option<&str>) -> Result<Vec<Ask>> {
             }
             "note" => {
                 if let Some(ep) = eps.last_mut().filter(|e| open && e.2.is_empty()) {
-                    ep.2 = asked_of(body.as_deref().unwrap_or_default());
+                    let note = body.as_deref().unwrap_or_default();
+                    ep.2 = asked_of(note);
+                    out[ep.0].question = blocked_of(note);
                 }
                 continue;
             }
@@ -320,6 +338,7 @@ fn escalations(conn: &Connection, project: Option<&str>) -> Result<Vec<Ask>> {
             task: Some(id),
             at: r.get(1)?,
             summary: r.get(7)?,
+            question: String::new(),
             rating: rating.map(|r| r.rating.clone()),
             rated_by: rating.map(|r| r.by.clone()),
             rated_at: rating.map(|r| r.at.clone()),
@@ -409,6 +428,7 @@ fn cards(conn: &Connection, project: Option<&str>, only: Option<i64>) -> Result<
             task: None,
             at: r.get(3)?,
             summary: first_line(&text, flags["html"] == true),
+            question: first_line(&text, flags["html"] == true),
             rating: rating.map(|r| r.rating.clone()),
             rated_by: rating.map(|r| r.by.clone()),
             rated_at: rating.map(|r| r.at.clone()),
@@ -441,23 +461,6 @@ pub fn rate(conn: &mut Connection, actor: &Actor, id: &str, rating: &str) -> Res
     let ask_id = write_rating(&tx, actor, id, rating)?;
     tx.commit()?;
     find(conn, &ask_id)
-}
-
-/// Rates every ask of `ids` in one transaction (a retro kind rating);
-/// returns how many were rated.
-pub fn rate_many(
-    conn: &mut Connection,
-    actor: &Actor,
-    ids: &[String],
-    rating: &str,
-) -> Result<usize> {
-    check_rater(actor, rating)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for id in ids {
-        write_rating(&tx, actor, id, rating)?;
-    }
-    tx.commit()?;
-    Ok(ids.len())
 }
 
 fn check_rater(actor: &Actor, rating: &str) -> Result<()> {
@@ -661,24 +664,27 @@ pub fn stats(conn: &Connection, project: Option<&str>, since: i64, until: i64) -
 
 /// Items one retro card holds; the rest are counted in `more`.
 pub const RETRO_ITEMS: usize = 1000;
-/// Items per page when a kind is opened.
-pub const RETRO_PAGE: usize = 8;
-/// Bots named on a kind line; the rest are summed as `+N`.
-const RETRO_LINE_BOTS: usize = 3;
-const RETRO_SUMMARY: usize = 40;
-const RETRO_BOT: usize = 16;
-/// Button codes in callback data `rate:<ask>:<code>` and `rk:<kind>:<code>`.
+/// Asks per page of a retro card: each has its own row of rating buttons.
+pub const RETRO_PAGE: usize = 10;
+/// Characters of an ask's question on its retro line.
+const RETRO_QUESTION: usize = 72;
+/// Button codes in callback data `rate:<ask>:<code>`.
 pub const CODES: [(&str, &str, &str); 3] = [
     ("n", "needed", "needed"),
     ("c", "could_decide", "decide"),
     ("x", "should_not_exist", "drop"),
 ];
 const NOTE: &str =
-    "needed: right to ask. decide: the bot could have decided. drop: should not exist.";
+    "Rate each ask: needed = right to ask, decide = the bot could have decided, drop = should not exist. Skipped asks stay unrated.";
 
 /// The rating a button code stands for.
 pub fn rating_of(code: &str) -> Option<&'static str> {
     CODES.iter().find(|c| c.0 == code).map(|c| c.1)
+}
+
+/// The button label of a rating (`decide` for `could_decide`).
+fn rating_label(rating: &str) -> &str {
+    CODES.iter().find(|c| c.1 == rating).map_or(rating, |c| c.2)
 }
 
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -725,13 +731,14 @@ pub fn retro_due(now: i64, at: i64, last_sent: Option<i64>, tried: Option<i64>) 
         .then_some(slot)
 }
 
-/// When the latest retro card was sent, by any bot.
-pub fn last_retro(conn: &Connection) -> Result<Option<i64>> {
+/// When bot `bot` last sent a retro card.
+pub fn last_retro(conn: &Connection, bot: &str) -> Result<Option<i64>> {
     let at: Option<String> = conn
         .query_row(
-            "SELECT at FROM bot_messages WHERE direction='out' AND json_type(flags,'$.retro') IS NOT NULL
-             ORDER BY id DESC LIMIT 1",
-            [],
+            "SELECT m.at FROM bot_messages m JOIN bots b ON b.id=m.bot_id
+             WHERE b.name=?1 AND m.direction='out' AND json_type(m.flags,'$.retro') IS NOT NULL
+             ORDER BY m.id DESC LIMIT 1",
+            [bot],
             |r| r.get(0),
         )
         .optional()?;
@@ -742,8 +749,8 @@ pub fn last_retro(conn: &Connection) -> Result<Option<i64>> {
 pub struct RetroItem {
     pub ask: String,
     pub line: String,
-    /// The ask's category. Empty on cards sent before kinds existed: those
-    /// render as a flat list.
+    /// The ask's category, for the footer totals. Empty on cards sent
+    /// before kinds existed: counted as `other`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -761,47 +768,67 @@ pub struct Retro {
     pub more: usize,
 }
 
-/// What a retro card shows: every kind, or one kind's page of items.
-#[derive(Debug, Clone, PartialEq)]
-pub enum View {
-    Kinds,
-    Kind(String, usize),
-}
-
 /// What a press on a retro card asks for (callback data).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Press {
-    /// `rate:<ask>:<code>`: rate one item.
+    /// `rate:<ask>:<code>`: rate one ask.
     Item(String, &'static str),
-    /// `rk:<kind>:<code>`: rate a kind's unrated items.
-    Kind(String, &'static str),
-    /// `ro:<kind>:<page>`: open a kind's page.
-    Open(String, usize),
-    /// `rb`: back to every kind.
-    Back,
+    /// `rp:<page>`: show a page.
+    Page(usize),
+    /// A button of a card sent when asks were rated by kind (`rk:`, `ro:`,
+    /// `rb`): kinds are no longer rated, so it shows the first page.
+    Retired,
 }
 
 impl Press {
     pub fn parse(data: &str) -> Option<Press> {
         if data == "rb" {
-            return Some(Press::Back);
+            return Some(Press::Retired);
         }
         let (head, rest) = data.split_once(':')?;
-        let (arg, last) = rest.rsplit_once(':')?;
         match head {
-            "rate" => Some(Press::Item(arg.into(), rating_of(last)?)),
-            "rk" => Some(Press::Kind(arg.into(), rating_of(last)?)),
-            "ro" => Some(Press::Open(arg.into(), last.parse().ok()?)),
+            "rp" => rest.parse().ok().map(Press::Page),
+            "rate" => {
+                let (ask, code) = rest.rsplit_once(':')?;
+                Some(Press::Item(ask.into(), rating_of(code)?))
+            }
+            "rk" | "ro" => rest.contains(':').then_some(Press::Retired),
             _ => None,
         }
     }
 }
 
-/// The weekly retro card: the owner's asks of the 7 days before `now` that
-/// nobody rated yet, grouped by kind. An item left alone stays unrated; it
-/// is never taken as `needed`.
-pub fn retro(conn: &Connection, now: i64) -> Result<Retro> {
-    let asks = list(
+/// Whose asks a retro card holds.
+#[derive(Debug, Default, Clone)]
+pub struct RetroScope<'a> {
+    /// The bot whose retro it is; `None` holds every ask.
+    pub bot: Option<&'a str>,
+    /// Whether this bot's retro also holds the asks no sending bot raised:
+    /// those with no bot, or whose bot is not in `senders`. The owner's
+    /// default bot (`telegram.retro.bot`, else the ops bot) has them.
+    pub home: bool,
+    /// The bots that send retros.
+    pub senders: &'a [String],
+}
+
+impl RetroScope<'_> {
+    fn holds(&self, ask: Option<&str>) -> bool {
+        let Some(bot) = self.bot else {
+            return true;
+        };
+        match ask {
+            Some(a) if a == bot => true,
+            Some(a) => self.home && !self.senders.iter().any(|s| s == a),
+            None => self.home,
+        }
+    }
+}
+
+/// The weekly retro card of one bot: the asks of the 7 days before `now`
+/// it raised that nobody rated yet, one line each, oldest first. An ask
+/// left alone stays unrated; it is never taken as `needed`.
+pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
+    let mut asks = list(
         conn,
         &Filter {
             since: now - WEEK,
@@ -811,6 +838,7 @@ pub fn retro(conn: &Connection, now: i64) -> Result<Retro> {
             ..Default::default()
         },
     )?;
+    asks.retain(|a| scope.holds(a.bot.as_deref()));
     let more = asks.len().saturating_sub(RETRO_ITEMS);
     let items = asks
         .iter()
@@ -822,34 +850,77 @@ pub fn retro(conn: &Connection, now: i64) -> Result<Retro> {
             bot: a.bot.clone().unwrap_or_else(|| "-".into()),
         })
         .collect::<Vec<_>>();
-    Ok(render_retro(&items, more, &HashMap::new(), &View::Kinds))
+    Ok(render_retro(&items, more, &HashMap::new(), 0, scope.bot))
 }
 
+/// An ask's retro line: its id (`#<task>`, `#<task>.<episode>` after the
+/// first episode, or `msg <id>`) and its question in a few words.
 fn retro_line(a: &Ask) -> String {
-    let bot = crate::board::cap(a.bot.as_deref().unwrap_or("-"), RETRO_BOT);
     let what = match a.task {
-        Some(t) if a.id.ends_with(".1") => format!("task #{t}"),
-        Some(_) => format!("task #{}", a.id.trim_start_matches('t')),
-        None => format!("card #{}", a.id.trim_start_matches('m')),
+        Some(t) if a.id.ends_with(".1") => format!("#{t}"),
+        Some(_) => format!("#{}", a.id.trim_start_matches('t')),
+        None => format!("msg {}", a.id.trim_start_matches('m')),
     };
-    let summary = a.summary.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!(
-        "{bot} {what}: {}",
-        crate::board::cap(&summary, RETRO_SUMMARY)
-    )
+    let q = if a.question.trim().is_empty() {
+        &a.summary
+    } else {
+        &a.question
+    };
+    let q = scrub(&q.split_whitespace().collect::<Vec<_>>().join(" "));
+    format!("{what}: {}", crate::board::cap(&q, RETRO_QUESTION))
 }
 
-/// Kinds on a card with their items' indices, most items first, `other`
-/// last.
-pub fn kinds_of(items: &[RetroItem]) -> Vec<(String, Vec<usize>)> {
-    let mut by: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (i, it) in items.iter().enumerate() {
+/// Masks what looks like a credential in text shown on a retro card: the
+/// value of a `token`/`secret`/`password`/`key` pair or the word after one,
+/// a known token prefix, or a long run of mixed letters and digits.
+pub fn scrub(text: &str) -> String {
+    const KEYS: [&str; 6] = ["token", "secret", "password", "passwd", "apikey", "api_key"];
+    const PREFIXES: [&str; 6] = ["ghp_", "gho_", "ghs_", "github_pat_", "sk-", "xox"];
+    const MASK: &str = "[redacted]";
+    let is_key = |k: &str| {
+        let k = k.to_lowercase();
+        KEYS.iter().any(|x| k.ends_with(x))
+    };
+    let looks_secret = |w: &str| {
+        let core = w.trim_matches(|c: char| !c.is_alphanumeric());
+        let long = core.len() >= 24
+            && core.chars().any(|c| c.is_ascii_digit())
+            && core.chars().any(|c| c.is_ascii_alphabetic())
+            && core
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_+/=.".contains(c));
+        long || (core.len() >= 12 && PREFIXES.iter().any(|p| core.starts_with(p)))
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut after_key = false;
+    for w in text.split(' ') {
+        let pair = w
+            .find(['=', ':'])
+            .filter(|&i| i > 0 && i + 1 < w.len() && is_key(&w[..i]));
+        out.push(match pair {
+            Some(i) => format!("{}{MASK}", &w[..=i]),
+            None if looks_secret(w)
+                || (after_key && w.len() >= 8 && !w.chars().all(char::is_alphabetic)) =>
+            {
+                MASK.into()
+            }
+            None => w.into(),
+        });
+        after_key = is_key(w.trim_end_matches([':', '=']));
+    }
+    out.join(" ")
+}
+
+/// The footer: each kind's ask count, most first, `other` last.
+fn kind_totals(items: &[RetroItem]) -> String {
+    let mut by: HashMap<&str, usize> = HashMap::new();
+    for it in items {
         let k = if it.kind.is_empty() {
             "other"
         } else {
             &it.kind
         };
-        by.entry(k).or_default().push(i);
+        *by.entry(k).or_default() += 1;
     }
     let order = |k: &str| {
         KINDS
@@ -857,188 +928,77 @@ pub fn kinds_of(items: &[RetroItem]) -> Vec<(String, Vec<usize>)> {
             .position(|x| x.0 == k)
             .unwrap_or(KINDS.len() - 1)
     };
-    let mut out: Vec<(String, Vec<usize>)> =
-        by.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    out.sort_by(|a, b| {
+    let mut by: Vec<(&str, usize)> = by.into_iter().collect();
+    by.sort_by(|a, b| {
         (a.0 == "other")
             .cmp(&(b.0 == "other"))
-            .then(b.1.len().cmp(&a.1.len()))
-            .then(order(&a.0).cmp(&order(&b.0)))
-            .then(a.0.cmp(&b.0))
+            .then(b.1.cmp(&a.1))
+            .then(order(a.0).cmp(&order(b.0)))
+            .then(a.0.cmp(b.0))
     });
-    out
+    by.iter()
+        .map(|(k, n)| format!("{} {n}", kind_label(k)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-/// The items of kind `kind` that `rated` has no rating for.
-pub fn unrated_of(items: &[RetroItem], rated: &HashMap<String, String>, kind: &str) -> Vec<String> {
-    kinds_of(items)
-        .into_iter()
-        .filter(|(k, _)| k == kind)
-        .flat_map(|(_, ix)| ix)
-        .map(|i| items[i].ask.clone())
-        .filter(|a| !rated.contains_key(a))
-        .collect()
-}
-
-/// The page of `kind` that holds item `ask`.
-pub fn page_of(items: &[RetroItem], kind: &str, ask: &str) -> usize {
-    kinds_of(items)
-        .into_iter()
-        .find(|(k, _)| k == kind)
-        .and_then(|(_, ix)| ix.iter().position(|i| items[*i].ask == ask))
+/// The page of the card that holds ask `ask` (0 when it holds none).
+pub fn page_of(items: &[RetroItem], ask: &str) -> usize {
+    items
+        .iter()
+        .position(|i| i.ask == ask)
         .map_or(0, |p| p / RETRO_PAGE)
 }
 
-/// Renders a retro card from its items, with `rated` (ask id to rating)
-/// marked. Pure, so presses re-render the stored items.
+/// Renders page `page` of a retro card from its items, with `rated` (ask id
+/// to rating) marked: one line and one row of rating buttons per ask (a
+/// rated ask can be re-rated), prev / next, and the kind totals as a
+/// footer. `bot` names whose retro it is. Pure, so presses re-render the
+/// stored items.
 pub fn render_retro(
     items: &[RetroItem],
     more: usize,
     rated: &HashMap<String, String>,
-    view: &View,
+    page: usize,
+    bot: Option<&str>,
 ) -> Retro {
+    let title = match bot {
+        Some(b) => format!("Weekly retro, {}", crate::board::cap(b, 32)),
+        None => "Weekly retro".to_string(),
+    };
     if items.is_empty() {
         return Retro {
-            text: "Weekly retro: no unrated asks last week.".into(),
+            text: format!("{title}: no unrated asks last week."),
             ..Default::default()
         };
     }
-    let mut r = if items.iter().any(|i| i.kind.is_empty()) {
-        render_flat(items, more, rated)
-    } else {
-        match view {
-            View::Kinds => render_kinds(items, more, rated),
-            View::Kind(k, page) => render_kind(items, rated, k, *page),
-        }
-    };
-    r.items = items.to_vec();
-    r.more = more;
-    r
-}
-
-fn bots_of(items: &[RetroItem], ix: &[usize]) -> String {
-    let mut n: BTreeMap<&str, usize> = BTreeMap::new();
-    for i in ix {
-        *n.entry(items[*i].bot.as_str()).or_default() += 1;
-    }
-    let mut n: Vec<_> = n.into_iter().collect();
-    n.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    let mut parts: Vec<String> = n
-        .iter()
-        .take(RETRO_LINE_BOTS)
-        .map(|(b, c)| format!("{} {c}", crate::board::cap(b, RETRO_BOT)))
-        .collect();
-    let rest: usize = n.iter().skip(RETRO_LINE_BOTS).map(|x| x.1).sum();
-    if rest > 0 {
-        parts.push(format!("+{rest}"));
-    }
-    parts.join(", ")
-}
-
-/// Every kind on one line with its count per bot, three rating buttons and
-/// an open button. A kind rating rates its unrated items.
-fn render_kinds(items: &[RetroItem], more: usize, rated: &HashMap<String, String>) -> Retro {
+    let pages = items.len().div_ceil(RETRO_PAGE);
+    let page = page.min(pages - 1);
     let left = items.iter().filter(|i| !rated.contains_key(&i.ask)).count();
     let mut text = format!(
-        "Weekly retro: last week's asks by kind ({}, {left} unrated)\n",
+        "{title}: last week's asks ({}, {left} unrated)",
         items.len() + more
     );
-    let mut buttons = Vec::new();
-    let mut rows = Vec::new();
-    for (n, (kind, ix)) in kinds_of(items).iter().enumerate() {
-        let n = n + 1;
-        let ratings: Vec<Option<&String>> = ix.iter().map(|i| rated.get(&items[*i].ask)).collect();
-        let unrated = ratings.iter().filter(|r| r.is_none()).count();
-        let state = if unrated == 0 {
-            let first = ratings[0];
-            if ratings.iter().all(|r| *r == first) {
-                format!(" = {}", first.map_or("", |s| s.as_str()))
-            } else {
-                " = rated".into()
-            }
-        } else if unrated < ix.len() {
-            format!(", {unrated} unrated")
-        } else {
-            String::new()
-        };
-        text.push_str(&format!(
-            "\n{n}. {}: {} ({}){state}",
-            kind_label(kind),
-            ix.len(),
-            bots_of(items, ix)
-        ));
-        let before = buttons.len();
-        if unrated > 0 {
-            for (code, _, label) in CODES {
-                buttons.push((format!("{n} {label}"), format!("rk:{kind}:{code}")));
-            }
-        }
-        buttons.push((format!("{n} open"), format!("ro:{kind}:0")));
-        rows.push(buttons.len() - before);
-    }
-    if more > 0 {
-        text.push_str(&format!(
-            "\n+{more} more not on this card: axe ask list --unrated"
-        ));
-    }
-    if left == 0 {
-        text.push_str("\n\nAll rated. Thanks.");
-    } else {
-        text.push_str(&format!(
-            "\n\nRate a kind once: it applies to its unrated asks. Open a kind to see or re-rate single asks. {NOTE} Skipped asks stay unrated."
-        ));
-    }
-    Retro {
-        text,
-        buttons,
-        rows,
-        ..Default::default()
-    }
-}
-
-/// One page of a kind's items, each with its rating buttons (a rated item
-/// can be re-rated), and prev / next / back.
-fn render_kind(
-    items: &[RetroItem],
-    rated: &HashMap<String, String>,
-    kind: &str,
-    page: usize,
-) -> Retro {
-    let ix: Vec<usize> = kinds_of(items)
-        .into_iter()
-        .find(|(k, _)| k == kind)
-        .map(|(_, ix)| ix)
-        .unwrap_or_default();
-    let pages = ix.len().div_ceil(RETRO_PAGE).max(1);
-    let page = page.min(pages - 1);
-    let unrated = ix
-        .iter()
-        .filter(|i| !rated.contains_key(&items[**i].ask))
-        .count();
-    let mut text = format!(
-        "Weekly retro > {}: {}, {unrated} unrated",
-        kind_label(kind),
-        ix.len()
-    );
     if pages > 1 {
-        text.push_str(&format!(" (page {}/{pages})", page + 1));
+        text.push_str(&format!(", page {}/{pages}", page + 1));
     }
     text.push('\n');
     let mut buttons = Vec::new();
     let mut rows = Vec::new();
-    for (p, i) in ix
+    for (p, it) in items
         .iter()
         .enumerate()
         .skip(page * RETRO_PAGE)
         .take(RETRO_PAGE)
     {
-        let (n, it) = (p + 1, &items[*i]);
-        match rated.get(&it.ask) {
-            Some(r) => text.push_str(&format!("\n{n}. {} = {r}", it.line)),
+        let n = p + 1;
+        let mine = rated.get(&it.ask).map(String::as_str);
+        match mine {
+            Some(r) => text.push_str(&format!("\n{n}. {} = {}", it.line, rating_label(r))),
             None => text.push_str(&format!("\n{n}. {}", it.line)),
         }
         for (code, rating, label) in CODES {
-            let label = if rated.get(&it.ask).map(String::as_str) == Some(rating) {
+            let label = if mine == Some(rating) {
                 format!("{n} {label} ✓")
             } else {
                 format!("{n} {label}")
@@ -1049,56 +1009,32 @@ fn render_kind(
     }
     let before = buttons.len();
     if page > 0 {
-        buttons.push(("‹ prev".into(), format!("ro:{kind}:{}", page - 1)));
+        buttons.push(("‹ prev".into(), format!("rp:{}", page - 1)));
     }
     if page + 1 < pages {
-        buttons.push(("next ›".into(), format!("ro:{kind}:{}", page + 1)));
+        buttons.push(("next ›".into(), format!("rp:{}", page + 1)));
     }
-    buttons.push(("‹ all kinds".into(), "rb".into()));
-    rows.push(buttons.len() - before);
-    text.push_str(&format!("\n\n{NOTE}"));
-    Retro {
-        text,
-        buttons,
-        rows,
-        ..Default::default()
-    }
-}
-
-/// A card sent before kinds existed: one row of buttons per unrated item.
-fn render_flat(items: &[RetroItem], more: usize, rated: &HashMap<String, String>) -> Retro {
-    let mut text = format!(
-        "Weekly retro: rate last week's asks ({})\n",
-        items.len() + more
-    );
-    let mut buttons = Vec::new();
-    let mut rows = Vec::new();
-    for (i, it) in items.iter().enumerate() {
-        let n = i + 1;
-        match rated.get(&it.ask) {
-            Some(r) => text.push_str(&format!("\n{n}. {} = {r}", it.line)),
-            None => {
-                text.push_str(&format!("\n{n}. {}", it.line));
-                for (code, _, label) in CODES {
-                    buttons.push((format!("{n} {label}"), format!("rate:{}:{code}", it.ask)));
-                }
-                rows.push(CODES.len());
-            }
-        }
+    if buttons.len() > before {
+        rows.push(buttons.len() - before);
     }
     if more > 0 {
-        text.push_str(&format!("\n+{more} more: axe ask list --unrated"));
+        text.push_str(&format!(
+            "\n+{more} more not on this card: axe ask list --unrated"
+        ));
     }
-    text.push_str(if buttons.is_empty() {
-        "\n\nAll rated. Thanks."
+    text.push_str("\n\n");
+    text.push_str(if left == 0 {
+        "All rated. Thanks."
     } else {
-        "\n\nneeded: right to ask. decide: the bot could have decided. drop: should not exist. Skipped items stay unrated."
+        NOTE
     });
+    text.push_str(&format!("\nBy kind: {}", kind_totals(items)));
     Retro {
         text,
         buttons,
         rows,
-        ..Default::default()
+        items: items.to_vec(),
+        more,
     }
 }
 
@@ -1106,19 +1042,10 @@ fn render_flat(items: &[RetroItem], more: usize, rated: &HashMap<String, String>
 mod tests {
     use super::*;
 
-    /// An item of a card sent before kinds existed (flat layout).
-    fn item(i: usize) -> RetroItem {
-        RetroItem {
-            ask: format!("t{i}.1"),
-            line: format!("bot task #{i}: thing {i}"),
-            ..Default::default()
-        }
-    }
-
     fn kitem(i: usize, kind: &str, bot: &str) -> RetroItem {
         RetroItem {
             ask: format!("t{i}.1"),
-            line: format!("{bot} task #{i}: thing {i}"),
+            line: format!("#{i}: thing {i}"),
             kind: kind.into(),
             bot: bot.into(),
         }
@@ -1134,9 +1061,230 @@ mod tests {
             task: None,
             at: ts(0),
             summary: String::new(),
+            question: String::new(),
             rating: None,
             rated_by: None,
             rated_at: None,
+        }
+    }
+
+    #[test]
+    fn retro_renders_zero_one_and_marks_ratings() {
+        let r = render_retro(&[], 0, &HashMap::new(), 0, Some("a"));
+        assert!(r.buttons.is_empty() && r.items.is_empty());
+        assert_eq!(r.text, "Weekly retro, a: no unrated asks last week.");
+
+        let r = render_retro(
+            &[kitem(7, "decision", "a")],
+            0,
+            &HashMap::new(),
+            0,
+            Some("a"),
+        );
+        assert_eq!(
+            r.buttons,
+            [
+                ("1 needed".to_string(), "rate:t7.1:n".to_string()),
+                ("1 decide".into(), "rate:t7.1:c".into()),
+                ("1 drop".into(), "rate:t7.1:x".into()),
+            ]
+        );
+        assert_eq!(r.rows, [3]);
+        assert!(
+            r.text.starts_with(
+                "Weekly retro, a: last week's asks (1, 1 unrated)\n\n1. #7: thing 7\n"
+            ),
+            "{}",
+            r.text
+        );
+        assert!(r.text.ends_with("\nBy kind: decisions 1"), "{}", r.text);
+
+        // A rated ask shows its rating and can be re-rated.
+        let rated = HashMap::from([("t7.1".to_string(), "could_decide".to_string())]);
+        let r = render_retro(&[kitem(7, "decision", "a")], 0, &rated, 0, Some("a"));
+        assert!(r.text.contains("1. #7: thing 7 = decide"), "{}", r.text);
+        assert!(r
+            .buttons
+            .contains(&("1 decide ✓".into(), "rate:t7.1:c".into())));
+        assert_eq!(r.rows, [3]);
+        assert!(r.text.contains("All rated. Thanks."), "{}", r.text);
+    }
+
+    #[test]
+    fn retro_lines_hold_the_id_and_the_question() {
+        let a = Ask {
+            kind: "escalation".into(),
+            bot: Some("a".into()),
+            task: Some(903),
+            summary: "the task title".into(),
+            question: "merge   PR 12\nafter ".to_string() + &"word ".repeat(30),
+            ..ask("t903.2")
+        };
+        let line = retro_line(&a);
+        assert!(
+            line.starts_with("#903.2: merge PR 12 after word word"),
+            "{line}"
+        );
+        assert!(line.chars().count() <= RETRO_QUESTION + 10, "{line}");
+        assert!(line.ends_with('…'));
+        // The first episode is the task id alone; a card is its message id.
+        let first = Ask {
+            task: Some(7),
+            question: "pick a host".into(),
+            ..ask("t7.1")
+        };
+        assert_eq!(retro_line(&first), "#7: pick a host");
+        let card = Ask {
+            question: "Ship it?".into(),
+            ..ask("m55")
+        };
+        assert_eq!(retro_line(&card), "msg 55: Ship it?");
+        // No question in the log: the title stands in.
+        let bare = Ask {
+            task: Some(8),
+            summary: "title".into(),
+            ..ask("t8.1")
+        };
+        assert_eq!(retro_line(&bare), "#8: title");
+        // Credentials never reach the card.
+        let leak = Ask {
+            question: "login failed with token=abc123SECRET and ghp_0123456789abcdef".into(),
+            ..ask("m1")
+        };
+        let line = retro_line(&leak);
+        assert!(!line.contains("abc123") && !line.contains("ghp_"), "{line}");
+    }
+
+    #[test]
+    fn scrub_masks_credentials_only() {
+        assert_eq!(scrub("merge PR 12 to main"), "merge PR 12 to main");
+        assert_eq!(scrub("set API_KEY=xyz now"), "set API_KEY=[redacted] now");
+        assert_eq!(scrub("password: hunter22!"), "password: [redacted]");
+        assert_eq!(scrub("token expired again"), "token expired again");
+        assert_eq!(
+            scrub("sha 0123456789abcdef0123456789abcdef01234567"),
+            "sha [redacted]"
+        );
+        assert_eq!(scrub("use sk-ant-0123456789xyz"), "use [redacted]");
+        assert_eq!(scrub("approve #46 at 0dc72e1"), "approve #46 at 0dc72e1");
+    }
+
+    #[test]
+    fn retro_pages_fit_telegram_with_kind_totals_as_footer() {
+        // Long questions, every kind, many asks: every page stays one message.
+        let long = "x".repeat(RETRO_QUESTION);
+        let mut items = Vec::new();
+        for (k, (kind, _)) in KINDS.iter().enumerate() {
+            for i in 0..(k + 1) * 4 {
+                items.push(RetroItem {
+                    ask: format!("t{}.{}", 100_000 + k * 1000 + i, 12),
+                    line: format!("#{}.12: {long}…", 100_000 + k * 1000 + i),
+                    kind: kind.to_string(),
+                    bot: "a-very-long-bot-name-indeed".into(),
+                });
+            }
+        }
+        let total = items.len();
+        let pages = total.div_ceil(RETRO_PAGE);
+        assert!(pages > 3);
+        let rated: HashMap<String, String> = items
+            .iter()
+            .step_by(2)
+            .map(|i| (i.ask.clone(), "should_not_exist".to_string()))
+            .collect();
+        let bot = "b".repeat(64);
+        let mut seen = 0;
+        for page in 0..pages {
+            let r = render_retro(&items, 40, &rated, page, Some(&bot));
+            assert!(
+                crate::board::utf16(&r.text) < 4096,
+                "page {page}: {}",
+                r.text.len()
+            );
+            for (label, data) in &r.buttons {
+                assert!(data.len() <= 64 && label.len() <= 20, "{label} {data}");
+            }
+            let n = r.rows.iter().filter(|n| **n == 3).count();
+            assert!(n <= RETRO_PAGE);
+            seen += n;
+            assert!(r.text.contains(&format!("page {}/{pages}", page + 1)));
+            // Prev / next only where there is somewhere to go.
+            let nav: Vec<&str> = r
+                .buttons
+                .iter()
+                .map(|b| b.1.as_str())
+                .filter(|d| d.starts_with("rp:"))
+                .collect();
+            let want: Vec<String> = [page.checked_sub(1), (page + 1 < pages).then_some(page + 1)]
+                .into_iter()
+                .flatten()
+                .map(|p| format!("rp:{p}"))
+                .collect();
+            assert_eq!(nav, want);
+            // The kind totals are the footer, and add up to every ask.
+            let footer = r.text.lines().last().unwrap();
+            assert!(footer.starts_with("By kind: "), "{footer}");
+            let sum: usize = footer
+                .trim_start_matches("By kind: ")
+                .split(", ")
+                .map(|p| p.rsplit(' ').next().unwrap().parse::<usize>().unwrap())
+                .sum();
+            assert_eq!(sum, total);
+            assert!(footer.ends_with("other 32"), "{footer}");
+        }
+        assert_eq!(seen, total);
+        // A page past the end shows the last one.
+        assert_eq!(
+            render_retro(&items, 0, &rated, 99, None).text,
+            render_retro(&items, 0, &rated, pages - 1, None).text
+        );
+        assert_eq!(page_of(&items, &items[RETRO_PAGE].ask), 1);
+        assert_eq!(page_of(&items, "t0.1"), 0);
+        // A stored card for RETRO_ITEMS asks stays a modest flags value.
+        let full: Vec<_> = (0..RETRO_ITEMS)
+            .map(|i| kitem(i, "decision", "bot"))
+            .collect();
+        assert!(serde_json::to_string(&full).unwrap().len() < 200_000);
+    }
+
+    #[test]
+    fn retro_scope_holds_own_asks_and_home_holds_the_rest() {
+        let senders = s(&["a", "b"]);
+        let a = RetroScope {
+            bot: Some("a"),
+            home: false,
+            senders: &senders,
+        };
+        assert!(a.holds(Some("a")));
+        assert!(!a.holds(Some("b")) && !a.holds(None) && !a.holds(Some("gone")));
+        let home = RetroScope {
+            bot: Some("b"),
+            home: true,
+            senders: &senders,
+        };
+        assert!(home.holds(Some("b")) && home.holds(None) && home.holds(Some("gone")));
+        assert!(!home.holds(Some("a")));
+        let all = RetroScope::default();
+        assert!(all.holds(Some("a")) && all.holds(None));
+    }
+
+    #[test]
+    fn presses_parse() {
+        assert_eq!(
+            Press::parse("rate:t7.1:n"),
+            Some(Press::Item("t7.1".into(), "needed"))
+        );
+        assert_eq!(
+            Press::parse("rate:m12:x"),
+            Some(Press::Item("m12".into(), "should_not_exist"))
+        );
+        assert_eq!(Press::parse("rp:3"), Some(Press::Page(3)));
+        // Buttons of a card that rated by kind.
+        assert_eq!(Press::parse("rk:approval:c"), Some(Press::Retired));
+        assert_eq!(Press::parse("ro:decision:3"), Some(Press::Retired));
+        assert_eq!(Press::parse("rb"), Some(Press::Retired));
+        for bad in ["rate:t7.1:q", "rk:approval", "rp:x", "zz:a:b", ""] {
+            assert_eq!(Press::parse(bad), None, "{bad}");
         }
     }
 
@@ -1148,65 +1296,6 @@ mod tests {
         for bad in ["t903.0", "mx", "t.1", "", "x9"] {
             assert!(AskId::parse(bad).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn retro_renders_zero_one_and_marks_ratings() {
-        let r = render_retro(&[], 0, &HashMap::new(), &View::Kinds);
-        assert!(r.buttons.is_empty() && r.items.is_empty());
-        assert_eq!(r.text, "Weekly retro: no unrated asks last week.");
-
-        let r = render_retro(&[item(7)], 0, &HashMap::new(), &View::Kinds);
-        assert_eq!(
-            r.buttons,
-            [
-                ("1 needed".to_string(), "rate:t7.1:n".to_string()),
-                ("1 decide".into(), "rate:t7.1:c".into()),
-                ("1 drop".into(), "rate:t7.1:x".into()),
-            ]
-        );
-        assert_eq!(r.rows, [3]);
-        assert!(r.text.contains("\n1. bot task #7: thing 7\n"), "{}", r.text);
-
-        let rated = HashMap::from([("t7.1".to_string(), "needed".to_string())]);
-        let r = render_retro(&[item(7)], 0, &rated, &View::Kinds);
-        assert!(r.buttons.is_empty());
-        assert!(r.text.contains("1. bot task #7: thing 7 = needed"));
-        assert!(r.text.ends_with("All rated. Thanks."));
-    }
-
-    #[test]
-    fn retro_flat_many_fits_telegram() {
-        let items: Vec<_> = (1..=10).map(item).collect();
-        let r = render_retro(&items, 5, &HashMap::new(), &View::Kinds);
-        assert_eq!(r.buttons.len(), 10 * 3);
-        assert_eq!(r.rows, vec![3; 10]);
-        assert!(r.text.contains("(15)") && r.text.contains("+5 more"));
-        for (label, data) in &r.buttons {
-            assert!(data.len() <= 64 && label.len() <= 16, "{label} {data}");
-        }
-        assert!(crate::board::utf16(&r.text) < 4096);
-    }
-
-    #[test]
-    fn retro_lines_truncate() {
-        let a = Ask {
-            kind: "escalation".into(),
-            bot: Some("a-very-long-bot-name-indeed".into()),
-            task: Some(903),
-            summary: "word ".repeat(30),
-            ..ask("t903.2")
-        };
-        let line = retro_line(&a);
-        assert!(
-            line.starts_with("a-very-long-bot… task #903.2: word word"),
-            "{line}"
-        );
-        assert!(
-            line.chars().count() <= RETRO_BOT + RETRO_SUMMARY + 20,
-            "{line}"
-        );
-        assert!(line.ends_with('…'));
     }
 
     #[test]
@@ -1264,198 +1353,6 @@ mod tests {
             assert!(KINDS.iter().any(|x| x.0 == k), "{k}");
         }
         assert_eq!(KINDS.last().unwrap().0, "other");
-    }
-
-    #[test]
-    fn retro_groups_zero_one_and_many_kinds() {
-        let r = render_retro(&[], 0, &HashMap::new(), &View::Kinds);
-        assert!(r.buttons.is_empty() && r.text.contains("no unrated asks"));
-
-        let one = [kitem(1, "approval", "a"), kitem(2, "approval", "b")];
-        let r = render_retro(&one, 0, &HashMap::new(), &View::Kinds);
-        assert!(
-            r.text.contains("\n1. merge/deploy approvals: 2 (a 1, b 1)"),
-            "{}",
-            r.text
-        );
-        assert_eq!(
-            r.buttons,
-            [
-                ("1 needed".to_string(), "rk:approval:n".to_string()),
-                ("1 decide".into(), "rk:approval:c".into()),
-                ("1 drop".into(), "rk:approval:x".into()),
-                ("1 open".into(), "ro:approval:0".into()),
-            ]
-        );
-        assert_eq!(r.rows, [4]);
-
-        // Most items first, `other` last whatever its size; bots by count,
-        // beyond three summed.
-        let mut many = vec![kitem(1, "decision", "a")];
-        many.extend((2..=6).map(|i| kitem(i, "other", "z")));
-        many.extend((7..=9).map(|i| kitem(i, "approval", "a")));
-        many.push(kitem(10, "approval", "b"));
-        many.extend((11..=13).map(|i| kitem(i, "stuck", &format!("bot{i}"))));
-        many.push(kitem(14, "stuck", "bot11"));
-        many.push(kitem(15, "stuck", "bot99"));
-        let order: Vec<String> = kinds_of(&many).into_iter().map(|k| k.0).collect();
-        assert_eq!(order, ["stuck", "approval", "decision", "other"]);
-        let r = render_retro(&many, 0, &HashMap::new(), &View::Kinds);
-        assert!(r.text.contains("(15, 15 unrated)"), "{}", r.text);
-        assert!(
-            r.text
-                .contains("\n1. stuck or failed runs: 5 (bot11 2, bot12 1, bot13 1, +1)"),
-            "{}",
-            r.text
-        );
-        assert!(
-            r.text.contains("\n2. merge/deploy approvals: 4 (a 3, b 1)"),
-            "{}",
-            r.text
-        );
-        assert!(r.text.contains("\n4. other: 5 (z 5)"), "{}", r.text);
-        assert_eq!(r.rows, [4, 4, 4, 4]);
-        assert_eq!(r.items, many);
-    }
-
-    #[test]
-    fn retro_all_kinds_fit_telegram() {
-        // Every kind, many items each, long bot names: one message.
-        let mut items = Vec::new();
-        for (k, (kind, _)) in KINDS.iter().enumerate() {
-            for i in 0..120 {
-                items.push(kitem(
-                    k * 1000 + i,
-                    kind,
-                    &format!("a-very-long-bot-name-{}", i % 7),
-                ));
-            }
-        }
-        let r = render_retro(&items, 40, &HashMap::new(), &View::Kinds);
-        assert!(kinds_of(&items).len() <= KINDS.len());
-        assert_eq!(r.rows.len(), KINDS.len());
-        assert!(r.text.contains("+40 more"));
-        assert!(crate::board::utf16(&r.text) < 4096, "{}", r.text.len());
-        for (_, data) in &r.buttons {
-            assert!(data.len() <= 64, "{data}");
-        }
-        // A stored card for RETRO_ITEMS asks stays a modest flags value.
-        let full: Vec<_> = (0..RETRO_ITEMS)
-            .map(|i| kitem(i, "decision", "bot"))
-            .collect();
-        assert!(serde_json::to_string(&full).unwrap().len() < 200_000);
-    }
-
-    #[test]
-    fn kind_rating_applies_to_unrated_items_only() {
-        let items = [
-            kitem(1, "approval", "a"),
-            kitem(2, "approval", "a"),
-            kitem(3, "decision", "a"),
-        ];
-        let rated = HashMap::from([("t1.1".to_string(), "needed".to_string())]);
-        assert_eq!(unrated_of(&items, &rated, "approval"), ["t2.1"]);
-        assert_eq!(unrated_of(&items, &rated, "decision"), ["t3.1"]);
-        assert!(unrated_of(&items, &rated, "stuck").is_empty());
-
-        // Partly rated: count of unrated shown, buttons kept.
-        let r = render_retro(&items, 0, &rated, &View::Kinds);
-        assert!(
-            r.text.contains("approvals: 2 (a 2), 1 unrated"),
-            "{}",
-            r.text
-        );
-        // All rated alike: the rating shown, only the open button left.
-        let mut rated = rated;
-        rated.insert("t2.1".into(), "needed".into());
-        let r = render_retro(&items, 0, &rated, &View::Kinds);
-        assert!(r.text.contains("approvals: 2 (a 2) = needed"), "{}", r.text);
-        assert_eq!(r.rows, [1, 4]);
-        // Mixed ratings read as rated.
-        rated.insert("t2.1".into(), "should_not_exist".into());
-        rated.insert("t3.1".into(), "needed".into());
-        let r = render_retro(&items, 0, &rated, &View::Kinds);
-        assert!(r.text.contains("approvals: 2 (a 2) = rated"), "{}", r.text);
-        assert!(r.text.ends_with("All rated. Thanks."), "{}", r.text);
-    }
-
-    #[test]
-    fn opening_a_kind_pages_its_items_for_re_rating() {
-        let mut items: Vec<_> = (1..=RETRO_PAGE + 3)
-            .map(|i| kitem(i, "decision", "a"))
-            .collect();
-        items.push(kitem(99, "approval", "b"));
-        let rated = HashMap::from([("t2.1".to_string(), "could_decide".to_string())]);
-        let view = View::Kind("decision".into(), 0);
-        let r = render_retro(&items, 0, &rated, &view);
-        assert!(
-            r.text.starts_with(&format!(
-                "Weekly retro > decisions: {}, {} unrated (page 1/2)",
-                RETRO_PAGE + 3,
-                RETRO_PAGE + 2
-            )),
-            "{}",
-            r.text
-        );
-        assert!(
-            r.text.contains("\n2. a task #2: thing 2 = could_decide"),
-            "{}",
-            r.text
-        );
-        assert!(!r.text.contains("task #99"), "{}", r.text);
-        // Each item has three buttons, a rated one too (its rating ticked).
-        assert_eq!(r.rows, [vec![3; RETRO_PAGE], vec![2]].concat());
-        assert!(r
-            .buttons
-            .contains(&("2 decide ✓".into(), "rate:t2.1:c".into())));
-        assert!(r
-            .buttons
-            .contains(&("2 needed".into(), "rate:t2.1:n".into())));
-        assert_eq!(
-            &r.buttons[r.buttons.len() - 2..],
-            [
-                ("next ›".to_string(), "ro:decision:1".to_string()),
-                ("‹ all kinds".into(), "rb".into())
-            ]
-        );
-        let r = render_retro(&items, 0, &rated, &View::Kind("decision".into(), 1));
-        assert!(
-            r.text.contains("(page 2/2)") && r.text.contains(&format!("\n{}. ", RETRO_PAGE + 1))
-        );
-        assert_eq!(r.rows, [3, 3, 3, 2]);
-        assert_eq!(r.buttons[r.buttons.len() - 2].1, "ro:decision:0");
-        // A page past the end shows the last one.
-        let past = render_retro(&items, 0, &rated, &View::Kind("decision".into(), 9));
-        assert_eq!(past.text, r.text);
-        assert_eq!(
-            page_of(&items, "decision", &format!("t{}.1", RETRO_PAGE + 1)),
-            1
-        );
-        assert_eq!(page_of(&items, "decision", "t1.1"), 0);
-    }
-
-    #[test]
-    fn presses_parse() {
-        assert_eq!(
-            Press::parse("rate:t7.1:n"),
-            Some(Press::Item("t7.1".into(), "needed"))
-        );
-        assert_eq!(
-            Press::parse("rate:m12:x"),
-            Some(Press::Item("m12".into(), "should_not_exist"))
-        );
-        assert_eq!(
-            Press::parse("rk:approval:c"),
-            Some(Press::Kind("approval".into(), "could_decide"))
-        );
-        assert_eq!(
-            Press::parse("ro:decision:3"),
-            Some(Press::Open("decision".into(), 3))
-        );
-        assert_eq!(Press::parse("rb"), Some(Press::Back));
-        for bad in ["rate:t7.1:q", "rk:approval", "ro:x:y", "zz:a:b", ""] {
-            assert_eq!(Press::parse(bad), None, "{bad}");
-        }
     }
 
     #[test]

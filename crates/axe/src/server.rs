@@ -1520,9 +1520,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 &crate::ask::stats(&st.conn(), req.query("project"), since, until)?,
             )
         }
-        ("GET", ["api", "asks", "retro"]) => {
-            ok(200, &crate::ask::retro(&st.conn(), crate::routine::now())?)
-        }
+        ("GET", ["api", "asks", "retro"]) => ok(200, &retro_preview(st, req.query("bot"))?),
         ("GET", ["api", "asks", id]) => ok(
             200,
             &crate::ask::find(&st.conn(), id).map_err(|e| HttpError(404, format!("{e:#}")))?,
@@ -2451,6 +2449,23 @@ fn asks_until(req: &Request, now: i64) -> Result<i64> {
 #[cfg(not(feature = "telegram"))]
 fn runtime_alert(_: &State, _: &serde_json::Value) -> Result<serde_json::Value> {
     Ok(json!({"sent": false, "reason": NO_TELEGRAM}))
+}
+
+/// `GET /api/asks/retro[?bot=]`: the retro card bot `bot` would send now
+/// (through the gateway, which knows the home bot), or every unrated ask.
+fn retro_preview(st: &State, bot: Option<&str>) -> Result<crate::ask::Retro> {
+    let now = crate::routine::now();
+    #[cfg(feature = "telegram")]
+    if let (Some(b), Some(gw)) = (bot, &st.telegram) {
+        if gw.bot(b).is_ok() {
+            return gw.retro_of(&st.conn(), b);
+        }
+    }
+    let scope = crate::ask::RetroScope {
+        bot,
+        ..Default::default()
+    };
+    crate::ask::retro(&st.conn(), now, &scope)
 }
 
 /// Sends a runtime card through the gateway, when one is configured.

@@ -1749,8 +1749,10 @@ enum AskCmd {
         #[arg(long, value_parser = PossibleValuesParser::new(["kind", "bot"]))]
         by: Option<String>,
     },
-    /// The weekly retro card: last week's unrated asks by kind, with rating buttons.
-    /// Sends it from the bot (default $AXE_BOT); --dry prints it instead
+    /// A bot's weekly retro card: last week's unrated asks it raised, one
+    /// line and one row of rating buttons each, paged. Sends it from the bot
+    /// (default $AXE_BOT); --dry prints its first page instead (every bot's
+    /// asks without a bot)
     Retro {
         #[arg(long)]
         bot: Option<String>,
@@ -2042,8 +2044,12 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         AskCmd::Retro { bot, dry } => {
+            let bot = bot
+                .clone()
+                .or_else(|| std::env::var("AXE_BOT").ok().filter(|b| !b.is_empty()));
             if *dry {
-                let r: Retro = c.get_private("/api/asks/retro", &[])?;
+                let q: Vec<(&str, &str)> = bot.iter().map(|b| ("bot", b.as_str())).collect();
+                let r: Retro = c.get_private("/api/asks/retro", &q)?;
                 println!("{}", r.text);
                 let mut i = 0;
                 for n in &r.rows {
@@ -2056,10 +2062,7 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
                 }
                 return Ok(());
             }
-            let name = bot
-                .clone()
-                .or_else(|| std::env::var("AXE_BOT").ok().filter(|b| !b.is_empty()))
-                .context("give --bot NAME (or set AXE_BOT)")?;
+            let name = bot.context("give --bot NAME (or set AXE_BOT)")?;
             let v: Value = c.send("POST", &format!("/api/bots/{name}/tg/retro"), json!({}))?;
             if v["sent"] == true {
                 println!(

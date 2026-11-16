@@ -2690,12 +2690,12 @@ fn the_goal_board_is_retired_into_goal_pins() {
 }
 
 #[test]
-fn the_retro_card_rates_asks_by_kind_in_place_without_waking_the_bot() {
+fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     let rig = Rig::new();
     // Nothing to rate: nothing is sent.
     let out = rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
     assert!(
-        out.starts_with("not sent: Weekly retro: no unrated asks"),
+        out.starts_with("not sent: Weekly retro, cos: no unrated asks"),
         "{out}"
     );
     assert!(rig.stub.calls("sendMessage").is_empty());
@@ -2730,25 +2730,41 @@ fn the_retro_card_rates_asks_by_kind_in_place_without_waking_the_bot() {
     assert_eq!(by["confirm"]["asks"], 1, "{by}");
     assert_eq!(by["other"]["asks"], 1, "{by}");
 
+    let dry = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "cos"]);
     let out = rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
     assert!(out.starts_with("sent #"), "{out}");
     let sent = rig.stub.calls("sendMessage").pop().unwrap();
     let text = sent.params["text"].as_str().unwrap().to_string();
-    assert!(text.contains("(4, 4 unrated)"), "{text}");
-    assert!(text.contains("\n1. decisions: 2 (cos 2)"), "{text}");
-    assert!(text.contains("\n2. yes/no checks: 1 (cos 1)"), "{text}");
-    assert!(text.contains("\n3. other: 1 (cos 1)"), "{text}");
-    let row = |n: usize, k: &str| -> Vec<(String, String)> {
+    assert!(
+        dry.starts_with(&text),
+        "the preview is the card:\n{dry}\n{text}"
+    );
+    // One line per ask: its id and its question; kinds only in the footer.
+    assert!(
+        text.starts_with(&format!(
+            "Weekly retro, cos: last week's asks (4, 4 unrated)\n\n1. #1: needs a call\n2. #2: needs a call\n3. msg {card}: Decided: yes\n4. msg {card2}: Archive the logs?\n\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("\nBy kind: decisions 2, yes/no checks 1, other 1"),
+        "{text}"
+    );
+    let row = |n: usize, a: &str| -> Vec<(String, String)> {
         vec![
-            (format!("{n} needed"), format!("rk:{k}:n")),
-            (format!("{n} decide"), format!("rk:{k}:c")),
-            (format!("{n} drop"), format!("rk:{k}:x")),
-            (format!("{n} open"), format!("ro:{k}:0")),
+            (format!("{n} needed"), format!("rate:{a}:n")),
+            (format!("{n} decide"), format!("rate:{a}:c")),
+            (format!("{n} drop"), format!("rate:{a}:x")),
         ]
     };
     assert_eq!(
         keyboard_of(&sent.params),
-        vec![row(1, "decision"), row(2, "confirm"), row(3, "other")]
+        vec![
+            row(1, "t1.1"),
+            row(2, "t2.1"),
+            row(3, &format!("m{card}")),
+            row(4, &format!("m{card2}"))
+        ]
     );
     let retro = rig.messages().len() as i64;
     assert!(flags_of(&rig, retro)["retro"].is_object());
@@ -2758,86 +2774,52 @@ fn the_retro_card_rates_asks_by_kind_in_place_without_waking_the_bot() {
     );
     let tg = tg_id(&rig, retro);
 
-    // Open a kind: its items, each with rating buttons.
-    rig.stub.push(press(50, tg, "ro:decision:0"));
-    rig.stub.wait_confirmed(50);
-    let edit = rig.stub.calls("editMessageText").pop().unwrap();
-    let edited = edit.params["text"].as_str().unwrap();
-    assert!(
-        edited.starts_with("Weekly retro > decisions: 2, 2 unrated"),
-        "{edited}"
-    );
-    assert!(
-        edited.contains("\n1. cos task #1: pick a region"),
-        "{edited}"
-    );
-    let kb = keyboard_of(&edit.params);
-    assert_eq!(kb.len(), 3, "{kb:?}");
-    assert_eq!(
-        kb[0][1],
-        ("1 decide".to_string(), "rate:t1.1:c".to_string())
-    );
-    assert_eq!(kb[2], vec![("‹ all kinds".to_string(), "rb".to_string())]);
-
-    // Rate one item there: the page stays, the item is marked, no bot wakes.
+    // Rate one ask: the card is re-rendered, the ask marked, no bot wakes.
     rig.stub.push(press(51, tg, "rate:t1.1:c"));
     rig.stub.wait_confirmed(51);
     let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
     assert_eq!(toast.params["text"], "Rated: could_decide");
     let edit = rig.stub.calls("editMessageText").pop().unwrap();
     let edited = edit.params["text"].as_str().unwrap();
-    assert!(edited.contains("pick a region = could_decide"), "{edited}");
-    assert!(edited.contains("2, 1 unrated"), "{edited}");
+    assert!(
+        edited.contains("\n1. #1: needs a call = decide\n"),
+        "{edited}"
+    );
+    assert!(edited.contains("(4, 3 unrated)"), "{edited}");
     assert_eq!(keyboard_of(&edit.params)[0][1].0, "1 decide ✓");
+    // The other ask of the same kind takes its own, different rating.
+    rig.stub.push(press(52, tg, "rate:t2.1:n"));
+    rig.stub.wait_confirmed(52);
     let asks: Vec<Value> = serde_json::from_str(&rig.srv().ok(&["ask", "list", "--json"])).unwrap();
     assert_eq!(asks[0]["rating"], "could_decide");
     assert_eq!(asks[0]["rated_by"], "owner");
     assert_eq!(asks[0]["category"], "decision");
+    assert_eq!(asks[1]["rating"], "needed");
     assert!(rig.message_wakes().iter().all(|w| w.0 != "button"));
     assert!(rig.inbound().is_empty());
 
-    // Back, then rate the kind: only its unrated item takes the rating.
-    rig.stub.push(press(52, tg, "rb"));
-    rig.stub.wait_confirmed(52);
-    rig.stub.push(press(53, tg, "rk:decision:n"));
-    rig.stub.wait_confirmed(53);
+    // An ask not on the card is refused; a by-kind button rates nothing.
+    rig.stub.push(press(54, tg, "rate:t9.1:n"));
+    rig.stub.wait_confirmed(54);
     let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
-    assert_eq!(toast.params["text"], "Rated 1 decisions: needed");
+    assert_eq!(toast.params["text"], "Not an item on this card");
+    rig.stub.push(press(55, tg, "rk:confirm:x"));
+    rig.stub.wait_confirmed(55);
+    let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
+    assert_eq!(toast.params["text"], "Rate each ask on its own");
     let asks: Vec<Value> = serde_json::from_str(&rig.srv().ok(&["ask", "list", "--json"])).unwrap();
-    assert_eq!(asks[0]["rating"], "could_decide", "kept its own rating");
-    assert_eq!(asks[1]["rating"], "needed");
-    let edit = rig.stub.calls("editMessageText").pop().unwrap();
-    let edited = edit.params["text"].as_str().unwrap();
-    assert!(
-        edited.contains("\n1. decisions: 2 (cos 2) = rated"),
-        "{edited}"
-    );
-    assert_eq!(
-        keyboard_of(&edit.params)[0],
-        vec![("1 open".to_string(), "ro:decision:0".to_string())]
-    );
+    assert_eq!(asks.iter().filter(|a| a["rating"].is_string()).count(), 2);
 
-    // A kind or item not on the card is refused; the last ratings close it.
-    for (u, data) in [(54, "rate:t9.1:n"), (55, "rk:stuck:n"), (56, "ro:stuck:0")] {
-        rig.stub.push(press(u, tg, data));
-        rig.stub.wait_confirmed(u);
-        let toast = rig.stub.calls("answerCallbackQuery").pop().unwrap();
-        assert_eq!(toast.params["text"], "Not an item on this card", "{data}");
-    }
-    rig.stub.push(press(57, tg, "rk:confirm:x"));
+    // The last ratings close it.
+    rig.stub.push(press(57, tg, &format!("rate:m{card2}:x")));
     rig.stub.wait_confirmed(57);
     rig.stub.push(press(58, tg, &format!("rate:m{card}:n")));
     rig.stub.wait_confirmed(58);
     let edit = rig.stub.calls("editMessageText").pop().unwrap();
     let edited = edit.params["text"].as_str().unwrap();
-    assert!(edited.contains("other: 1, 0 unrated"), "{edited}");
-    rig.stub.push(press(59, tg, "rb"));
-    rig.stub.wait_confirmed(59);
-    let edit = rig.stub.calls("editMessageText").pop().unwrap();
-    let edited = edit.params["text"].as_str().unwrap();
-    assert!(edited.ends_with("All rated. Thanks."), "{edited}");
+    assert!(edited.contains("All rated. Thanks."), "{edited}");
     assert!(
-        edited.contains("yes/no checks: 1 (cos 1) = should_not_exist"),
+        edited.contains(&format!("4. msg {card2}: Archive the logs? = drop")),
         "{edited}"
     );
     let asks: Vec<Value> = serde_json::from_str(&rig.srv().ok(&["ask", "list", "--json"])).unwrap();
@@ -2851,7 +2833,95 @@ fn the_retro_card_rates_asks_by_kind_in_place_without_waking_the_bot() {
 }
 
 #[test]
-fn a_retro_card_sent_before_kinds_keeps_its_flat_layout() {
+fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
+    let tokens = tempfile::tempdir().unwrap();
+    let rig = Rig::with(&extra_bots(tokens.path()));
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    rig.add_bot("aux");
+    rig.add_bot("grp");
+    // 12 asks of aux, one of cos, one no bot raised (no owner, no card).
+    for i in 1..=12 {
+        rig.srv().ok(&[
+            "add",
+            "--project",
+            "p",
+            "--title",
+            &format!("aux {i}"),
+            "--owner",
+            "bot:aux",
+        ]);
+    }
+    rig.srv().ok(&[
+        "add",
+        "--project",
+        "p",
+        "--title",
+        "cos 13",
+        "--owner",
+        "bot:cos",
+    ]);
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "nobody 14"]);
+    for i in 1..=14 {
+        escalate(&rig, &i.to_string());
+    }
+    let ids = |dry: &str| -> Vec<String> {
+        dry.lines()
+            .filter_map(|l| {
+                l.split_once(". #")
+                    .map(|(_, r)| r.split(':').next().unwrap().to_string())
+            })
+            .collect()
+    };
+    let aux = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "aux"]);
+    assert!(
+        aux.starts_with("Weekly retro, aux: last week's asks (12, 12 unrated), page 1/2\n"),
+        "{aux}"
+    );
+    assert_eq!(
+        ids(&aux),
+        (1..=10).map(|i| i.to_string()).collect::<Vec<_>>()
+    );
+    assert!(aux.contains("[next ›]") && !aux.contains("prev"), "{aux}");
+    // cos is the ops bot: its retro also holds the ask no bot raised.
+    let cos = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "cos"]);
+    assert_eq!(ids(&cos), ["13", "14"], "{cos}");
+    let grp = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "grp"]);
+    assert!(grp.contains("no unrated asks"), "{grp}");
+
+    // Sent, paged in place: next, then prev.
+    let out = rig.srv().ok(&["ask", "retro", "--bot", "aux"]);
+    assert!(out.starts_with("sent #"), "{out}");
+    let retro = rig.messages().len() as i64;
+    let tg = tg_id(&rig, retro);
+    rig.stub.push_to(AUX_TOKEN, press(70, tg, "rp:1"));
+    rig.stub.wait_confirmed(70);
+    let edit = rig.stub.calls("editMessageText").pop().unwrap();
+    assert_eq!(edit.token, AUX_TOKEN);
+    let edited = edit.params["text"].as_str().unwrap();
+    assert!(
+        edited.contains("page 2/2")
+            && edited.contains("\n11. #11: needs a call\n12. #12: needs a call\n"),
+        "{edited}"
+    );
+    let kb = keyboard_of(&edit.params);
+    assert_eq!(kb.len(), 3, "{kb:?}");
+    assert_eq!(kb[2], vec![("‹ prev".to_string(), "rp:0".to_string())]);
+    // Rating on page 2 keeps page 2.
+    rig.stub.push_to(AUX_TOKEN, press(71, tg, "rate:t12.1:x"));
+    rig.stub.wait_confirmed(71);
+    let edited = rig.stub.calls("editMessageText").pop().unwrap().params["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        edited.contains("page 2/2") && edited.contains("#12: needs a call = drop"),
+        "{edited}"
+    );
+}
+
+#[test]
+fn a_retro_card_sent_by_kind_re_renders_one_line_per_ask() {
     let rig = Rig::new();
     rig.srv().ok(&[
         "add",
@@ -2865,30 +2935,27 @@ fn a_retro_card_sent_before_kinds_keeps_its_flat_layout() {
     escalate(&rig, "1");
     rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
     let retro = rig.messages().len() as i64;
-    // As #903's cards stored it: items without kinds.
+    // As the by-kind cards stored it.
     rig.db()
         .execute(
             "UPDATE bot_messages SET flags=json_set(flags,'$.retro',json(?1)) WHERE id=?2",
             rusqlite::params![
-                json!({"items": [{"ask": "t1.1", "line": "cos task #1: old"}], "more": 0})
+                json!({"items": [{"ask": "t1.1", "line": "cos task #1: old", "kind": "decision", "bot": "cos"}], "more": 0})
                     .to_string(),
                 retro
             ],
         )
         .unwrap();
-    rig.stub.push(press(60, tg_id(&rig, retro), "rate:t1.1:x"));
+    rig.stub
+        .push(press(60, tg_id(&rig, retro), "ro:decision:0"));
     rig.stub.wait_confirmed(60);
     let edit = rig.stub.calls("editMessageText").pop().unwrap();
     let edited = edit.params["text"].as_str().unwrap();
-    assert!(
-        edited.starts_with("Weekly retro: rate last week's asks (1)"),
-        "{edited}"
+    assert!(edited.contains("\n1. cos task #1: old\n"), "{edited}");
+    assert_eq!(
+        keyboard_of(&edit.params)[0][2],
+        ("1 drop".to_string(), "rate:t1.1:x".to_string())
     );
-    assert!(
-        edited.contains("1. cos task #1: old = should_not_exist"),
-        "{edited}"
-    );
-    assert!(keyboard_of(&edit.params).is_empty());
 }
 
 /// `[telegram.retro]` with its slot a minute ago: due now.
@@ -2918,7 +2985,10 @@ fn retro_sends(rig: &Rig) -> usize {
 
 #[test]
 fn the_weekly_retro_goes_out_at_its_slot_once_and_only_with_asks() {
-    let mut rig = Rig::with(&retro_due_now());
+    let tokens = tempfile::tempdir().unwrap();
+    let mut rig = Rig::with(&format!("{}{}", extra_bots(tokens.path()), retro_due_now()));
+    rig.add_bot("aux");
+    rig.add_bot("grp");
     // Due, but nothing to rate: nothing is sent.
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(retro_sends(&rig), 0);
@@ -2932,30 +3002,51 @@ fn the_weekly_retro_goes_out_at_its_slot_once_and_only_with_asks() {
         "--owner",
         "bot:cos",
     ]);
+    rig.srv().ok(&[
+        "add",
+        "--project",
+        "p",
+        "--title",
+        "ask aux",
+        "--owner",
+        "bot:aux",
+    ]);
     escalate(&rig, "1");
-    // The restart still meets the slot (it is a minute old): one card, to
-    // the owner's chat.
+    escalate(&rig, "2");
+    // The restart still meets the slot (it is a minute old): each bot with
+    // asks sends its own card, from its own token, to the owner's chat;
+    // grp has none and sends nothing.
     rig.restart();
-    wait_for("weekly retro sent", 20, || retro_sends(&rig) == 1);
-    let sent = rig
+    wait_for("weekly retros sent", 20, || retro_sends(&rig) == 2);
+    let sent: Vec<_> = rig
         .stub
         .calls("sendMessage")
         .into_iter()
-        .rfind(|c| {
+        .filter(|c| {
             c.params["text"]
                 .as_str()
                 .unwrap()
                 .starts_with("Weekly retro")
         })
-        .unwrap();
-    assert_eq!(sent.params["chat_id"], OWNER);
+        .collect();
+    let of = |token: &str| {
+        let c = sent.iter().find(|c| c.token == token).unwrap();
+        assert_eq!(c.params["chat_id"], OWNER);
+        c.params["text"].as_str().unwrap().to_string()
+    };
+    let cos = of(TG_TOKEN);
     assert!(
-        sent.params["text"]
-            .as_str()
-            .unwrap()
-            .contains("decisions: 1 (cos 1)"),
-        "{}",
-        sent.params["text"]
+        cos.starts_with(
+            "Weekly retro, cos: last week's asks (1, 1 unrated)\n\n1. #1: needs a call\n"
+        ),
+        "{cos}"
+    );
+    let aux = of(AUX_TOKEN);
+    assert!(
+        aux.starts_with(
+            "Weekly retro, aux: last week's asks (1, 1 unrated)\n\n1. #2: needs a call\n"
+        ),
+        "{aux}"
     );
     let retro = rig.messages().len() as i64;
     assert!(flags_of(&rig, retro)["retro"].is_object());
@@ -2963,7 +3054,7 @@ fn the_weekly_retro_goes_out_at_its_slot_once_and_only_with_asks() {
     // A card already sent since the slot: a restart sends no second one.
     rig.restart();
     std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(retro_sends(&rig), 1);
+    assert_eq!(retro_sends(&rig), 2);
 }
 
 fn post(rig: &Rig, path: &str, body: Value) -> Value {
