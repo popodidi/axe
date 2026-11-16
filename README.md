@@ -27,7 +27,46 @@ TypeScript API types.
 Releases (`.github/workflows/release.yml`) publish a server image, a Linux
 binary tarball and the `skills/axe` tarball from a `vX.Y.Z` tag, with sha256
 sums; verify with `gh release download <tag> -R popodidi/axe && sha256sum -c
-SHA256SUMS`. Other platforms install from source with `--tag <tag>`.
+SHA256SUMS`, or without a GitHub login `curl -LO
+https://github.com/popodidi/axe/releases/download/<tag>/<asset>`. Other
+platforms install from source with `--tag <tag>`.
+
+This README describes `main`, and releases can lag it: a release may lack
+commands or flags named here (`axe <command> --help` is authoritative for the
+binary you run). A `main` build may still report the last release's version
+in `axe --version`.
+
+## Quickstart
+
+One host, a loopback server, one task, using the built-in defaults.
+
+1. **Install the agent CLI and log in** on the host that runs `axe dispatch`
+   (`claude` for the built-in agent; `axe config` prints its command). The
+   dispatcher only spawns it; a missing binary escalates the task with
+   `spawn "claude" failed`. To try axe without a model, declare a stub agent
+   whose command is any script that ends with `axe set "$AXE_TASK" --state done`.
+2. **Config** (optional): `~/.config/axe/config.toml`. Agents are
+   `[agents.<name>]` tables (`cmd`, `resume_cmd`, `session`, `harness`,
+   `bot_args`; `Agent` in `crates/axe/src/config.rs`); bots need `bot_args`.
+   Repos are `[repos.<name>]` (`path`, `url`).
+3. **Server**: `axe server`. On loopback it needs no token. It reads the
+   config once, and `axe add --agent` checks names against the server's
+   agents, so restart the server after adding an agent.
+4. **A repo**: a Git clone at `~/workspace/<name>` (or `[repos.<name>] url`
+   to clone on first use) with an `origin` remote whose `origin/HEAD` is set
+   (`git remote set-head origin <branch>`; `worktree.rs`). Without it the run
+   escalates with "has no worktree base".
+5. **A task**: `axe add --project <p> --title <t> --repo <name> --detail
+   "## Outcome ..."` (add `--agent <name>` to pin one), then `axe dispatch`
+   (`--once` for one pass). Follow it with `axe list --all` and `axe log <id>`;
+   an escalated task says why in its block note.
+
+A bot works the same way: `axe bot create --file bot.json` (`name`,
+`project`, `agent`, `identity`, `conduct`), `axe bot edit <name> --repo a,b`
+for a multi-repo run folder, `axe bot wake <name> --now --note ...`, then
+`axe dispatch`. Telegram is optional. The `axe doc put` commands below read
+`skills/` and `bundles/` from a clone of this repository; `cargo install`
+leaves none, and the release skills tarball has `skills/axe` only.
 
 ## Not a workflow engine
 
