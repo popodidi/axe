@@ -1195,7 +1195,9 @@ impl Gateway {
     }
 
     /// Hands a sealed reply to the dispatcher and tells the owner the
-    /// outcome, removing the form keyboard once the form is done.
+    /// outcome, removing the form keyboard once the form is done (unless
+    /// another open form's keyboard is in the chat). A form that finishes
+    /// later has its prompt closed by the server (`Forms::take_closing`).
     fn form_reply(
         &self,
         b: &TgBot,
@@ -1205,15 +1207,18 @@ impl Gateway {
         data: Result<String>,
     ) -> Result<()> {
         let outcome = data.and_then(|d| store.form_submit(&d));
-        let (text, done) = match &outcome {
-            Ok(f) => (crate::form::outcome_text(f), f.state != crate::form::OPEN),
+        let (text, remove) = match &outcome {
+            Ok(f) => (
+                crate::form::outcome_text(f),
+                store.form_close(&f.spec.form, &b.name, chat) == Some(true),
+            ),
             Err(e) => (format!("Sealed form reply refused: {e:#}."), false),
         };
-        self.form_say(b, store, chat, Some(tg_id), &text, done);
+        self.form_say(b, store, chat, Some(tg_id), &text, remove);
         Ok(())
     }
 
-    /// Sends a system message about a form; `done` removes its keyboard.
+    /// Sends a system message about a form; `remove` removes its keyboard.
     fn form_say(
         &self,
         b: &TgBot,
@@ -1221,13 +1226,13 @@ impl Gateway {
         chat: i64,
         reply_to: Option<i64>,
         text: &str,
-        done: bool,
+        remove: bool,
     ) {
         let mut p = json!({"chat_id": chat, "text": text});
         if let Some(r) = reply_to {
             p["reply_parameters"] = json!({"message_id": r, "allow_sending_without_reply": true});
         }
-        if done {
+        if remove {
             p["reply_markup"] = json!({"remove_keyboard": true});
         }
         match b.paced(chat, || b.api.call("sendMessage", &p)) {
@@ -1310,11 +1315,19 @@ impl Gateway {
         ))
     }
 
-    /// Tells the owner the outcome of a reply delivered after a wait.
-    pub fn form_outcome(&self, store: &dyn Store, bot: &str, chat: i64, f: &crate::form::Form) {
+    /// Tells the owner a form's outcome in its prompt's chat (delivered after
+    /// a wait or outside Telegram, rejected for good, or expired); `remove`
+    /// removes the prompt's keyboard.
+    pub fn form_outcome(
+        &self,
+        store: &dyn Store,
+        bot: &str,
+        chat: i64,
+        f: &crate::form::Form,
+        remove: bool,
+    ) {
         if let Ok(b) = self.bot(bot) {
-            let done = f.state != crate::form::OPEN;
-            self.form_say(b, store, chat, None, &crate::form::outcome_text(f), done);
+            self.form_say(b, store, chat, None, &crate::form::outcome_text(f), remove);
         }
     }
 

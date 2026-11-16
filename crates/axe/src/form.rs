@@ -23,6 +23,9 @@ pub const DELIVERED: &str = "delivered";
 pub const EXPIRED: &str = "expired";
 /// How long a finished form stays visible to `axe form show`.
 const KEEP_FINISHED: i64 = 3600;
+/// How long after a form finishes the server closes its prompt itself, so a
+/// channel that took the reply can close it first (with its outcome reply).
+const CLOSE_AFTER: i64 = 2;
 
 /// Where a form's Telegram prompt went, so the reply can be answered there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +49,8 @@ pub struct Form {
     pub error: Option<String>,
     pub prompt: Option<Prompt>,
     pub finished: Option<i64>,
+    /// The prompt's keyboard was dealt with once the form finished.
+    closed: bool,
 }
 
 impl Form {
@@ -124,6 +129,7 @@ impl Forms {
             error: None,
             prompt: None,
             finished: None,
+            closed: false,
         };
         self.lock().insert(form.spec.form.clone(), form.clone());
         Ok(form)
@@ -237,6 +243,43 @@ impl Forms {
             .collect()
     }
 
+    /// Claims closing a finished form's prompt for a reply that came back in
+    /// `at` (its prompt's bot and chat). `Some(remove)` when the caller closes
+    /// it: `remove` is false while another open form's keyboard is in that
+    /// chat. `None` when the form is not finished, was prompted elsewhere or
+    /// is already closed.
+    pub fn claim_close(&self, form: &str, at: &Prompt) -> Option<bool> {
+        let mut forms = self.lock();
+        let f = forms.get_mut(form)?;
+        if f.finished.is_none() || f.closed || f.prompt.as_ref() != Some(at) {
+            return None;
+        }
+        f.closed = true;
+        Some(!open_prompt_in(&forms, at))
+    }
+
+    /// Finished forms whose prompt nobody closed yet (expired, rejected for
+    /// good, or delivered through the browser or `axe form submit`), each
+    /// with whether to remove the keyboard. Marks them closed. Forms asked
+    /// without a prompt (`--no-telegram`) are never returned.
+    pub fn take_closing(&self, now: i64) -> Vec<(Form, bool)> {
+        let mut forms = self.lock();
+        let mut out = vec![];
+        for f in forms.values_mut() {
+            let due = f.finished.is_some_and(|t| now - t >= CLOSE_AFTER);
+            if due && !f.closed && f.prompt.is_some() {
+                f.closed = true;
+                out.push(f.clone());
+            }
+        }
+        out.into_iter()
+            .map(|f| {
+                let remove = !open_prompt_in(&forms, f.prompt.as_ref().unwrap());
+                (f, remove)
+            })
+            .collect()
+    }
+
     /// Waits up to `timeout` for the form to leave `open`/`submitted`.
     pub fn wait(&self, form: &str, timeout: Duration, now: impl Fn() -> i64) -> Option<Form> {
         let deadline = Instant::now() + timeout;
@@ -264,6 +307,14 @@ impl Forms {
                 .0;
         }
     }
+}
+
+/// Whether an open form's prompt keyboard is in `at`'s chat: removing the
+/// keyboard there would hide that form's button.
+fn open_prompt_in(forms: &HashMap<String, Form>, at: &Prompt) -> bool {
+    forms
+        .values()
+        .any(|f| matches!(f.state, OPEN | SUBMITTED) && f.prompt.as_ref() == Some(at))
 }
 
 /// The owner-facing prompt text for a form (no values; names only).
@@ -422,6 +473,55 @@ mod tests {
         assert!(f.sealed.is_none());
         assert!(forms.job(&spec.form).is_none());
         assert!(forms.submit(&sealed.text(), 122).is_err());
+    }
+
+    #[test]
+    fn finished_prompts_close_once() {
+        let forms = Forms::default();
+        let key = crate::sealed::Key::random();
+        let at = Prompt {
+            bot: "cos".into(),
+            chat: 7,
+        };
+        let mut ids = vec![];
+        for _ in 0..3 {
+            let (_, s) = key.sign("d", &req(), 0).unwrap();
+            let f = forms.add(&req(), s, 0).unwrap();
+            forms.set_prompt(&f.spec.form, at.clone());
+            ids.push(f.spec.form);
+        }
+        // No prompt (--no-telegram): never closed.
+        let (_, s) = key.sign("d", &req(), 0).unwrap();
+        forms.add(&req(), s, 0).unwrap();
+        assert!(forms.take_closing(100).is_empty(), "all open");
+
+        // Delivered through the chat: the channel claims it once; the other
+        // open forms keep the keyboard.
+        let spec = forms.get(&ids[0], 1).unwrap().spec;
+        let sealed = crate::sealed::seal(&spec, &json!({"token": "v"})).unwrap();
+        forms.submit(&sealed.text(), 1).unwrap();
+        assert_eq!(forms.claim_close(&ids[0], &at), None, "not finished");
+        forms.finish(&ids[0], &Delivery::Done(json!({"files": []})), 1);
+        let elsewhere = Prompt {
+            bot: "cos".into(),
+            chat: 8,
+        };
+        assert_eq!(forms.claim_close(&ids[0], &elsewhere), None);
+        assert_eq!(forms.claim_close(&ids[0], &at), Some(false));
+        assert_eq!(forms.claim_close(&ids[0], &at), None, "once");
+        assert!(forms.take_closing(100).is_empty());
+
+        // Expiry: the server closes them, removing the keyboard only once no
+        // open form is left in the chat; not before CLOSE_AFTER.
+        forms.sweep(121);
+        assert!(forms.take_closing(121).is_empty(), "too soon");
+        let mut closing = forms.take_closing(121 + CLOSE_AFTER);
+        closing.sort_by_key(|(f, _)| f.spec.form.clone());
+        assert_eq!(closing.len(), 2);
+        assert!(closing
+            .iter()
+            .all(|(f, remove)| f.state == EXPIRED && *remove));
+        assert!(forms.take_closing(200).is_empty(), "once");
     }
 
     #[test]

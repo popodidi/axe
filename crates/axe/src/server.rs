@@ -142,6 +142,13 @@ impl channel::Store for State {
         let f = self.forms.submit(sealed, remote::epoch())?;
         Ok(deliver_form(self, &f.spec.form).unwrap_or(f))
     }
+    fn form_close(&self, form: &str, bot: &str, chat: i64) -> Option<bool> {
+        let at = form::Prompt {
+            bot: bot.into(),
+            chat,
+        };
+        self.forms.claim_close(form, &at)
+    }
     fn runtime_login(&self, bot: &str, runtime: &str, method: &str) -> Result<String> {
         runtime_login(self, bot, runtime, method)
     }
@@ -2671,16 +2678,21 @@ fn form_event(st: &State, f: &form::Form, body: &str) {
     }
 }
 
-/// Expires forms and retries deliveries held for an offline dispatcher.
+/// Expires forms, retries deliveries held for an offline dispatcher and
+/// closes finished forms' prompts (their outcome, removing the keyboard).
 fn form_loop(st: &State) {
     while !st.stop.load(Ordering::SeqCst) {
         st.forms.sweep(remote::epoch());
         for id in st.forms.undelivered() {
             if let Some(f) = deliver_form(st, &id) {
-                if f.state != form::SUBMITTED {
-                    form_notify(st, &f);
+                // Refused but still open; a finished form closes below.
+                if f.state == form::OPEN {
+                    form_notify(st, &f, false);
                 }
             }
+        }
+        for (f, remove) in st.forms.take_closing(remote::epoch()) {
+            form_notify(st, &f, remove);
         }
         for _ in 0..50 {
             if st.stop.load(Ordering::SeqCst) {
@@ -2691,16 +2703,17 @@ fn form_loop(st: &State) {
     }
 }
 
-/// Tells the owner a held reply's outcome where its prompt went.
+/// Tells the owner a form's outcome where its prompt went; `remove` removes
+/// the prompt's keyboard.
 #[cfg(feature = "telegram")]
-fn form_notify(st: &State, f: &form::Form) {
+fn form_notify(st: &State, f: &form::Form, remove: bool) {
     if let (Some(gw), Some(p)) = (&st.telegram, &f.prompt) {
-        gw.form_outcome(st, &p.bot, p.chat, f);
+        gw.form_outcome(st, &p.bot, p.chat, f, remove);
     }
 }
 
 #[cfg(not(feature = "telegram"))]
-fn form_notify(_: &State, _: &form::Form) {}
+fn form_notify(_: &State, _: &form::Form, _: bool) {}
 
 /// `/api/forms` routes (the token was checked: forms are private reads).
 fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
