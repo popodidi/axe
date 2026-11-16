@@ -1,8 +1,8 @@
 //! Owner asks (`ask.rs`): escalation episodes and bot cards, ratings, the
-//! wasted-ask share per bot and week, and the retro card's content.
+//! wasted-ask share per bot and week, and each bot's retro card.
 mod common;
 
-use axe::ask::{self, Filter};
+use axe::ask::{self, Filter, RetroScope};
 use axe::bot::{self, ts, NewBot, NewMessage};
 use axe::db::{self, Actor, Changes, NewTask};
 use rusqlite::{params, Connection};
@@ -150,6 +150,9 @@ fn asks_are_escalation_episodes_and_cards_and_take_ratings() {
     );
     assert_eq!(asks[0].bot.as_deref(), Some("a"));
     assert_eq!(asks[0].summary, "ship it");
+    // The question: an escalation's blocked line, a card's first line.
+    assert_eq!(asks[0].question, "x");
+    assert_eq!(asks[3].question, "Deploy now?");
     assert_eq!(asks[2].bot.as_deref(), Some("b"));
     assert_eq!(asks[3].summary, "Deploy now?");
     assert_eq!(asks[3].kind, "card");
@@ -287,47 +290,120 @@ fn stats_give_wasted_share_per_bot_and_week() {
     let q = ask::stats(&c, Some("q"), end - 14 * DAY, end).unwrap();
     assert_eq!(q.overall.total.asks, 1);
 
-    // The retro card: last week's unrated asks only.
-    let r = ask::retro(&c, end).unwrap();
+    // The retro card: last week's unrated asks only, one line each.
+    let r = ask::retro(&c, end, &RetroScope::default()).unwrap();
     let items: Vec<_> = r.items.iter().map(|i| i.ask.clone()).collect();
     assert_eq!(items, [format!("t{}.1", ids[4]), format!("t{none}.1")]);
-    assert_eq!(r.items[0].line, format!("a task #{}: t4", ids[4]));
-    assert_eq!(r.items[1].line, format!("- task #{none}: nobody's"));
+    assert_eq!(r.items[0].line, format!("#{}: x", ids[4]));
+    assert_eq!(r.items[1].line, format!("#{none}: x"));
     assert!(
-        r.text.contains("\n1. decisions: 2 (- 1, a 1)"),
+        r.text
+            .contains(&format!("\n1. #{}: x\n2. #{none}: x\n", ids[4])),
         "{}",
         r.text
     );
+    assert!(r.text.ends_with("\nBy kind: decisions 2"), "{}", r.text);
+    assert_eq!(r.rows, [3, 3], "a row of ratings per ask");
+    // Bot a's retro has its own ask only; the home bot's has the bot-less one.
+    let senders = vec!["a".to_string(), "b".to_string()];
+    let mine = |bot: &str, home: bool| {
+        ask::retro(
+            &c,
+            end,
+            &RetroScope {
+                bot: Some(bot),
+                home,
+                senders: &senders,
+            },
+        )
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|i| i.ask)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(mine("a", false), [format!("t{}.1", ids[4])]);
+    assert!(mine("b", false).is_empty());
+    assert_eq!(mine("b", true), [format!("t{none}.1")]);
     // Per kind too.
     assert_eq!(s.kinds["decision"].total.asks, 6);
     assert_eq!(s.kinds["other"].total.wasted_share, Some(1.0));
-    assert_eq!(r.buttons.len(), 4, "one kind: three ratings and open");
 }
 
 #[test]
-fn retro_holds_every_unrated_ask_grouped_by_kind() {
+fn a_bots_retro_holds_only_its_asks_one_line_each_paged() {
     let (_d, mut c) = setup();
+    let mut mine = Vec::new();
     for i in 0..13 {
-        let id = task(
-            &mut c,
-            "p",
-            &format!("a long title number {i} ").repeat(5),
-            Some("bot:a"),
-        );
-        set_state(&mut c, id, "escalated");
+        let id = task(&mut c, "p", "title", Some("bot:a"));
+        let ch = Changes {
+            state: Some("escalated".into()),
+            note: Some(format!(
+                "blocked: {}\nresolver: owner: decide\nresume: y",
+                format!("need a call on question {i} ").repeat(5)
+            )),
+            ..Default::default()
+        };
+        db::set_task(&mut c, &Actor::new("agent"), id, &ch).unwrap();
+        mine.push(id);
     }
-    let r = ask::retro(&c, now() + 1).unwrap();
-    assert_eq!(r.items.len(), 13);
+    // Bot b's escalation and card never reach a's retro.
+    let theirs = task(&mut c, "q", "theirs", Some("bot:b"));
+    set_state(&mut c, theirs, "escalated");
+    message(
+        &mut c,
+        "b",
+        40,
+        "B's question?",
+        json!({"buttons": [["Y","y"],["N","n"]], "ask": true}),
+    );
+    let card = message(
+        &mut c,
+        "a",
+        41,
+        "A's question?",
+        json!({"buttons": [["Y","y"],["N","n"]], "ask": true}),
+    );
+    let senders = vec!["a".to_string(), "b".to_string()];
+    let scope = RetroScope {
+        bot: Some("a"),
+        home: false,
+        senders: &senders,
+    };
+    let r = ask::retro(&c, now() + 1, &scope).unwrap();
+    assert_eq!(r.items.len(), 14);
     assert_eq!(r.more, 0);
-    assert!(r.text.contains("(13, 13 unrated)") && r.text.contains("decisions: 13 (a 13)"));
-    assert_eq!(r.rows, [4]);
+    assert!(r.items.iter().all(|i| i.bot == "a"), "{:?}", r.items);
+    assert!(!r.text.contains("B's") && !r.text.contains(&format!("#{theirs}")));
     assert!(
-        r.items
-            .iter()
-            .all(|i| i.line.ends_with('…') && i.kind == "decision"),
+        r.text
+            .starts_with("Weekly retro, a: last week's asks (14, 14 unrated), page 1/2\n"),
+        "{}",
+        r.text
+    );
+    assert!(
+        r.items[..13].iter().zip(&mine).all(|(i, id)| i
+            .line
+            .starts_with(&format!("#{id}: need a call on question"))
+            && i.line.ends_with('…')),
         "{:?}",
         r.items
     );
+    assert_eq!(r.items[13].line, format!("msg {card}: A's question?"));
+    assert_eq!(
+        r.rows,
+        [vec![3; ask::RETRO_PAGE], vec![1]].concat(),
+        "next only"
+    );
+    assert!(
+        r.text.ends_with("\nBy kind: decisions 13, yes/no checks 1"),
+        "{}",
+        r.text
+    );
+    assert!(r.text.encode_utf16().count() < 4096);
+    let page2 = ask::render_retro(&r.items, r.more, &Default::default(), 1, Some("a"));
+    assert!(page2.text.contains("page 2/2") && page2.text.contains(&format!("\n14. msg {card}: ")));
+    assert_eq!(page2.rows, [3, 3, 3, 3, 1], "prev only");
 }
 
 /// Escalates `id` with a class and resolver, as `axe escalate` does.
@@ -427,33 +503,38 @@ fn asks_carry_a_stable_kind() {
         .iter()
         .all(|(_, k)| ask::KINDS.iter().any(|x| x.0 == k)));
 
-    // A kind rating rates only that kind's unrated items.
+    // Each ask is rated on its own, even within one kind; a rated ask is
+    // off the next card.
     ask::rate(&mut c, &owner(), &format!("t{merge}.2"), "needed").unwrap();
-    let r = ask::retro(&c, now() + 1).unwrap();
+    let r = ask::retro(&c, now() + 1, &RetroScope::default()).unwrap();
     assert!(
         r.items.iter().all(|i| i.ask != format!("t{merge}.2")),
         "rated is off the card"
     );
-    let todo = ask::unrated_of(&r.items, &Default::default(), "approval");
-    assert_eq!(todo.len(), 2);
-    assert_eq!(
-        ask::rate_many(&mut c, &owner(), &todo, "could_decide").unwrap(),
-        2
-    );
+    let approvals: Vec<String> = r
+        .items
+        .iter()
+        .filter(|i| i.kind == "approval")
+        .map(|i| i.ask.clone())
+        .collect();
+    assert_eq!(approvals.len(), 2);
+    ask::rate(&mut c, &owner(), &approvals[0], "could_decide").unwrap();
+    ask::rate(&mut c, &owner(), &approvals[1], "should_not_exist").unwrap();
     let rated = ask::ratings(
         &c,
         &r.items.iter().map(|i| i.ask.clone()).collect::<Vec<_>>(),
     )
     .unwrap();
     assert_eq!(rated.len(), 2);
-    assert!(rated.values().all(|v| v == "could_decide"));
+    assert_eq!(rated[&approvals[0]], "could_decide");
+    assert_eq!(rated[&approvals[1]], "should_not_exist");
     assert_eq!(
-        ask::rate(&mut c, &owner(), &format!("t{merge}.2"), "needed")
+        ask::find(&c, &format!("t{merge}.2"))
             .unwrap()
             .rating
             .as_deref(),
         Some("needed"),
-        "the item rated alone kept its rating"
+        "each ask keeps its own rating"
     );
 }
 
@@ -495,10 +576,14 @@ fn cli_lists_rates_and_reports_asks() {
         "{list:?}"
     );
     let dry = srv.ok(&["ask", "retro", "--dry"]);
-    assert!(dry.contains("\n1. decisions: 1 (- 1)"), "{dry}");
+    assert!(dry.contains(&format!("\n1. #{id}: x\n")), "{dry}");
+    assert!(dry.contains("By kind: decisions 1"), "{dry}");
+    assert!(dry.contains("[1 needed] [1 decide] [1 drop]"), "{dry}");
+    // A bot's preview holds only its own asks (no gateway: no home bot).
+    let other = srv.ok(&["ask", "retro", "--dry", "--bot", "someone"]);
     assert!(
-        dry.contains("[1 needed] [1 decide] [1 drop] [1 open]"),
-        "{dry}"
+        other.contains("Weekly retro, someone: no unrated asks"),
+        "{other}"
     );
     assert!(list.contains("decision"), "{list:?}");
     let by: Value =

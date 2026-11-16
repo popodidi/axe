@@ -583,8 +583,8 @@ pub struct Telegram {
     pub board: BoardMode,
     #[serde(rename = "bot", default)]
     pub bots: Vec<TelegramBot>,
-    /// The weekly retro card (`ask.rs`): sent to the owner once a week when
-    /// last week has unrated asks.
+    /// The weekly retro cards (`ask.rs`): once a week each bot sends the
+    /// owner its own, when it has unrated asks from last week.
     #[serde(default)]
     pub retro: RetroSend,
     /// The bot that sends the owner runtime cards (a runtime needs a login
@@ -593,7 +593,7 @@ pub struct Telegram {
     pub ops_bot: Option<String>,
 }
 
-/// `telegram.retro`: when and from which bot the weekly retro card goes out.
+/// `telegram.retro`: when the weekly retro cards go out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetroSend {
@@ -603,7 +603,8 @@ pub struct RetroSend {
     /// UTC weekday and time, `mon 01:00` by default.
     #[serde(default = "default_retro_at")]
     pub at: String,
-    /// The bot that sends it; default the first `[[telegram.bot]]`.
+    /// The bot whose retro also holds the asks no sending bot raised (an
+    /// escalation of a task no bot owns, with no card); default the ops bot.
     #[serde(default)]
     pub bot: Option<String>,
 }

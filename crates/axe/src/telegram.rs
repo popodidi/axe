@@ -272,8 +272,12 @@ pub struct Gateway {
     owner: i64,
     poll_timeout: u64,
     bots: HashMap<String, Arc<TgBot>>,
-    /// The weekly retro send: the bot and the weekly slot (`ask::parse_weekly`).
-    retro: Option<(String, i64)>,
+    /// The weekly retro send's slot (`ask::parse_weekly`): every bot sends
+    /// its own.
+    retro: Option<i64>,
+    /// The bot whose retro also holds the asks no sending bot raised
+    /// (`telegram.retro.bot`, else the ops bot).
+    retro_home: Option<String>,
     /// The bot that sends runtime cards (`telegram.ops_bot`).
     ops: Option<String>,
 }
@@ -449,26 +453,25 @@ impl Gateway {
         let retro = cfg
             .retro
             .enabled
-            .then(|| {
-                let name = cfg
-                    .retro
-                    .bot
-                    .clone()
-                    .or(cfg.bots.first().map(|b| b.name.clone()))?;
-                let at = ask::parse_weekly(&cfg.retro.at).ok()?;
-                bots.contains_key(&name).then_some((name, at))
-            })
+            .then(|| ask::parse_weekly(&cfg.retro.at).ok())
             .flatten();
         let ops = cfg
             .ops_bot
             .clone()
             .or(cfg.bots.first().map(|b| b.name.clone()))
             .filter(|n| bots.contains_key(n));
+        let retro_home = cfg
+            .retro
+            .bot
+            .clone()
+            .filter(|n| bots.contains_key(n))
+            .or(ops.clone());
         Gateway {
             owner: cfg.owner_user_id,
             poll_timeout: cfg.poll_timeout,
             bots,
             retro,
+            retro_home,
             ops,
         }
     }
@@ -501,19 +504,25 @@ impl Gateway {
         }
     }
 
-    /// Sends the weekly retro card at its slot (`telegram.retro`), once per
-    /// slot: not when a retro card already went out since the slot (by hand
-    /// or before a restart), and not at all when last week has no unrated
-    /// asks. A slot missed while the server was down is still sent up to
-    /// `ask::RETRO_CATCH_UP` late.
+    /// Sends each bot's weekly retro card at its slot (`telegram.retro`),
+    /// once per slot and bot: not when that bot's retro card already went
+    /// out since the slot (by hand or before a restart), and not at all when
+    /// it has no unrated asks from last week. A slot missed while the server
+    /// was down is still sent up to `ask::RETRO_CATCH_UP` late.
     fn retro_loop(&self, store: &dyn Store) {
-        let Some((name, at)) = self.retro.clone() else {
+        let Some(at) = self.retro else {
             return;
         };
-        let mut tried = None;
+        let mut tried: HashMap<String, i64> = HashMap::new();
         while !store.stopping() {
-            if let Err(e) = self.retro_tick(store, &name, at, &mut tried) {
-                eprintln!("telegram: bot {name}: weekly retro: {e:#}");
+            for name in self.names() {
+                let mut t = tried.get(&name).copied();
+                if let Err(e) = self.retro_tick(store, &name, at, &mut t) {
+                    eprintln!("telegram: bot {name}: weekly retro: {e:#}");
+                }
+                if let Some(t) = t {
+                    tried.insert(name, t);
+                }
             }
             let until = Instant::now() + RETRO_TICK;
             while !store.stopping() && Instant::now() < until {
@@ -533,7 +542,7 @@ impl Gateway {
         let Some(slot) = ask::retro_due(now, at, None, *tried) else {
             return Ok(());
         };
-        let last = ask::last_retro(&store.conn())?;
+        let last = ask::last_retro(&store.conn(), name)?;
         if ask::retro_due(now, at, last, *tried).is_none() {
             *tried = Some(slot);
             return Ok(());
@@ -1377,35 +1386,25 @@ impl Gateway {
             serde_json::from_value(stored.flags["retro"]["items"].clone()).unwrap_or_default();
         let more = stored.flags["retro"]["more"].as_u64().unwrap_or(0) as usize;
         let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
-        let kind_of = |a: &str| items.iter().find(|i| i.ask == a).map(|i| i.kind.clone());
-        let known = |k: &str| items.iter().any(|i| i.kind == k);
-        let rated_now = || ask::ratings(&store.conn(), &ids);
-        let (toast, view) = match ask::Press::parse(data) {
-            Some(ask::Press::Item(a, rating)) if kind_of(&a).is_some() => {
+        let (toast, page) = match ask::Press::parse(data) {
+            Some(ask::Press::Item(a, rating)) if ids.contains(&a) => {
                 ask::rate(&mut store.conn(), &owner_actor(), &a, rating)?;
-                let k = kind_of(&a).unwrap_or_default();
-                let page = ask::page_of(&items, &k, &a);
-                (format!("Rated: {rating}"), Some(ask::View::Kind(k, page)))
+                (format!("Rated: {rating}"), Some(ask::page_of(&items, &a)))
             }
-            Some(ask::Press::Kind(k, rating)) if known(&k) => {
-                let todo = ask::unrated_of(&items, &rated_now()?, &k);
-                let n = ask::rate_many(&mut store.conn(), &owner_actor(), &todo, rating)?;
-                (
-                    format!("Rated {n} {}: {rating}", ask::kind_label(&k)),
-                    Some(ask::View::Kinds),
-                )
-            }
-            Some(ask::Press::Open(k, page)) if known(&k) => (
-                ask::kind_label(&k).to_string(),
-                Some(ask::View::Kind(k, page)),
-            ),
-            Some(ask::Press::Back) => ("All kinds".to_string(), Some(ask::View::Kinds)),
+            Some(ask::Press::Page(p)) => (format!("Page {}", p + 1), Some(p)),
+            // A card sent when asks were rated by kind: shown per ask now.
+            Some(ask::Press::Retired) => ("Rate each ask on its own".to_string(), Some(0)),
             _ => ("Not an item on this card".to_string(), None),
         };
-        if let Some(view) = view {
+        if let Some(page) = page {
             store.changed();
-            // A flat card (sent before kinds) keeps its flat layout.
-            let r = ask::render_retro(&items, more, &rated_now()?, &view);
+            let r = ask::render_retro(
+                &items,
+                more,
+                &ask::ratings(&store.conn(), &ids)?,
+                page,
+                Some(&b.name),
+            );
             if let Err(e) = self.edit(
                 store,
                 &b.name,
@@ -1430,11 +1429,27 @@ impl Gateway {
         Ok(true)
     }
 
-    /// Sends the weekly retro card (`ask::retro`) from bot `name`: one
-    /// message, one row of rating buttons per unrated ask of the last 7 days.
-    /// With nothing to rate it sends nothing.
+    /// Bot `name`'s weekly retro card (`ask::retro`): the asks it raised,
+    /// and on the home bot's card the asks no sending bot raised.
+    pub fn retro_of(&self, conn: &Connection, name: &str) -> Result<ask::Retro> {
+        let senders = self.names();
+        ask::retro(
+            conn,
+            now(),
+            &ask::RetroScope {
+                bot: Some(name),
+                home: self.retro_home.as_deref() == Some(name),
+                senders: &senders,
+            },
+        )
+    }
+
+    /// Sends bot `name`'s weekly retro card (`retro_of`): one message, paged
+    /// in place, one row of rating buttons per ask of the last 7 days it
+    /// raised that nobody rated. With nothing to rate it sends nothing.
     pub fn send_retro(&self, store: &dyn Store, name: &str, o: &SendOpts) -> Result<Value> {
-        let r = ask::retro(&store.conn(), now())?;
+        self.bot(name)?;
+        let r = self.retro_of(&store.conn(), name)?;
         if r.items.is_empty() {
             return Ok(json!({"sent": false, "text": r.text}));
         }
