@@ -1011,9 +1011,9 @@ enum FormCmd {
         /// How long the form stays open: 1m to 1h (default 15m)
         #[arg(long)]
         ttl: Option<String>,
-        /// The Telegram bot that sends the prompt (default: the target bot,
-        /// else the server's ops bot)
-        #[arg(long)]
+        /// The Telegram bot that sends the prompt (required unless
+        /// --no-telegram); it must be able to write to the owner's private chat
+        #[arg(long, required_unless_present = "no_telegram")]
         bot: Option<String>,
         /// Send no Telegram prompt; share the link yourself
         #[arg(long)]
