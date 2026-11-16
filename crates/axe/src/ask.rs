@@ -1098,7 +1098,11 @@ fn clip(text: &str, limit: usize) -> String {
         })
         .map(|(i, _)| i + 1);
     if let Some(i) = sentence.filter(|&i| utf16(&text[..i]) >= limit / 2) {
-        return text[..i].to_string();
+        // A clause (`;`) ends the cut as a word cut does.
+        return match text[..i].strip_suffix(';') {
+            Some(clause) => format!("{clause}…"),
+            None => text[..i].to_string(),
+        };
     }
     let cut = match fits.rfind(' ') {
         Some(i) if utf16(&fits[..i]) >= limit / 2 => &fits[..i],
@@ -1566,6 +1570,10 @@ mod tests {
             "at 0123456,"
         );
         assert_eq!(shorten("v38.12 at 0dc72e1"), "v38.12 at 0dc72e1");
+        // A cut at a clause never leaves a dangling `;`.
+        let t = "Merged with owner approval; then ".to_string() + &"more words ".repeat(10);
+        assert_eq!(clip(&t, 50), "Merged with owner approval…");
+        assert_eq!(clip("One. Two three four five six", 12), "One. Two…");
     }
 
     #[test]
