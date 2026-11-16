@@ -1048,6 +1048,8 @@ pub enum Press {
     Page(usize),
     /// `ra:<page>`: accept the recommendations of the unrated asks on a page.
     Accept(usize),
+    /// `rd` ([`DISMISS`]): close the card, leaving its asks as they are.
+    Dismiss,
     /// A button of a card sent when asks were rated by kind (`rk:`, `ro:`,
     /// `rb`): kinds are no longer rated, so it shows the first page.
     Retired,
@@ -1057,6 +1059,9 @@ impl Press {
     pub fn parse(data: &str) -> Option<Press> {
         if data == "rb" {
             return Some(Press::Retired);
+        }
+        if data == DISMISS {
+            return Some(Press::Dismiss);
         }
         let (head, rest) = data.split_once(':')?;
         match head {
@@ -1071,6 +1076,9 @@ impl Press {
         }
     }
 }
+
+/// Callback data of a retro card's Dismiss button.
+pub const DISMISS: &str = "rd";
 
 /// Whose asks a retro card holds.
 #[derive(Debug, Default, Clone)]
@@ -1510,12 +1518,36 @@ pub fn page_items(items: &[RetroItem], page: usize) -> &[RetroItem] {
     &items[start.min(items.len())..(start + RETRO_PAGE).min(items.len())]
 }
 
+/// A retro card's title: whose retro it is.
+fn retro_title(bot: Option<&str>) -> String {
+    match bot {
+        Some(b) => format!("Weekly retro, {}", crate::board::cap(b, 32)),
+        None => "Weekly retro".to_string(),
+    }
+}
+
+/// The text a dismissed retro card is edited to: it has no buttons, and its
+/// unrated asks stay unrated.
+pub fn dismissed_retro(
+    items: &[RetroItem],
+    rated: &HashMap<String, String>,
+    bot: Option<&str>,
+) -> String {
+    let left = items.iter().filter(|i| !rated.contains_key(&i.ask)).count();
+    format!(
+        "{}: dismissed. {left} of {} asks left unrated.",
+        retro_title(bot),
+        items.len()
+    )
+}
+
 /// Renders page `page` of a retro card from its items, with `rated` (ask id
 /// to rating) marked: two lines and one row of rating buttons per ask (a
 /// rated ask can be re-rated), a recommended rating marked `(rec)` on its
 /// button and shown as a third line with its reason, an accept button while
-/// an unrated ask on the page has a recommendation, prev / next, and the
-/// kind totals as a footer. `bot` names whose retro it is. Pure, so presses re-render the
+/// an unrated ask on the page has a recommendation, prev / next, a Dismiss
+/// row, and the kind totals as a footer. `bot` names whose retro it is.
+/// Pure, so presses re-render the
 /// stored items.
 pub fn render_retro(
     items: &[RetroItem],
@@ -1524,10 +1556,7 @@ pub fn render_retro(
     page: usize,
     bot: Option<&str>,
 ) -> Retro {
-    let title = match bot {
-        Some(b) => format!("Weekly retro, {}", crate::board::cap(b, 32)),
-        None => "Weekly retro".to_string(),
-    };
+    let title = retro_title(bot);
     if items.is_empty() {
         return Retro {
             text: format!("{title}: no unrated asks last week."),
@@ -1597,6 +1626,8 @@ pub fn render_retro(
     if buttons.len() > before {
         rows.push(buttons.len() - before);
     }
+    buttons.push(("Dismiss".into(), DISMISS.into()));
+    rows.push(1);
     if more > 0 {
         text.push_str(&format!(
             "\n+{more} more not on this card: axe ask list --unrated"
@@ -1696,7 +1727,7 @@ mod tests {
             ]
         );
         assert_eq!(r.buttons[9], (ACCEPT_LABEL.into(), "ra:0".into()));
-        assert_eq!(r.rows, [3, 3, 3, 1]);
+        assert_eq!(r.rows, [3, 3, 3, 1, 1], "accept, then Dismiss");
 
         // A rated ask shows its own rating; once every rec on the page is
         // rated, the accept button goes.
@@ -1710,7 +1741,7 @@ mod tests {
         assert!(r.buttons.iter().any(|b| b.0 == "3 needed ✓"));
         assert!(r.buttons.iter().all(|b| b.0 != ACCEPT_LABEL));
         assert!(!r.text.contains(REC_NOTE));
-        assert_eq!(r.rows, [3, 3, 3]);
+        assert_eq!(r.rows, [3, 3, 3, 1]);
 
         // No recs: as before, no accept button.
         let plain = render_retro(&[kitem(2, "decision", "a")], 0, &HashMap::new(), 0, None);
@@ -1766,9 +1797,11 @@ mod tests {
                 ("1 needed".to_string(), "rate:t7.1:n".to_string()),
                 ("1 decide".into(), "rate:t7.1:c".into()),
                 ("1 drop".into(), "rate:t7.1:x".into()),
+                ("Dismiss".into(), DISMISS.into()),
             ]
         );
-        assert_eq!(r.rows, [3]);
+        assert_eq!(r.rows, [3, 1]);
+        assert_eq!(Press::parse("rd"), Some(Press::Dismiss));
         assert!(
             r.text.starts_with(
                 "Weekly retro, a: last week's asks (1, 1 unrated)\n\n1. #7: thing 7\n"
@@ -1785,8 +1818,15 @@ mod tests {
         assert!(r
             .buttons
             .contains(&("1 decide ✓".into(), "rate:t7.1:c".into())));
-        assert_eq!(r.rows, [3]);
+        assert_eq!(r.rows, [3, 1]);
         assert!(r.text.contains("All rated. Thanks."), "{}", r.text);
+
+        // Dismissed: no buttons, the unrated asks counted as left unrated.
+        let two = [kitem(7, "decision", "a"), kitem(8, "confirm", "a")];
+        assert_eq!(
+            dismissed_retro(&two, &rated, Some("a")),
+            "Weekly retro, a: dismissed. 1 of 2 asks left unrated."
+        );
     }
 
     fn lines(a: &Ask) -> (String, String) {
