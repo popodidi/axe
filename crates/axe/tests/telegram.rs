@@ -2740,10 +2740,11 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
         "the preview is the card:\n{dry}\n{text}"
     );
     // Two lines per ask: its id and title, then its question; kinds only
-    // in the footer.
+    // in the footer. Decisions first, then the cards nobody answered,
+    // newest first.
     assert!(
         text.starts_with(&format!(
-            "Weekly retro, cos: last week's asks (4, 4 unrated)\n\n1. #1: pick a region\n   needs a call Ask: decide\n2. #2: pick a name\n   needs a call Ask: decide\n3. msg {card}: Decided: yes\n4. msg {card2}: Archive the logs?\n\n"
+            "Weekly retro, cos: last week's asks (4, 4 unrated)\n\n1. #2: pick a name\n   needs a call Ask: decide\n2. #1: pick a region\n   needs a call Ask: decide\n3. msg {card2}: Archive the logs?\n4. msg {card}: Decided: yes\n\n"
         )),
         "{text}"
     );
@@ -2761,10 +2762,10 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     assert_eq!(
         keyboard_of(&sent.params),
         vec![
-            row(1, "t1.1"),
-            row(2, "t2.1"),
-            row(3, &format!("m{card}")),
-            row(4, &format!("m{card2}")),
+            row(1, "t2.1"),
+            row(2, "t1.1"),
+            row(3, &format!("m{card2}")),
+            row(4, &format!("m{card}")),
             vec![("Dismiss".to_string(), "rd".to_string())]
         ]
     );
@@ -2784,11 +2785,11 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     let edit = rig.stub.calls("editMessageText").pop().unwrap();
     let edited = edit.params["text"].as_str().unwrap();
     assert!(
-        edited.contains("\n1. #1: pick a region = decide\n   needs a call Ask: decide\n"),
+        edited.contains("\n2. #1: pick a region = decide\n   needs a call Ask: decide\n"),
         "{edited}"
     );
     assert!(edited.contains("(4, 3 unrated)"), "{edited}");
-    assert_eq!(keyboard_of(&edit.params)[0][1].0, "1 decide ✓");
+    assert_eq!(keyboard_of(&edit.params)[1][1].0, "2 decide ✓");
     // The other ask of the same kind takes its own, different rating.
     rig.stub.push(press(52, tg, "rate:t2.1:n"));
     rig.stub.wait_confirmed(52);
@@ -2821,7 +2822,7 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     let edited = edit.params["text"].as_str().unwrap();
     assert!(edited.contains("All rated. Thanks."), "{edited}");
     assert!(
-        edited.contains(&format!("4. msg {card2}: Archive the logs? = drop")),
+        edited.contains(&format!("3. msg {card2}: Archive the logs? = drop")),
         "{edited}"
     );
     let asks: Vec<Value> = serde_json::from_str(&rig.srv().ok(&["ask", "list", "--json"])).unwrap();
@@ -2870,12 +2871,13 @@ fn the_retro_card_accepts_a_pages_recs_in_one_tap() {
     let text = sent.params["text"].as_str().unwrap();
     assert!(
         text.contains(
-            "\n1. #1: pick a region\n   needs a call Ask: decide\n   rec: decide (reversible)\n"
+            "\n3. #1: pick a region\n   needs a call Ask: decide\n   rec: decide (reversible)\n"
         ),
         "{text}"
     );
     let kb = keyboard_of(&sent.params);
-    assert_eq!(kb[0][1].0, "1 decide (rec)");
+    // Newest first: #3, #2, #1.
+    assert_eq!(kb[2][1].0, "3 decide (rec)");
     assert_eq!(kb[1][0].0, "2 needed (rec)");
     assert_eq!(
         kb[3],
@@ -2891,7 +2893,7 @@ fn the_retro_card_accepts_a_pages_recs_in_one_tap() {
     assert_eq!(toast.params["text"], "Accepted 2 recs");
     let edit = rig.stub.calls("editMessageText").pop().unwrap();
     let edited = edit.params["text"].as_str().unwrap();
-    assert!(edited.contains("1. #1: pick a region = decide"), "{edited}");
+    assert!(edited.contains("3. #1: pick a region = decide"), "{edited}");
     assert!(edited.contains("(3, 1 unrated)"), "{edited}");
     assert!(keyboard_of(&edit.params)
         .iter()
@@ -3048,24 +3050,43 @@ fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
             })
             .collect()
     };
+    // By default the 10 newest, one page, and a count of the rest.
     let aux = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "aux"]);
+    assert!(
+        aux.starts_with("Weekly retro, aux: last week's asks (12, 12 unrated)\n"),
+        "{aux}"
+    );
+    assert_eq!(
+        ids(&aux),
+        (3..=12).rev().map(|i| i.to_string()).collect::<Vec<_>>()
+    );
+    assert!(
+        aux.contains("\n10 of 12 asks shown, most useful first;"),
+        "{aux}"
+    );
+    assert!(!aux.contains("[next ›]"), "{aux}");
+    let aux = rig
+        .srv()
+        .ok(&["ask", "retro", "--dry", "--bot", "aux", "--limit", "12"]);
     assert!(
         aux.starts_with("Weekly retro, aux: last week's asks (12, 12 unrated), page 1/2\n"),
         "{aux}"
     );
     assert_eq!(
         ids(&aux),
-        (1..=10).map(|i| i.to_string()).collect::<Vec<_>>()
+        (3..=12).rev().map(|i| i.to_string()).collect::<Vec<_>>()
     );
     assert!(aux.contains("[next ›]") && !aux.contains("prev"), "{aux}");
     // cos is the ops bot: its retro also holds the ask no bot raised.
     let cos = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "cos"]);
-    assert_eq!(ids(&cos), ["13", "14"], "{cos}");
+    assert_eq!(ids(&cos), ["14", "13"], "{cos}");
     let grp = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "grp"]);
     assert!(grp.contains("no unrated asks"), "{grp}");
 
     // Sent, paged in place: next, then prev.
-    let out = rig.srv().ok(&["ask", "retro", "--bot", "aux"]);
+    let out = rig
+        .srv()
+        .ok(&["ask", "retro", "--bot", "aux", "--limit", "12"]);
     assert!(out.starts_with("sent #"), "{out}");
     let retro = rig.messages().len() as i64;
     let tg = tg_id(&rig, retro);
@@ -3076,7 +3097,7 @@ fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
     let edited = edit.params["text"].as_str().unwrap();
     assert!(
         edited.contains("page 2/2")
-            && edited.contains("\n11. #11: aux 11\n   needs a call Ask: decide\n12. #12: aux 12\n"),
+            && edited.contains("\n11. #2: aux 2\n   needs a call Ask: decide\n12. #1: aux 1\n"),
         "{edited}"
     );
     let kb = keyboard_of(&edit.params);
@@ -3084,14 +3105,14 @@ fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
     assert_eq!(kb[2], vec![("‹ prev".to_string(), "rp:0".to_string())]);
     assert_eq!(kb[3], vec![("Dismiss".to_string(), "rd".to_string())]);
     // Rating on page 2 keeps page 2.
-    rig.stub.push_to(AUX_TOKEN, press(71, tg, "rate:t12.1:x"));
+    rig.stub.push_to(AUX_TOKEN, press(71, tg, "rate:t1.1:x"));
     rig.stub.wait_confirmed(71);
     let edited = rig.stub.calls("editMessageText").pop().unwrap().params["text"]
         .as_str()
         .unwrap()
         .to_string();
     assert!(
-        edited.contains("page 2/2") && edited.contains("#12: aux 12 = drop"),
+        edited.contains("page 2/2") && edited.contains("#1: aux 1 = drop"),
         "{edited}"
     );
 }

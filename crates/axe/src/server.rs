@@ -1527,7 +1527,10 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 &crate::ask::stats(&st.conn(), req.query("project"), since, until)?,
             )
         }
-        ("GET", ["api", "asks", "retro"]) => ok(200, &retro_preview(st, req.query("bot"))?),
+        ("GET", ["api", "asks", "retro"]) => {
+            let limit = retro_limit(req.query("limit"))?;
+            ok(200, &retro_preview(st, req.query("bot"), limit)?)
+        }
         ("GET", ["api", "asks", id]) => ok(
             200,
             &crate::ask::find(&st.conn(), id).map_err(|e| HttpError(404, format!("{e:#}")))?,
@@ -2490,18 +2493,38 @@ fn runtime_alert(_: &State, _: &serde_json::Value) -> Result<serde_json::Value> 
     Ok(json!({"sent": false, "reason": NO_TELEGRAM}))
 }
 
-/// `GET /api/asks/retro[?bot=]`: the retro card bot `bot` would send now
-/// (through the gateway, which knows the home bot), or every unrated ask.
-fn retro_preview(st: &State, bot: Option<&str>) -> Result<crate::ask::Retro> {
+/// A retro card's `limit` (query or body): a positive count, at most
+/// `ask::RETRO_ITEMS`; none is the default.
+fn retro_limit(s: Option<&str>) -> Result<Option<usize>> {
+    let Some(s) = s else {
+        return Ok(None);
+    };
+    match s.trim().parse::<usize>() {
+        Ok(n) if (1..=crate::ask::RETRO_ITEMS).contains(&n) => Ok(Some(n)),
+        _ => Err(HttpError(
+            400,
+            format!(
+                "limit {s:?}: expected 1 to {} asks",
+                crate::ask::RETRO_ITEMS
+            ),
+        )
+        .into()),
+    }
+}
+
+/// `GET /api/asks/retro[?bot=&limit=]`: the retro card bot `bot` would send
+/// now (through the gateway, which knows the home bot), or every unrated ask.
+fn retro_preview(st: &State, bot: Option<&str>, limit: Option<usize>) -> Result<crate::ask::Retro> {
     let now = crate::routine::now();
     #[cfg(feature = "telegram")]
     if let (Some(b), Some(gw)) = (bot, &st.telegram) {
         if gw.bot(b).is_ok() {
-            return gw.retro_of(&st.conn(), b);
+            return gw.retro_of(&st.conn(), b, limit);
         }
     }
     let scope = crate::ask::RetroScope {
         bot,
+        limit,
         ..Default::default()
     };
     crate::ask::retro(&st.conn(), now, &scope)
@@ -2616,8 +2639,14 @@ fn tg_route(st: &State, req: &Request, name: &str, action: &str) -> Result<Respo
             )
         }
         "retro" => {
-            let o: telegram::SendOpts = req.json()?;
-            ok(200, &gw.send_retro(st, name, &o)?)
+            let v: serde_json::Value = req.json()?;
+            let limit = match &v["limit"] {
+                serde_json::Value::Null => None,
+                l => retro_limit(Some(&l.to_string()))?,
+            };
+            let o: telegram::SendOpts = serde_json::from_value(v)
+                .map_err(|e| HttpError(400, format!("invalid JSON body: {e}")))?;
+            ok(200, &gw.send_retro(st, name, &o, limit)?)
         }
         "pin" | "unpin" => {
             let b: Pin = req.json()?;
