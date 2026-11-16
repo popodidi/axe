@@ -284,8 +284,10 @@ export default function Dashboard() {
   useEffect(() => {
     if (phase !== "opening" && phase !== "closing") return;
     // Timer cleanup, never transitionend, so zero-duration motion still ends.
+    // A timer can fire after a newer phase has committed, before effect
+    // cleanup clears it (closing just as opening ends). End only its own phase.
     const done = setTimeout(() => {
-      setPhase(null);
+      setPhase((current) => (current === phase ? null : current));
       if (phase === "closing") setExiting(null);
     }, motionMs("--duration-layout"));
     return () => clearTimeout(done);
