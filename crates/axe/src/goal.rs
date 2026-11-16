@@ -42,7 +42,7 @@ pub const STATES: [&str; 5] = ["proposed", "active", "paused", "done", "dropped"
 /// Trajectory event kinds, written with `axe goal record`.
 pub const TRAJECTORY_KINDS: [&str; 5] = ["hypothesis", "test", "verdict", "observation", "note"];
 /// Audit event kinds, written by the server on each change.
-pub const AUDIT_KINDS: [&str; 8] = [
+pub const AUDIT_KINDS: [&str; 9] = [
     "proposed",
     "activated",
     "intent",
@@ -51,6 +51,7 @@ pub const AUDIT_KINDS: [&str; 8] = [
     "join",
     "leave",
     "state",
+    "project",
 ];
 pub const INTENT_CAP: usize = 16 * 1024;
 pub const RECORD_CAP: usize = 16 * 1024;
@@ -510,6 +511,8 @@ pub struct Edit {
     pub deadline: Option<String>,
     pub budget_cost_week: Option<String>,
     pub budget_attention_week: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 fn optional<T>(v: &str, parse: impl Fn(&str) -> Result<T>) -> Result<Option<T>> {
@@ -538,8 +541,15 @@ pub fn edit(
         && e.deadline.is_none()
         && e.budget_cost_week.is_none()
         && e.budget_attention_week.is_none()
+        && e.project.is_none()
     {
-        bail!("nothing to edit: give --intent-file, --deadline or a budget");
+        bail!("nothing to edit: give --intent-file, --deadline, a budget or --project");
+    }
+    let project = e.project.as_deref().map(str::trim);
+    if let Some(p) = project {
+        if p.is_empty() || p.chars().any(char::is_whitespace) {
+            bail!("invalid project {p:?}");
+        }
     }
     let owner = owner_ref(actor, owner, "editing a goal")?;
     if let Some(i) = &e.intent {
@@ -588,6 +598,15 @@ pub fn edit(
         )?;
         let body = format!("why: {why}\n{} -> {}", show(&g.deadline), show(&new));
         event(&tx, g.id, actor, "deadline", None, owner, &body, &at)?;
+        changed = true;
+    }
+    if let Some(new) = project.filter(|p| *p != g.project) {
+        tx.execute(
+            "UPDATE goals SET project=?1 WHERE id=?2",
+            params![new, g.id],
+        )?;
+        let body = format!("why: {why}\n{} -> {new}", g.project);
+        event(&tx, g.id, actor, "project", None, owner, &body, &at)?;
         changed = true;
     }
     let mut budget = Vec::new();

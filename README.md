@@ -224,7 +224,9 @@ that reason.
 Tasks without `repos` keep the project worktree. A bot with a repo list
 (`axe bot edit <name> --repo <r>`, `--no-repos` clears it) runs in
 `<run_root>/bot-<name>` the same way, on branch `bot-<name>--work`; a bot
-without one keeps its project worktree. Before each bot run the dispatcher
+without one keeps its project worktree. `axe bot edit <name> --project <p>`
+moves a bot to another project (its subscriptions keep the projects they
+name), and `axe goal edit <name> --project <p>` moves a goal. Before each bot run the dispatcher
 fetches and fast-forwards each of its repo worktrees to the base branch's
 origin commit when it is clean and has no local commits; otherwise it leaves it
 unchanged and records why in the run's `run_start` event (`repos_refresh`). Housekeeping removes a task's run

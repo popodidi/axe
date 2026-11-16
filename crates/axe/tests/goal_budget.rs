@@ -549,3 +549,38 @@ fn stats_origin_splits_routine_tasks_from_normal_tasks() {
     .call();
     assert!(matches!(r, Err(ureq::Error::Status(400, _))), "{r:?}");
 }
+
+#[test]
+fn edit_moves_a_goal_to_another_project_with_an_audit_event() {
+    let (_d, mut c) = setup();
+    let e = Edit {
+        project: Some("q".into()),
+        ..Default::default()
+    };
+    edit(&mut c, "g", e.clone());
+    assert_eq!(goal::detail(&c, "g").unwrap().goal.project, "q");
+    let n: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM goal_events WHERE kind='project' AND body LIKE '%p -> q%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+    // Unchanged: no second event.
+    edit(&mut c, "g", e);
+    let n: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM goal_events WHERE kind='project'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+    let bad = Edit {
+        project: Some("a b".into()),
+        ..Default::default()
+    };
+    assert!(goal::edit(&mut c, &human(), "g", &bad, "owner", None).is_err());
+    assert!(goal::edit(&mut c, &human(), "g", &Edit::default(), "owner", None).is_err());
+}
