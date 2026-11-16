@@ -562,6 +562,7 @@ impl Gateway {
                 chat,
                 ..SendOpts::default()
             },
+            None,
         )?;
         *tried = Some(slot);
         if v["sent"] == true {
@@ -1481,8 +1482,14 @@ impl Gateway {
     }
 
     /// Bot `name`'s weekly retro card (`ask::retro`): the asks it raised,
-    /// and on the home bot's card the asks no sending bot raised.
-    pub fn retro_of(&self, conn: &Connection, name: &str) -> Result<ask::Retro> {
+    /// and on the home bot's card the asks no sending bot raised; at most
+    /// `limit` of them (`None`: [`ask::RETRO_LIMIT`]).
+    pub fn retro_of(
+        &self,
+        conn: &Connection,
+        name: &str,
+        limit: Option<usize>,
+    ) -> Result<ask::Retro> {
         let senders = self.names();
         ask::retro(
             conn,
@@ -1491,6 +1498,7 @@ impl Gateway {
                 bot: Some(name),
                 home: self.retro_home.as_deref() == Some(name),
                 senders: &senders,
+                limit,
             },
         )
     }
@@ -1498,9 +1506,15 @@ impl Gateway {
     /// Sends bot `name`'s weekly retro card (`retro_of`): one message, paged
     /// in place, one row of rating buttons per ask of the last 7 days it
     /// raised that nobody rated. With nothing to rate it sends nothing.
-    pub fn send_retro(&self, store: &dyn Store, name: &str, o: &SendOpts) -> Result<Value> {
+    pub fn send_retro(
+        &self,
+        store: &dyn Store,
+        name: &str,
+        o: &SendOpts,
+        limit: Option<usize>,
+    ) -> Result<Value> {
         self.bot(name)?;
-        let r = self.retro_of(&store.conn(), name)?;
+        let r = self.retro_of(&store.conn(), name, limit)?;
         if r.items.is_empty() {
             return Ok(json!({"sent": false, "text": r.text}));
         }

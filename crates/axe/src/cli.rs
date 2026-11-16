@@ -1779,13 +1779,18 @@ enum AskCmd {
     },
     /// A bot's weekly retro card: last week's unrated asks it raised, two
     /// lines (id and topic, then the question) and one row of rating buttons
-    /// each, paged. Sends it from the bot (default $AXE_BOT); --dry prints
-    /// its first page instead (every bot's asks without a bot)
+    /// each, paged. It holds the 10 most useful asks (--limit): one per task
+    /// or card, those the owner had to act on first, then the newest; the
+    /// rest stay unrated. Sends it from the bot (default $AXE_BOT); --dry
+    /// prints its first page instead (every bot's asks without a bot)
     Retro {
         #[arg(long)]
         bot: Option<String>,
         #[arg(long)]
         dry: bool,
+        /// Most asks on the card (1-1000; default 10)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=crate::ask::RETRO_ITEMS as u64))]
+        limit: Option<u64>,
     },
 }
 
@@ -2110,12 +2115,17 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        AskCmd::Retro { bot, dry } => {
+        AskCmd::Retro { bot, dry, limit } => {
             let bot = bot
                 .clone()
                 .or_else(|| std::env::var("AXE_BOT").ok().filter(|b| !b.is_empty()));
             if *dry {
-                let q: Vec<(&str, &str)> = bot.iter().map(|b| ("bot", b.as_str())).collect();
+                let limit = limit.map(|n| n.to_string());
+                let q: Vec<(&str, &str)> = bot
+                    .iter()
+                    .map(|b| ("bot", b.as_str()))
+                    .chain(limit.iter().map(|n| ("limit", n.as_str())))
+                    .collect();
                 let r: Retro = c.get_private("/api/asks/retro", &q)?;
                 println!("{}", r.text);
                 let mut i = 0;
@@ -2130,7 +2140,11 @@ fn run_ask(c: &Client, command: &AskCmd) -> Result<()> {
                 return Ok(());
             }
             let name = bot.context("give --bot NAME (or set AXE_BOT)")?;
-            let v: Value = c.send("POST", &format!("/api/bots/{name}/tg/retro"), json!({}))?;
+            let body = match limit {
+                Some(n) => json!({ "limit": n }),
+                None => json!({}),
+            };
+            let v: Value = c.send("POST", &format!("/api/bots/{name}/tg/retro"), body)?;
             if v["sent"] == true {
                 println!(
                     "sent #{} ({} asks, {} more)",

@@ -293,12 +293,13 @@ fn stats_give_wasted_share_per_bot_and_week() {
     // The retro card: last week's unrated asks only, two lines each.
     let r = ask::retro(&c, end, &RetroScope::default()).unwrap();
     let items: Vec<_> = r.items.iter().map(|i| i.ask.clone()).collect();
-    assert_eq!(items, [format!("t{}.1", ids[4]), format!("t{none}.1")]);
-    assert_eq!(r.items[0].line, format!("#{}: t4", ids[4]));
-    assert_eq!(r.items[1].line, format!("#{none}: nobody's"));
+    // Newest first.
+    assert_eq!(items, [format!("t{none}.1"), format!("t{}.1", ids[4])]);
+    assert_eq!(r.items[0].line, format!("#{none}: nobody's"));
+    assert_eq!(r.items[1].line, format!("#{}: t4", ids[4]));
     assert!(
         r.text.contains(&format!(
-            "\n1. #{}: t4\n   x Ask: decide\n2. #{none}: nobody's\n   x Ask: decide\n",
+            "\n1. #{none}: nobody's\n   x Ask: decide\n2. #{}: t4\n   x Ask: decide\n",
             ids[4]
         )),
         "{}",
@@ -316,6 +317,7 @@ fn stats_give_wasted_share_per_bot_and_week() {
                 bot: Some(bot),
                 home,
                 senders: &senders,
+                limit: None,
             },
         )
         .unwrap()
@@ -349,6 +351,8 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
         db::set_task(&mut c, &Actor::new("agent"), id, &ch).unwrap();
         mine.push(id);
     }
+    // Newest first.
+    mine.reverse();
     // Bot b's escalation and card never reach a's retro.
     let theirs = task(&mut c, "q", "theirs", Some("bot:b"));
     set_state(&mut c, theirs, "escalated");
@@ -371,6 +375,7 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
         bot: Some("a"),
         home: false,
         senders: &senders,
+        limit: Some(20),
     };
     let r = ask::retro(&c, now() + 1, &scope).unwrap();
     assert_eq!(r.items.len(), 14);
@@ -396,7 +401,7 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
     );
     assert!(
         r.text.contains(&format!(
-            "\n1. #{}: title\n   need a call on question 0 ",
+            "\n1. #{}: title\n   need a call on question 12 ",
             mine[0]
         )),
         "{}",
@@ -418,6 +423,149 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
     let page2 = ask::render_retro(&r.items, r.more, &Default::default(), 1, Some("a"));
     assert!(page2.text.contains("page 2/2") && page2.text.contains(&format!("\n14. msg {card}: ")));
     assert_eq!(page2.rows, [3, 3, 3, 3, 1, 1], "prev only, then Dismiss");
+}
+
+#[test]
+fn a_retro_holds_the_ten_most_useful_asks_one_per_task() {
+    let (_d, mut c) = setup();
+    let long = |i: usize| format!("need a call on question {i} ").repeat(8);
+    // 14 decision escalations, one of them escalated three times.
+    let mut decisions = Vec::new();
+    for i in 0..14 {
+        let id = task(&mut c, "p", &format!("decide {i}"), Some("bot:a"));
+        escalate(&mut c, id, Some("decision"), &long(i));
+        decisions.push(id);
+    }
+    let again = decisions[0];
+    for _ in 0..2 {
+        set_state(&mut c, again, "pending");
+        escalate(&mut c, again, Some("decision"), "owner: decide again");
+    }
+    // Newer asks that may have cleared themselves: stuck runs, and one card
+    // nobody answered, sent twice.
+    let mut stuck = Vec::new();
+    for i in 0..3 {
+        let id = task(&mut c, "p", &format!("stuck {i}"), Some("bot:a"));
+        escalate(&mut c, id, Some("runtime"), "owner: look");
+        stuck.push(id);
+    }
+    let yn = json!({"buttons": [["Y","y"],["N","n"]], "ask": true});
+    let unanswered: Vec<i64> = (0..2)
+        .map(|i| message(&mut c, "a", 80 + i, "Rotate the key?", yn.clone()))
+        .collect();
+    let answered = message(
+        &mut c,
+        "a",
+        82,
+        "Ship the docs?",
+        json!({"buttons": [], "ask": true, "answered": {"label": "Y"}}),
+    );
+    // A card about a task is that task's ask too.
+    message(
+        &mut c,
+        "a",
+        83,
+        &format!("#{} still needs a call", decisions[1]),
+        yn.clone(),
+    );
+    let total = 14 + 2 + 3 + 2 + 1 + 1;
+    let senders = vec!["a".to_string(), "b".to_string()];
+    let scope = |limit| RetroScope {
+        bot: Some("a"),
+        home: false,
+        senders: &senders,
+        limit,
+    };
+    let task_of = |ask: &str| -> Option<i64> {
+        let id = ask.strip_prefix('t')?;
+        id.split('.').next()?.parse().ok()
+    };
+    let before = ask::stats(&c, None, now() - 7 * DAY, now() + 1).unwrap();
+
+    // Default: exactly 10, all asks the owner acted on, newest first.
+    let r = ask::retro(&c, now() + 1, &scope(None)).unwrap();
+    assert_eq!(r.items.len(), ask::RETRO_LIMIT);
+    assert_eq!(r.more, total - 10);
+    assert!(
+        r.items
+            .iter()
+            .all(|i| i.kind == "decision" || i.ask == format!("m{answered}")),
+        "{:?}",
+        r.items
+    );
+    assert!(
+        r.text.starts_with(&format!(
+            "Weekly retro, a: last week's asks ({total}, {total} unrated)\n"
+        )),
+        "{}",
+        r.text
+    );
+    assert!(
+        r.text.ends_with(&format!(
+            "\n10 of {total} asks shown, most useful first; the rest stay unrated (axe ask list --unrated)."
+        )),
+        "{}",
+        r.text
+    );
+    assert!(r.text.encode_utf16().count() < 4096, "{}", r.text);
+    assert_eq!(r.rows, [vec![3; 10], vec![1]].concat(), "one page");
+
+    // A larger limit: one ask per task or card, the acted-on ones first.
+    let r = ask::retro(&c, now() + 1, &scope(Some(50))).unwrap();
+    let ids: Vec<&str> = r.items.iter().map(|i| i.ask.as_str()).collect();
+    let distinct = 14 + 3 + 1 + 1;
+    assert_eq!(ids.len(), distinct, "{ids:?}");
+    assert_eq!(r.more, total - distinct);
+    let mut tasks: Vec<i64> = ids.iter().filter_map(|a| task_of(a)).collect();
+    tasks.sort();
+    tasks.dedup();
+    assert_eq!(
+        tasks.len(),
+        ids.iter().filter(|a| a.starts_with('t')).count(),
+        "one per task"
+    );
+    assert!(
+        ids.contains(&format!("t{again}.3").as_str()),
+        "the latest episode"
+    );
+    // The card about decisions[1] and its escalation show once between them.
+    let about_1 = r
+        .items
+        .iter()
+        .filter(|i| {
+            task_of(&i.ask) == Some(decisions[1]) || i.line.contains(&format!("#{}", decisions[1]))
+        })
+        .count();
+    assert_eq!(about_1, 1, "{ids:?}");
+    // The unanswered card, sent twice, shows once: its latest.
+    assert!(!ids.contains(&format!("m{}", unanswered[0]).as_str()));
+    assert!(ids.contains(&format!("m{}", unanswered[1]).as_str()));
+    // Acted-on asks (decisions, the answered card) rank before the newer rest.
+    let acted = ids
+        .iter()
+        .position(|a| {
+            task_of(a).is_some_and(|t| stuck.contains(&t))
+                || a.starts_with(&format!("m{}", unanswered[1]))
+        })
+        .unwrap();
+    assert_eq!(acted, 14 + 1, "{ids:?}");
+    assert!(ids[acted..]
+        .iter()
+        .all(|a| a.starts_with('m') || task_of(a).is_some_and(|t| stuck.contains(&t))));
+    // Every page fits a Telegram message.
+    for page in 0..ids.len().div_ceil(ask::RETRO_PAGE) {
+        let p = ask::render_retro(&r.items, r.more, &Default::default(), page, Some("a"));
+        assert!(p.text.encode_utf16().count() < 4096, "{}", p.text);
+    }
+    // The same store gives the same card.
+    let again_r = ask::retro(&c, now() + 1, &scope(Some(50))).unwrap();
+    assert_eq!(again_r.items, r.items);
+
+    // Asks not shown stay unrated and the stats are as before.
+    let after = ask::stats(&c, None, now() - 7 * DAY, now() + 1).unwrap();
+    assert_eq!(after.overall.total.asks, before.overall.total.asks);
+    assert_eq!(after.overall.total.rated, 0);
+    assert_eq!(after.overall.total.should_not_exist, 0);
 }
 
 /// Escalates `id` with a class and resolver, as `axe escalate` does.
@@ -481,7 +629,13 @@ fn asks_carry_a_stable_kind() {
         (json!({"buttons": [], "ask": true}), "other"),
     ];
     for (i, (flags, _)) in cards.iter().enumerate() {
-        message(&mut c, "a", 30 + i as i64, "card", flags.clone());
+        message(
+            &mut c,
+            "a",
+            30 + i as i64,
+            &format!("card {i}"),
+            flags.clone(),
+        );
     }
     let kinds: Vec<_> = all(&c).into_iter().map(|a| (a.id, a.category)).collect();
     let mut want = vec![
@@ -660,6 +814,8 @@ fn recs_are_stored_apart_accepted_per_page_and_overridden() {
         set_state(&mut c, id, "escalated");
         ids.push(format!("t{id}.1"));
     }
+    // Newest first, as the retro card shows them.
+    ids.reverse();
     let card = message(
         &mut c,
         "a",
@@ -751,6 +907,7 @@ fn recs_are_stored_apart_accepted_per_page_and_overridden() {
         bot: Some("a"),
         home: false,
         senders: &senders,
+        limit: Some(20),
     };
     let r = ask::retro(&c, now() + 1, &scope).unwrap();
     assert_eq!(r.items.len(), 13);
@@ -897,10 +1054,22 @@ fn cli_recommends_one_or_many() {
     assert!(!other.status.success());
     assert!(String::from_utf8_lossy(&other.stderr).contains("not bot x"));
 
+    let one = srv.ok(&["ask", "retro", "--dry", "--limit", "1"]);
+    assert!(
+        one.contains("\n1 of 2 asks shown, most useful first"),
+        "{one}"
+    );
+    assert!(!one.contains("[2 "), "{one}");
+    assert!(!srv
+        .run(&["ask", "retro", "--dry", "--limit", "0"])
+        .status
+        .success());
     let dry = srv.ok(&["ask", "retro", "--dry"]);
+    assert!(!dry.contains("asks shown"), "{dry}");
     assert!(dry.contains("\n   rec: decide (in scope)\n"), "{dry}");
-    assert!(dry.contains("[1 decide (rec)]"), "{dry}");
-    assert!(dry.contains("[2 needed (rec)]"), "{dry}");
+    // Newest first.
+    assert!(dry.contains("[1 needed (rec)]"), "{dry}");
+    assert!(dry.contains("[2 decide (rec)]"), "{dry}");
     assert!(dry.contains(&format!("[{}]", ask::ACCEPT_LABEL)), "{dry}");
     let list: Vec<Value> = serde_json::from_str(&srv.ok(&["ask", "list", "--json"])).unwrap();
     assert_eq!(list[0]["rec"], "could_decide");

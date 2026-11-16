@@ -913,8 +913,11 @@ pub fn stats(conn: &Connection, project: Option<&str>, since: i64, until: i64) -
     Ok(out)
 }
 
-/// Items one retro card holds; the rest are counted in `more`.
+/// The most items one retro card may hold (`--limit` is capped to it).
 pub const RETRO_ITEMS: usize = 1000;
+/// Items a retro card holds by default: the most useful asks of the week
+/// ([`select`]); the rest are counted in `more` and stay unrated.
+pub const RETRO_LIMIT: usize = 10;
 /// Asks per page of a retro card: each has its own row of rating buttons.
 pub const RETRO_PAGE: usize = 10;
 /// Length (UTF-16 units, as Telegram counts) of an ask's first retro line:
@@ -1091,6 +1094,9 @@ pub struct RetroScope<'a> {
     pub home: bool,
     /// The bots that send retros.
     pub senders: &'a [String],
+    /// How many asks the card holds; `None` is [`RETRO_LIMIT`]. Capped to
+    /// [`RETRO_ITEMS`].
+    pub limit: Option<usize>,
 }
 
 impl RetroScope<'_> {
@@ -1106,9 +1112,10 @@ impl RetroScope<'_> {
     }
 }
 
-/// The weekly retro card of one bot: the asks of the 7 days before `now`
-/// it raised that nobody rated yet, two lines each, oldest first. An ask
-/// left alone stays unrated; it is never taken as `needed`.
+/// The weekly retro card of one bot: of the asks of the 7 days before `now`
+/// it raised that nobody rated yet, the most useful few ([`select`]), two
+/// lines each. An ask not shown, or shown and left alone, stays unrated; it
+/// is never taken as `needed`.
 pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
     let mut asks = list(
         conn,
@@ -1121,14 +1128,19 @@ pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
         },
     )?;
     asks.retain(|a| scope.holds(a.bot.as_deref()));
-    let more = asks.len().saturating_sub(RETRO_ITEMS);
-    let mut items = Vec::new();
-    for a in asks.iter().take(RETRO_ITEMS) {
+    let mut cands = Vec::new();
+    for a in asks {
         let card = match a.kind.as_str() {
-            "card" => card_text(conn, a)?,
+            "card" => card_text(conn, &a)?,
             _ => CardText::default(),
         };
-        let (line, detail) = retro_lines(a, &card);
+        cands.push((a, card));
+    }
+    let total = cands.len();
+    let limit = scope.limit.unwrap_or(RETRO_LIMIT).clamp(1, RETRO_ITEMS);
+    let mut items = Vec::new();
+    for (a, card) in select(cands, limit) {
+        let (line, detail) = retro_lines(&a, &card);
         items.push(RetroItem {
             ask: a.id.clone(),
             line,
@@ -1143,7 +1155,68 @@ pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
                 .unwrap_or_default(),
         });
     }
+    let more = total - items.len();
     Ok(render_retro(&items, more, &HashMap::new(), 0, scope.bot))
+}
+
+/// What one retro item stands for, so repeats show once: an escalation's
+/// task, a card's task when it opens with one, else the card's bot and
+/// first line.
+fn retro_key(a: &Ask, card: &CardText) -> String {
+    let task = a
+        .task
+        .or_else(|| card.task.as_ref().and_then(|_| leading_task(&card.body)));
+    match task {
+        Some(t) => format!("t{t}"),
+        None => format!(
+            "m{}\n{}",
+            a.bot.as_deref().unwrap_or("-"),
+            flatten(&a.question).to_lowercase()
+        ),
+    }
+}
+
+/// Whether the owner had to act on an ask: an escalation of class decision
+/// (a decision or an approval), or a card the owner answered. Anything else
+/// (runs that got stuck, access, cards left alone) may have cleared itself.
+fn acted(a: &Ask, card: &CardText) -> bool {
+    match a.kind.as_str() {
+        "escalation" => matches!(a.category.as_str(), "decision" | "approval"),
+        _ => card.answered,
+    }
+}
+
+/// An ask's place in time: when it was made, then its numeric id.
+fn recency(a: &Ask) -> (String, i64, i64) {
+    let id = a.id.trim_start_matches(['t', 'm']);
+    let (x, y) = id.split_once('.').unwrap_or((id, "0"));
+    (a.at.clone(), x.parse().unwrap_or(0), y.parse().unwrap_or(0))
+}
+
+/// The retro's asks, most useful first, at most `limit`: one per task or
+/// card ([`retro_key`]: the latest), then those the owner had to act on
+/// ([`acted`]) before the rest, then the most recent. Only stored data
+/// decides, so the same store gives the same card.
+fn select(cands: Vec<(Ask, CardText)>, limit: usize) -> Vec<(Ask, CardText)> {
+    let mut latest: HashMap<String, (Ask, CardText)> = HashMap::new();
+    for (a, card) in cands {
+        let key = retro_key(&a, &card);
+        match latest.get(&key) {
+            Some((b, _)) if recency(b) >= recency(&a) => {}
+            _ => {
+                latest.insert(key, (a, card));
+            }
+        }
+    }
+    let mut out: Vec<_> = latest.into_values().collect();
+    out.sort_by(|(a, ac), (b, bc)| {
+        acted(b, bc)
+            .cmp(&acted(a, ac))
+            .then_with(|| recency(b).cmp(&recency(a)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out.truncate(limit);
+    out
 }
 
 /// What a card's retro lines are made of, read from the store.
@@ -1155,6 +1228,8 @@ struct CardText {
     task: Option<String>,
     /// The first line of the message the card replies to.
     reply: Option<String>,
+    /// Whether the owner answered the card (`flags.answered`).
+    answered: bool,
 }
 
 fn card_text(conn: &Connection, a: &Ask) -> Result<CardText> {
@@ -1179,6 +1254,8 @@ fn card_text(conn: &Connection, a: &Ask) -> Result<CardText> {
     let Some((text, flags, reply_to)) = row else {
         return Ok(CardText::default());
     };
+    let answered = serde_json::from_str::<Value>(&flags)
+        .is_ok_and(|f| f.get("answered").is_some_and(|v| !v.is_null()));
     let body = plain(text, flags);
     let task = match leading_task(&body) {
         Some(t) => conn
@@ -1201,7 +1278,12 @@ fn card_text(conn: &Connection, a: &Ask) -> Result<CardText> {
             .filter(|l| !l.is_empty()),
         None => None,
     };
-    Ok(CardText { body, task, reply })
+    Ok(CardText {
+        body,
+        task,
+        reply,
+        answered,
+    })
 }
 
 /// The task id a text opens with (`#458 reopened: ...`).
@@ -1566,9 +1648,11 @@ pub fn render_retro(
     let pages = items.len().div_ceil(RETRO_PAGE);
     let page = page.min(pages - 1);
     let left = items.iter().filter(|i| !rated.contains_key(&i.ask)).count();
+    // Asks not on the card stay unrated.
     let mut text = format!(
-        "{title}: last week's asks ({}, {left} unrated)",
-        items.len() + more
+        "{title}: last week's asks ({}, {} unrated)",
+        items.len() + more,
+        left + more
     );
     if pages > 1 {
         text.push_str(&format!(", page {}/{pages}", page + 1));
@@ -1628,11 +1712,6 @@ pub fn render_retro(
     }
     buttons.push(("Dismiss".into(), DISMISS.into()));
     rows.push(1);
-    if more > 0 {
-        text.push_str(&format!(
-            "\n+{more} more not on this card: axe ask list --unrated"
-        ));
-    }
     text.push_str("\n\n");
     text.push_str(if left == 0 {
         "All rated. Thanks."
@@ -1644,6 +1723,13 @@ pub fn render_retro(
         text.push_str(REC_NOTE);
     }
     text.push_str(&format!("\nBy kind: {}", kind_totals(items)));
+    if more > 0 {
+        text.push_str(&format!(
+            "\n{} of {} asks shown, most useful first; the rest stay unrated (axe ask list --unrated).",
+            items.len(),
+            items.len() + more
+        ));
+    }
     Retro {
         text,
         buttons,
@@ -1902,6 +1988,7 @@ mod tests {
                     body: body.into(),
                     task: task.map(String::from),
                     reply: reply.map(String::from),
+                    ..Default::default()
                 },
             )
         };
@@ -2070,8 +2157,19 @@ mod tests {
                 .map(|p| format!("rp:{p}"))
                 .collect();
             assert_eq!(nav, want);
-            // The kind totals are the footer, and add up to every ask.
-            let footer = r.text.lines().last().unwrap();
+            // The kind totals, then how many asks are shown, are the footer.
+            let mut tail = r.text.lines().rev();
+            assert_eq!(
+                tail.next(),
+                Some(
+                    format!(
+                        "{total} of {} asks shown, most useful first; the rest stay unrated (axe ask list --unrated).",
+                        total + 40
+                    )
+                    .as_str()
+                )
+            );
+            let footer = tail.next().unwrap();
             assert!(footer.starts_with("By kind: "), "{footer}");
             let sum: usize = footer
                 .trim_start_matches("By kind: ")
@@ -2106,6 +2204,7 @@ mod tests {
             bot: Some("a"),
             home: false,
             senders: &senders,
+            limit: None,
         };
         assert!(a.holds(Some("a")));
         assert!(!a.holds(Some("b")) && !a.holds(None) && !a.holds(Some("gone")));
@@ -2113,6 +2212,7 @@ mod tests {
             bot: Some("b"),
             home: true,
             senders: &senders,
+            limit: None,
         };
         assert!(home.holds(Some("b")) && home.holds(None) && home.holds(Some("gone")));
         assert!(!home.holds(Some("a")));
