@@ -408,10 +408,11 @@ fn a_bots_own_actions_do_not_reach_it() {
 
 #[test]
 fn protocol_states_the_triage_rules() {
-    let protocol = include_str!("../../../bundles/axe-bot/prompt.md");
+    let protocol = axe::bot::PROTOCOL;
     assert!(protocol.contains("Triage it"));
     assert!(protocol.contains("never clear an escalation"));
-    assert!(protocol.contains("Never relay `new` or `done`"));
+    let preferences = include_str!("../../../bundles/responsive/prompt.md");
+    assert!(preferences.contains("Never relay `new` or `done`"));
 }
 
 const FOLLOW: i64 = sub::FOLLOW_BATCH_SECONDS;
