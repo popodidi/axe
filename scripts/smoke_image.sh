@@ -7,7 +7,7 @@ image=$1 revision=$2 version=$3
 name="axe-smoke-${RANDOM}-$$"
 trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 
-test "$(docker run --rm "$image" --version)" = "axe $version"
+test "$(docker run --rm "$image" --version)" = "axe $version (${revision:0:12})"
 docker run -d --name "$name" --entrypoint sh "$image" -c \
   'mkdir -p /tmp/state; echo fixture > /tmp/token; AXE_DB=/tmp/state/axe.db AXE_CONFIG=/tmp/missing AXE_TOKEN_FILE=/tmp/token exec axe server --listen 0.0.0.0:8790' >/dev/null
 get() {

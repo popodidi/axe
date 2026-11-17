@@ -118,7 +118,7 @@ jobs:
           cid=$(docker create "$IMAGE_REF")
           docker cp "$cid:/usr/local/bin/axe" "$stage/bin/axe"
           docker rm "$cid" >/dev/null
-          test "$("$stage/bin/axe" --version)" = "axe $VERSION"
+          test "$("$stage/bin/axe" --version)" = "axe $VERSION (${GITHUB_SHA:0:12})"
           cp LICENSE-MIT LICENSE-APACHE README.md "$stage/bin/"
           bin="axe-$TAG-linux-x86_64.tar.gz" skills="axe-skills-$TAG.tar.gz"
           tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$bin" -C "$stage/bin" axe LICENSE-MIT LICENSE-APACHE README.md

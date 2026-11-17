@@ -16,7 +16,7 @@ use crate::server;
 #[derive(Parser)]
 #[command(
     name = "axe",
-    version,
+    version = env!("AXE_VERSION"),
     about = "Personal agent task queue and dispatcher"
 )]
 pub struct Cli {

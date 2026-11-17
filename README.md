@@ -33,8 +33,9 @@ platforms install from source with `--tag <tag>`.
 
 This README describes `main`, and releases can lag it: a release may lack
 commands or flags named here (`axe <command> --help` is authoritative for the
-binary you run). A `main` build may still report the last release's version
-in `axe --version`.
+binary you run). `axe --version` names the commit after the version (`axe
+0.4.0 (56305982f192)`) when the build knew it (`crates/axe/build.rs`), so a
+`main` build is distinct from the release it follows.
 
 ## Quickstart
 
