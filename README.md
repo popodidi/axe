@@ -25,9 +25,9 @@ first, see [web/README.md](web/README.md)); `ts` generates the dashboard's
 TypeScript API types.
 
 Releases (`.github/workflows/release.yml`) publish a server image, a Linux
-binary tarball, the `skills/axe` tarball and a `bundles/` tarball from a
-`vX.Y.Z` tag, with sha256 sums; verify with `gh release download <tag> -R
-popodidi/axe && sha256sum -c SHA256SUMS`, or without a GitHub login `curl -LO
+binary tarball and the `skills/axe` tarball from a `vX.Y.Z` tag, with sha256
+sums; verify with `gh release download <tag> -R popodidi/axe && sha256sum -c
+SHA256SUMS`, or without a GitHub login `curl -LO
 https://github.com/popodidi/axe/releases/download/<tag>/<asset>`. Other
 platforms install from source with `--tag <tag>`.
 
@@ -66,8 +66,8 @@ A bot works the same way: `axe bot create --file bot.json` (`name`,
 `project`, `agent`, `identity`, `conduct`), `axe bot edit <name> --repo a,b`
 for a multi-repo run folder, `axe bot wake <name> --now --note ...`, then
 `axe dispatch`. Telegram is optional. The `axe doc put` commands below read
-`skills/` and `bundles/` from a clone of this repository or the release's
-skills and bundles tarballs; `cargo install` leaves neither.
+`skills/` and `bundles/` from a clone of this repository; `cargo install`
+leaves none, and the release skills tarball has `skills/axe` only.
 
 ## Not a workflow engine
 
