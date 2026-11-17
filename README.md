@@ -64,7 +64,8 @@ One host, a loopback server, one task, using the built-in defaults.
 A bot works the same way: `axe bot create --file bot.json` (`name`,
 `project`, `agent`, `identity`, `conduct`), `axe bot edit <name> --repo a,b`
 for a multi-repo run folder, `axe bot wake <name> --now --note ...`, then
-`axe dispatch`. Telegram is optional. The `axe doc put` commands below read
+`axe dispatch`. The bot protocol is built in; bundles only add opinions.
+Telegram is optional. The `axe doc put` commands below read
 `skills/` and `bundles/` from a clone of this repository; `cargo install`
 leaves none, and the release skills tarball has `skills/axe` only.
 
@@ -350,13 +351,14 @@ attached means nothing changes.
 like any skill, so runs get it from there instead of a machine install:
 `axe doc put skills/axe skills/axe`, then `axe doc attach skills/axe global`.
 
-**Bundles.** A bundle's `prompt.md` is text a bot carries in its system
-prompt: the bot inlines it, ordered by its `order:` front matter, before its
-identity and conduct. The bot protocol and the Telegram channel protocol ship
-as bundles in [`bundles/`](bundles/README.md); load and attach them
-(`axe doc put bundles/axe-bot bundles/axe-bot`, then `axe doc attach`) to give
-bots the protocol. A bot with no bundles runs on its identity and conduct
-alone. `axe context explain <task>` prints each candidate, its scope and why
+**Bundles.** Every bot's system prompt starts with the bot protocol, which
+is core (`crates/axe/src/bot_protocol.md`: runs and wakes, memory,
+subscriptions, goals, authority, the Telegram commands and cards). A bundle's
+`prompt.md` is text a bot carries after it: the bot inlines it, ordered by
+its `order:` front matter, before its identity and conduct. Bundles hold
+opinions, such as [`bundles/responsive`](bundles/README.md); load and attach
+one with `axe doc put` and `axe doc attach`. A bot with no bundles still works
+fully. `axe context explain <task>` prints each candidate, its scope and why
 it was included or skipped (`context.rs`).
 
 ## Configuration

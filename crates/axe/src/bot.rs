@@ -1,7 +1,7 @@
 //! Bots: a persistent identity in a project, one resumed agent session, and one
 //! wake schedule (self-wakes, named schedules, task events and messages). The
-//! prompt parts of attached bundles, identity and conduct are delivered as the
-//! system prompt; wakes are the only user prompt.
+//! bot protocol, the prompt parts of attached bundles, identity and conduct are
+//! delivered as the system prompt; wakes are the only user prompt.
 //! Design: `docs/design/bots.md`.
 //!
 //! All times are fixed-width UTC strings (`2026-11-07T10:00:00Z`), so string
@@ -1487,13 +1487,19 @@ pub fn render_prompt(c: &Claimed, resumed: bool) -> String {
     s
 }
 
-/// The system prompt file: the prompt parts of the bundles attached to the
-/// bot (in order, `context::bot_prompt_parts`), then its identity and
-/// conduct. The bot protocol and channel protocols are such bundles
-/// (`bundles/` in the axe repository); with none attached the prompt is the
-/// identity and conduct alone.
+/// The bot protocol every bot carries, first in its system prompt: runs and
+/// wakes, memory, subscriptions, goals, authority and the Telegram commands.
+/// Opinionated preferences are bundles (`bundles/` in the axe repository).
+pub const PROTOCOL: &str = include_str!("bot_protocol.md");
+
+/// The system prompt file: the bot protocol ([`PROTOCOL`]), the prompt parts
+/// of the bundles attached to the bot (in order, `context::bot_prompt_parts`),
+/// then its identity and conduct. A bot with no bundles still gets the whole
+/// protocol.
 pub fn system_prompt(b: &Bot, parts: &[String]) -> String {
     let mut s = String::new();
+    s.push_str(PROTOCOL.trim_end());
+    s.push_str("\n\n");
     for p in parts {
         s.push_str(p.trim_end());
         s.push_str("\n\n");

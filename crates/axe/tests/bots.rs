@@ -194,11 +194,14 @@ fn create_then_first_run_gets_system_prompt_and_only_wakes() {
     let out = rig.dispatcher(true, "exit0").wait();
     assert!(out.status.success(), "{out:?}");
 
-    // No bundle attached: the bot still runs, on its identity and conduct.
+    // No bundle attached: the protocol, then identity and conduct.
     let system = rig.file("system-1");
     assert_eq!(
         system,
-        "# Identity (bot b, project a)\n\nIDENTITY-TEXT\n\n# Code of conduct\n\nCONDUCT-TEXT\n"
+        format!(
+            "{}\n\n# Identity (bot b, project a)\n\nIDENTITY-TEXT\n\n# Code of conduct\n\nCONDUCT-TEXT\n",
+            bot::PROTOCOL.trim_end()
+        )
     );
     assert!(
         !system.contains("NOTES-TEXT"),
@@ -394,12 +397,12 @@ fn shipped_bundle(name: &str) -> PathBuf {
 }
 
 #[test]
-fn shipped_bundles_rebuild_the_system_prompt_from_before_bundles() {
-    // Golden: tests/fixtures/bot_system_golden.md is the system prompt the
-    // compiled-in protocol produced (default features) for this bot.
+fn the_protocol_and_the_shipped_bundle_build_the_golden_system_prompt() {
+    // Golden: tests/fixtures/bot_system_golden.md is the system prompt of this
+    // bot with the shipped preferences bundle attached (default features).
     let dir = tempfile::tempdir().unwrap();
     let store = axe::doc::Store::open(&Default::default(), &dir.path().join("axe.db")).unwrap();
-    for name in ["telegram", "axe-bot"] {
+    for name in ["responsive"] {
         let mut files = Vec::new();
         for e in std::fs::read_dir(shipped_bundle(name)).unwrap() {
             let e = e.unwrap();
@@ -432,7 +435,33 @@ fn shipped_bundles_rebuild_the_system_prompt_from_before_bundles() {
         golden.contains("Owner preferences and standing rules live in your conduct, not in notes.")
             && golden.contains("notes hold only what axe")
             && golden.contains("\"Owner preferences\" section"),
-        "the protocol bundle carries the preferences-in-conduct rule"
+        "the protocol carries the preferences-in-conduct rule"
+    );
+}
+
+#[test]
+fn a_bot_with_no_bundles_gets_the_whole_protocol() {
+    let b: bot::Bot = serde_json::from_value(json!({
+        "id":1,"name":"bare","project":"proj","agent":"claude",
+        "identity":"I.\n","conduct":"C.\n",
+        "notes":"","heartbeat_seconds":0,"nudge_after_seconds":600,"state":"active",
+        "session_agent":null,"session_id":null,"resume_count":0,"failures":0,
+        "created_at":"x","updated_at":"x"}))
+    .unwrap();
+    let system = bot::system_prompt(&b, &[]);
+    assert!(system.starts_with("# axe bot protocol\n"), "{system}");
+    for section in [
+        "## Runs and wakes\n",
+        "## Memory\n",
+        "## Task-event subscriptions\n",
+        "## Goals\n",
+        "## Authority\n",
+        "## Talking to the owner (Telegram)\n",
+    ] {
+        assert!(system.contains(section), "{section}");
+    }
+    assert!(
+        system.ends_with("# Identity (bot bare, project proj)\n\nI.\n\n# Code of conduct\n\nC.\n")
     );
 }
 
@@ -442,11 +471,11 @@ fn attaching_and_detaching_a_bundle_changes_the_next_runs_system_prompt() {
     rig.srv.ok(&[
         "doc",
         "put",
-        "bundles/axe-bot",
-        shipped_bundle("axe-bot").to_str().unwrap(),
+        "bundles/responsive",
+        shipped_bundle("responsive").to_str().unwrap(),
     ]);
     rig.srv
-        .ok(&["doc", "attach", "bundles/axe-bot", "owner:bot:b"]);
+        .ok(&["doc", "attach", "bundles/responsive", "owner:bot:b"]);
     rig.create(json!({}));
     let out = rig.dispatcher(true, "exit0").wait();
     assert!(out.status.success(), "{out:?}");
@@ -454,6 +483,7 @@ fn attaching_and_detaching_a_bundle_changes_the_next_runs_system_prompt() {
     assert!(system.starts_with("# axe bot protocol\n"), "{system}");
     assert!(
         system.contains("## Authority\n")
+            && system.contains("\n\n## Responsiveness\n")
             && system.contains("\n\n# Identity (bot b, project a)\n\nIDENTITY-TEXT\n"),
         "{system}"
     );
@@ -463,17 +493,20 @@ fn attaching_and_detaching_a_bundle_changes_the_next_runs_system_prompt() {
     );
 
     rig.srv
-        .ok(&["doc", "detach", "bundles/axe-bot", "owner:bot:b"]);
+        .ok(&["doc", "detach", "bundles/responsive", "owner:bot:b"]);
     rig.srv
         .ok(&["bot", "wake", "b", "--now", "--note", "again"]);
     let out = rig.dispatcher(true, "exit0").wait();
     assert!(out.status.success(), "{out:?}");
     let system = rig.file("system-2");
+    // With no bundles the run still carries the whole protocol.
+    assert!(system.starts_with("# axe bot protocol\n"), "{system}");
     assert!(
-        system.starts_with("# Identity (bot b, project a)\n"),
+        system.contains("## Talking to the owner (Telegram)\n")
+            && !system.contains("## Responsiveness")
+            && system.contains("\n\n# Identity (bot b, project a)\n"),
         "{system}"
     );
-    assert!(!system.contains("axe bot protocol"), "{system}");
 }
 
 #[test]
