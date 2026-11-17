@@ -199,8 +199,10 @@ fn check(
         .filter(|r| r.starts_with("refs/remotes/origin/"))
         .ok_or_else(|| {
             gap(format!(
-                "{} has no refs/remotes/origin/HEAD (run `git remote set-head origin --auto`)",
-                canonical.display()
+                "{} has no refs/remotes/origin/HEAD (run `git -C {} remote set-head origin {}`)",
+                canonical.display(),
+                canonical.display(),
+                head_hint(&canonical)
             ))
         })?;
     Ok(Ready {
@@ -209,6 +211,32 @@ fn check(
         base_ref,
         branch_prefix: cfg.worktrees.clone().unwrap_or_default().branch_prefix,
     })
+}
+
+/// The branch to name in the missing-`origin/HEAD` hint. `set-head --auto`
+/// asks the remote, which fails for a fresh bare origin whose HEAD names an
+/// unpushed branch, so name a fetched branch: `main` or `master` when fetched,
+/// else the only one, else `<branch>`.
+fn head_hint(canonical: &Path) -> String {
+    let refs = git(
+        canonical,
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=3)",
+            "refs/remotes/origin/",
+        ],
+    )
+    .unwrap_or_default();
+    let branches: Vec<&str> = refs.lines().filter(|b| *b != "HEAD").collect();
+    ["main", "master"]
+        .into_iter()
+        .find(|b| branches.contains(b))
+        .or(match branches[..] {
+            [only] => Some(only),
+            _ => None,
+        })
+        .unwrap_or("<branch>")
+        .to_string()
 }
 
 /// Runs git with a deadline; never inherits redirecting Git environment.

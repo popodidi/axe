@@ -335,6 +335,13 @@ enum Cmd {
     },
     /// Validate and print the local config ($AXE_CONFIG)
     Config,
+    /// Write a starter config ($AXE_CONFIG) with a `stub` agent that needs no
+    /// model, and print the commands for a first task. Never overwrites
+    Init {
+        /// Print the starter config instead of writing it
+        #[arg(long)]
+        print: bool,
+    },
     /// Show whether the dispatcher is admitting new sessions (resource
     /// pressure or a manual hold), or set and release a hold
     Admission {
@@ -3456,6 +3463,38 @@ pub fn run() -> Result<()> {
             println!("# config: {}", cfg_path.display());
             println!("# db: {}", db::default_path()?.display());
             print!("{}", toml::to_string_pretty(&cfg)?);
+        }
+        Cmd::Init { print } => {
+            if *print {
+                print!("{}", config::STARTER);
+                return Ok(());
+            }
+            let path = config::default_path()?;
+            if path.exists() {
+                anyhow::bail!(
+                    "{} exists; `axe init --print` shows the starter config",
+                    path.display()
+                );
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("create {}", dir.display()))?;
+            }
+            let cfg = Config::parse(config::STARTER)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, config::STARTER.as_bytes()))
+                .with_context(|| format!("write {}", path.display()))?;
+            let demo = cfg.workspace_root().join("demo");
+            println!("wrote {}", path.display());
+            println!("first task, with the stub agent (no model):");
+            println!("  mkdir -p {}", demo.display());
+            println!("  axe server &");
+            println!("  axe add --project demo --title \"first task\" --agent stub");
+            println!("  axe dispatch --once");
+            println!("  axe list --all");
         }
         Cmd::Backup { to } => {
             client().backup(to)?;

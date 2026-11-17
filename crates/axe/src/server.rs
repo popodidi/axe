@@ -119,6 +119,21 @@ struct State {
     forms: form::Forms,
 }
 
+impl State {
+    /// Checks an agent name against the config. A miss re-reads the config
+    /// file, so an agent added since the server started is usable without a
+    /// restart; the rest of the loaded config is unchanged.
+    fn check_agent(&self, check: impl Fn(&Config) -> Result<()>) -> Result<()> {
+        check(&self.cfg).or_else(|miss| match Config::load(&self.config_path) {
+            Ok(fresh) => check(&fresh),
+            Err(e) => Err(anyhow::anyhow!(
+                "{miss:#} (re-reading {}: {e:#})",
+                self.config_path.display()
+            )),
+        })
+    }
+}
+
 impl channel::Store for State {
     fn conn(&self) -> MutexGuard<'_, Connection> {
         State::conn(self)
@@ -1359,7 +1374,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 who: Who,
             }
             let b: Save = req.json()?;
-            st.cfg.validate_agent(b.template.agent.as_deref())?;
+            st.check_agent(|c| c.validate_agent(b.template.agent.as_deref()))?;
             let id = path.get(2).map(|id| task_id(id)).transpose()?;
             let mut conn = st.conn();
             let id = routine::save(&mut conn, &b.who.actor(), id, &b.template, routine::now())?;
@@ -1790,7 +1805,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
         }
         ("POST", ["api", "tasks"]) => {
             let b: AddBody = req.json()?;
-            st.cfg.validate_agent(b.agent.as_deref())?;
+            st.check_agent(|c| c.validate_agent(b.agent.as_deref()))?;
             let mut conn = st.conn();
             let id = db::add_task_full(
                 &mut conn,
@@ -2350,8 +2365,7 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("POST", ["api", "bots"]) => {
             let b: Create = req.json()?;
-            st.cfg
-                .validate_bot_agent(b.bot.agent.as_deref().unwrap_or("claude"))?;
+            st.check_agent(|c| c.validate_bot_agent(b.bot.agent.as_deref().unwrap_or("claude")))?;
             let created = bot::create(&mut st.conn(), &b.who.actor(), &b.bot, now)?;
             ok(201, &created)
         }

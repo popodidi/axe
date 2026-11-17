@@ -1313,6 +1313,26 @@ impl Config {
 pub const TEMPLATE_VARS: [&str; 5] = ["session_id", "prompt", "cwd", "task_id", "project"];
 
 /// Extra placeholders only `bot_args` may use.
+/// The config `axe init` writes: a `stub` agent for a first run without a
+/// model. It must parse (`tests/config.rs`).
+pub const STARTER: &str = r#"# axe config: `axe config` prints it resolved; every field is in `Config`
+# (crates/axe/src/config.rs). The server checks `--agent` names against this
+# file; restart `axe server` after other edits.
+
+# Tasks without --repo run in <workspace_root>/<project>; repos default to
+# <workspace_root>/<name>.
+workspace_root = "~/workspace"
+
+# A stub agent: no model. It notes where it ran and marks its task done.
+#   axe add --project demo --title "first task" --agent stub
+#   axe dispatch --once
+# The built-in `claude` agent (unpinned tasks) needs the Claude Code CLI
+# installed and logged in on the dispatcher host.
+[agents.stub]
+cmd = ["sh", "-c", "axe note \"$AXE_TASK\" \"stub agent ran in $PWD\" && axe set \"$AXE_TASK\" --state done"]
+session = "none"
+"#;
+
 pub const BOT_VARS: [&str; 2] = ["system_prompt_file", "settings_file"];
 
 /// Rejects `{name}` placeholders that are not in [`TEMPLATE_VARS`] or `extra`.
