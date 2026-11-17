@@ -5,6 +5,7 @@ run-name: release ${{ github.ref_name }}${{ !startsWith(github.ref, 'refs/tags/v
 # - image ghcr.io/popodidi/axe:<tag> (its digest is in the release notes)
 # - axe-<tag>-linux-x86_64.tar.gz: the image's `axe` binary (dashboard embedded)
 # - axe-skills-<tag>.tar.gz: skills/axe
+# - axe-bundles-<tag>.tar.gz: bundles/ (for `axe doc put bundles/<name> ...`)
 # - a .sha256 file per asset and SHA256SUMS
 # The `gate` job first runs ci.yml in full (feature variants, embed-ui, web);
 # nothing is published unless it passes and the tagged commit is on main.
@@ -118,15 +119,18 @@ jobs:
           cid=$(docker create "$IMAGE_REF")
           docker cp "$cid:/usr/local/bin/axe" "$stage/bin/axe"
           docker rm "$cid" >/dev/null
-          test "$("$stage/bin/axe" --version)" = "axe $VERSION"
+          test "$("$stage/bin/axe" --version)" = "axe $VERSION (${GITHUB_SHA:0:12})"
           cp LICENSE-MIT LICENSE-APACHE README.md "$stage/bin/"
-          bin="axe-$TAG-linux-x86_64.tar.gz" skills="axe-skills-$TAG.tar.gz"
+          bin="axe-$TAG-linux-x86_64.tar.gz" skills="axe-skills-$TAG.tar.gz" bundles="axe-bundles-$TAG.tar.gz"
           tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$bin" -C "$stage/bin" axe LICENSE-MIT LICENSE-APACHE README.md
           tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$skills" -C skills axe
+          tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$bundles" bundles
           cd "$dist"
-          for f in "$bin" "$skills"; do sha256sum "$f" > "$f.sha256"; done
-          sha256sum "$bin" "$skills" > SHA256SUMS
+          for f in "$bin" "$skills" "$bundles"; do sha256sum "$f" > "$f.sha256"; done
+          sha256sum "$bin" "$skills" "$bundles" > SHA256SUMS
           sha256sum -c SHA256SUMS
+          # The run log lists every asset and its contents (a dry run's evidence).
+          for f in "$bin" "$skills" "$bundles"; do echo "== $f"; tar -tzf "$f"; done
           {
             echo "axe $VERSION, commit $GITHUB_SHA."
             echo

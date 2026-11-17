@@ -16,7 +16,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY --from=web /src/web/out ./web/out
-RUN cargo build --release --locked -p axe-os --features embed-ui
+# The commit `axe --version` reports (build.rs); the context has no `.git`.
+ARG GIT_COMMIT
+RUN AXE_GIT_COMMIT="$GIT_COMMIT" cargo build --release --locked -p axe-os --features embed-ui
 
 FROM debian:bookworm-slim
 # python3 serves maintenance pods that reuse this image (database copies);
