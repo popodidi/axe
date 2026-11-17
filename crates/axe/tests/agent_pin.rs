@@ -185,3 +185,50 @@ fn routine_pin_is_validated_saved_and_copied_for_scheduled_and_manual_tasks() {
         .success());
     assert_eq!(s.get(&format!("/api/routines/{id}"))["agent"], "pinned");
 }
+
+#[test]
+fn agent_added_to_the_config_after_server_start_is_accepted_without_restart() {
+    let d = tempfile::tempdir().unwrap();
+    let cfg = config(d.path());
+    let s = Server::start_with(d.path(), &cfg, Some(TOKEN), &[], &[]);
+    let add = |agent: &str| {
+        s.run(&[
+            "add",
+            "--project",
+            "project",
+            "--title",
+            "t",
+            "--agent",
+            agent,
+        ])
+    };
+    let out = add("late");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown agent"));
+    // A config that no longer parses keeps the miss and names the parse error.
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, format!("{text}\n[agents.late\n")).unwrap();
+    let out = add("late");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        err.contains("unknown agent") && err.contains("re-reading"),
+        "{err}"
+    );
+    std::fs::write(
+        &cfg,
+        format!("{text}\n[agents.late]\ncmd = [\"sh\", \"-c\", \"\\\"$AXE_BIN\\\" set \\\"$AXE_TASK\\\" --state done\"]\n"),
+    )
+    .unwrap();
+    let out = add("late");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8(out.stdout).unwrap();
+    let id = id.trim();
+    assert_eq!(s.get(&format!("/api/tasks/{id}"))["agent"], "late");
+    assert!(s.dispatcher(&["--once"], &[]).wait().status.success());
+    assert_eq!(s.get(&format!("/api/tasks/{id}"))["state"], "done");
+}

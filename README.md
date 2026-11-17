@@ -43,15 +43,17 @@ One host, a loopback server, one task, using the built-in defaults.
 1. **Install the agent CLI and log in** on the host that runs `axe dispatch`
    (`claude` for the built-in agent; `axe config` prints its command). The
    dispatcher only spawns it; a missing binary escalates the task with
-   `spawn "claude" failed`. To try axe without a model, declare a stub agent
-   whose command is any script that ends with `axe set "$AXE_TASK" --state done`.
-2. **Config** (optional): `~/.config/axe/config.toml`. Agents are
+   `spawn "claude" failed`. To try axe without a model, use the `stub` agent
+   from `axe init`.
+2. **Config** (optional): `~/.config/axe/config.toml`. `axe init` writes a
+   starter one with a `stub` agent (no model) and prints the commands for a
+   first task (`STARTER` in `crates/axe/src/config.rs`). Agents are
    `[agents.<name>]` tables (`cmd`, `resume_cmd`, `session`, `harness`,
    `bot_args`; `Agent` in `crates/axe/src/config.rs`); bots need `bot_args`.
    Repos are `[repos.<name>]` (`path`, `url`).
 3. **Server**: `axe server`. On loopback it needs no token. It reads the
-   config once, and `axe add --agent` checks names against the server's
-   agents, so restart the server after adding an agent.
+   config at start; `axe add --agent` re-reads it for a name it does not
+   know, so a new agent needs no restart (other config edits do).
 4. **A repo**: a Git clone at `~/workspace/<name>` (or `[repos.<name>] url`
    to clone on first use) with an `origin` remote whose `origin/HEAD` is set
    (`git remote set-head origin <branch>`; `worktree.rs`). Without it the run
