@@ -5,7 +5,7 @@
 //! privacy, and pin/unpin and keyboard edits.
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -53,6 +53,17 @@ struct StubState {
     files: HashMap<String, (String, u64, Vec<u8>)>,
     /// method -> description of a 400 it answers once.
     fail: HashMap<String, String>,
+    /// Bot token -> failures its next getUpdates calls get, in order.
+    poll_faults: HashMap<String, VecDeque<PollFault>>,
+}
+
+/// One failed getUpdates, as seen in production (task 1298).
+#[derive(Clone, Copy, Debug)]
+enum PollFault {
+    /// Telegram's own JSON 502.
+    BadGateway,
+    /// No response before the client's read timeout.
+    Hang(Duration),
 }
 
 /// A minimal Bot API: `/bot<token>/<method>` and `/file/bot<token>/<path>`.
@@ -189,6 +200,34 @@ fn api(st: &Mutex<StubState>, token: &str, method: &str, body: &[u8]) -> (u16, V
     };
     let at = Instant::now();
     if method == "getUpdates" {
+        let fault = {
+            let mut s = st.lock().unwrap();
+            let f = s.poll_faults.get_mut(token).and_then(VecDeque::pop_front);
+            if f.is_some() {
+                s.calls.push(Call {
+                    token: token.into(),
+                    method: method.into(),
+                    params: params.clone(),
+                    raw: Vec::new(),
+                    at,
+                });
+            }
+            f
+        };
+        let bad_gateway = || {
+            (
+                502,
+                json!({"ok":false,"error_code":502,"description":"Bad Gateway"}),
+            )
+        };
+        match fault {
+            Some(PollFault::BadGateway) => return bad_gateway(),
+            Some(PollFault::Hang(d)) => {
+                std::thread::sleep(d);
+                return bad_gateway();
+            }
+            None => {}
+        }
         let timeout = params["timeout"].as_u64().unwrap_or(0);
         let end = Instant::now() + Duration::from_millis(300.min(timeout * 1000));
         loop {
@@ -1490,6 +1529,86 @@ fn telegram_config_is_validated() {
         let e = format!("{:#}", Config::parse(&bad).unwrap_err());
         assert!(e.contains(msg), "{bad}: {e}");
     }
+}
+
+#[test]
+fn polling_recovers_after_502s_and_timeouts_without_loss_or_duplicates() {
+    // Task 1298: Telegram answered one bot's getUpdates with 502s and read
+    // timeouts for minutes while the other bots polled normally.
+    let tokens = tempfile::tempdir().unwrap();
+    let rig = Rig::with(&extra_bots(tokens.path()));
+    rig.add_bot("aux");
+    wait_for("both pollers", 20, || {
+        let calls = rig.stub.calls("getUpdates");
+        [TG_TOKEN, AUX_TOKEN]
+            .iter()
+            .all(|t| calls.iter().any(|c| c.token == *t))
+    });
+    let confirmed = |token: &str, update: i64| {
+        rig.stub
+            .calls("getUpdates")
+            .iter()
+            .any(|c| c.token == token && c.params["offset"].as_i64().is_some_and(|o| o > update))
+    };
+    // The poller's read timeout is poll_timeout (1 s) + 15 s.
+    let faults = [
+        PollFault::BadGateway,
+        PollFault::BadGateway,
+        PollFault::Hang(Duration::from_secs(17)),
+        PollFault::BadGateway,
+        PollFault::BadGateway,
+    ];
+    rig.stub
+        .state
+        .lock()
+        .unwrap()
+        .poll_faults
+        .insert(TG_TOKEN.into(), faults.into_iter().collect());
+    let left = || rig.stub.state.lock().unwrap().poll_faults[TG_TOKEN].len();
+    // Past any poll already in flight: the outage has begun.
+    wait_for("outage", 20, || left() < faults.len());
+    // Queued while the outage lasts.
+    rig.stub
+        .push(text_msg(90, 60, OWNER, OWNER, "sent during outage"));
+    rig.stub.push(text_msg(91, 61, OWNER, OWNER, "correction"));
+    rig.stub.push_to(
+        AUX_TOKEN,
+        text_msg(40, 30, OWNER, OWNER, "to the healthy bot"),
+    );
+
+    // The healthy bot keeps polling while the other one fails.
+    wait_for("healthy bot", 20, || confirmed(AUX_TOKEN, 40));
+    assert!(left() > 0, "aux was served only after cos's outage");
+
+    wait_for("recovery", 60, || confirmed(TG_TOKEN, 91));
+    let failed = rig
+        .stub
+        .calls("getUpdates")
+        .into_iter()
+        .filter(|c| c.token == TG_TOKEN && c.params["offset"].is_null())
+        .count();
+    assert!(
+        failed > faults.len(),
+        "every failed poll retried from the same offset"
+    );
+    let texts: Vec<String> = rig.inbound().into_iter().map(|m| m.2).collect();
+    for t in ["sent during outage", "correction", "to the healthy bot"] {
+        assert_eq!(
+            texts.iter().filter(|x| *x == t).count(),
+            1,
+            "{t} stored once"
+        );
+    }
+    // Let the recovered poller confirm and poll again: nothing is redelivered.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(rig.inbound().len(), 3);
+    let cos = rig.srv().ok(&["bot", "log", "cos", "--limit", "100"]);
+    assert_eq!(cos.matches("poll_recovered").count(), 1, "{cos}");
+    let ev: Value = serde_json::from_str(&rig.events("poll_recovered")[0]).unwrap();
+    assert_eq!(ev["failed_polls"], faults.len());
+    assert!(ev["seconds"].as_i64().unwrap() >= 17, "{ev}");
+    let aux = rig.srv().ok(&["bot", "log", "aux", "--limit", "100"]);
+    assert!(!aux.contains("poll_recovered"), "{aux}");
 }
 
 #[test]
