@@ -59,14 +59,21 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+td:has(.rowActions > :nth-child(2)) .name {
+  padding-right: calc(var(--space-6) * 2);
+}
 .name a {
   text-decoration: underline;
   text-underline-offset: var(--space-quarter);
 }
-.disclosure {
+.rowActions {
   position: absolute;
   top: var(--space-compact);
   right: var(--space-half);
+  display: flex;
+  gap: var(--space-half);
+}
+.disclosure {
   cursor: pointer;
   font-size: var(--text-caption);
   color: var(--text-secondary);

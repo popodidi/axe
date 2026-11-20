@@ -1,8 +1,11 @@
 # axe web dashboard
 
 Read-only Next.js / TypeScript dashboard for an axe server: Tasks, Routines,
-Bots, Goals, Stats and Cost views over the server's GET API. All data stays
-in the server; the browser holds no credentials and has no mutation UI.
+Bots, Goals, Store, Stats and Cost views over the server's GET API. All data
+stays in the server; the browser keeps no token and has no mutation UI. The
+Store view and store previews read private blobs and docs through a
+read-session cookie the owner unlocks with the token (same origin only, so
+the embedded dashboard).
 Design intent: [docs/design/dashboard.md](../docs/design/dashboard.md).
 
 ## Development and checks
@@ -51,6 +54,7 @@ regenerate it from the repository root with
 | Views | `components/dashboard/` (`routines`, `bots`, `goals`, `stats`, `cost`) |
 | Run log viewer and conversation replay | `components/dashboard/run-log.tsx`, `lib/run-log.ts`, `lib/transcript.ts` |
 | Stats, bot stats, cost and goal calculations | `lib/stats.ts`, `lib/bot-stats.ts`, `lib/cost.ts`, `lib/goals.ts` |
+| Store view, store previews and the read session | `components/dashboard/store.tsx`, `store-viewer.tsx`, `lib/store.ts` |
 | Theme and tokens | `app/styles/`, `lib/theme-script.ts` |
 
 The URL is the state: every view, selection and filter is a query parameter

@@ -277,6 +277,12 @@ opens without the token, for example from a phone; it renders inline in a
 sandbox. The signing key is created on first start; `[blobs]` sets the
 directory, size limit, link base URL and key file.
 
+The dashboard's Store view lists and searches blobs and docs, and a task's
+artifacts preview store links inline (images, text, Markdown, sandboxed
+HTML), re-signing an expired link from its sha256. Older artifact URLs open
+too when a link-map doc (any doc path ending in `.links.tsv`, with `url` and
+`sha256` columns; `blob_refs.rs`) maps them to a blob.
+
 ## Sealed forms
 
 `axe form ask` (`sealed.rs`, `form.rs`) asks the owner for values (secret,
@@ -393,7 +399,10 @@ run on server start (`db.rs`); back up before upgrading.
 `GET` is unauthenticated, except Telegram message content, `/api/blobs`,
 `/api/docs` and
 the dispatcher connection (a signed `/b/` link needs only its signature);
-every other method needs `Authorization: Bearer <token>`. The server refuses
+every other method needs `Authorization: Bearer <token>`. For the dashboard,
+`POST /api/session` with the token sets an HttpOnly read-session cookie that
+reads blobs and docs and signs blob links for seven days, and nothing else
+(`session_route`); `POST /api/session-end` clears it. The server refuses
 a non-loopback listen address without a token file. Expose it only on a
 trusted network: reads include full agent logs. Bodies are JSON, errors are
 `{"error": "..."}`, and `X-Axe-Request-Id` makes a write retry-safe.
