@@ -411,6 +411,32 @@ fn now() -> i64 {
     crate::remote::epoch()
 }
 
+/// Bounds a `getUpdates` outage: one log line, plus a `poll_recovered` bot
+/// event when it outlasted two long-poll windows (`min_secs`), long enough for
+/// the owner to notice. Updates sent meanwhile arrive now: the offset never
+/// advanced.
+fn poll_recovered(b: &TgBot, store: &dyn Store, id: i64, since: i64, polls: u32, min_secs: u64) {
+    let secs = now() - since;
+    eprintln!(
+        "telegram: bot {}: getUpdates recovered after {polls} failed polls over {secs}s (since {})",
+        b.name,
+        bot::ts(since)
+    );
+    if secs < min_secs as i64 {
+        return;
+    }
+    let body = json!({"failed_polls": polls, "since": bot::ts(since), "seconds": secs});
+    if let Err(e) = bot::event(
+        &store.conn(),
+        id,
+        &Actor::new("telegram"),
+        "poll_recovered",
+        &body.to_string(),
+    ) {
+        eprintln!("telegram: bot {}: poll_recovered event: {e:#}", b.name);
+    }
+}
+
 fn owner_actor() -> Actor {
     Actor::new("owner")
 }
@@ -579,6 +605,8 @@ impl Gateway {
         let mut started = false;
         let mut last_attention = 0i64;
         let mut failures: HashMap<i64, u32> = HashMap::new();
+        // (first failure, failed polls) since the last successful getUpdates.
+        let mut outage: Option<(i64, u32)> = None;
         while !store.stopping() {
             let id = bot_id(&store.conn(), &b.name).ok();
             let Some(id) = id else {
@@ -607,9 +635,15 @@ impl Gateway {
                 params["offset"] = json!(o);
             }
             let updates = match b.api.call("getUpdates", &params) {
-                Ok(u) => u,
+                Ok(u) => {
+                    if let Some((since, polls)) = outage.take() {
+                        poll_recovered(b, store, id, since, polls, 2 * self.poll_timeout);
+                    }
+                    u
+                }
                 Err(e) => {
                     eprintln!("telegram: bot {}: {e}", b.name);
+                    outage.get_or_insert((now(), 0)).1 += 1;
                     std::thread::sleep(Duration::from_secs(
                         e.retry_after.unwrap_or(3).min(MAX_RETRY_AFTER),
                     ));
