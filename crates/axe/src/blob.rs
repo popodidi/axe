@@ -220,6 +220,36 @@ impl Store {
     }
 }
 
+/// Lifetime of a browser read session (`/api/session`): seven days.
+pub const SESSION_SECS: i64 = 7 * 86400;
+
+impl Store {
+    /// A read-session value (`<exp>.<sig>`) valid until `exp`, signed with the
+    /// link key: the dashboard's cookie for store reads.
+    pub fn session_value(&self, exp: i64) -> String {
+        let sig = hex(&hmac_sha256(&self.key, session_message(exp).as_bytes()));
+        format!("{exp}.{sig}")
+    }
+
+    /// The expiry of a valid, unexpired read-session value at `now`.
+    pub fn verify_session(&self, value: &str, now: i64) -> Option<i64> {
+        let (exp, sig) = value.split_once('.')?;
+        let exp: i64 = exp.parse().ok()?;
+        let want = hex(&hmac_sha256(&self.key, session_message(exp).as_bytes()));
+        let same = want.len() == sig.len()
+            && want
+                .bytes()
+                .zip(sig.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0;
+        (same && now < exp).then_some(exp)
+    }
+}
+
+fn session_message(exp: i64) -> String {
+    format!("axe-read-session-v1\n{exp}")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum LinkError {
     Invalid,
@@ -764,6 +794,24 @@ mod tests {
         // A second open reuses the key, so links survive a restart.
         let again = Store::open(&Blobs::default(), &dir.path().join("axe.db")).unwrap();
         assert_eq!(again.link_path(&sha, Some("a b.txt"), 1000), path);
+    }
+
+    #[test]
+    fn sessions_verify_until_expiry_and_reject_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&Blobs::default(), &dir.path().join("axe.db")).unwrap();
+        let v = store.session_value(1000);
+        assert_eq!(store.verify_session(&v, 999), Some(1000));
+        assert_eq!(store.verify_session(&v, 1000), None);
+        assert_eq!(
+            store.verify_session(&v.replace("1000.", "2000."), 999),
+            None
+        );
+        assert_eq!(store.verify_session("1000", 999), None);
+        // A link signature is not a session.
+        let link = store.link_path(&sha256_hex(b"x"), None, 1000);
+        let sig = link.rsplit_once("sig=").unwrap().1;
+        assert_eq!(store.verify_session(&format!("1000.{sig}"), 999), None);
     }
 
     #[test]

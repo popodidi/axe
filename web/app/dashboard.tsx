@@ -31,6 +31,7 @@ import {
   cx,
 } from "../components/ui";
 import { ArtifactTable } from "../components/dashboard/artifact-table";
+import { Store } from "../components/dashboard/store";
 import { RunList } from "../components/dashboard/run-card";
 import { RunLog } from "../components/dashboard/run-log";
 import {
@@ -75,9 +76,9 @@ const when = (s: string) =>
     dateStyle: "medium",
     timeStyle: "short",
   });
-const views = ["tasks", "routines", "bots", "goals", "stats", "cost"];
-const labels = ["Tasks", "Routines", "Bots", "Goals", "Stats", "Cost"];
-const keys = ["t", "r", "b", "o", "s", "c"];
+const views = ["tasks", "routines", "bots", "goals", "store", "stats", "cost"];
+const labels = ["Tasks", "Routines", "Bots", "Goals", "Store", "Stats", "Cost"];
+const keys = ["t", "r", "b", "o", "e", "s", "c"];
 type Snapshot = {
   tasks: Task[];
 };
@@ -416,6 +417,7 @@ export default function Dashboard() {
           r: "routines",
           b: "bots",
           o: "goals",
+          e: "store",
         };
         if (v[e.key]) {
           update({ view: v[e.key], task: null, focus: null, page: null, bot: null, goal: null });
@@ -639,7 +641,7 @@ export default function Dashboard() {
             className={styles.listPane}
             aria-label="Task workspace"
           >
-            {view !== "stats" && view !== "cost" && !botName && !goalName && (
+            {view !== "stats" && view !== "cost" && view !== "store" && !botName && !goalName && (
             <div className={styles.filters}>
               <Search
                 compact
@@ -762,6 +764,13 @@ export default function Dashboard() {
                   update({ routine: String(id), task: null, tab: null })
                 }
                 onOpenTask={(id) => update({ task: String(id), tab: null })}
+              />
+            ) : view === "store" ? (
+              <Store
+                base={base}
+                params={p}
+                onChange={(patch) => update(patch)}
+                onOpenTask={(id) => update({ task: String(id), tab: "artifacts" })}
               />
             ) : view === "cost" ? (
               <Cost base={base} params={p} onRange={(patch) => update(patch)} />
@@ -1038,7 +1047,7 @@ export default function Dashboard() {
                         </article>
                       ))
                   ) : tab === "artifacts" ? (
-                    <ArtifactTable key={activeDetail.task.id} events={artifacts} onCopy={copy} />
+                    <ArtifactTable key={activeDetail.task.id} base={base} events={artifacts} onCopy={copy} />
                   ) : (
                     <article className={styles.spec} aria-label="Spec">
                       <Markdown compact body={activeDetail.task.detail} />

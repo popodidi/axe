@@ -1,6 +1,15 @@
 import { safeLink } from "./model";
+import { storeLink, type StoreLink } from "./store";
+export type ArtifactReference = {
+  type: string;
+  name: string;
+  source: string;
+  href: string | undefined;
+  // Set for signed axe store links (`/b/<sha256>/<name>?exp=..&sig=..`).
+  blob?: StoreLink;
+};
 // Labels describe only the recorded URL; never infer external titles or status.
-export function artifactReference(value: string) {
+export function artifactReference(value: string): ArtifactReference {
   const href = safeLink(value);
   if (!href)
     return {
@@ -12,6 +21,15 @@ export function artifactReference(value: string) {
   const url = new URL(href);
   const parts = url.pathname.split("/").filter(Boolean);
   const source = url.hostname;
+  const blob = storeLink(href);
+  if (blob)
+    return {
+      type: "Store",
+      name: blob.name || `blob ${blob.sha256.slice(0, 12)}`,
+      source,
+      href,
+      blob,
+    };
   const repo = parts.slice(0, 2).join("/");
   if (
     source === "github.com" &&

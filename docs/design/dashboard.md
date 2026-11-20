@@ -60,6 +60,11 @@ success. Logs follow the tail only while the user is at it.
 
 ## Boundaries
 
-The browser only reads: it holds no credentials and has no mutation UI.
+The browser only reads: it keeps no token and has no mutation UI. Store
+views (blobs and docs, private reads) need the owner to unlock them once with
+the token, which the server swaps for an HttpOnly read-only session cookie.
+Store previews never run content on the dashboard's origin: HTML renders in
+a frame sandboxed without scripts or same-origin access, and the server
+serves every blob with `Content-Security-Policy: sandbox`.
 Anyone who can reach the server can read full agent logs, so public
 screenshots use synthetic fixtures only.

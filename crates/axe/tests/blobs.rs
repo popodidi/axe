@@ -257,3 +257,176 @@ fn s3_store_round_trip_dedup_and_links() {
         0
     );
 }
+
+/// GET with an optional cookie and no token.
+fn fetch_with(url: &str, cookie: Option<&str>) -> (u16, ureq::Response) {
+    let mut r = ureq::get(url);
+    if let Some(c) = cookie {
+        r = r.set("Cookie", c);
+    }
+    match r.call() {
+        Ok(r) => (r.status(), r),
+        Err(ureq::Error::Status(c, r)) => (c, r),
+        Err(e) => panic!("GET {url}: {e}"),
+    }
+}
+
+/// The dashboard's read session: the token buys an HttpOnly cookie that reads
+/// blobs and docs and signs links, and nothing else.
+#[test]
+fn read_session_cookie_reads_the_store_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    let f = dir.path().join("page.html");
+    std::fs::write(&f, "<script>alert(1)</script>").unwrap();
+    let sha = srv
+        .ok(&["blob", "put", f.to_str().unwrap()])
+        .trim()
+        .to_string();
+
+    let (status, r) = fetch(&format!("{}/api/session", srv.url));
+    assert_eq!(status, 200);
+    assert_eq!(json(&r.into_string().unwrap())["read"], false);
+    let anon = ureq::post(&format!("{}/api/session", srv.url)).call();
+    assert!(matches!(anon, Err(ureq::Error::Status(401, _))));
+
+    let r = ureq::post(&format!("{}/api/session", srv.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .call()
+        .unwrap();
+    let set = r.header("set-cookie").unwrap().to_string();
+    assert!(
+        set.contains("HttpOnly") && set.contains("SameSite=Strict"),
+        "{set}"
+    );
+    assert_eq!(json(&r.into_string().unwrap())["read"], true);
+    let cookie = set.split(';').next().unwrap().to_string();
+
+    let (status, r) = fetch_with(&format!("{}/api/session", srv.url), Some(&cookie));
+    assert_eq!(status, 200);
+    assert_eq!(json(&r.into_string().unwrap())["read"], true);
+    // Store reads work; blob bytes never run on the server's origin.
+    let (status, r) = fetch_with(&format!("{}/api/blobs/{sha}", srv.url), Some(&cookie));
+    assert_eq!(status, 200);
+    assert_eq!(r.header("content-security-policy"), Some("sandbox"));
+    assert_eq!(r.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(
+        fetch_with(&format!("{}/api/blobs", srv.url), Some(&cookie)).0,
+        200
+    );
+    assert_eq!(
+        fetch_with(&format!("{}/api/docs", srv.url), Some(&cookie)).0,
+        200
+    );
+    let link = ureq::post(&format!("{}/api/blobs/{sha}/link", srv.url))
+        .set("Cookie", &cookie)
+        .send_json(serde_json::json!({"ttl": 60, "name": "page.html"}))
+        .unwrap();
+    assert!(json(&link.into_string().unwrap())["path"]
+        .as_str()
+        .unwrap()
+        .starts_with(&format!("/b/{sha}/page.html?exp=")));
+    // Not uploads, other private reads or writes.
+    let up = ureq::post(&format!("{}/api/blobs", srv.url))
+        .set("Cookie", &cookie)
+        .send_bytes(b"x");
+    assert!(matches!(up, Err(ureq::Error::Status(401, _))));
+    assert_eq!(
+        fetch_with(&format!("{}/api/forms", srv.url), Some(&cookie)).0,
+        401
+    );
+    let add = ureq::post(&format!("{}/api/tasks", srv.url))
+        .set("Cookie", &cookie)
+        .send_json(serde_json::json!({"project": "p", "title": "t"}));
+    assert!(matches!(add, Err(ureq::Error::Status(401, _))));
+    // A forged or ended session reads nothing.
+    let forged = cookie.replace('.', ".0");
+    assert_eq!(
+        fetch_with(&format!("{}/api/blobs", srv.url), Some(&forged)).0,
+        401
+    );
+    let end = ureq::post(&format!("{}/api/session-end", srv.url))
+        .call()
+        .unwrap();
+    assert!(end.header("set-cookie").unwrap().contains("Max-Age=0"));
+}
+
+/// `?refs=1` names blobs and their tasks from signed links and link-map docs;
+/// `resolve` maps a recorded URL to its blob.
+#[test]
+fn refs_and_resolve_use_links_and_link_maps() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    let put = |name: &str, body: &str| {
+        let f = dir.path().join(name);
+        std::fs::write(&f, body).unwrap();
+        srv.ok(&["blob", "put", f.to_str().unwrap()])
+            .trim()
+            .to_string()
+    };
+    let new = put("new.png", "png");
+    let old = put("old.json", "{}");
+    let lone = put("lone.txt", "x");
+    let link = srv.ok(&["blob", "link", &new, "--name", "shot one.png"]);
+    let link = link.trim();
+    let t1 = srv
+        .ok(&["add", "--project", "p", "--title", "a"])
+        .trim()
+        .to_string();
+    let t2 = srv
+        .ok(&["add", "--project", "p", "--title", "b"])
+        .trim()
+        .to_string();
+    srv.ok(&["artifact", &t1, link]);
+    srv.ok(&["note", &t2, &format!("evidence {link} ok")]);
+    let old_url = "http://files.lan/run/dispatch%3Aab/manifest.json";
+    srv.ok(&["artifact", &t2, old_url]);
+    let map = dir.path().join("map.tsv");
+    std::fs::write(
+        &map,
+        format!("url\tsha256\nhttp://files.lan/run/dispatch:ab/manifest.json\t{old}\n"),
+    )
+    .unwrap();
+    srv.ok(&["doc", "put", "ref/old.links.tsv", map.to_str().unwrap()]);
+
+    let auth = format!("Bearer {TOKEN}");
+    let get = |path: &str| -> Value {
+        json(
+            &ureq::get(&format!("{}{path}", srv.url))
+                .set("Authorization", &auth)
+                .call()
+                .unwrap()
+                .into_string()
+                .unwrap(),
+        )
+    };
+    let all = get("/api/blobs?refs=1");
+    let by = |sha: &str| {
+        all.as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["sha256"] == sha)
+            .unwrap()
+            .clone()
+    };
+    let (t1, t2): (i64, i64) = (t1.parse().unwrap(), t2.parse().unwrap());
+    assert_eq!(by(&new)["names"], serde_json::json!(["shot one.png"]));
+    assert_eq!(by(&new)["tasks"], serde_json::json!([t1, t2]));
+    assert_eq!(by(&old)["names"], serde_json::json!(["manifest.json"]));
+    assert_eq!(by(&old)["tasks"], serde_json::json!([t2]));
+    assert_eq!(by(&lone)["tasks"], serde_json::json!([]));
+    // Without the flag the listing is unchanged.
+    assert!(get("/api/blobs")[0].get("names").is_none());
+
+    let q = |u: &str| format!("/api/blobs/resolve?url={}", axe::channel::pct_encode(u));
+    let hit = get(&q(old_url));
+    assert_eq!(hit["sha256"], old);
+    assert_eq!(hit["name"], "manifest.json");
+    assert_eq!(hit["content_type"], "application/json");
+    assert_eq!(get(&q(link))["sha256"], new);
+    let miss = ureq::get(&format!("{}{}", srv.url, q("http://files.lan/other")))
+        .set("Authorization", &auth)
+        .call();
+    assert!(matches!(miss, Err(ureq::Error::Status(404, _))));
+    assert_eq!(fetch(&format!("{}{}", srv.url, q(old_url))).0, 401);
+}

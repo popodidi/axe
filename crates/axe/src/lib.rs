@@ -3,6 +3,7 @@ pub mod admission;
 pub mod agent_proc;
 pub mod ask;
 pub mod blob;
+pub mod blob_refs;
 pub mod board;
 pub mod bot;
 pub mod channel;

@@ -529,6 +529,72 @@ fn private_read(path: &[String]) -> bool {
             && matches!(path[1].as_str(), "blobs" | "docs" | "asks" | "forms"))
 }
 
+/// Store reads a dashboard read session (`/api/session`) may make without
+/// the token: blob and doc GETs, and signing a link to a blob.
+fn store_read(req: &Request) -> bool {
+    let p: Vec<&str> = req.path.iter().map(String::as_str).collect();
+    match (req.method.as_str(), p.as_slice()) {
+        ("GET", ["api", "blobs" | "docs", ..]) => true,
+        ("POST", ["api", "blobs", sha, "link"]) => blob::check_sha(sha).is_ok(),
+        _ => false,
+    }
+}
+
+/// Name of the dashboard's read-session cookie.
+const SESSION_COOKIE: &str = "axe_read";
+
+/// The expiry of the request's valid read-session cookie.
+fn session(st: &State, req: &Request) -> Option<i64> {
+    let cookies = req.headers.get("cookie")?;
+    cookies
+        .split(';')
+        .filter_map(|c| c.trim().split_once('='))
+        .filter(|(k, _)| *k == SESSION_COOKIE)
+        .find_map(|(_, v)| st.blobs.verify_session(v, remote::epoch()))
+}
+
+/// `/api/session` and `/api/session-end`: the dashboard's read session. A
+/// `POST /api/session` with the token sets an HttpOnly cookie that lets the
+/// browser read blobs and docs (never write) for [`blob::SESSION_SECS`], so
+/// the page keeps no token. `GET` reports it; `POST /api/session-end` clears
+/// it. Returns the response and the `Set-Cookie` value, if any.
+fn session_route(st: &State, req: &Request) -> (Response, Option<String>) {
+    let at = |exp: i64| {
+        time::OffsetDateTime::from_unix_timestamp(exp)
+            .ok()
+            .and_then(|t| {
+                t.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+    };
+    let open = |exp: Option<i64>| json!({"read": exp.is_some(), "expires_at": exp.and_then(at)});
+    let reply = |status: u16, v: serde_json::Value| Response {
+        status,
+        body: serde_json::to_vec(&v).unwrap_or_default(),
+    };
+    let ending = req.path[1] == "session-end";
+    match (req.method.as_str(), ending) {
+        ("GET", false) => (reply(200, open(session(st, req))), None),
+        ("POST", false) if authorized(st, req) => {
+            let exp = remote::epoch() + blob::SESSION_SECS;
+            let cookie = format!(
+                "{SESSION_COOKIE}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Strict",
+                st.blobs.session_value(exp),
+                blob::SESSION_SECS
+            );
+            (reply(200, open(Some(exp))), Some(cookie))
+        }
+        ("POST", false) => (error(401, "unauthorized"), None),
+        ("POST", true) => (
+            reply(200, open(None)),
+            Some(format!(
+                "{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+            )),
+        ),
+        _ => (error(405, "use GET or POST"), None),
+    }
+}
+
 fn write_head(
     w: &mut TcpStream,
     status: u16,
@@ -668,8 +734,33 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
         let _ = std::fs::remove_file(path);
         return result;
     }
+    if req.path.first().is_some_and(|p| p == "api")
+        && matches!(
+            req.path.get(1).map(String::as_str),
+            Some("session" | "session-end")
+        )
+        && req.path.len() == 2
+    {
+        let (r, cookie) = session_route(st, &req);
+        observe(r.status);
+        write_head(
+            &mut w,
+            r.status,
+            "application/json",
+            Some(r.body.len()),
+            None,
+            &cookie
+                .map(|c| format!("Set-Cookie: {c}\r\n"))
+                .unwrap_or_default(),
+        )?;
+        w.write_all(&r.body)?;
+        return Ok(w.flush()?);
+    }
     let read = req.method == "GET";
-    if (!read || private_read(&req.path)) && !authorized(st, &req) {
+    if (!read || private_read(&req.path))
+        && !authorized(st, &req)
+        && !(store_read(&req) && session(st, &req).is_some())
+    {
         observe(401);
         return Ok(write_response(&mut w, &error(401, "unauthorized"), None)?);
     }
@@ -880,7 +971,7 @@ fn blob_api(
     let path: Vec<&str> = req.path.iter().map(String::as_str).collect();
     // `None`: the response was streamed already.
     let result = (|| -> Result<Option<Response>> {
-        if let Some(sha) = path.get(2) {
+        if let Some(sha) = path.get(2).filter(|p| **p != "resolve") {
             blob::check_sha(sha).map_err(|e| HttpError(400, e.to_string()))?;
         }
         match (req.method.as_str(), path.as_slice()) {
@@ -904,13 +995,59 @@ fn blob_api(
                 v["created"] = created.into();
                 ok(if created { 201 } else { 200 }, &v).map(Some)
             }
+            ("GET", ["api", "blobs"]) if req.flag("refs") => {
+                let maps = crate::blob_refs::link_maps(st.docs.as_ref())?;
+                let refs = crate::blob_refs::index(&st.conn(), &maps)?;
+                let mut out = Vec::new();
+                for meta in st.blobs.list()? {
+                    let mut v = serde_json::to_value(&meta)?;
+                    let r = refs.get(&meta.sha256).cloned().unwrap_or_default();
+                    v["names"] = json!(r.names);
+                    v["tasks"] = json!(r.tasks);
+                    out.push(v);
+                }
+                ok(200, &out).map(Some)
+            }
             ("GET", ["api", "blobs"]) => ok(200, &st.blobs.list()?).map(Some),
+            ("GET", ["api", "blobs", "resolve"]) => {
+                let url = req
+                    .query("url")
+                    .ok_or_else(|| HttpError(400, "url is required".into()))?;
+                let (sha, name) = match crate::blob_refs::signed_links(url).into_iter().next() {
+                    Some(hit) => hit,
+                    None => {
+                        let maps = crate::blob_refs::link_maps(st.docs.as_ref())?;
+                        let m = maps
+                            .get(&crate::blob_refs::url_key(url))
+                            .ok_or_else(|| HttpError(404, "no stored blob for this url".into()))?;
+                        let name = m
+                            .name
+                            .clone()
+                            .or_else(|| crate::blob_refs::last_segment(url));
+                        (m.sha256.clone(), name)
+                    }
+                };
+                let meta = st
+                    .blobs
+                    .stat(&sha)?
+                    .ok_or_else(|| HttpError(404, format!("blob {sha} not found")))?;
+                let mut v = serde_json::to_value(&meta)?;
+                v["name"] = json!(name);
+                ok(200, &v).map(Some)
+            }
             ("GET", ["api", "blobs", sha]) => {
                 let Some((meta, body)) = st.blobs.open_blob(sha)? else {
                     return Err(HttpError(404, format!("blob {sha} not found")).into());
                 };
                 observe(200);
-                send_blob(w, &meta, body, "")?;
+                // A browser may open this with a read session: never as
+                // active content on the server's origin.
+                send_blob(
+                    w,
+                    &meta,
+                    body,
+                    "X-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n",
+                )?;
                 Ok(None)
             }
             ("POST", ["api", "blobs", sha, "link"]) => {

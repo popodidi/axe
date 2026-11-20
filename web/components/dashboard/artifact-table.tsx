@@ -3,16 +3,29 @@ import type { Event } from "../../lib/model";
 import { artifactReference } from "../../lib/artifact-reference";
 import { Button, CopyButton, EmptyState, Filter, Search } from "../ui";
 import type { CopyHandler } from "../ui/command";
+import { BlobViewer } from "./store-viewer";
 import styles from "./artifact-table.module.css";
 export function ArtifactTable({
+  base,
   events,
   onCopy,
 }: {
+  base: string;
   events: Event[];
   onCopy: CopyHandler;
 }) {
   const detailsId = useId();
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // Rows whose store preview is open: store links, and files the server may
+  // map to a stored blob (link-map docs, `/api/blobs/resolve`).
+  const [previewed, setPreviewed] = useState<Set<number>>(new Set());
+  const toggle = (set: typeof setExpanded, id: number) =>
+    set((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const [query, setQuery] = useState("");
   const [type, setType] = useState("");
   const rows = events
@@ -89,23 +102,30 @@ export function ArtifactTable({
                         <span title={r.value}>{r.name}</span>
                       )}
                     </div>
+                    <span className={styles.rowActions}>
+                    {(r.blob || (r.href && r.type === "File")) && (
+                      <Button
+                        className={styles.disclosure}
+                        variant="ghost"
+                        aria-label={`Preview: ${r.name}`}
+                        aria-expanded={previewed.has(r.event.id)}
+                        aria-controls={`${detailsId}-preview-${r.event.id}`}
+                        onClick={() => toggle(setPreviewed, r.event.id)}
+                      >
+                        {previewed.has(r.event.id) ? "Hide" : "Preview"}
+                      </Button>
+                    )}
                     <Button
                       className={styles.disclosure}
                       variant="ghost"
                       aria-label={`Reference details: ${r.name}`}
                       aria-expanded={expanded.has(r.event.id)}
                       aria-controls={`${detailsId}-${r.event.id}`}
-                      onClick={() =>
-                        setExpanded((previous) => {
-                          const next = new Set(previous);
-                          if (next.has(r.event.id)) next.delete(r.event.id);
-                          else next.add(r.event.id);
-                          return next;
-                        })
-                      }
+                      onClick={() => toggle(setExpanded, r.event.id)}
                     >
                       {expanded.has(r.event.id) ? "Close" : "Details"}
                     </Button>
+                    </span>
                   </td>
                   <td className={styles.source} title={r.source}>
                     {r.source}
@@ -121,6 +141,20 @@ export function ArtifactTable({
                     </time>
                   </td>
                 </tr>
+                {previewed.has(r.event.id) && (
+                  <tr>
+                    <td colSpan={4}>
+                      <div id={`${detailsId}-preview-${r.event.id}`} data-artifact-preview>
+                        <BlobViewer
+                          base={base}
+                          link={r.blob}
+                          name={r.blob ? undefined : r.name}
+                          url={r.blob ? undefined : r.value}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                )}
                 {expanded.has(r.event.id) && (
                   <tr>
                     <td colSpan={3}>
