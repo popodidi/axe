@@ -3724,8 +3724,8 @@ fn a_finished_form_removes_its_button_and_no_telegram_forms_send_nothing() {
     );
 
     // Two prompted forms; the first one expires (1m), the second is
-    // delivered outside Telegram. Its outcome keeps the keyboard, which
-    // still holds the first form's button.
+    // delivered outside Telegram. Its outcome re-sends the keyboard with
+    // only the first form's button.
     let first = ask(&["--bot", "cos", "--ttl", "1m"]);
     let second = ask(&["--bot", "cos"]);
     assert_eq!(rig.sent_to(OWNER).len(), 2);
@@ -3735,7 +3735,11 @@ fn a_finished_form_removes_its_button_and_no_telegram_forms_send_nothing() {
     });
     let out = rig.sent_to(OWNER).pop().unwrap();
     assert_eq!(out["text"], "Sealed form delivered to task 5: key.");
-    assert!(out.get("reply_markup").is_none(), "{out}");
+    assert_eq!(
+        out["reply_markup"]["keyboard"],
+        json!([[{"text": "Open sealed form", "web_app": {"url": first["link"]}}]]),
+        "{out}"
+    );
 
     // The first one expires: its outcome removes the keyboard.
     let shown = || -> Value {
@@ -3749,6 +3753,78 @@ fn a_finished_form_removes_its_button_and_no_telegram_forms_send_nothing() {
     assert_eq!(out["reply_markup"], json!({"remove_keyboard": true}));
     std::thread::sleep(Duration::from_secs(6));
     assert_eq!(rig.sent_to(OWNER).len(), 4, "each form closes once");
+}
+
+#[test]
+fn every_open_form_in_a_chat_keeps_its_button() {
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    let _disp = rig.srv().dispatcher(&[], &[]);
+    let ask = |purpose: &str, field: &str| {
+        form_ask(
+            &rig,
+            &[
+                "--bot",
+                "cos",
+                "--task",
+                "5",
+                "--purpose",
+                purpose,
+                "--field",
+                &format!("{field}:secret:required"),
+            ],
+        )
+    };
+    let button = |text: &str, v: &Value| json!([{"text": text, "web_app": {"url": v["link"]}}]);
+
+    // The second prompt's keyboard holds both forms' buttons, by purpose
+    // (a chat shows only its latest reply keyboard).
+    let first = ask("API key for a test", "key");
+    let prompt = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        prompt["reply_markup"]["keyboard"],
+        json!([button("Open sealed form", &first)])
+    );
+    let second = ask("Deploy token", "token");
+    let prompt = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        prompt["reply_markup"]["keyboard"],
+        json!([
+            button("Open: API key for a test", &first),
+            button("Open: Deploy token", &second)
+        ]),
+        "{prompt}"
+    );
+    assert_eq!(prompt["reply_markup"]["one_time_keyboard"], true);
+
+    // Delivering one from its button leaves a keyboard with only the other;
+    // delivering both removes it.
+    let deliver = |update: i64, v: &Value, field: &str| -> Value {
+        let sealed = axe::sealed::seal(&form_spec(v), &json!({field: "v"})).unwrap();
+        let before = rig.sent_to(OWNER).len();
+        rig.stub.push(json!({"update_id": update, "message": {
+            "message_id": 300 + update, "date": 0, "from": user(OWNER),
+            "chat": {"id": OWNER, "type": "private"},
+            "web_app_data": {"data": sealed.text(), "button_text": "Open: x"}}}));
+        rig.stub.wait_confirmed(update);
+        wait_for("the form reply", 20, || rig.sent_to(OWNER).len() > before);
+        rig.sent_to(OWNER).pop().unwrap()
+    };
+    let out = deliver(10, &first, "key");
+    assert_eq!(out["text"], "Sealed form delivered to task 5: key.");
+    assert_eq!(
+        out["reply_markup"]["keyboard"],
+        json!([button("Open sealed form", &second)]),
+        "{out}"
+    );
+    let out = deliver(11, &second, "token");
+    assert_eq!(out["text"], "Sealed form delivered to task 5: token.");
+    assert_eq!(out["reply_markup"], json!({"remove_keyboard": true}));
+
+    // The server closes neither again.
+    let sent = rig.sent_to(OWNER).len();
+    std::thread::sleep(Duration::from_secs(8));
+    assert_eq!(rig.sent_to(OWNER).len(), sent, "each form closes once");
 }
 
 #[test]
