@@ -133,12 +133,24 @@ impl Server {
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// The server's token, when it has one (reads need it).
+    pub fn token(&self) -> Option<String> {
+        std::fs::read_to_string(&self.token_file)
+            .ok()
+            .map(|t| t.trim().to_string())
+    }
+
+    /// A GET with the token, when the server has one.
+    pub fn request(&self, path: &str) -> ureq::Request {
+        let r = ureq::get(&format!("{}{path}", self.url));
+        match self.token() {
+            Some(t) => r.set("Authorization", &format!("Bearer {t}")),
+            None => r,
+        }
+    }
+
     pub fn get(&self, path: &str) -> serde_json::Value {
-        ureq::get(&format!("{}{path}", self.url))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap()
+        self.request(path).call().unwrap().into_json().unwrap()
     }
 
     /// Waits for a `--once` server to exit and returns its output.

@@ -23,7 +23,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use aes_gcm::aead::{Aead, Payload};
+use aes_gcm::aead::{Aead, Payload as Payload_};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -260,6 +260,9 @@ pub enum Target {
     /// A login of one of the dispatcher's runtimes (`runtime::login_methods`);
     /// one field, `secret`.
     Runtime { runtime: String, login: String },
+    /// The owner's reply key for sealed messages back to the owner
+    /// ([`ReplyKey`]); one field, `passphrase`.
+    Reply,
 }
 
 impl Target {
@@ -269,6 +272,7 @@ impl Target {
             Target::Bot { bot } => format!("bot {bot}"),
             Target::Git { host } => format!("git credential for {host}"),
             Target::Runtime { runtime, login } => format!("runtime {runtime} login ({login})"),
+            Target::Reply => "the owner's reply key".into(),
         }
     }
 
@@ -306,6 +310,16 @@ impl Target {
                     _ => bail!("a runtime login form has one required secret field, secret"),
                 }
             }
+            Target::Reply => match fields {
+                [f] if f.name == "passphrase"
+                    && f.kind == Kind::Secret
+                    && f.required
+                    && f.env.is_none() =>
+                {
+                    Ok(())
+                }
+                _ => bail!("a reply key form has one required secret field, passphrase"),
+            },
         }
     }
 }
@@ -537,7 +551,7 @@ pub fn seal(spec: &Spec, values: &Value) -> Result<Sealed> {
         .expect("32-byte key")
         .encrypt(
             &Nonce::from(iv),
-            Payload {
+            Payload_ {
                 msg: &serde_json::to_vec(values)?,
                 aad: aad.as_bytes(),
             },
@@ -677,7 +691,7 @@ impl Key {
             .expect("32-byte key")
             .decrypt(
                 &Nonce::from(<[u8; IV_LEN]>::try_from(iv).expect("split at IV_LEN")),
-                Payload {
+                Payload_ {
                     msg: ct,
                     aad: aad.as_bytes(),
                 },
@@ -790,7 +804,7 @@ pub fn secrets_dir(run_root: &Path, target: &Target) -> Option<PathBuf> {
     match target {
         Target::Task { task } => Some(run_root.join(format!("task-{task}")).join(".secrets")),
         Target::Bot { bot } => Some(run_root.join(format!("bot-{bot}")).join(".secrets")),
-        Target::Git { .. } | Target::Runtime { .. } => None,
+        Target::Git { .. } | Target::Runtime { .. } | Target::Reply => None,
     }
 }
 
@@ -903,6 +917,261 @@ pub fn write_git_credential(path: &Path, host: &str, username: &str, token: &str
     write_private(path, format!("{}\n", lines.join("\n")).as_bytes())
 }
 
+// ------------------------------------------- sealed messages to the owner
+//
+// The reverse of a form: an agent or the dispatcher sends the owner a secret,
+// a link or a small file over a channel that must see only ciphertext.
+//
+// - The owner sets a passphrase once through a reply key form
+//   ([`Target::Reply`]). The dispatcher derives the reply key
+//   `K = PBKDF2-HMAC-SHA256(passphrase, salt, iter)` (random 16-byte salt,
+//   [`REPLY_ITERATIONS`]) and keeps only `K`, salt and count in
+//   `reply.key` (0600, [`ReplyKey`]); the passphrase is dropped.
+// - A message is AES-256-GCM under `K` with a random 12-byte IV. Its header
+//   ([`MessageHeader`]: id, sender, salt, count, expiry) is plaintext and is
+//   the associated data, so a relay cannot alter the expiry or swap keys.
+//   The text is `<base64url(header JSON)>.<base64url(iv | ciphertext)>`; the
+//   link is the form page with `#m=<text>` in its fragment (never sent to the
+//   page's host). The page asks for the passphrase, derives `K` and decrypts
+//   in the browser.
+// - Expiry: the page refuses a message past its authenticated expiry. One
+//   use: what must be single-use (a login code) is enforced where it is
+//   redeemed; the page also remembers opened ids per device and warns on a
+//   second open. Replay: without `K` a message is useless; the ciphertext
+//   stays in the chat, so send only material that expires or can be rotated.
+// - The server and the channel see the header, the ciphertext and the
+//   message text the sender chose (sender and purpose); never `K`, the
+//   passphrase or the plaintext.
+
+/// The reply key file's name next to the config (`[forms] reply_key_file`).
+pub const REPLY_KEY_FILE: &str = "reply.key";
+pub const MESSAGE_VERSION: u32 = 1;
+/// PBKDF2 iterations for a new reply key (OWASP 2023, PBKDF2-HMAC-SHA256).
+pub const REPLY_ITERATIONS: u32 = 600_000;
+/// Shortest passphrase a reply key form accepts, in characters.
+pub const MIN_PASSPHRASE: usize = 12;
+/// A message's life when the sender names none.
+pub const MESSAGE_DEFAULT_TTL: i64 = 15 * 60;
+pub const MESSAGE_MAX_TTL: i64 = 24 * 3600;
+/// Largest plaintext body: the whole link rides in a Mini App button URL.
+pub const MAX_MESSAGE: usize = 2048;
+const SALT_LEN: usize = 16;
+
+/// PBKDF2-HMAC-SHA256 with a 32-byte output (one block), as WebCrypto's
+/// `deriveBits({name: "PBKDF2", hash: "SHA-256"}, ..., 256)`.
+pub fn pbkdf2_sha256(pass: &[u8], salt: &[u8], iter: u32) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    type H = Hmac<sha2_10::Sha256>;
+    let mac = <H as Mac>::new_from_slice(pass).expect("HMAC takes any key length");
+    let mut u = {
+        let mut m = mac.clone();
+        m.update(salt);
+        m.update(&1u32.to_be_bytes());
+        m.finalize().into_bytes()
+    };
+    let mut out: [u8; 32] = u.into();
+    for _ in 1..iter {
+        let mut m = mac.clone();
+        m.update(&u);
+        u = m.finalize().into_bytes();
+        out.iter_mut().zip(u.iter()).for_each(|(o, b)| *o ^= b);
+    }
+    out
+}
+
+/// The owner's reply key (`reply.key`): the derived key, never the passphrase.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplyKey {
+    pub v: u32,
+    /// base64url salt.
+    pub salt: String,
+    pub iter: u32,
+    /// base64url 32-byte AES key.
+    key: String,
+}
+
+impl std::fmt::Debug for ReplyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReplyKey({})", self.id())
+    }
+}
+
+impl ReplyKey {
+    /// A key from `passphrase` with a fresh salt and [`REPLY_ITERATIONS`].
+    pub fn create(passphrase: &str) -> Result<ReplyKey> {
+        if passphrase.chars().count() < MIN_PASSPHRASE {
+            bail!("the passphrase is shorter than {MIN_PASSPHRASE} characters");
+        }
+        let mut salt = [0u8; SALT_LEN];
+        getrandom(&mut salt);
+        Ok(ReplyKey::derive(passphrase, &salt, REPLY_ITERATIONS))
+    }
+
+    pub fn derive(passphrase: &str, salt: &[u8], iter: u32) -> ReplyKey {
+        ReplyKey {
+            v: MESSAGE_VERSION,
+            salt: B64.encode(salt),
+            iter,
+            key: B64.encode(pbkdf2_sha256(passphrase.as_bytes(), salt, iter)),
+        }
+    }
+
+    /// The key's id: its salt (not secret; the page caches keys by it).
+    pub fn id(&self) -> &str {
+        &self.salt
+    }
+
+    pub fn load(path: &Path) -> Result<ReplyKey> {
+        let b = std::fs::read(path).map_err(|e| {
+            anyhow::anyhow!(
+                "no reply key at {} ({e}): the owner sets one with `axe form reply-key --bot <bot>`",
+                path.display()
+            )
+        })?;
+        let k: ReplyKey = serde_json::from_slice(&b)
+            .with_context(|| format!("invalid reply key {}", path.display()))?;
+        if k.v != MESSAGE_VERSION || k.bytes()?.len() != 32 || k.iter == 0 {
+            bail!("invalid reply key {}", path.display());
+        }
+        Ok(k)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        write_private_file(path, &serde_json::to_vec_pretty(self)?)
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>> {
+        B64.decode(&self.key).context("invalid reply key")
+    }
+}
+
+/// A sealed message's plaintext header, authenticated as associated data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageHeader {
+    pub v: u32,
+    /// 32 hex digits.
+    pub id: String,
+    /// Who sent it (`task 7`, `bot axe-os`), shown by the page.
+    pub from: String,
+    pub salt: String,
+    pub iter: u32,
+    /// RFC 3339 UTC.
+    pub expires: String,
+}
+
+/// What a message carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Payload {
+    Secret(String),
+    /// An access link the page opens with one tap.
+    Link(String),
+    File {
+        name: String,
+        data: Vec<u8>,
+    },
+}
+
+impl Payload {
+    fn body(&self, purpose: &str) -> Value {
+        match self {
+            Payload::Secret(s) => json!({"purpose": purpose, "kind": "secret", "secret": s}),
+            Payload::Link(l) => json!({"purpose": purpose, "kind": "link", "link": l}),
+            Payload::File { name, data } => json!({"purpose": purpose, "kind": "file",
+                "file": {"name": name,
+                         "data": base64::engine::general_purpose::STANDARD.encode(data)}}),
+        }
+    }
+}
+
+/// Seals `payload` to the owner's reply key; returns the header and the
+/// message text (`<header>.<iv | ciphertext>`, base64url).
+pub fn seal_message(
+    key: &ReplyKey,
+    from: &str,
+    purpose: &str,
+    payload: &Payload,
+    ttl: i64,
+    now: i64,
+) -> Result<(MessageHeader, String)> {
+    if !(MIN_TTL..=MESSAGE_MAX_TTL).contains(&ttl) {
+        bail!("a sealed message lives 1m to 24h");
+    }
+    if let Payload::Link(l) = payload {
+        if !(l.starts_with("https://") || l.starts_with("http://")) {
+            bail!("a link must be http(s)");
+        }
+    }
+    let header = MessageHeader {
+        v: MESSAGE_VERSION,
+        id: new_form_id(),
+        from: from.chars().take(MAX_LABEL).collect(),
+        salt: key.salt.clone(),
+        iter: key.iter,
+        expires: format_time(now + ttl),
+    };
+    let plain = serde_json::to_vec(&payload.body(purpose))?;
+    if plain.len() > MAX_MESSAGE {
+        bail!(
+            "the message is {} bytes; a sealed message holds at most {MAX_MESSAGE}",
+            plain.len()
+        );
+    }
+    let aad = B64.encode(serde_json::to_vec(&header)?);
+    let cipher = Aes256Gcm::new_from_slice(&key.bytes()?).context("reply key")?;
+    let mut iv = [0u8; IV_LEN];
+    getrandom(&mut iv);
+    let ct = cipher
+        .encrypt(
+            &Nonce::from(iv),
+            Payload_ {
+                msg: &plain,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("cannot seal the message"))?;
+    let mut data = iv.to_vec();
+    data.extend_from_slice(&ct);
+    Ok((header, format!("{aad}.{}", B64.encode(data))))
+}
+
+/// Opens a message text with the reply key, as the page does; checks the
+/// expiry. Returns the header and the body (`purpose`, `kind`, value).
+pub fn open_message(key: &ReplyKey, text: &str, now: i64) -> Result<(MessageHeader, Value)> {
+    let (aad, data) = text.split_once('.').context("not a sealed message")?;
+    let header: MessageHeader = serde_json::from_slice(&B64.decode(aad)?)?;
+    if header.v != MESSAGE_VERSION {
+        bail!("unsupported message version {}", header.v);
+    }
+    if header.salt != key.salt || header.iter != key.iter {
+        bail!("the message is sealed to another reply key");
+    }
+    if now > parse_time(&header.expires)? {
+        bail!("the message expired at {}", header.expires);
+    }
+    let data = B64.decode(data)?;
+    if data.len() <= IV_LEN {
+        bail!("truncated message");
+    }
+    let cipher = Aes256Gcm::new_from_slice(&key.bytes()?).context("reply key")?;
+    let plain = cipher
+        .decrypt(
+            &Nonce::from(<[u8; IV_LEN]>::try_from(&data[..IV_LEN]).expect("split at IV_LEN")),
+            Payload_ {
+                msg: &data[IV_LEN..],
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("the message does not open with this key"))?;
+    Ok((header, serde_json::from_slice(&plain)?))
+}
+
+/// The page link that opens a message.
+pub fn message_link(page: &str, text: &str) -> String {
+    format!("{page}#m={text}")
+}
+
 // ------------------------------------------------------- the dispatcher side
 
 /// The dispatcher's half: signs requests and delivers sealed replies. It
@@ -919,6 +1188,8 @@ pub struct Desk {
     cfg: Option<crate::config::Config>,
     /// Runtimes with a device login in progress.
     logins: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// Where a reply key form writes the owner's [`ReplyKey`].
+    reply_key: PathBuf,
 }
 
 /// How long a device login's first output is collected for the owner.
@@ -940,6 +1211,7 @@ impl Desk {
             key,
             id: id.to_string(),
             run_root,
+            reply_key: git_credentials.with_file_name(REPLY_KEY_FILE),
             git_credentials,
             used_path,
             used: Mutex::new(used),
@@ -964,7 +1236,14 @@ impl Desk {
             cfg.forms.git_credentials_path(),
             cfg.log_dir().join(".dispatcher").join("forms-used.json"),
         )
-        .with_config(cfg.clone()))
+        .with_config(cfg.clone())
+        .with_reply_key(cfg.forms.reply_key_path()))
+    }
+
+    /// The desk writing the owner's reply key to `path`.
+    pub fn with_reply_key(mut self, path: PathBuf) -> Desk {
+        self.reply_key = path;
+        self
     }
 
     pub fn key(&self) -> &Key {
@@ -1106,6 +1385,18 @@ impl Desk {
                 Ok(json!({"target": spec.target.describe(), "runtime": runtime,
                           "note": "the runtime is ok again at its next login check"}))
             }
+            Target::Reply => {
+                let pass = match vals.get("passphrase") {
+                    Some(Val::Text(t)) => t,
+                    _ => bail!("a reply key needs its passphrase"),
+                };
+                let key = ReplyKey::create(pass)?;
+                key.save(&self.reply_key)?;
+                Ok(
+                    json!({"target": spec.target.describe(), "path": self.reply_key,
+                          "key": key.id()}),
+                )
+            }
         }
     }
 }
@@ -1148,6 +1439,132 @@ mod tests {
             &json!({"kind":"form_deliver","signed":s,"sealed":sealed.text()}),
             now,
         )
+    }
+
+    fn hexs(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn pbkdf2_matches_known_vectors() {
+        // RFC 7914 section 11 / common PBKDF2-HMAC-SHA256 vectors, 32 bytes.
+        assert_eq!(
+            hexs(&pbkdf2_sha256(b"password", b"salt", 1)),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+        );
+        assert_eq!(
+            hexs(&pbkdf2_sha256(b"password", b"salt", 2)),
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        );
+        assert_eq!(
+            hexs(&pbkdf2_sha256(b"password", b"salt", 4096)),
+            "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+        );
+    }
+
+    /// A fast key for tests (the real count is [`REPLY_ITERATIONS`]).
+    fn reply_key() -> ReplyKey {
+        ReplyKey::derive("correct horse battery", &[7u8; SALT_LEN], 1000)
+    }
+
+    #[test]
+    fn sealed_messages_round_trip_and_hold_no_plaintext() {
+        let k = reply_key();
+        let now = 1_800_000_000;
+        for p in [
+            Payload::Secret("dummy-secret-91d2".into()),
+            Payload::Link("http://axe.example/login?code=dummy-code-77ab".into()),
+            Payload::File {
+                name: "id.txt".into(),
+                data: b"dummy-file-3c4d".to_vec(),
+            },
+        ] {
+            let (h, text) = seal_message(&k, "task 7", "Web login", &p, 600, now).unwrap();
+            for needle in [
+                "dummy-secret-91d2",
+                "dummy-code-77ab",
+                "dummy-file-3c4d",
+                "Web login",
+            ] {
+                assert!(!text.contains(needle), "{needle} in {text}");
+            }
+            let link = message_link("https://page.example/", &text);
+            assert!(link.starts_with("https://page.example/#m="));
+            let (h2, body) = open_message(&k, &text, now + 599).unwrap();
+            assert_eq!(h, h2);
+            assert_eq!(h.from, "task 7");
+            assert_eq!(body["purpose"], "Web login");
+            match &p {
+                Payload::Secret(s) => assert_eq!(body["secret"], s.as_str()),
+                Payload::Link(l) => assert_eq!(body["link"], l.as_str()),
+                Payload::File { name, .. } => {
+                    assert_eq!(body["file"]["name"], name.as_str());
+                    assert_eq!(body["file"]["data"], "ZHVtbXktZmlsZS0zYzRk");
+                }
+            }
+            // Expired, tampered header, tampered ciphertext, another key.
+            assert!(open_message(&k, &text, now + 601).is_err());
+            let (aad, data) = text.split_once('.').unwrap();
+            let mut hdr: MessageHeader = serde_json::from_slice(&B64.decode(aad).unwrap()).unwrap();
+            hdr.expires = format_time(now + 86_000);
+            let forged = format!("{}.{data}", B64.encode(serde_json::to_vec(&hdr).unwrap()));
+            assert!(open_message(&k, &forged, now).is_err());
+            let mut raw = B64.decode(data).unwrap();
+            *raw.last_mut().unwrap() ^= 1;
+            assert!(open_message(&k, &format!("{aad}.{}", B64.encode(raw)), now).is_err());
+            let other = ReplyKey::derive("correct horse battery", &[8u8; SALT_LEN], 1000);
+            assert!(open_message(&other, &text, now).is_err());
+            let same_salt = ReplyKey::derive("wrong horse battery", &[7u8; SALT_LEN], 1000);
+            assert!(open_message(&same_salt, &text, now).is_err());
+        }
+        let big = Payload::Secret("x".repeat(MAX_MESSAGE));
+        assert!(seal_message(&k, "t", "p", &big, 600, now).is_err());
+        let s = Payload::Secret("s".into());
+        assert!(seal_message(&k, "t", "p", &s, 10, now).is_err());
+        assert!(seal_message(&k, "t", "p", &s, MESSAGE_MAX_TTL + 1, now).is_err());
+        assert!(seal_message(
+            &k,
+            "t",
+            "p",
+            &Payload::Link("javascript:x".into()),
+            600,
+            now
+        )
+        .is_err());
+    }
+
+    /// The vector `sealed-form`'s `test/unit.mjs` opens with WebCrypto.
+    #[test]
+    fn sealed_message_cross_vector_opens() {
+        let text = include_str!("../tests/fixtures/sealed-message-vector.txt").trim();
+        let (h, body) = open_message(&reply_key(), text, 4_000_000_000).unwrap();
+        assert_eq!(h.from, "task 7");
+        assert_eq!(body["kind"], "link");
+        assert_eq!(body["link"], "http://axe.example/login?code=vector");
+    }
+
+    #[test]
+    fn reply_key_files_and_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(ReplyKey::create("too short").is_err());
+        let path = dir.path().join("cfg").join(REPLY_KEY_FILE);
+        let err = ReplyKey::load(&path).unwrap_err().to_string();
+        assert!(err.contains("axe form reply-key"), "{err}");
+        let k = reply_key();
+        k.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let back = ReplyKey::load(&path).unwrap();
+        assert_eq!(back.id(), k.id());
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(!file.contains("correct horse"), "no passphrase on disk");
+        assert!(!format!("{k:?}").contains(&k.key), "Debug hides the key");
+
+        // A reply key form takes exactly one required secret, passphrase.
+        let mut r = req(Target::Reply);
+        assert!(r.validate().is_err());
+        r.fields = vec![Field::parse("passphrase:secret:required").unwrap()];
+        r.validate().unwrap();
     }
 
     #[test]

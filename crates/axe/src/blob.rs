@@ -220,8 +220,8 @@ impl Store {
     }
 }
 
-/// Lifetime of a browser read session (`/api/session`): seven days.
-pub const SESSION_SECS: i64 = 7 * 86400;
+/// Lifetime of a browser read session (`/api/session`, `/login`): 30 days.
+pub const SESSION_SECS: i64 = 30 * 86400;
 
 impl Store {
     /// A read-session value (`<exp>.<sig>`) valid until `exp`, signed with the

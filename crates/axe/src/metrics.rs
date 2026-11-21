@@ -72,6 +72,8 @@ pub fn route(path: &[String]) -> &'static str {
         ["api", "stream"] => "/api/stream",
         ["api", "backup"] => "/api/backup",
         ["api", "session" | "session-end"] => "/api/session",
+        ["login"] => "/login",
+        ["api", "login-links"] => "/api/login-links",
         ["api", "blobs"] => "/api/blobs",
         ["api", "blobs", "resolve"] => "/api/blobs/resolve",
         ["api", "blobs", _] => "/api/blobs/:sha",

@@ -122,6 +122,7 @@ dependencies = [
  "dirs",
  "fs2",
  "hkdf",
+ "hmac",
  "libc",
  "p256",
  "rand_core 0.6.4",

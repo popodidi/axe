@@ -283,7 +283,7 @@ HTML), re-signing an expired link from its sha256. Older artifact URLs open
 too when a link-map doc (any doc path ending in `.links.tsv`, with `url` and
 `sha256` columns; `blob_refs.rs`) maps them to a blob.
 
-## Sealed forms
+## Sealed forms and messages
 
 `axe form ask` (`sealed.rs`, `form.rs`) asks the owner for values (secret,
 text, code, choice and file fields) that only the dispatcher can read, for
@@ -327,6 +327,22 @@ axe form ask --bot ops --purpose "Deploy token" --field token:secret:required:en
   `env=VAR` fields are also set on its later runs), or a git credential for
   `--git <host>` that the dispatcher's clones fall back to
   (`[forms] git_credentials`).
+
+The reverse, sealed messages to the owner (sealed messages in `sealed.rs`):
+
+```sh
+axe form reply-key --bot ops --wait   # once: the owner sets a passphrase
+axe form send --bot ops --purpose "Staging DB password" --secret-file pw.txt
+axe web login-link --tg --bot ops     # a one-time portal sign-in link, sealed
+```
+
+The owner's passphrase arrives through a sealed form; the dispatcher keeps
+only the key derived from it (`[forms] reply_key_file`). `axe form send`
+(`--secret-file`, `--link` or `--file`, 2 KiB in all) runs on the dispatcher
+host, encrypts there and sends an inline "Open sealed message" Mini App
+button whose form page link carries the ciphertext in its fragment. The page
+asks for the passphrase and decrypts in the browser. Telegram and the server
+see only the sender, purpose, expiry and ciphertext.
 
 ## Docs
 
@@ -396,15 +412,16 @@ run on server start (`db.rs`); back up before upgrading.
 
 ## HTTP API
 
-`GET` is unauthenticated, except Telegram message content, `/api/blobs`,
-`/api/docs` and
-the dispatcher connection (a signed `/b/` link needs only its signature);
-every other method needs `Authorization: Bearer <token>`. For the dashboard,
-`POST /api/session` with the token sets an HttpOnly read-session cookie that
-reads blobs and docs and signs blob links for seven days, and nothing else
-(`session_route`); `POST /api/session-end` clears it. The server refuses
-a non-loopback listen address without a token file. Expose it only on a
-trusted network: reads include full agent logs. Bodies are JSON, errors are
+With a token, every request needs `Authorization: Bearer <token>` or, for
+reads, a browser read session; `/healthz`, `/metrics` and signed `/b/` links
+are open, and a page without either gets the login page (`allowed` and
+`login_route` in `crates/axe/src/server.rs`). The session is an HttpOnly
+cookie that makes reads for 30 days, except Telegram message content, asks
+and forms, which stay token-only (`private_read`). A browser gets one from
+`axe web login-link` (a one-time code, `crates/axe/src/login.rs`), the token
+on `/login`, or `POST /api/session` with the token; `POST /api/session-end`
+clears it. The server refuses a non-loopback listen address without a token
+file. Expose it only on a trusted network: reads include full agent logs. Bodies are JSON, errors are
 `{"error": "..."}`, and `X-Axe-Request-Id` makes a write retry-safe.
 
 The route table is `route`, `bot_route`, `goal_route`, `doc_route` and `blob_api` in

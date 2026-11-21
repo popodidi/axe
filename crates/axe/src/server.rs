@@ -117,6 +117,8 @@ struct State {
     docs: Option<doc::Store>,
     /// Sealed forms, in memory only (`form.rs`).
     forms: form::Forms,
+    /// Open web login codes (`login.rs`).
+    logins: crate::login::Codes,
 }
 
 impl State {
@@ -239,6 +241,7 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         blobs,
         docs,
         forms: form::Forms::default(),
+        logins: crate::login::Codes::default(),
     });
     {
         let st = Arc::clone(&state);
@@ -390,6 +393,7 @@ fn reason(status: u16) -> &'static str {
         201 => "Created",
         202 => "Accepted",
         204 => "No Content",
+        303 => "See Other",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -540,6 +544,10 @@ fn store_read(req: &Request) -> bool {
     }
 }
 
+/// Longest sealed message link a Telegram button carries.
+#[cfg(feature = "telegram")]
+const SEALED_LINK_MAX: usize = 4096;
+
 /// Name of the dashboard's read-session cookie.
 const SESSION_COOKIE: &str = "axe_read";
 
@@ -553,11 +561,25 @@ fn session(st: &State, req: &Request) -> Option<i64> {
         .find_map(|(_, v)| st.blobs.verify_session(v, remote::epoch()))
 }
 
-/// `/api/session` and `/api/session-end`: the dashboard's read session. A
-/// `POST /api/session` with the token sets an HttpOnly cookie that lets the
-/// browser read blobs and docs (never write) for [`blob::SESSION_SECS`], so
-/// the page keeps no token. `GET` reports it; `POST /api/session-end` clears
-/// it. Returns the response and the `Set-Cookie` value, if any.
+/// A new read-session cookie and its expiry. `SameSite=Lax`, so a sign-in
+/// link opened from another app lands signed in; the cookie only reads, and
+/// every write needs the token, so it carries no cross-site write.
+fn session_cookie(st: &State) -> (String, i64) {
+    let exp = remote::epoch() + blob::SESSION_SECS;
+    let cookie = format!(
+        "{SESSION_COOKIE}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+        st.blobs.session_value(exp),
+        blob::SESSION_SECS
+    );
+    (cookie, exp)
+}
+
+/// `/api/session` and `/api/session-end`: the browser's read session. A
+/// `POST /api/session` with the token (or a redeemed login code, `/login`)
+/// sets an HttpOnly cookie that lets the browser make reads (never writes)
+/// for [`blob::SESSION_SECS`], so the page keeps no token. `GET` reports it;
+/// `POST /api/session-end` clears it. Returns the response and the
+/// `Set-Cookie` value, if any.
 fn session_route(st: &State, req: &Request) -> (Response, Option<String>) {
     let at = |exp: i64| {
         time::OffsetDateTime::from_unix_timestamp(exp)
@@ -576,19 +598,14 @@ fn session_route(st: &State, req: &Request) -> (Response, Option<String>) {
     match (req.method.as_str(), ending) {
         ("GET", false) => (reply(200, open(session(st, req))), None),
         ("POST", false) if authorized(st, req) => {
-            let exp = remote::epoch() + blob::SESSION_SECS;
-            let cookie = format!(
-                "{SESSION_COOKIE}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Strict",
-                st.blobs.session_value(exp),
-                blob::SESSION_SECS
-            );
+            let (cookie, exp) = session_cookie(st);
             (reply(200, open(Some(exp))), Some(cookie))
         }
         ("POST", false) => (error(401, "unauthorized"), None),
         ("POST", true) => (
             reply(200, open(None)),
             Some(format!(
-                "{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+                "{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
             )),
         ),
         _ => (error(405, "use GET or POST"), None),
@@ -637,6 +654,82 @@ fn authorized(st: &State, req: &Request) -> bool {
     bearer_ok(&req.headers, st.token.as_deref())
 }
 
+/// Whether a request may go on past the sign-in gate: with the token,
+/// anything; with a read session (`/api/session`, `/login`), every GET but
+/// message content ([`private_read`]) and the store reads ([`store_read`]).
+/// `/healthz` and `/metrics` (counters for the scraper) need neither. With
+/// no token configured (loopback only), everything may.
+fn allowed(st: &State, req: &Request) -> bool {
+    let read = req.method == "GET";
+    if read && matches!(req.path.as_slice(), [p] if p == "healthz" || p == "metrics") {
+        return true;
+    }
+    if authorized(st, req) {
+        return true;
+    }
+    session(st, req).is_some() && ((read && !private_read(&req.path)) || store_read(req))
+}
+
+/// A browser page (the dashboard) rather than an API route.
+fn is_page(path: &[String]) -> bool {
+    !matches!(
+        path.first().map(String::as_str),
+        Some("api" | "healthz" | "metrics" | "b")
+    )
+}
+
+/// `/login`: the sign-in page. `GET ?code=` redeems a one-time login code
+/// (`POST /api/login-links`) and `POST` a form with the token; both set the
+/// read-session cookie and go to `/`. Returns the status, page and extra
+/// header lines.
+fn login_route(st: &State, req: &Request) -> (u16, String, String) {
+    let signed_in = |st: &State| {
+        let (cookie, _) = session_cookie(st);
+        (
+            303,
+            String::new(),
+            format!("Set-Cookie: {cookie}\r\nLocation: /\r\n"),
+        )
+    };
+    let refused = |note: &str| (401, crate::login::page(note), String::new());
+    match req.method.as_str() {
+        "GET" => match req.query("code") {
+            Some(code) if st.logins.redeem(code, remote::epoch()) => signed_in(st),
+            Some(_) => refused("This sign-in link was already used or has expired."),
+            None if session(st, req).is_some() => (303, String::new(), "Location: /\r\n".into()),
+            None => (200, crate::login::page(""), String::new()),
+        },
+        "POST" => {
+            let body = String::from_utf8_lossy(&req.body);
+            let given = body
+                .split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .find(|(k, _)| *k == "token")
+                .map(|(_, v)| pct_decode(v, true))
+                .unwrap_or_default();
+            if token_ok(given.trim(), st.token.as_deref()) {
+                signed_in(st)
+            } else {
+                refused("Wrong token.")
+            }
+        }
+        _ => (405, crate::login::page(""), String::new()),
+    }
+}
+
+fn write_page(w: &mut TcpStream, status: u16, html: &str, extra: &str) -> std::io::Result<()> {
+    write_head(
+        w,
+        status,
+        "text/html; charset=utf-8",
+        Some(html.len()),
+        None,
+        extra,
+    )?;
+    w.write_all(html.as_bytes())?;
+    w.flush()
+}
+
 /// The request carries the server token (always true without a token).
 fn bearer_ok(headers: &HashMap<String, String>, token: Option<&str>) -> bool {
     let Some(token) = token else {
@@ -647,6 +740,14 @@ fn bearer_ok(headers: &HashMap<String, String>, token: Option<&str>) -> bool {
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(str::trim)
         .unwrap_or("");
+    token_ok(given, Some(token))
+}
+
+/// `given` is the server token (always true without a token).
+fn token_ok(given: &str, token: Option<&str>) -> bool {
+    let Some(token) = token else {
+        return true;
+    };
     // Constant-time comparison.
     given.len() == token.len()
         && given
@@ -756,12 +857,17 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
         w.write_all(&r.body)?;
         return Ok(w.flush()?);
     }
+    if req.path == ["login"] {
+        let (status, page, extra) = login_route(st, &req);
+        observe(status);
+        return Ok(write_page(&mut w, status, &page, &extra)?);
+    }
     let read = req.method == "GET";
-    if (!read || private_read(&req.path))
-        && !authorized(st, &req)
-        && !(store_read(&req) && session(st, &req).is_some())
-    {
+    if !allowed(st, &req) {
         observe(401);
+        if read && is_page(&req.path) {
+            return Ok(write_page(&mut w, 401, &crate::login::page(""), "")?);
+        }
         return Ok(write_response(&mut w, &error(401, "unauthorized"), None)?);
     }
     if req.path.first().is_some_and(|p| p == "api") && req.path.get(1).is_some_and(|p| p == "blobs")
@@ -798,7 +904,11 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
         observe(200);
         return Ok(stream_events(st, &mut w, cors)?);
     }
-    let request_id = req.headers.get(REQUEST_ID_HEADER).filter(|_| !read);
+    // A login code is never stored: a retried mint just mints another one.
+    let request_id = req
+        .headers
+        .get(REQUEST_ID_HEADER)
+        .filter(|_| !read && req.path != ["api", "login-links"]);
     let resp = match request_id {
         Some(id) => replayable(st, &req, id),
         None => route(st, &req).unwrap_or_else(|e| error_response(&e)),
@@ -1567,6 +1677,33 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             ok(200, &rule)
         }
         ("GET", ["healthz"]) => ok(200, &json!({ "ok": true })),
+        ("POST", ["api", "login-links"]) => {
+            #[derive(Deserialize)]
+            struct B {
+                ttl: Option<i64>,
+            }
+            let b: B = req.json()?;
+            let ttl = b.ttl.unwrap_or(crate::login::DEFAULT_TTL);
+            if !(crate::login::MIN_TTL..=crate::login::MAX_TTL).contains(&ttl) {
+                return Err(HttpError(400, "a login link lives 1m to 1h".into()).into());
+            }
+            let now = remote::epoch();
+            let code = st.logins.mint(ttl, now);
+            let base = match &st.blobs.public_url {
+                Some(u) => u.trim_end_matches('/').to_string(),
+                None => format!(
+                    "http://{}",
+                    req.headers
+                        .get("host")
+                        .map_or("127.0.0.1:8790", String::as_str)
+                ),
+            };
+            ok(
+                201,
+                &json!({"url": format!("{base}/login?code={code}"),
+                        "expires_at": crate::sealed::format_time(now + ttl)}),
+            )
+        }
         ("GET", ["api", "tasks"]) => {
             let state = req.query("state");
             if let Some(s) = state {
@@ -2742,6 +2879,25 @@ fn tg_route(st: &State, req: &Request, name: &str, action: &str) -> Result<Respo
         "send" => {
             let b: Send = req.json()?;
             ok(200, &gw.send(st, name, &b.text, &b.opts)?)
+        }
+        "send-sealed" => {
+            #[derive(Deserialize)]
+            struct Sealed {
+                text: String,
+                link: String,
+            }
+            let b: Sealed = req.json()?;
+            // Only a link to the form page's message mode: the button opens
+            // nothing else, and the link carries only ciphertext.
+            let prefix = format!("{}#m=", st.cfg.forms.page());
+            if !b.link.starts_with(&prefix) || b.link.len() > SEALED_LINK_MAX {
+                return Err(HttpError(
+                    400,
+                    format!("a sealed message link is {prefix}<message>, at most {SEALED_LINK_MAX} bytes"),
+                )
+                .into());
+            }
+            ok(200, &gw.send_sealed(st, name, &b.text, &b.link)?)
         }
         "send-file" => {
             let num = |k: &str| -> Result<Option<i64>> {

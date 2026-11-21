@@ -1041,9 +1041,8 @@ fn the_cost_endpoint_applies_filters_and_rejects_bad_breakdowns() {
     let srv = Server::start(dir.path());
     cost_fixture(&db::open(&srv.db).unwrap());
     let get = |extra: &str| {
-        ureq::get(&format!(
-            "{}/api/stats/cost?since=2026-11-01T00:00:00Z&until=2026-11-06T00:00:00Z&step_days=1{extra}",
-            srv.url
+        srv.request(&format!(
+            "/api/stats/cost?since=2026-11-01T00:00:00Z&until=2026-11-06T00:00:00Z&step_days=1{extra}"
         ))
         .call()
         .map_err(|e| matches!(e, ureq::Error::Status(400, _)))

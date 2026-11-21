@@ -5,8 +5,14 @@ mod common;
 
 use common::Server;
 
+/// A GET with the token (pages and reads need a sign-in).
 fn get(srv: &Server, path: &str) -> (u16, String, String) {
-    let r = match ureq::get(&format!("{}{path}", srv.url)).call() {
+    fetch(srv.request(path))
+}
+
+fn fetch(req: ureq::Request) -> (u16, String, String) {
+    let path = req.url().to_string();
+    let r = match req.call() {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
         Err(e) => panic!("{path}: {e}"),
@@ -48,4 +54,12 @@ fn server_serves_the_dashboard_at_root() {
     assert_eq!((status, mime.as_str()), (404, "application/json"));
     let (status, mime, _) = get(&srv, "/api/no-such-route");
     assert_eq!((status, mime.as_str()), (404, "application/json"));
+
+    // Without a sign-in the dashboard and its scripts get the login page.
+    for path in ["/", script] {
+        let (status, mime, body) = fetch(ureq::get(&format!("{}{path}", srv.url)));
+        assert_eq!(status, 401, "{path}");
+        assert!(mime.starts_with("text/html"), "{mime}");
+        assert!(body.contains("axe web login-link"), "{body}");
+    }
 }

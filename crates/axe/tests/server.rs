@@ -296,7 +296,7 @@ fn post(url: &str, auth: Option<&str>, body: &str) -> u16 {
 }
 
 #[test]
-fn writes_require_token_and_reads_do_not() {
+fn writes_and_reads_require_the_token() {
     let dir = tempfile::tempdir().unwrap();
     let srv = Server::start(dir.path());
     srv.ok(&["add", "--project", "p", "--title", "t"]);
@@ -346,20 +346,50 @@ fn writes_require_token_and_reads_do_not() {
     assert_eq!(srv.get("/api/tasks?all=1"), before_tasks);
     assert_eq!(srv.get("/api/tasks/1/events"), before_events);
 
-    // Reads need no token; the right token (env or file) writes.
+    // Reads need the token too (task 1350): the API answers 401, a page
+    // the login page. Only the health check and the scrape are open.
     for path in [
-        "/healthz",
         "/api/tasks",
         "/api/tasks/1",
         "/api/tasks/1/events",
         "/api/runs",
         "/api/overview",
         "/api/config",
+        "/api/stream",
+        "/api/bots",
+        "/api/goals",
+        "/api/routines",
     ] {
+        for auth in [None, wrong] {
+            let mut r = ureq::get(&url(path));
+            if let Some(a) = auth {
+                r = r.set("Authorization", a);
+            }
+            match r.call() {
+                Err(ureq::Error::Status(401, resp)) => {
+                    let body = resp.into_string().unwrap();
+                    assert!(body.contains("unauthorized"), "{path}: {body}");
+                    assert!(!body.contains("evil") && !body.contains("\"t\""));
+                }
+                other => panic!("{path} {auth:?}: {other:?}"),
+            }
+        }
+        assert_eq!(srv.request(path).call().unwrap().status(), 200, "{path}");
+    }
+    for page in ["/", "/tasks", "/goals/g"] {
+        match ureq::get(&url(page)).call() {
+            Err(ureq::Error::Status(401, resp)) => {
+                assert!(resp.content_type().starts_with("text/html"));
+                assert!(resp.into_string().unwrap().contains("axe web login-link"));
+            }
+            other => panic!("{page}: {other:?}"),
+        }
+    }
+    for open in ["/healthz", "/metrics", "/api/session"] {
         assert_eq!(
-            ureq::get(&url(path)).call().unwrap().status(),
+            ureq::get(&url(open)).call().unwrap().status(),
             200,
-            "{path}"
+            "{open}"
         );
     }
     assert_eq!(post(&url("/api/tasks"), Some(&bearer), add), 201);
@@ -372,7 +402,8 @@ fn writes_require_token_and_reads_do_not() {
     assert!(env_token.status.success(), "{env_token:?}");
 
     // The config endpoint never exposes the token.
-    let cfg = ureq::get(&url("/api/config"))
+    let cfg = srv
+        .request("/api/config")
         .call()
         .unwrap()
         .into_string()
@@ -524,20 +555,21 @@ fn read_api_overview_sessions_cors_and_stream() {
     assert_eq!(blocked.iter().map(|t| t.id).collect::<Vec<_>>(), [3, 4]);
     assert_eq!(srv.get("/api/runs?live=1"), serde_json::json!([]));
     assert!(matches!(
-        ureq::get(&format!("{}/api/sessions/nope", srv.url)).call(),
+        srv.request("/api/sessions/nope").call(),
         Err(ureq::Error::Status(404, _))
     ));
     assert!(matches!(
-        ureq::get(&format!("{}/api/tasks/9", srv.url)).call(),
+        srv.request("/api/tasks/9").call(),
         Err(ureq::Error::Status(404, _))
     ));
     assert!(matches!(
-        ureq::get(&format!("{}/api/tasks?state=weird", srv.url)).call(),
+        srv.request("/api/tasks?state=weird").call(),
         Err(ureq::Error::Status(400, _))
     ));
 
     // CORS: configured origins may read; nothing else gets the header.
-    let allowed = ureq::get(&format!("{}/api/tasks", srv.url))
+    let allowed = srv
+        .request("/api/tasks")
         .set("Origin", "http://dash.example")
         .call()
         .unwrap();
@@ -545,7 +577,8 @@ fn read_api_overview_sessions_cors_and_stream() {
         allowed.header("Access-Control-Allow-Origin"),
         Some("http://dash.example")
     );
-    let other = ureq::get(&format!("{}/api/tasks", srv.url))
+    let other = srv
+        .request("/api/tasks")
         .set("Origin", "http://evil.example")
         .call()
         .unwrap();
@@ -564,6 +597,7 @@ fn read_api_overview_sessions_cors_and_stream() {
         .timeout_read(Duration::from_secs(20))
         .build()
         .get(&format!("{}/api/stream", srv.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
         .call()
         .unwrap();
     assert_eq!(stream.header("Content-Type"), Some("text/event-stream"));
@@ -848,6 +882,7 @@ fn reset_runs_api_and_cli_preserve_continuity_and_reopen_budget() {
         .timeout_read(Duration::from_secs(5))
         .build()
         .get(&format!("{}/api/stream", srv.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
         .call()
         .unwrap();
     let mut lines = BufReader::new(stream.into_reader()).lines();
@@ -973,9 +1008,7 @@ fn run_log_api_is_record_bound_and_preserves_attempts() {
         (format!("/api/runs/{first}/log?after=-1"), 400),
         (format!("/api/runs/{first}/log?after=0&before=1"), 400),
     ] {
-        let error = ureq::get(&format!("{}{route}", srv.url))
-            .call()
-            .unwrap_err();
+        let error = srv.request(&route).call().unwrap_err();
         assert!(
             matches!(error, ureq::Error::Status(s, _) if s == status),
             "{error}"
@@ -1181,4 +1214,109 @@ fn stats_history_matches_per_task_reads_in_one_request() {
             "started_at": "2026-11-01T00:00:00Z", "ended_at": null})
     );
     assert_eq!(runs[1]["ended_at"], "2026-11-01T00:05:00Z");
+}
+
+/// A client that keeps the redirect for the test to read.
+fn no_redirects() -> ureq::Agent {
+    ureq::AgentBuilder::new().redirects(0).build()
+}
+
+/// `axe web login-link` mints a one-time code: opening it sets the read
+/// session (30 days) once; a reused, unknown or expired code is refused, and
+/// the link carries no token.
+#[test]
+fn a_login_link_signs_in_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    let out = srv.run(&["web", "login-link"]);
+    assert!(out.status.success(), "{out:?}");
+    let link = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert!(link.contains("/login?code="), "{link}");
+    assert!(!link.contains(TOKEN));
+    let path = link.split_once("127.0.0.1").unwrap().1;
+    let path = &path[path.find('/').unwrap()..];
+
+    let r = no_redirects()
+        .get(&format!("{}{path}", srv.url))
+        .call()
+        .unwrap();
+    assert_eq!(r.status(), 303);
+    assert_eq!(r.header("location"), Some("/"));
+    let set = r.header("set-cookie").unwrap().to_string();
+    assert!(
+        set.contains("Max-Age=2592000") && set.contains("HttpOnly"),
+        "{set}"
+    );
+    let cookie = set.split(';').next().unwrap().to_string();
+    let tasks = ureq::get(&format!("{}/api/tasks", srv.url))
+        .set("Cookie", &cookie)
+        .call()
+        .unwrap();
+    assert_eq!(tasks.status(), 200);
+    // A session reads, never writes.
+    let add = ureq::post(&format!("{}/api/tasks", srv.url))
+        .set("Cookie", &cookie)
+        .send_json(serde_json::json!({"project": "p", "title": "t"}));
+    assert!(matches!(add, Err(ureq::Error::Status(401, _))));
+
+    // Once only; an unknown code neither.
+    for p in [path.to_string(), "/login?code=bogus".to_string()] {
+        match no_redirects().get(&format!("{}{p}", srv.url)).call() {
+            Err(ureq::Error::Status(401, resp)) => {
+                assert!(resp.header("set-cookie").is_none());
+                assert!(resp
+                    .into_string()
+                    .unwrap()
+                    .contains("already used or has expired"));
+            }
+            other => panic!("{p}: {other:?}"),
+        }
+    }
+
+    // A code's life is 1m to 1h (expiry itself: `login.rs` unit tests).
+    let mint = |ttl: i64| -> Result<Value, u16> {
+        match ureq::post(&format!("{}/api/login-links", srv.url))
+            .set("Authorization", &format!("Bearer {TOKEN}"))
+            .send_json(serde_json::json!({ "ttl": ttl }))
+        {
+            Ok(r) => Ok(r.into_json().unwrap()),
+            Err(ureq::Error::Status(c, _)) => Err(c),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let v = mint(60).unwrap();
+    let exp = time::OffsetDateTime::parse(
+        v["expires_at"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap()
+    .unix_timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    assert!((55..=65).contains(&(exp - now)), "{v}");
+    assert_eq!(mint(10), Err(400));
+    assert_eq!(mint(7200), Err(400));
+    // Minting needs the token.
+    let anon = ureq::post(&format!("{}/api/login-links", srv.url)).send_json(serde_json::json!({}));
+    assert!(matches!(anon, Err(ureq::Error::Status(401, _))));
+
+    // The login page's token form signs in too; a wrong token does not.
+    let form = |t: &str| -> u16 {
+        match no_redirects()
+            .post(&format!("{}/login", srv.url))
+            .send_form(&[("token", t)])
+        {
+            Ok(r) => r.status(),
+            Err(ureq::Error::Status(c, _)) => c,
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(form(TOKEN), 303);
+    assert_eq!(form("nope"), 401);
+    assert_eq!(
+        ureq::get(&format!("{}/login", srv.url))
+            .call()
+            .unwrap()
+            .status(),
+        200
+    );
 }

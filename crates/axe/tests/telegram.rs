@@ -3876,3 +3876,176 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
             "target": {"kind": "runtime", "runtime": "claude-1", "login": "token"}}}));
     assert!(matches!(r, Err(ureq::Error::Status(400, _))), "{r:?}");
 }
+
+/// The sealed back-channel (task 1350): the owner sets a reply key through a
+/// sealed form, then `axe web login-link --tg` and `axe form send` reach the
+/// owner as a Mini App button whose link carries only ciphertext. Opening it
+/// with the passphrase (as the page does) gives a login link that signs in
+/// once; nothing in the relayed payload, the server's records or its
+/// database is plaintext.
+#[test]
+fn sealed_messages_reach_the_owner_as_ciphertext_only() {
+    const PASS: &str = "dummy-passphrase-4b7e";
+    const SECRET: &str = "dummy-secret-e19a";
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "pause", "cos"]);
+
+    // No reply key yet: refused before any code is minted or sent.
+    let out = rig
+        .srv()
+        .run(&["web", "login-link", "--tg", "--bot", "cos"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("axe form reply-key"));
+
+    let _disp = rig.srv().dispatcher(&[], &[]);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let v: Value = loop {
+        let out = rig
+            .srv()
+            .run(&["form", "reply-key", "--bot", "cos", "--json"]);
+        if out.status.success() {
+            break serde_json::from_slice(&out.stdout).unwrap();
+        }
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            err.contains("not connected") && Instant::now() < deadline,
+            "{err}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let spec = form_spec(&v);
+    assert_eq!(spec.target, axe::sealed::Target::Reply);
+    let reply = |update: i64, values: Value| {
+        let sealed = axe::sealed::seal(&spec, &values).unwrap();
+        rig.stub.push(json!({"update_id": update, "message": {
+            "message_id": 400 + update, "date": 0, "from": user(OWNER),
+            "chat": {"id": OWNER, "type": "private"},
+            "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}));
+        rig.stub.wait_confirmed(update);
+    };
+    // Too short a passphrase is refused; the form stays open.
+    let before = rig.sent_to(OWNER).len();
+    reply(20, json!({"passphrase": "short"}));
+    wait_for("the refusal", 20, || rig.sent_to(OWNER).len() > before);
+    let key_path = rig.dir.path().join("reply.key");
+    assert!(!key_path.exists());
+    let before = rig.sent_to(OWNER).len();
+    reply(21, json!({"passphrase": PASS}));
+    wait_for("the reply key", 120, || key_path.exists());
+    wait_for("the outcome", 20, || rig.sent_to(OWNER).len() > before);
+    let key = axe::sealed::ReplyKey::load(&key_path).unwrap();
+    assert!(!std::fs::read_to_string(&key_path).unwrap().contains(PASS));
+    assert_eq!(key.iter, axe::sealed::REPLY_ITERATIONS, "the real count");
+
+    // A login link, sealed.
+    let out = rig
+        .srv()
+        .run(&["web", "login-link", "--tg", "--bot", "cos", "--json"]);
+    assert!(out.status.success(), "{out:?}");
+    let sent: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(sent["telegram"]["sent"], true, "{sent}");
+    let msg = rig.sent_to(OWNER).pop().unwrap();
+    let button = &msg["reply_markup"]["inline_keyboard"][0][0];
+    assert_eq!(button["text"], "Open sealed message");
+    let link = button["web_app"]["url"].as_str().unwrap();
+    let text = link
+        .strip_prefix(&format!("{}#m=", axe::config::DEFAULT_FORM_PAGE))
+        .unwrap();
+    // The page's view: the passphrase-derived key opens it.
+    let page_key = axe::sealed::ReplyKey::derive(
+        PASS,
+        &base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &key.salt)
+            .unwrap(),
+        key.iter,
+    );
+    let (h, body) = axe::sealed::open_message(&page_key, text, axe::remote::epoch()).unwrap();
+    assert_eq!(h.id, sent["id"]);
+    assert_eq!(body["kind"], "link");
+    let login = body["link"].as_str().unwrap();
+    let code = login.split_once("/login?code=").unwrap().1;
+    assert!(
+        login.starts_with("http://axe.example/login?code="),
+        "{login}"
+    );
+    // Nothing Telegram got carries the code, the token or the link.
+    let relayed = rig
+        .stub
+        .calls("sendMessage")
+        .iter()
+        .map(|c| c.params.to_string())
+        .collect::<String>();
+    for needle in [code, TOKEN, "/login?code", PASS] {
+        assert!(!relayed.contains(needle), "{needle} relayed");
+    }
+    assert!(!msg["text"].as_str().unwrap().contains(code));
+    // The code signs in once.
+    let open = |c: &str| -> u16 {
+        match ureq::AgentBuilder::new()
+            .redirects(0)
+            .build()
+            .get(&format!("{}/login?code={c}", rig.srv().url))
+            .call()
+        {
+            Ok(r) => r.status(),
+            Err(ureq::Error::Status(s, _)) => s,
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(open(code), 303);
+    assert_eq!(open(code), 401);
+
+    // Any secret, the same way.
+    let f = rig.dir.path().join("secret");
+    std::fs::write(&f, format!("{SECRET}\n")).unwrap();
+    let out = rig.srv().run(&[
+        "form",
+        "send",
+        "--bot",
+        "cos",
+        "--purpose",
+        "Staging DB password",
+        "--secret-file",
+        f.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let msg = rig.sent_to(OWNER).pop().unwrap();
+    assert!(msg["text"]
+        .as_str()
+        .unwrap()
+        .contains("Staging DB password"));
+    let link = msg["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"]
+        .as_str()
+        .unwrap();
+    let (_, body) = axe::sealed::open_message(
+        &page_key,
+        link.split_once("#m=").unwrap().1,
+        axe::remote::epoch(),
+    )
+    .unwrap();
+    assert_eq!(body["secret"], SECRET);
+    let relayed = rig
+        .stub
+        .calls("sendMessage")
+        .iter()
+        .map(|c| c.params.to_string())
+        .collect::<String>();
+    assert!(!relayed.contains(SECRET));
+
+    // The server's records and database hold no plaintext either.
+    let db = std::fs::read(rig.srv().db.clone()).unwrap();
+    let wal = std::fs::read(rig.srv().db.with_extension("db-wal")).unwrap_or_default();
+    for needle in [SECRET, code, PASS] {
+        for bytes in [&db, &wal] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{needle} stored"
+            );
+        }
+    }
+
+    // The relay takes only form page message links.
+    let bad = ureq::post(&format!("{}/api/bots/cos/tg/send-sealed", rig.srv().url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .send_json(json!({"text": "x", "link": "https://evil.example/#m=x"}));
+    assert!(matches!(bad, Err(ureq::Error::Status(400, _))));
+}

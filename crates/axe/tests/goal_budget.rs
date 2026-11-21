@@ -542,11 +542,7 @@ fn stats_origin_splits_routine_tasks_from_normal_tasks() {
     assert_eq!(routine["overall"]["tasks"], 1);
     let out = srv.run(&["stats", "--project", "p", "--origin", "bogus"]);
     assert!(!out.status.success());
-    let r = ureq::get(&format!(
-        "{}/api/stats/flow?project=p&origin=bogus",
-        srv.url
-    ))
-    .call();
+    let r = srv.request("/api/stats/flow?project=p&origin=bogus").call();
     assert!(matches!(r, Err(ureq::Error::Status(400, _))), "{r:?}");
 }
 
