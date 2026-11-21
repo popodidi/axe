@@ -297,11 +297,13 @@ axe form ask --bot ops --purpose "Deploy token" --field token:secret:required:en
   able to write to the owner's private chat. It is required unless
   `--no-telegram`, which only prints the link. `/runtimes` login forms come
   from the bot the owner typed `/runtimes` in.
-- The prompt's "Open sealed form" button is a reply keyboard. Once the form
+- The prompt's "Open sealed form" button is a reply keyboard. A chat shows
+  only its latest one, so while several forms are open in a chat the
+  keyboard holds one button per form, labelled with its purpose. Once a form
   is delivered, rejected for good or expired, the bot tells the owner the
-  outcome in that chat and removes the keyboard, unless another open form's
-  button is there (`Forms::take_closing` in `form.rs`, `form_reply` in
-  `telegram.rs`).
+  outcome in that chat with a keyboard of the forms still open there, or
+  removes it (`form_keyboard` and `form_reply` in `telegram.rs`,
+  `Forms::take_closing` in `form.rs`).
 - To test forms (CI, post-deploy checks), do not prompt the owner: use
   `axe form ask --no-telegram`, then submit a reply sealed to the printed
   link's spec with `axe form submit` (or through the link's page). No

@@ -1239,9 +1239,10 @@ impl Gateway {
     }
 
     /// Hands a sealed reply to the dispatcher and tells the owner the
-    /// outcome, removing the form keyboard once the form is done (unless
-    /// another open form's keyboard is in the chat). A form that finishes
-    /// later has its prompt closed by the server (`Forms::take_closing`).
+    /// outcome; once the form is done, the outcome replaces the form
+    /// keyboard with the buttons of the forms still open in the chat, or
+    /// removes it. A form that finishes later has its prompt closed by the
+    /// server (`Forms::take_closing`).
     fn form_reply(
         &self,
         b: &TgBot,
@@ -1251,18 +1252,20 @@ impl Gateway {
         data: Result<String>,
     ) -> Result<()> {
         let outcome = data.and_then(|d| store.form_submit(&d));
-        let (text, remove) = match &outcome {
+        let (text, open) = match &outcome {
             Ok(f) => (
                 crate::form::outcome_text(f),
-                store.form_close(&f.spec.form, &b.name, chat) == Some(true),
+                store.form_close(&f.spec.form, &b.name, chat),
             ),
-            Err(e) => (format!("Sealed form reply refused: {e:#}."), false),
+            Err(e) => (format!("Sealed form reply refused: {e:#}."), None),
         };
-        self.form_say(b, store, chat, Some(tg_id), &text, remove);
+        self.form_say(b, store, chat, Some(tg_id), &text, open.as_deref());
         Ok(())
     }
 
-    /// Sends a system message about a form; `remove` removes its keyboard.
+    /// Sends a system message about a form; `open` (the open forms'
+    /// purpose and link) replaces the chat's form keyboard, and an empty
+    /// `open` removes it.
     fn form_say(
         &self,
         b: &TgBot,
@@ -1270,14 +1273,14 @@ impl Gateway {
         chat: i64,
         reply_to: Option<i64>,
         text: &str,
-        remove: bool,
+        open: Option<&[(String, String)]>,
     ) {
         let mut p = json!({"chat_id": chat, "text": text});
         if let Some(r) = reply_to {
             p["reply_parameters"] = json!({"message_id": r, "allow_sending_without_reply": true});
         }
-        if remove {
-            p["reply_markup"] = json!({"remove_keyboard": true});
+        if let Some(open) = open {
+            p["reply_markup"] = form_keyboard(open);
         }
         match b.paced(chat, || b.api.call("sendMessage", &p)) {
             Ok(sent) => {
@@ -1311,19 +1314,27 @@ impl Gateway {
         Ok(b)
     }
 
-    /// Sends the owner a form's prompt with a reply-keyboard Mini App button
-    /// (`web_app`, private chats only) from bot `name`.
+    /// Sends the owner a form's prompt with a reply keyboard of Mini App
+    /// buttons (`web_app`, private chats only) from bot `name`. A chat shows
+    /// only its latest reply keyboard, so it holds a button for each form
+    /// `open` returns: the open forms prompted in that chat (this one
+    /// included), as purpose and link.
     pub fn form_prompt(
         &self,
         store: &dyn Store,
         name: &str,
         f: &crate::form::Form,
         link: &str,
-    ) -> Result<(Value, crate::form::Prompt)> {
+        open: impl FnOnce(&crate::form::Prompt) -> Vec<(String, String)>,
+    ) -> Result<Value> {
         let b = self.form_sender(name)?;
         bot_id(&store.conn(), name)?;
         let name = name.to_string();
         let chat = self.owner;
+        let buttons = open(&crate::form::Prompt {
+            bot: name.clone(),
+            chat,
+        });
         let text = crate::form::prompt_text(f);
         let html = format!(
             "{}\n\nNot in Telegram? <a href=\"{}\">Open the form in a browser</a> and paste the sealed reply here.",
@@ -1335,12 +1346,7 @@ impl Gateway {
             "text": html,
             "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": true},
-            "reply_markup": {
-                "keyboard": [[{"text": "Open sealed form", "web_app": {"url": link}}]],
-                "resize_keyboard": true,
-                "one_time_keyboard": true,
-                "input_field_placeholder": "Sealed form",
-            },
+            "reply_markup": form_keyboard(&buttons),
         });
         let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
         let id = record_out(
@@ -1353,10 +1359,7 @@ impl Gateway {
             json!([]),
             json!({"system": true, "form": f.spec.form}),
         )?;
-        Ok((
-            json!({"sent": true, "bot": name, "id": id}),
-            crate::form::Prompt { bot: name, chat },
-        ))
+        Ok(json!({"sent": true, "bot": name, "id": id}))
     }
 
     /// Sends the owner a sealed message (`sealed.rs`, sealed messages) from
@@ -1397,18 +1400,18 @@ impl Gateway {
     }
 
     /// Tells the owner a form's outcome in its prompt's chat (delivered after
-    /// a wait or outside Telegram, rejected for good, or expired); `remove`
-    /// removes the prompt's keyboard.
+    /// a wait or outside Telegram, rejected for good, or expired); `open`
+    /// replaces the prompt's keyboard (as `form_say`).
     pub fn form_outcome(
         &self,
         store: &dyn Store,
         bot: &str,
         chat: i64,
         f: &crate::form::Form,
-        remove: bool,
+        open: Option<&[(String, String)]>,
     ) {
         if let Ok(b) = self.bot(bot) {
-            self.form_say(b, store, chat, None, &crate::form::outcome_text(f), remove);
+            self.form_say(b, store, chat, None, &crate::form::outcome_text(f), open);
         }
     }
 
@@ -2673,6 +2676,38 @@ fn live_chats(conn: &Connection, name: &str) -> Result<Vec<(i64, Option<i64>)>> 
         )?
         .query_map([name], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The longest form purpose a form keyboard button shows.
+const FORM_LABEL_MAX: usize = 40;
+
+/// The reply keyboard of the open forms in a chat (purpose, link), one
+/// Mini App button per row: "Open sealed form" for a single form, else each
+/// form's purpose. No forms removes the keyboard.
+fn form_keyboard(open: &[(String, String)]) -> Value {
+    if open.is_empty() {
+        return json!({"remove_keyboard": true});
+    }
+    let rows: Vec<Value> = open
+        .iter()
+        .map(|(purpose, link)| {
+            let text = if open.len() == 1 {
+                "Open sealed form".to_string()
+            } else if purpose.chars().count() > FORM_LABEL_MAX {
+                let cut: String = purpose.chars().take(FORM_LABEL_MAX - 1).collect();
+                format!("Open: {}…", cut.trim_end())
+            } else {
+                format!("Open: {purpose}")
+            };
+            json!([{"text": text, "web_app": {"url": link}}])
+        })
+        .collect();
+    json!({
+        "keyboard": rows,
+        "resize_keyboard": true,
+        "one_time_keyboard": true,
+        "input_field_placeholder": "Sealed form",
+    })
 }
 
 /// The inline keyboard: `rows` buttons per row (checked by

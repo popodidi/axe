@@ -39,9 +39,10 @@ pub trait Store: Send + Sync + 'static {
         anyhow::bail!("sealed forms need an axe server")
     }
     /// Claims closing a finished form's prompt from the reply's `bot` and
-    /// `chat` (`form::Forms::claim_close`): `Some(remove)` when the caller
-    /// removes the keyboard, `None` when it does nothing.
-    fn form_close(&self, _form: &str, _bot: &str, _chat: i64) -> Option<bool> {
+    /// `chat` (`form::Forms::claim_close`): `Some(open)` when the caller
+    /// re-sends the keyboard with the `open` forms' buttons (purpose, link;
+    /// none: removes it), `None` when it does nothing.
+    fn form_close(&self, _form: &str, _bot: &str, _chat: i64) -> Option<Vec<(String, String)>> {
         None
     }
     /// Starts a login of a dispatcher runtime by `method`

@@ -159,12 +159,13 @@ impl channel::Store for State {
         let f = self.forms.submit(sealed, remote::epoch())?;
         Ok(deliver_form(self, &f.spec.form).unwrap_or(f))
     }
-    fn form_close(&self, form: &str, bot: &str, chat: i64) -> Option<bool> {
+    fn form_close(&self, form: &str, bot: &str, chat: i64) -> Option<Vec<(String, String)>> {
         let at = form::Prompt {
             bot: bot.into(),
             chat,
         };
-        self.forms.claim_close(form, &at)
+        let open = self.forms.claim_close(form, &at)?;
+        Some(form::buttons(&open, self.cfg.forms.page()))
     }
     fn runtime_login(&self, bot: &str, runtime: &str, method: &str) -> Result<String> {
         runtime_login(self, bot, runtime, method)
@@ -3062,7 +3063,8 @@ fn form_event(st: &State, f: &form::Form, body: &str) {
 }
 
 /// Expires forms, retries deliveries held for an offline dispatcher and
-/// closes finished forms' prompts (their outcome, removing the keyboard).
+/// closes finished forms' prompts (their outcome, with a keyboard of the
+/// forms still open in that chat, or none).
 fn form_loop(st: &State) {
     while !st.stop.load(Ordering::SeqCst) {
         st.forms.sweep(remote::epoch());
@@ -3070,12 +3072,13 @@ fn form_loop(st: &State) {
             if let Some(f) = deliver_form(st, &id) {
                 // Refused but still open; a finished form closes below.
                 if f.state == form::OPEN {
-                    form_notify(st, &f, false);
+                    form_notify(st, &f, None);
                 }
             }
         }
-        for (f, remove) in st.forms.take_closing(remote::epoch()) {
-            form_notify(st, &f, remove);
+        for (f, open) in st.forms.take_closing(remote::epoch()) {
+            let buttons = form::buttons(&open, st.cfg.forms.page());
+            form_notify(st, &f, Some(&buttons));
         }
         for _ in 0..50 {
             if st.stop.load(Ordering::SeqCst) {
@@ -3086,17 +3089,17 @@ fn form_loop(st: &State) {
     }
 }
 
-/// Tells the owner a form's outcome where its prompt went; `remove` removes
-/// the prompt's keyboard.
+/// Tells the owner a form's outcome where its prompt went; `open` (the open
+/// forms' buttons there) replaces the prompt's keyboard (none: removes it).
 #[cfg(feature = "telegram")]
-fn form_notify(st: &State, f: &form::Form, remove: bool) {
+fn form_notify(st: &State, f: &form::Form, open: Option<&[(String, String)]>) {
     if let (Some(gw), Some(p)) = (&st.telegram, &f.prompt) {
-        gw.form_outcome(st, &p.bot, p.chat, f, remove);
+        gw.form_outcome(st, &p.bot, p.chat, f, open);
     }
 }
 
 #[cfg(not(feature = "telegram"))]
-fn form_notify(_: &State, _: &form::Form, _: bool) {}
+fn form_notify(_: &State, _: &form::Form, _: Option<&[(String, String)]>) {}
 
 /// `/api/forms` routes (the token was checked: forms are private reads).
 fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
@@ -3320,12 +3323,15 @@ fn form_prompt(st: &State, f: &form::Form, name: &str) -> serde_json::Value {
         return json!({"sent": false, "reason": "telegram is not configured on this server"});
     };
     let page = st.cfg.forms.page();
-    match gw.form_prompt(st, name, f, &crate::sealed::link(page, &f.signed)) {
-        Ok((v, prompt)) => {
-            st.forms.set_prompt(&f.spec.form, prompt);
-            v
+    // The prompt is recorded before it is sent, so a form closing meanwhile
+    // keeps this one's button in the keyboard it re-sends.
+    let open = |at: &form::Prompt| form::buttons(&st.forms.prompt_at(&f.spec.form, at), page);
+    match gw.form_prompt(st, name, f, &crate::sealed::link(page, &f.signed), open) {
+        Ok(v) => v,
+        Err(e) => {
+            st.forms.clear_prompt(&f.spec.form);
+            json!({"sent": false, "reason": format!("{e:#}")})
         }
-        Err(e) => json!({"sent": false, "reason": format!("{e:#}")}),
     }
 }
 

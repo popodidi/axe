@@ -135,12 +135,6 @@ impl Forms {
         Ok(form)
     }
 
-    pub fn set_prompt(&self, form: &str, prompt: Prompt) {
-        if let Some(f) = self.lock().get_mut(form) {
-            f.prompt = Some(prompt);
-        }
-    }
-
     pub fn get(&self, form: &str, now: i64) -> Option<Form> {
         self.sweep(now);
         self.lock().get(form).cloned()
@@ -243,26 +237,46 @@ impl Forms {
             .collect()
     }
 
+    /// Records where a form's prompt goes and returns the open forms
+    /// prompted there, this one included, oldest first: the prompt's
+    /// keyboard holds one button for each, since a chat shows only its
+    /// latest reply keyboard.
+    pub fn prompt_at(&self, form: &str, at: &Prompt) -> Vec<Form> {
+        let mut forms = self.lock();
+        if let Some(f) = forms.get_mut(form) {
+            f.prompt = Some(at.clone());
+        }
+        open_prompts_in(&forms, at)
+    }
+
+    /// Forgets a prompt that could not be sent.
+    pub fn clear_prompt(&self, form: &str) {
+        if let Some(f) = self.lock().get_mut(form) {
+            f.prompt = None;
+        }
+    }
+
     /// Claims closing a finished form's prompt for a reply that came back in
-    /// `at` (its prompt's bot and chat). `Some(remove)` when the caller closes
-    /// it: `remove` is false while another open form's keyboard is in that
-    /// chat. `None` when the form is not finished, was prompted elsewhere or
-    /// is already closed.
-    pub fn claim_close(&self, form: &str, at: &Prompt) -> Option<bool> {
+    /// `at` (its prompt's bot and chat). `Some(open)` when the caller closes
+    /// it: `open` are the forms still open in that chat, whose buttons the
+    /// new keyboard keeps (none: remove it). `None` when the form is not
+    /// finished, was prompted elsewhere or is already closed.
+    pub fn claim_close(&self, form: &str, at: &Prompt) -> Option<Vec<Form>> {
         let mut forms = self.lock();
         let f = forms.get_mut(form)?;
         if f.finished.is_none() || f.closed || f.prompt.as_ref() != Some(at) {
             return None;
         }
         f.closed = true;
-        Some(!open_prompt_in(&forms, at))
+        Some(open_prompts_in(&forms, at))
     }
 
     /// Finished forms whose prompt nobody closed yet (expired, rejected for
     /// good, or delivered through the browser or `axe form submit`), each
-    /// with whether to remove the keyboard. Marks them closed. Forms asked
-    /// without a prompt (`--no-telegram`) are never returned.
-    pub fn take_closing(&self, now: i64) -> Vec<(Form, bool)> {
+    /// with the forms still open in its prompt's chat (as `claim_close`).
+    /// Marks them closed. Forms asked without a prompt (`--no-telegram`) are
+    /// never returned.
+    pub fn take_closing(&self, now: i64) -> Vec<(Form, Vec<Form>)> {
         let mut forms = self.lock();
         let mut out = vec![];
         for f in forms.values_mut() {
@@ -274,8 +288,8 @@ impl Forms {
         }
         out.into_iter()
             .map(|f| {
-                let remove = !open_prompt_in(&forms, f.prompt.as_ref().unwrap());
-                (f, remove)
+                let open = open_prompts_in(&forms, f.prompt.as_ref().unwrap());
+                (f, open)
             })
             .collect()
     }
@@ -309,12 +323,24 @@ impl Forms {
     }
 }
 
-/// Whether an open form's prompt keyboard is in `at`'s chat: removing the
-/// keyboard there would hide that form's button.
-fn open_prompt_in(forms: &HashMap<String, Form>, at: &Prompt) -> bool {
-    forms
+/// The open forms prompted in `at`'s chat, oldest first: a keyboard sent
+/// there must keep their buttons.
+fn open_prompts_in(forms: &HashMap<String, Form>, at: &Prompt) -> Vec<Form> {
+    let mut v: Vec<Form> = forms
         .values()
-        .any(|f| matches!(f.state, OPEN | SUBMITTED) && f.prompt.as_ref() == Some(at))
+        .filter(|f| matches!(f.state, OPEN | SUBMITTED) && f.prompt.as_ref() == Some(at))
+        .cloned()
+        .collect();
+    v.sort_by_key(|f| (f.created, f.spec.form.clone()));
+    v
+}
+
+/// The prompt keyboard's buttons for `open` forms: each form's purpose and
+/// its page link.
+pub fn buttons(open: &[Form], page: &str) -> Vec<(String, String)> {
+    open.iter()
+        .map(|f| (f.spec.purpose.clone(), sealed::link(page, &f.signed)))
+        .collect()
 }
 
 /// The owner-facing prompt text for a form (no values; names only).
@@ -487,8 +513,13 @@ mod tests {
         for _ in 0..3 {
             let (_, s) = key.sign("d", &req(), 0).unwrap();
             let f = forms.add(&req(), s, 0).unwrap();
-            forms.set_prompt(&f.spec.form, at.clone());
+            let open = forms.prompt_at(&f.spec.form, &at);
             ids.push(f.spec.form);
+            let mut open: Vec<String> = open.into_iter().map(|f| f.spec.form).collect();
+            open.sort();
+            let mut want = ids.clone();
+            want.sort();
+            assert_eq!(open, want, "each prompt lists every open form");
         }
         // No prompt (--no-telegram): never closed.
         let (_, s) = key.sign("d", &req(), 0).unwrap();
@@ -500,15 +531,20 @@ mod tests {
         let spec = forms.get(&ids[0], 1).unwrap().spec;
         let sealed = crate::sealed::seal(&spec, &json!({"token": "v"})).unwrap();
         forms.submit(&sealed.text(), 1).unwrap();
-        assert_eq!(forms.claim_close(&ids[0], &at), None, "not finished");
+        assert!(forms.claim_close(&ids[0], &at).is_none(), "not finished");
         forms.finish(&ids[0], &Delivery::Done(json!({"files": []})), 1);
         let elsewhere = Prompt {
             bot: "cos".into(),
             chat: 8,
         };
-        assert_eq!(forms.claim_close(&ids[0], &elsewhere), None);
-        assert_eq!(forms.claim_close(&ids[0], &at), Some(false));
-        assert_eq!(forms.claim_close(&ids[0], &at), None, "once");
+        assert!(forms.claim_close(&ids[0], &elsewhere).is_none());
+        let open = forms.claim_close(&ids[0], &at).expect("claimed");
+        let mut open: Vec<String> = open.into_iter().map(|f| f.spec.form).collect();
+        open.sort();
+        let mut want = ids[1..].to_vec();
+        want.sort();
+        assert_eq!(open, want, "the others keep their buttons");
+        assert!(forms.claim_close(&ids[0], &at).is_none(), "once");
         assert!(forms.take_closing(100).is_empty());
 
         // Expiry: the server closes them, removing the keyboard only once no
@@ -520,7 +556,7 @@ mod tests {
         assert_eq!(closing.len(), 2);
         assert!(closing
             .iter()
-            .all(|(f, remove)| f.state == EXPIRED && *remove));
+            .all(|(f, open)| f.state == EXPIRED && open.is_empty()));
         assert!(forms.take_closing(200).is_empty(), "once");
     }
 
