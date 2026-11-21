@@ -8,6 +8,7 @@
 //! answers, and a restart forgets open forms (their links stop working).
 //! Crypto and targets: `sealed.rs`.
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,8 @@ pub struct Form {
     pub finished: Option<i64>,
     /// The prompt's keyboard was dealt with once the form finished.
     closed: bool,
+    /// The order forms were added in (`created` has one-second ties).
+    seq: u64,
 }
 
 impl Form {
@@ -100,6 +103,7 @@ pub enum Delivery {
 pub struct Forms {
     forms: Mutex<HashMap<String, Form>>,
     cv: Condvar,
+    next: AtomicU64,
 }
 
 impl Forms {
@@ -130,6 +134,7 @@ impl Forms {
             prompt: None,
             finished: None,
             closed: false,
+            seq: self.next.fetch_add(1, Ordering::Relaxed),
         };
         self.lock().insert(form.spec.form.clone(), form.clone());
         Ok(form)
@@ -238,7 +243,7 @@ impl Forms {
     }
 
     /// Records where a form's prompt goes and returns the open forms
-    /// prompted there, this one included, oldest first: the prompt's
+    /// prompted there, this one included, in the order they were added: the prompt's
     /// keyboard holds one button for each, since a chat shows only its
     /// latest reply keyboard.
     pub fn prompt_at(&self, form: &str, at: &Prompt) -> Vec<Form> {
@@ -323,15 +328,15 @@ impl Forms {
     }
 }
 
-/// The open forms prompted in `at`'s chat, oldest first: a keyboard sent
-/// there must keep their buttons.
+/// The open forms prompted in `at`'s chat, in the order they were added: a
+/// keyboard sent there must keep their buttons.
 fn open_prompts_in(forms: &HashMap<String, Form>, at: &Prompt) -> Vec<Form> {
     let mut v: Vec<Form> = forms
         .values()
         .filter(|f| matches!(f.state, OPEN | SUBMITTED) && f.prompt.as_ref() == Some(at))
         .cloned()
         .collect();
-    v.sort_by_key(|f| (f.created, f.spec.form.clone()));
+    v.sort_by_key(|f| f.seq);
     v
 }
 
@@ -515,11 +520,8 @@ mod tests {
             let f = forms.add(&req(), s, 0).unwrap();
             let open = forms.prompt_at(&f.spec.form, &at);
             ids.push(f.spec.form);
-            let mut open: Vec<String> = open.into_iter().map(|f| f.spec.form).collect();
-            open.sort();
-            let mut want = ids.clone();
-            want.sort();
-            assert_eq!(open, want, "each prompt lists every open form");
+            let open: Vec<String> = open.into_iter().map(|f| f.spec.form).collect();
+            assert_eq!(open, ids, "each prompt lists every open form, in order");
         }
         // No prompt (--no-telegram): never closed.
         let (_, s) = key.sign("d", &req(), 0).unwrap();
@@ -539,11 +541,8 @@ mod tests {
         };
         assert!(forms.claim_close(&ids[0], &elsewhere).is_none());
         let open = forms.claim_close(&ids[0], &at).expect("claimed");
-        let mut open: Vec<String> = open.into_iter().map(|f| f.spec.form).collect();
-        open.sort();
-        let mut want = ids[1..].to_vec();
-        want.sort();
-        assert_eq!(open, want, "the others keep their buttons");
+        let open: Vec<String> = open.into_iter().map(|f| f.spec.form).collect();
+        assert_eq!(open, ids[1..], "the others keep their buttons");
         assert!(forms.claim_close(&ids[0], &at).is_none(), "once");
         assert!(forms.take_closing(100).is_empty());
 
