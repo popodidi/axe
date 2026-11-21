@@ -10,12 +10,25 @@ trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 test "$(docker run --rm "$image" --version)" = "axe $version (${revision:0:12})"
 docker run -d --name "$name" --entrypoint sh "$image" -c \
   'mkdir -p /tmp/state; echo fixture > /tmp/token; AXE_DB=/tmp/state/axe.db AXE_CONFIG=/tmp/missing AXE_TOKEN_FILE=/tmp/token exec axe server --listen 0.0.0.0:8790' >/dev/null
+# Reads need the token (the fixture) since pages and the API are private.
 get() {
-  docker exec "$name" python3 -c 'import sys, urllib.request; r = urllib.request.urlopen("http://127.0.0.1:8790" + sys.argv[1]); assert r.status == 200; sys.stdout.write(r.read().decode())' "$1"
+  docker exec "$name" python3 -c 'import sys, urllib.request; r = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8790" + sys.argv[1], headers={"Authorization": "Bearer fixture"})); assert r.status == 200; sys.stdout.write(r.read().decode())' "$1"
+}
+# Without it a page is the login page (401).
+anon_login() {
+  docker exec "$name" python3 -c '
+import urllib.error, urllib.request
+try:
+    urllib.request.urlopen("http://127.0.0.1:8790/")
+    raise SystemExit("/ served without a sign-in")
+except urllib.error.HTTPError as e:
+    assert e.code == 401 and b"axe web login-link" in e.read()
+'
 }
 for _ in $(seq 30); do get /healthz >/dev/null 2>&1 && break; sleep 1; done
 get /healthz | grep -q '"ok":true'
 get / | grep -qi '<html'
+anon_login
 test "$(docker exec "$name" cat /etc/axe-revision)" = "$revision"
 # The doc store (git backend) writes and reads back.
 docker exec "$name" python3 -c '
