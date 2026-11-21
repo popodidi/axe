@@ -1359,6 +1359,43 @@ impl Gateway {
         ))
     }
 
+    /// Sends the owner a sealed message (`sealed.rs`, sealed messages) from
+    /// bot `name`: `text` (the sender and purpose, never a secret) and an
+    /// inline Mini App button to `link`, the form page with the ciphertext in
+    /// its fragment. Only that text is recorded.
+    pub fn send_sealed(
+        &self,
+        store: &dyn Store,
+        name: &str,
+        text: &str,
+        link: &str,
+    ) -> Result<Value> {
+        let b = self.form_sender(name)?;
+        bot_id(&store.conn(), name)?;
+        let chat = self.owner;
+        let p = json!({
+            "chat_id": chat,
+            "text": text,
+            "link_preview_options": {"is_disabled": true},
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "Open sealed message", "web_app": {"url": link}}]],
+            },
+        });
+        let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+        let id = record_out(
+            store,
+            name,
+            &sent,
+            "text",
+            text,
+            None,
+            json!([]),
+            json!({"system": true, "sealed": true}),
+        )?;
+        Ok(json!({"sent": true, "bot": name, "chat": chat, "id": id,
+                  "message_id": sent["message_id"]}))
+    }
+
     /// Tells the owner a form's outcome in its prompt's chat (delivered after
     /// a wait or outside Telegram, rejected for good, or expired); `remove`
     /// removes the prompt's keyboard.

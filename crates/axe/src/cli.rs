@@ -363,6 +363,11 @@ enum Cmd {
         #[command(subcommand)]
         command: FormCmd,
     },
+    /// The web portal: every page and read needs a sign-in
+    Web {
+        #[command(subcommand)]
+        command: WebCmd,
+    },
     /// Download a consistent server-side snapshot of the database to a new file
     Backup { to: PathBuf },
     /// Immutable, content-addressed files kept by the server, shared through
@@ -1063,6 +1068,163 @@ enum FormCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Set the owner's reply key for sealed messages (`axe form send`): the
+    /// owner types a passphrase (12+ characters) into a sealed form and the
+    /// dispatcher keeps only the key derived from it (`[forms]
+    /// reply_key_file`). Run it again to replace the key; messages sealed to
+    /// the old one stop opening
+    ReplyKey {
+        /// The Telegram bot that sends the prompt
+        #[arg(long)]
+        bot: String,
+        /// How long the form stays open: 1m to 1h (default 15m)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Then wait for the reply
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send the owner a sealed message on Telegram: a secret, a link or a
+    /// small file (2 KiB in all), encrypted on this host to the owner's reply
+    /// key (`axe form reply-key`; run it on the dispatcher host). The server
+    /// and Telegram see only ciphertext and the text "<from>: <purpose>"; the
+    /// owner opens it in the form page with the passphrase
+    #[command(group(clap::ArgGroup::new("payload").required(true).args(["secret_file", "link", "file"])))]
+    Send {
+        /// The Telegram bot that sends it (it must write to the owner's
+        /// private chat)
+        #[arg(long)]
+        bot: String,
+        /// Shown in the chat as plain text: never a secret
+        #[arg(long)]
+        purpose: String,
+        /// A secret from a file (`-` for stdin; one trailing newline is dropped)
+        #[arg(long, value_name = "FILE")]
+        secret_file: Option<PathBuf>,
+        /// An access link the owner opens with one tap
+        #[arg(long, value_name = "URL")]
+        link: Option<String>,
+        /// A small file the owner downloads
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// How long the page opens it: 1m to 24h (default 15m)
+        #[arg(long)]
+        ttl: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum WebCmd {
+    /// Mint a one-time sign-in link to the portal: it works once, within
+    /// --ttl, and sets a 30-day read session in the browser that opens it.
+    /// The link carries a code, never the token. Prints it, or with --tg
+    /// sends it to the owner as a sealed message (`axe form send`)
+    LoginLink {
+        /// Send it sealed on Telegram instead of printing it
+        #[arg(long)]
+        tg: bool,
+        /// The Telegram bot for --tg
+        #[arg(long, env = "AXE_BOT")]
+        bot: Option<String>,
+        /// How long the link works: 1m to 1h (default 10m)
+        #[arg(long)]
+        ttl: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Who a sealed message is from: this task, this bot, else `axe`.
+fn sealed_from() -> String {
+    match (std::env::var("AXE_TASK"), std::env::var("AXE_BOT")) {
+        (Ok(t), _) if !t.is_empty() => format!("task {t}"),
+        (_, Ok(b)) if !b.is_empty() => format!("bot {b}"),
+        _ => "axe".into(),
+    }
+}
+
+/// Seals `payload` to the owner's reply key and sends it from `bot`.
+fn send_sealed(
+    c: &Client,
+    bot: &str,
+    purpose: &str,
+    payload: &crate::sealed::Payload,
+    ttl: i64,
+) -> Result<Value> {
+    let cfg = Config::load(&config::default_path()?).unwrap_or_default();
+    let key = crate::sealed::ReplyKey::load(&cfg.forms.reply_key_path())?;
+    let from = sealed_from();
+    let (h, text) =
+        crate::sealed::seal_message(&key, &from, purpose, payload, ttl, crate::remote::epoch())?;
+    let link = crate::sealed::message_link(cfg.forms.page(), &text);
+    let note = format!(
+        "Sealed message from {from}: {purpose}\nOpen it with your passphrase before {}.",
+        h.expires
+    );
+    let sent: Value = c.send(
+        "POST",
+        &format!("/api/bots/{bot}/tg/send-sealed"),
+        json!({"text": note, "link": link}),
+    )?;
+    Ok(json!({"id": h.id, "expires": h.expires, "telegram": sent}))
+}
+
+fn print_sealed(v: &Value, json: bool) -> Result<()> {
+    if json {
+        return print_json(v);
+    }
+    println!(
+        "sealed message {} sent by bot {} (telegram message {}), expires {}",
+        v["id"].as_str().unwrap_or("?"),
+        v["telegram"]["bot"].as_str().unwrap_or("?"),
+        v["telegram"]["message_id"],
+        v["expires"].as_str().unwrap_or("?"),
+    );
+    Ok(())
+}
+
+fn run_web(c: &Client, command: WebCmd) -> Result<()> {
+    match command {
+        WebCmd::LoginLink { tg, bot, ttl, json } => {
+            let ttl = ttl
+                .as_deref()
+                .map(crate::bot::parse_duration)
+                .transpose()?
+                .unwrap_or(crate::login::DEFAULT_TTL);
+            let bot = match (tg, bot) {
+                (true, Some(b)) => Some(b),
+                (true, None) => anyhow::bail!("--tg needs --bot (or $AXE_BOT)"),
+                (false, _) => None,
+            };
+            if bot.is_some() {
+                // Fail before minting a code when there is no reply key.
+                let cfg = Config::load(&config::default_path()?).unwrap_or_default();
+                crate::sealed::ReplyKey::load(&cfg.forms.reply_key_path())?;
+            }
+            let v: Value = c.send("POST", "/api/login-links", json!({"ttl": ttl}))?;
+            let url = v["url"].as_str().context("no link")?;
+            match bot {
+                None if json => print_json(&v),
+                None => {
+                    println!("{url}");
+                    eprintln!(
+                        "works once, until {}",
+                        v["expires_at"].as_str().unwrap_or("?")
+                    );
+                    Ok(())
+                }
+                Some(bot) => {
+                    let p = crate::sealed::Payload::Link(url.to_string());
+                    let sent = send_sealed(c, &bot, "Sign in to the axe web portal", &p, ttl)?;
+                    print_sealed(&sent, json)
+                }
+            }
+        }
+    }
 }
 
 fn form_line(v: &Value) -> String {
@@ -1259,6 +1421,83 @@ fn run_form(c: &Client, command: FormCmd) -> Result<()> {
             )?;
             println!("{}", form_line(&v));
             Ok(())
+        }
+        FormCmd::ReplyKey {
+            bot,
+            ttl,
+            wait,
+            json,
+        } => {
+            let ttl = ttl.as_deref().map(crate::bot::parse_duration).transpose()?;
+            let request = crate::sealed::Request {
+                purpose: format!(
+                    "Reply key: a passphrase ({}+ characters) to open sealed messages sent to you",
+                    crate::sealed::MIN_PASSPHRASE
+                ),
+                target: crate::sealed::Target::Reply,
+                fields: vec![crate::sealed::Field::parse(
+                    "passphrase:secret:required:label=Passphrase",
+                )?],
+                ttl,
+                from: sealed_from(),
+            };
+            request.validate()?;
+            let v: Value = c.send(
+                "POST",
+                "/api/forms",
+                json!({"request": request, "telegram": true, "bot": bot}),
+            )?;
+            if !wait {
+                return if json {
+                    print_json(&v)
+                } else {
+                    println!("{}", form_line(&v));
+                    Ok(())
+                };
+            }
+            let form = v["form"].as_str().context("no form id")?.to_string();
+            let exp = crate::sealed::parse_time(v["expires"].as_str().unwrap_or(""))?;
+            let done = form_wait(c, &form, exp - crate::remote::epoch() + 5)?;
+            print_form_result(&done, json)
+        }
+        FormCmd::Send {
+            bot,
+            purpose,
+            secret_file,
+            link,
+            file,
+            ttl,
+            json,
+        } => {
+            let ttl = ttl
+                .as_deref()
+                .map(crate::bot::parse_duration)
+                .transpose()?
+                .unwrap_or(crate::sealed::MESSAGE_DEFAULT_TTL);
+            let payload = match (secret_file, link, file) {
+                (Some(f), _, _) => {
+                    let mut s = String::new();
+                    if f.as_os_str() == "-" {
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                    } else {
+                        s = std::fs::read_to_string(&f)
+                            .with_context(|| format!("read {}", f.display()))?;
+                    }
+                    let s = s.strip_suffix('\n').unwrap_or(&s).to_string();
+                    crate::sealed::Payload::Secret(s)
+                }
+                (None, Some(l), _) => crate::sealed::Payload::Link(l),
+                (None, None, Some(f)) => crate::sealed::Payload::File {
+                    name: f
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file".into()),
+                    data: std::fs::read(&f).with_context(|| format!("read {}", f.display()))?,
+                },
+                (None, None, None) => anyhow::bail!("give --secret-file, --link or --file"),
+            };
+            let v = send_sealed(c, &bot, &purpose, &payload, ttl)?;
+            print_sealed(&v, json)
         }
         FormCmd::Key { json } => {
             let cfg = Config::load(&config::default_path()?).unwrap_or_default();
@@ -3350,6 +3589,7 @@ pub fn run() -> Result<()> {
         Cmd::Ask { command } => run_ask(&client(), command)?,
         Cmd::Rule { command } => run_rule(&client(), command.clone())?,
         Cmd::Form { command } => run_form(&client(), command.clone())?,
+        Cmd::Web { command } => run_web(&client(), command.clone())?,
         Cmd::Routine { command } => {
             let c = client();
             let value: Value = match command {

@@ -17,8 +17,13 @@ Only the latest release receives security fixes.
 ## Threat model in brief
 
 - `axe server` refuses to listen on a non-loopback address without a bearer
-  token. Writes and message content require the token; the read API is
-  unauthenticated, so expose the server only on a trusted network.
+  token. With a token, every request needs it or a browser read session
+  (`allowed` in `crates/axe/src/server.rs`); only `/healthz`, `/metrics`
+  and signed `/b/` links are open. A session (one-time `axe web login-link`
+  codes or the token on `/login`) only reads and lasts 30 days; it is an
+  HMAC cookie, revoked only by replacing the blob link key. Plain HTTP
+  carries the cookie and token in the clear, so keep the server on a
+  trusted network.
 - The dispatcher runs coding agents with the permissions you configure in
   `[agents]` (the built-in Claude Code command bypasses its permission
   prompts). Treat every task spec as code that will run on the dispatcher
@@ -33,3 +38,10 @@ Only the latest release receives security fixes.
   the key on the first form a browser sees, so compare the fingerprint once
   (`axe form key`). Values are files readable by the dispatcher's user, like
   its logins: every task run as that user can read them.
+- Sealed messages (`axe form send`, `axe web login-link --tg`) go the other
+  way, encrypted on the dispatcher host to a key derived from the owner's
+  passphrase (`axe form reply-key`; `ReplyKey` in `crates/axe/src/sealed.rs`).
+  The server and the channel see the sender, purpose, expiry and ciphertext.
+  The ciphertext stays in the chat and allows offline guessing of the
+  passphrase, so choose a long one and send material that expires or can be
+  rotated. Like forms, the page's code is the trust root.

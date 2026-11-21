@@ -274,7 +274,7 @@ fn fetch_with(url: &str, cookie: Option<&str>) -> (u16, ureq::Response) {
 /// The dashboard's read session: the token buys an HttpOnly cookie that reads
 /// blobs and docs and signs links, and nothing else.
 #[test]
-fn read_session_cookie_reads_the_store_only() {
+fn read_session_cookie_reads_but_never_writes() {
     let dir = tempfile::tempdir().unwrap();
     let srv = Server::start(dir.path());
     let f = dir.path().join("page.html");
@@ -296,7 +296,7 @@ fn read_session_cookie_reads_the_store_only() {
         .unwrap();
     let set = r.header("set-cookie").unwrap().to_string();
     assert!(
-        set.contains("HttpOnly") && set.contains("SameSite=Strict"),
+        set.contains("HttpOnly") && set.contains("SameSite=Lax") && set.contains("Max-Age=2592000"),
         "{set}"
     );
     assert_eq!(json(&r.into_string().unwrap())["read"], true);
@@ -326,6 +326,11 @@ fn read_session_cookie_reads_the_store_only() {
         .as_str()
         .unwrap()
         .starts_with(&format!("/b/{sha}/page.html?exp=")));
+    // Other reads too (the portal), but not message content.
+    assert_eq!(
+        fetch_with(&format!("{}/api/tasks", srv.url), Some(&cookie)).0,
+        200
+    );
     // Not uploads, other private reads or writes.
     let up = ureq::post(&format!("{}/api/blobs", srv.url))
         .set("Cookie", &cookie)

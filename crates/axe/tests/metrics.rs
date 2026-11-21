@@ -76,7 +76,8 @@ fn real_http_metrics_auth_errors_cache_and_restart() {
     assert!(initial.contains("axe_pending_oldest_age_seconds{project=\"all\"} 0\n"));
     assert_eq!(srv.get("/healthz")["ok"], true);
     for n in 0..20 {
-        let e = ureq::get(&format!("{}/private-{n}?token=do-not-leak", srv.url))
+        let e = srv
+            .request(&format!("/private-{n}?token=do-not-leak"))
             .call()
             .unwrap_err();
         assert_eq!(e.into_response().unwrap().status(), 404);

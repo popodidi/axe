@@ -115,14 +115,9 @@ impl Client {
         }
     }
 
+    /// A GET with the token: a server with a token refuses reads without it.
     pub fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
-        self.attempts(false, |_| {
-            let mut req = self.agent.get(&format!("{}{path}", self.base));
-            for (k, v) in query {
-                req = req.query(k, v);
-            }
-            self.finish(req.call())
-        })
+        self.get_private(path, query)
     }
 
     /// Sends a write with the actor, session, and bearer token.
@@ -156,7 +151,7 @@ impl Client {
         })
     }
 
-    /// A GET that needs the token (message content).
+    /// A GET with the token.
     pub fn get_private<T: DeserializeOwned>(
         &self,
         path: &str,

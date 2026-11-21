@@ -204,6 +204,10 @@ pub struct Forms {
     /// to the config file).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_credentials: Option<String>,
+    /// The owner's reply key for sealed messages (`sealed.rs`; default
+    /// `reply.key` next to the config file, written by a reply key form, 0600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_key_file: Option<String>,
 }
 
 impl Forms {
@@ -215,6 +219,13 @@ impl Forms {
         match &self.key_file {
             Some(p) => expand_tilde(p),
             None => beside_config("dispatcher.key"),
+        }
+    }
+    /// `reply_key_file`, else `reply.key` next to the config file.
+    pub fn reply_key_path(&self) -> PathBuf {
+        match &self.reply_key_file {
+            Some(p) => expand_tilde(p),
+            None => beside_config(crate::sealed::REPLY_KEY_FILE),
         }
     }
     /// `git_credentials`, else `git-credentials` next to the config file.
