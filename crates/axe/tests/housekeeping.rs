@@ -1410,8 +1410,9 @@ fn done_task_run_folders_go_after_retention() {
 
     // task-20: done long ago, two repo worktrees -> removed and deregistered.
     run_folder(&folder(20), &[(&src, "src"), (&lib, "lib")]);
-    // task-21: done long ago, no repos -> removed.
+    // task-21: done long ago, no repos, a delivered sealed form -> removed.
     run_folder(&folder(21), &[]);
+    axe::sealed::write_private_file(&folder(21).join(".secrets/.env.json"), b"{}").unwrap();
     // Kept: waiting (pending), stored blocked, escalated, in progress with a
     // live run, done too recently, done but a live run, an extra file, a dirty
     // repo worktree, an unpushed commit.

@@ -406,9 +406,18 @@ fn candidates(root: &Path) -> Result<Vec<Candidate>> {
     Ok(out)
 }
 
-/// Entries of a run folder that axe generates (`run_workspace.rs`); anything
-/// else is the task's own and keeps the folder.
-const RUN_GENERATED: [&str; 6] = [".agents", ".claude", "AGENTS.md", "docs", "repos", "skills"];
+/// Entries of a run folder that axe generates (`run_workspace.rs`, and the
+/// sealed form `.secrets` folder, `sealed::secrets_dir`); anything else is the
+/// task's own and keeps the folder.
+const RUN_GENERATED: [&str; 7] = [
+    ".agents",
+    ".claude",
+    ".secrets",
+    "AGENTS.md",
+    "docs",
+    "repos",
+    "skills",
+];
 
 /// Task run folders `task-<id>` directly under `runs`; bot run folders
 /// (`bot-<name>`) and other names are not candidates.
