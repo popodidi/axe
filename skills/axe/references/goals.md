@@ -128,6 +128,11 @@ and cost spent. Send it to the owner as one digest item. Close with the
 owner's word: `axe goal done G --why "..." --owner-ref "msg #N"`, or
 `axe goal pause G` likewise.
 
+To give a goal a better name, keep it rather than closing it and proposing a
+duplicate: `axe goal rename G NEW --why "..." --owner-ref "msg #N"` (an owner
+decision). Its id, history, cost, linked tasks, wakes, schedules and pin stay.
+A name in use, a dropped goal's included, is refused; rename that goal first.
+
 ## 6. Several bots on one goal
 
 A goal has one shared trajectory. Read it (`axe goal log G`) before

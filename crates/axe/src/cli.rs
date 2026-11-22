@@ -2144,6 +2144,16 @@ enum GoalCmd {
         #[arg(long)]
         owner_ref: Option<String>,
     },
+    /// Rename a goal (an owner decision); its id, history and links stay
+    Rename {
+        name: String,
+        new_name: String,
+        #[arg(long)]
+        why: String,
+        /// Owner decision this rests on (e.g. "msg #873"); required unless human
+        #[arg(long)]
+        owner_ref: Option<String>,
+    },
     /// Attach a bot to the goal
     Join {
         name: String,
@@ -2580,6 +2590,16 @@ fn run_goal(c: &Client, command: &GoalCmd) -> Result<()> {
             why,
             owner_ref,
         } => action(name, "drop", json!({"why": why, "owner_ref": owner_ref}))?,
+        GoalCmd::Rename {
+            name,
+            new_name,
+            why,
+            owner_ref,
+        } => action(
+            name,
+            "rename",
+            json!({"to": new_name, "why": why, "owner_ref": owner_ref}),
+        )?,
         GoalCmd::Join {
             name,
             bot,

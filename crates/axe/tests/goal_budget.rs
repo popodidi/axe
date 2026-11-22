@@ -580,3 +580,99 @@ fn edit_moves_a_goal_to_another_project_with_an_audit_event() {
     assert!(goal::edit(&mut c, &human(), "g", &bad, "owner", None).is_err());
     assert!(goal::edit(&mut c, &human(), "g", &Edit::default(), "owner", None).is_err());
 }
+
+fn fails(r: anyhow::Result<impl std::fmt::Debug>, want: &str) {
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains(want), "{e}");
+}
+
+#[test]
+fn rename_keeps_id_cost_trajectory_and_links() {
+    let (_d, mut c) = setup();
+    let t = now();
+    let before = goal::get(&c, "g").unwrap();
+    let linked = old_linked_task(&mut c, "g");
+    task_run(&c, 1, linked, t - 3600, 2.0);
+    bot_run(&c, 10, 1, t - 60, 1.5, &[("k", "[goal g] a")]);
+    goal::membership(&mut c, &human(), "g", "join", "a", "w", None).unwrap();
+    goal::record(&mut c, &human(), "g", "hypothesis", Some(linked), "H1").unwrap();
+    let s = axe::schedule::NewSchedule {
+        name: "probe".into(),
+        cron: "0 9 * * *".into(),
+        timezone: "UTC".into(),
+        objective: "check".into(),
+    };
+    axe::schedule::add_for_goal(&mut c, &human(), "a", &s, Some("g"), "w", t).unwrap();
+    let later = goal::label("g", "later");
+    bot::add_wake(&mut c, &human(), "a", t + DAY, &later, None, t).unwrap();
+    let spent = budget(&c, "g").cost_spent;
+    assert!((spent - 3.5).abs() < 1e-9, "{spent}");
+
+    // An owner decision: a bot needs an owner reference.
+    let bot_a = Actor::new("bot:a");
+    let e = goal::rename(&mut c, &bot_a, "g", "live", "w", None).unwrap_err();
+    assert!(e.to_string().contains("--owner-ref"), "{e}");
+    // Onto an existing name is refused, a dropped goal's included, until that
+    // goal is renamed out of the way.
+    fails(
+        goal::rename(&mut c, &human(), "g", "h", "w", None),
+        "goal h already exists",
+    );
+    goal::change(&mut c, &human(), "h", "drop", "w", None).unwrap();
+    fails(
+        goal::rename(&mut c, &human(), "g", "h", "w", None),
+        "goal h already exists (dropped)",
+    );
+    fails(
+        goal::rename(&mut c, &human(), "g", "Bad!", "w", None),
+        "must be 1-40",
+    );
+    fails(
+        goal::rename(&mut c, &human(), "nope", "x", "w", None),
+        "not found",
+    );
+    goal::rename(&mut c, &human(), "h", "h-dropped", "free the name", None).unwrap();
+
+    let g = goal::rename(&mut c, &bot_a, "g", "h", "scope grew", Some("msg #1")).unwrap();
+    assert_eq!(g.id, before.id);
+    assert_eq!(g.state, "active");
+    assert_eq!(g.bots, ["a"]);
+    fails(goal::get(&c, "g"), "goal g not found");
+
+    let d = goal::detail(&c, "h").unwrap();
+    assert!((d.goal.budget.unwrap().cost_spent - spent).abs() < 1e-9);
+    assert_eq!(d.tasks.iter().map(|t| t.id).collect::<Vec<_>>(), [linked]);
+    assert_eq!(d.trajectory.len(), 1);
+    assert_eq!(d.trajectory[0].body, "H1");
+    assert_eq!(db::current_goal(&c, linked).unwrap().as_deref(), Some("h"));
+    assert_eq!(
+        axe::schedule::list(&c, "a").unwrap()[0].goal.as_deref(),
+        Some("h")
+    );
+    let wakes = bot::wakes(&c, "a", true, 100).unwrap();
+    assert!(
+        wakes.iter().any(|w| w.body == "[goal h] later"),
+        "{wakes:?}"
+    );
+    assert!(d.next_wake.is_some());
+    // The schedule fires labeled with the new name.
+    assert_eq!(axe::schedule::tick(&mut c, t + 2 * DAY).unwrap(), 1);
+    let fired = bot::wakes(&c, "a", true, 100).unwrap();
+    assert!(
+        fired
+            .iter()
+            .any(|w| w.body.starts_with("[goal h] scheduled wake")),
+        "{fired:?}"
+    );
+    // New links use the new name; the old one is gone.
+    assert!(task(&mut c, Some("g")).is_err());
+    task(&mut c, Some("h")).unwrap();
+
+    let ev = goal::events(&c, "h", 100, false).unwrap();
+    let r = ev.iter().rev().find(|e| e.kind == "rename").unwrap();
+    assert_eq!(r.actor, "bot:a");
+    assert_eq!(r.owner_ref.as_deref(), Some("msg #1"));
+    assert!(r.body.starts_with("g -> h\nwhy: scope grew"), "{}", r.body);
+    // The dropped goal kept its own history under its new name.
+    assert_eq!(goal::get(&c, "h-dropped").unwrap().state, "dropped");
+}

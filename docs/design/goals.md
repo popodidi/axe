@@ -48,6 +48,16 @@ Tasks link to a goal through a task event (latest wins), not a task column,
 and wakes and schedules carry a `[goal NAME]` label in their body, so neither
 needed a change to task or wake storage.
 
+Renaming a goal (`axe goal rename`, task 1415 on 2026-11-21) is an owner
+decision too. Because links and labels hold the name as text, a rename
+rewrites them in one transaction: the task `goal` events and every
+`[goal NAME]` wake body, delivered or pending, so linked tasks, next wakes and
+cost and attention history follow the goal. The id, bots, schedules, pins and
+goal events stay; one `rename` event records the old name. Names stay unique
+across all states, so reusing a dropped goal's name means renaming the dropped
+goal first. Dispatch rules that match a goal by name are config and must be
+edited by hand.
+
 ## Budget
 
 Spend is computed on read over a rolling seven-day window; nothing is stored.

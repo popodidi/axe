@@ -596,4 +596,41 @@ fn cli_drives_goals_through_the_api() {
     let log = srv.ok(&["goal", "log", "g"]);
     assert!(log.contains("activated: proposed -> active"), "{log}");
     assert!(log.contains(r#"owner_ref="msg #1""#), "{log}");
+
+    // Rename: an owner decision; the goal, its wakes and links move along.
+    let out = as_bot(&["goal", "rename", "g", "g2", "--why", "scope"]);
+    assert!(!out.status.success(), "{out:?}");
+    let out = srv.run(&["goal", "rename", "g", "g", "--why", "same"]);
+    assert!(!out.status.success(), "{out:?}");
+    let out = as_bot(&[
+        "goal",
+        "rename",
+        "g",
+        "g2",
+        "--why",
+        "scope",
+        "--owner-ref",
+        "msg #2",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("g2  active"));
+    let out = srv.run(&["goal", "show", "g"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("goal g not found"),
+        "{out:?}"
+    );
+    let show = srv.get("/api/goals/g2");
+    assert_eq!(show["next_wake"], due);
+    assert_eq!(show["trajectory"][1]["task_id"].to_string(), id);
+    let wakes = srv.get("/api/bots/a/wakes?undelivered=1");
+    assert!(
+        wakes.to_string().contains("[goal g2] look at it"),
+        "{wakes}"
+    );
+    let log = srv.ok(&["goal", "log", "g2"]);
+    assert!(
+        log.contains(r#"bot:a rename owner_ref="msg #2": g -> g2"#),
+        "{log}"
+    );
 }

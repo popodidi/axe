@@ -2329,6 +2329,14 @@ fn goal_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Respons
         who: Who,
     }
     #[derive(Deserialize)]
+    struct RenameBody {
+        to: String,
+        why: String,
+        owner_ref: Option<String>,
+        #[serde(flatten)]
+        who: Who,
+    }
+    #[derive(Deserialize)]
     struct RecordBody {
         kind: String,
         task_id: Option<i64>,
@@ -2406,6 +2414,20 @@ fn goal_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Respons
                     name,
                     action,
                     bot,
+                    &b.why,
+                    b.owner_ref.as_deref(),
+                )?,
+            )
+        }
+        ("POST", ["api", "goals", name, "rename"]) => {
+            let b: RenameBody = req.json()?;
+            ok(
+                200,
+                &goal::rename(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    name,
+                    b.to.trim(),
                     &b.why,
                     b.owner_ref.as_deref(),
                 )?,
