@@ -51,9 +51,8 @@ pub fn route(path: &[String]) -> &'static str {
         | "reset"] => "/api/bots/:name/action",
         ["api", "goals"] => "/api/goals",
         ["api", "goals", _] => "/api/goals/:name",
-        ["api", "goals", _, "events" | "activate" | "pause" | "resume" | "done" | "drop" | "join" | "leave"] => {
-            "/api/goals/:name/action"
-        }
+        ["api", "goals", _, "events" | "activate" | "pause" | "resume" | "done" | "drop" | "join" | "leave"
+        | "rename"] => "/api/goals/:name/action",
         ["api", "bot-runs"] => "/api/bot-runs",
         ["api", "bot-runs", _] => "/api/bot-runs/:id",
         ["api", "bot-runs", _, "log"] => "/api/bot-runs/:id/log",

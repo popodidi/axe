@@ -42,7 +42,7 @@ pub const STATES: [&str; 5] = ["proposed", "active", "paused", "done", "dropped"
 /// Trajectory event kinds, written with `axe goal record`.
 pub const TRAJECTORY_KINDS: [&str; 5] = ["hypothesis", "test", "verdict", "observation", "note"];
 /// Audit event kinds, written by the server on each change.
-pub const AUDIT_KINDS: [&str; 9] = [
+pub const AUDIT_KINDS: [&str; 10] = [
     "proposed",
     "activated",
     "intent",
@@ -52,6 +52,7 @@ pub const AUDIT_KINDS: [&str; 9] = [
     "leave",
     "state",
     "project",
+    "rename",
 ];
 pub const INTENT_CAP: usize = 16 * 1024;
 pub const RECORD_CAP: usize = 16 * 1024;
@@ -642,6 +643,66 @@ pub fn edit(
     }
     tx.commit()?;
     get(conn, name)
+}
+
+/// Renames a goal (an owner decision). The id, intent, budget, bots,
+/// schedules, pins and every event stay; the name references stored as text
+/// move with it in one transaction: task `goal` events (links, cost and
+/// attention history) and `[goal NAME]` wake labels, delivered or pending.
+/// The new name must be free: a dropped goal still holds its name until it is
+/// renamed itself.
+pub fn rename(
+    conn: &mut Connection,
+    actor: &Actor,
+    name: &str,
+    new: &str,
+    why: &str,
+    owner: Option<&str>,
+) -> Result<Goal> {
+    check_why(why)?;
+    check_name(new)?;
+    let owner = owner_ref(actor, owner, "renaming a goal")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let g = get(&tx, name)?;
+    if g.name == new {
+        bail!("goal {name} already has that name");
+    }
+    let taken: Option<String> = tx
+        .query_row("SELECT state FROM goals WHERE name=?1", [new], |r| r.get(0))
+        .optional()?;
+    if let Some(state) = taken {
+        bail!(
+            "goal {new} already exists ({state}); rename or pick another name \
+             (a dropped goal keeps its name until it is renamed)"
+        );
+    }
+    let at = ts(crate::remote::epoch());
+    tx.execute(
+        "UPDATE goals SET name=?1, updated_at=?2 WHERE id=?3",
+        params![new, at, g.id],
+    )?;
+    let links = tx.execute(
+        "UPDATE events SET to_value=?2 WHERE kind='goal' AND to_value=?1",
+        params![g.name, new],
+    )?;
+    tx.execute(
+        "UPDATE events SET from_value=?2 WHERE kind='goal' AND from_value=?1",
+        params![g.name, new],
+    )?;
+    let (old_label, new_label) = (label(&g.name, ""), label(new, ""));
+    let (old_label, new_label) = (old_label.trim_end(), new_label.trim_end());
+    let wakes = tx.execute(
+        "UPDATE bot_wakes SET body=?2 || substr(body, length(?1)+1)
+         WHERE substr(body, 1, length(?1))=?1",
+        params![old_label, new_label],
+    )?;
+    let body = format!(
+        "{} -> {new}\nwhy: {why}\nrewrote {links} task link(s) and {wakes} wake label(s)",
+        g.name
+    );
+    event(&tx, g.id, actor, "rename", None, owner, &body, &at)?;
+    tx.commit()?;
+    get(conn, new)
 }
 
 /// The state an action moves a goal to, and the states it applies from.
