@@ -49,7 +49,11 @@ pub trait Source {
     /// Every attachment of every scope.
     fn attachments(&self) -> Result<Vec<Attachment>>;
     /// The current doc or folder at `path`.
-    fn get(&self, path: &str) -> Result<Fetched>;
+    fn get(&self, path: &str) -> Result<Fetched> {
+        Ok(self.get_versioned(path)?.0)
+    }
+    /// [`Source::get`] with the version it read (`axe workspace` records it).
+    fn get_versioned(&self, path: &str) -> Result<(Fetched, String)>;
 }
 
 /// A doc's content, or a folder's files.
@@ -62,9 +66,9 @@ impl Source for Client {
     fn attachments(&self) -> Result<Vec<Attachment>> {
         self.get_private("/api/docs/attachments", &[])
     }
-    fn get(&self, path: &str) -> Result<Fetched> {
+    fn get_versioned(&self, path: &str) -> Result<(Fetched, String)> {
         let v: Value = self.get_private("/api/docs/file", &[("path", path)])?;
-        fetched(v)
+        versioned(v)
     }
 }
 
@@ -72,9 +76,14 @@ impl Source for doc::Store {
     fn attachments(&self) -> Result<Vec<Attachment>> {
         doc::Store::attachments(self, None)
     }
-    fn get(&self, path: &str) -> Result<Fetched> {
-        fetched(serde_json::to_value(doc::Store::get(self, path, None)?)?)
+    fn get_versioned(&self, path: &str) -> Result<(Fetched, String)> {
+        versioned(serde_json::to_value(doc::Store::get(self, path, None)?)?)
     }
+}
+
+fn versioned(v: Value) -> Result<(Fetched, String)> {
+    let version = v["version"].as_str().unwrap_or_default().to_string();
+    Ok((fetched(v)?, version))
 }
 
 fn fetched(v: Value) -> Result<Fetched> {
@@ -424,7 +433,7 @@ pub fn write_skills(skills_dir: &Path, res: &Resolution, source: &dyn Source) ->
 }
 
 /// Writes one file of a stored folder under `dir`.
-fn write_file(dir: &Path, f: &doc::File) -> Result<()> {
+pub fn write_file(dir: &Path, f: &doc::File) -> Result<()> {
     let p = dir.join(doc::check_path(&f.path)?);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1061,7 +1070,7 @@ mod tests {
                 },
             ])
         }
-        fn get(&self, _: &str) -> Result<Fetched> {
+        fn get_versioned(&self, _: &str) -> Result<(Fetched, String)> {
             anyhow::bail!("boom")
         }
     }
