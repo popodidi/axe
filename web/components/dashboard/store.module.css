@@ -89,6 +89,59 @@
   overflow: auto;
   min-width: 0;
 }
+/* In the store pane the preview takes the pane's height: an HTML frame
+   grows into the free space, and text and images show whole (the pane
+   scrolls) instead of in a capped inner box. */
+.fill {
+  display: flex;
+  flex-direction: column;
+}
+.fill .frame {
+  flex: 1;
+  height: auto;
+  min-height: 70vh;
+}
+.fill .text,
+.fill .image {
+  max-height: none;
+}
+.fill .image {
+  align-self: flex-start;
+}
+.fill .docFile {
+  min-width: 0;
+}
+.facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-quarter) var(--space-1);
+  margin: 0;
+  padding: var(--space-1);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.fact {
+  display: contents;
+}
+.facts dt {
+  color: var(--text-tertiary);
+}
+.facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.facts .taskLinks {
+  flex-wrap: wrap;
+}
+/* The doc page (app/doc): one readable column. */
+.page {
+  max-width: calc(var(--space-8) * 7);
+  margin: 0 auto;
+  padding: var(--pane-padding);
+}
 .docFile {
   display: grid;
   gap: var(--space-half);

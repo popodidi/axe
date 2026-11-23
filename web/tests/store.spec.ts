@@ -54,10 +54,6 @@ async function mockStore(page: Page, read: boolean) {
       }
       return json({ read: store.read, expires_at: store.read ? "2099-01-01T00:00:00Z" : null });
     }
-    if (p === "/api/session-end") {
-      store.read = false;
-      return json({ read: false });
-    }
     if (p.startsWith("/api/blobs") || p.startsWith("/api/docs") || p.startsWith("/api/store")) {
       if (!store.read) return json({ error: "unauthorized" }, 401);
       const signedLink = p.match(/^\/api\/blobs\/([0-9a-f]{64})\/link$/);
@@ -100,6 +96,11 @@ async function mockStore(page: Page, read: boolean) {
         });
       if (p === "/api/docs/attachments")
         return json([{ scope: "label:harvis", path: "harvis/docs/reference/brand-guide.md", exists: true }]);
+      if (p === "/api/docs/log")
+        return json([
+          { version: "c".repeat(40), at: "2026-11-10T00:00:00+00:00", author: "axe", message: "edit" },
+          { version: "e".repeat(40), at: "2026-11-01T00:00:00+00:00", author: "axe", message: "create" },
+        ]);
       if (p === "/api/docs/file")
         return json({
           path: url.searchParams.get("path"),
@@ -222,9 +223,19 @@ test("the store page lists, searches and opens blobs and docs", async ({ page })
   await page.getByLabel("Search blobs").fill("shot");
   await blobsTable.getByRole("button", { name: "shot.png" }).click();
   await expect(page).toHaveURL(new RegExp(`blob=${sha("1")}`));
-  // The item opens in the side pane; the list stays.
+  // The item opens in the side pane with its metadata and a full link; the
+  // list stays. Signing in is the portal's, so the store has no Lock.
   const pane = page.getByRole("region", { name: "Store item" });
   await expect(pane.getByRole("img", { name: "Preview of shot.png" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Lock" })).toHaveCount(0);
+  const blobFacts = pane.getByRole("definition");
+  await expect(pane.locator("dl[aria-label='Blob details']")).toContainText(sha("1"));
+  await expect(pane.locator("dl[aria-label='Blob details']")).toContainText("image/png");
+  await expect(pane.locator("dl[aria-label='Blob details']")).toContainText("2099");
+  await expect(blobFacts.getByRole("button", { name: "#3" })).toBeVisible();
+  const full = pane.getByRole("link", { name: "Open full" });
+  await expect(full).toHaveAttribute("href", `http://axe.test/b/${sha("1")}/shot.png?exp=${future}&sig=fresh`);
+  await expect(full).toHaveAttribute("target", "_blank");
   await expect(blobsTable).toBeVisible();
   await expect(blobsTable.locator("tbody tr[aria-selected=true]")).toContainText("shot.png");
   // Escape closes it and focus returns to the row.
@@ -246,6 +257,17 @@ test("the store page lists, searches and opens blobs and docs", async ({ page })
   await expect(page).toHaveURL(/doc=harvis%2Fdocs%2Freference%2Fbrand-guide.md/);
   await expect(pane.getByRole("heading", { name: "Quiet" })).toBeVisible();
   await expect(tree).toBeVisible();
+  const docFacts = pane.locator("dl[aria-label='Doc details']");
+  await expect(docFacts).toContainText("c".repeat(40));
+  await expect(docFacts).toContainText("label:harvis");
+  await expect(docFacts).toContainText("120 B");
+  await expect(docFacts).toContainText("2 · first");
+  const docFull = pane.getByRole("link", { name: "Open full" });
+  await expect(docFull).toHaveAttribute("target", "_blank");
+  const href = (await docFull.getAttribute("href"))!;
+  expect(href).toBe(
+    "/doc?path=harvis%2Fdocs%2Freference%2Fbrand-guide.md&server=http%3A%2F%2Faxe.test",
+  );
   // A linked task opens from its blob.
   await page.getByRole("tab", { name: "blobs" }).click();
   await page.getByLabel("Search blobs").fill("");
@@ -263,8 +285,25 @@ test("the store page lists, searches and opens blobs and docs", async ({ page })
   await expect(pane.getByRole("img", { name: "Preview of shot.png" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator("[data-store-viewer]")).toHaveCount(0);
-  await page.getByRole("button", { name: "Lock" }).click();
-  await expect(page.getByRole("form", { name: "Unlock the store" })).toBeVisible();
+  // The doc's full page renders it on its own.
+  await page.goto(href);
+  await expect(page.getByRole("heading", { name: "Quiet" })).toBeVisible();
+  await expect(page.getByText("harvis/docs/reference/brand-guide.md")).toBeVisible();
+});
+
+test("a store item fills the pane height", async ({ page }) => {
+  await mockDesk(page);
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  for (const item of [`blob=${sha("3")}`, "kind=docs&doc=harvis/docs/reference/brand-guide.md"]) {
+    await page.goto(`/?server=http://axe.test&view=store&${item}`);
+    const pane = page.getByRole("region", { name: "Store item" });
+    const viewer = pane.locator("[data-store-viewer]");
+    await expect(viewer).toBeVisible();
+    // Short content: the viewer reaches the pane's bottom (no blank band).
+    const [p, v] = await Promise.all([pane.boundingBox(), viewer.boundingBox()]);
+    expect(p!.y + p!.height - (v!.y + v!.height)).toBeLessThan(40);
+  }
 });
 
 test("store rows stay on one line and docs browse as folders", async ({ page }) => {

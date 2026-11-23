@@ -279,7 +279,9 @@ opens without the token, for example from a phone; it renders inline in a
 sandbox. The signing key is created on first start; `[blobs]` sets the
 directory, size limit, link base URL and key file.
 
-The dashboard's Store view lists and searches blobs and docs, and a task's
+The dashboard's Store view lists and searches blobs and docs; a selected
+item shows its metadata and an "Open full" link (the signed `/b/` URL, or
+`/doc?path=` for a doc) beside a preview. A task's
 artifacts preview store links inline (images, text, Markdown, sandboxed
 HTML), re-signing an expired link from its sha256. Older artifact URLs open
 too when a link-map doc (any doc path ending in `.links.tsv`, with `url` and
