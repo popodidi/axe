@@ -210,17 +210,12 @@ export function useStoreSession(base: string) {
     },
     [base],
   );
-  const lock = useCallback(async () => {
-    await getJson<Session>(`${base}/api/session-end`, { method: "POST" }).catch(() => null);
-    publish(base, { read: false });
-  }, [base]);
   const s = sessions.get(base);
   return {
     // null while the first check runs.
     read: s ? s.read : null,
     expiresAt: s?.expires_at || null,
     unlock,
-    lock,
   };
 }
 

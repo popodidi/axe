@@ -249,6 +249,18 @@
   border-left: var(--border-subtle);
 }
 
+/* A store item fills the pane height, so its preview has no blank space
+   below it; longer content scrolls the pane. */
+.storeInner {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.storeInner > [data-store-viewer] {
+  flex: 1;
+}
+
 /* Desktop open/close: the workspace boundary moves (275ms) and content enters
    by at most 4px (160ms). Only during a transition, never while resizing.
    Content keeps its minimum width so text does not reflow every frame. */

@@ -84,18 +84,38 @@ export function storeItemKey(params: URLSearchParams) {
   return blob ? `blob:${blob}` : doc ? `doc:${doc}` : null;
 }
 
-// The detail pane body for a store item key.
+// The detail pane body for a store item key: the item's metadata, a link to
+// open it whole in a new tab, and a preview that fills the pane.
 export function StoreItem({
   base,
   item,
   state,
+  onOpenTask,
 }: {
   base: string;
   item: string;
   state: StoreState;
+  onOpenTask: (id: number) => void;
 }) {
   const id = item.slice(item.indexOf(":") + 1);
-  if (item.startsWith("doc:")) return <DocViewer key={id} base={base} path={id} />;
+  if (item.startsWith("doc:")) {
+    const doc = state.data?.docs.find((d) => d.path === id);
+    return (
+      <DocViewer
+        key={id}
+        base={base}
+        path={id}
+        fill
+        info={
+          doc && {
+            size: doc.size,
+            updatedAt: doc.updated_at,
+            scopes: docScopes(doc.path, state.data?.attachments || []),
+          }
+        }
+      />
+    );
+  }
   if (state.error) return <Alert>Unable to load the store: {state.error}</Alert>;
   if (!state.data) return <Skeleton label="Opening…" lines={2} />;
   const blob = state.data.blobs.find((b) => b.sha256 === id);
@@ -107,6 +127,9 @@ export function StoreItem({
       name={blob?.names?.[0] || ""}
       contentType={blob?.content_type || undefined}
       size={blob?.size}
+      fill
+      info={{ names: blob?.names || [], tasks: blob?.tasks || [], storedAt: blob?.created_at }}
+      onOpenTask={onOpenTask}
     />
   );
 }
@@ -162,11 +185,7 @@ export function Store({
   const count = kind === "blobs" ? blobs.length : docs.length;
   return (
     <Panel aria-label="Store">
-      <PanelHead label="Store">
-        <Button variant="ghost" onClick={() => session.lock()}>
-          Lock
-        </Button>
-      </PanelHead>
+      <PanelHead label="Store" />
       {data?.stats && <StoreStatsRow stats={data.stats} />}
       <Tabs
         tabs={["blobs", "docs"]}

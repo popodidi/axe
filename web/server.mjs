@@ -44,10 +44,13 @@ createServer(async (req, res) => {
     return;
   }
   try {
-    const data = await readFile(file);
+    // `/doc` is the static export's `doc.html`, as `axe server` resolves it.
+    const data = await readFile(file).catch((e) =>
+      extname(file) ? Promise.reject(e) : readFile(file + ".html"),
+    );
     res.setHeader(
       "Content-Type",
-      mime[extname(file)] || "application/octet-stream",
+      mime[extname(file) || ".html"] || "application/octet-stream",
     );
     res.end(req.method === "HEAD" ? undefined : data);
   } catch {

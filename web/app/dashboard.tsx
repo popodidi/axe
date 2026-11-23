@@ -967,7 +967,7 @@ export default function Dashboard() {
               inert={phase === "closing" || overlay}
               aria-label="Store item"
             >
-              <div className={styles.detailInner}>
+              <div className={`${styles.detailInner} ${styles.storeInner}`}>
                 <header className={styles.detailHeader}>
                   <div className={styles.detailTop}>
                     <span className={styles.detailId}>
@@ -982,7 +982,12 @@ export default function Dashboard() {
                     </Button>
                   </div>
                 </header>
-                <StoreItem base={base} item={shownStore} state={store} />
+                <StoreItem
+                  base={base}
+                  item={shownStore}
+                  state={store}
+                  onOpenTask={(id) => update({ task: String(id), tab: null })}
+                />
               </div>
             </section>
           )}

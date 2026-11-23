@@ -3,20 +3,47 @@
 // server when expired) and docs. HTML renders in a sandboxed frame with no
 // script or same-origin access, and the server also sends
 // `Content-Security-Policy: sandbox` with every blob it serves.
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import Markdown from "../../app/markdown";
 import {
   formatBytes,
   getJson,
   previewKind,
   signLink,
+  storeLink,
   TEXT_PREVIEW_BYTES,
   useStoreSession,
   type PreviewKind,
   type StoreLink,
 } from "../../lib/store";
-import { Alert, Button, CodeBlock, Input, Skeleton } from "../ui";
+import { Alert, Button, CodeBlock, cx, Input, Skeleton } from "../ui";
 import styles from "./store.module.css";
+
+// A full local timestamp, or a dash.
+function fullDate(s?: string | number) {
+  if (s === undefined || s === "") return "—";
+  const d = new Date(s);
+  return Number.isFinite(d.getTime())
+    ? d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+    : "—";
+}
+
+// The item's metadata as label/value rows.
+function Facts({ label, rows }: { label: string; rows: [string, ReactNode][] }) {
+  return (
+    <dl className={styles.facts} aria-label={label}>
+      {rows.map(([k, v]) => (
+        <div key={k} className={styles.fact}>
+          <dt>{k}</dt>
+          <dd>{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+// What the store pane knows about a blob beyond its link.
+export type BlobInfo = { names: string[]; tasks: number[]; storedAt?: string };
 
 export function StoreUnlock({ base, reason }: { base: string; reason: string }) {
   const { unlock } = useStoreSession(base);
@@ -82,6 +109,9 @@ export function BlobViewer({
   contentType,
   size,
   url,
+  fill = false,
+  info,
+  onOpenTask,
 }: {
   base: string;
   link?: StoreLink;
@@ -90,6 +120,11 @@ export function BlobViewer({
   contentType?: string;
   size?: number;
   url?: string;
+  // Fill the containing pane (the store page) instead of a capped box.
+  fill?: boolean;
+  // Show the blob's metadata (the store page).
+  info?: BlobInfo;
+  onOpenTask?: (id: number) => void;
 }) {
   const session = useStoreSession(base);
   const [blob, setBlob] = useState<Blob | null | "missing">(
@@ -158,10 +193,31 @@ export function BlobViewer({
       );
     return <Skeleton label="Opening…" lines={2} />;
   }
-  return <BlobPreview key={src} src={src} blob={blob} />;
+  return (
+    <BlobPreview
+      key={src}
+      src={src}
+      blob={blob}
+      fill={fill}
+      info={info}
+      onOpenTask={onOpenTask}
+    />
+  );
 }
 
-function BlobPreview({ src, blob }: { src: string; blob: Blob }) {
+function BlobPreview({
+  src,
+  blob,
+  fill,
+  info,
+  onOpenTask,
+}: {
+  src: string;
+  blob: Blob;
+  fill: boolean;
+  info?: BlobInfo;
+  onOpenTask?: (id: number) => void;
+}) {
   const [meta, setMeta] = useState<{ kind: PreviewKind; size?: number; type: string } | null>(
     blob.contentType
       ? {
@@ -195,28 +251,64 @@ function BlobPreview({ src, blob }: { src: string; blob: Blob }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src, blob.name]);
   const title = blob.name || blob.sha256.slice(0, 12);
+  const expires = storeLink(src)?.expires;
   return (
-    <div className={styles.viewer} data-store-viewer>
+    <div className={cx(styles.viewer, fill && styles.fill)} data-store-viewer>
       <div className={styles.viewerHead}>
         <span className={styles.viewerName} title={blob.name}>
           {title}
         </span>
-        <span className={styles.meta}>
-          {meta ? `${meta.type || "unknown type"}` : "…"}
-          {meta?.size !== undefined && ` · ${formatBytes(meta.size)}`}
-        </span>
-        <span className={styles.sha} title="sha256">
-          {blob.sha256}
-        </span>
+        {!info && (
+          <>
+            <span className={styles.meta}>
+              {meta ? `${meta.type || "unknown type"}` : "…"}
+              {meta?.size !== undefined && ` · ${formatBytes(meta.size)}`}
+            </span>
+            <span className={styles.sha} title="sha256">
+              {blob.sha256}
+            </span>
+          </>
+        )}
         <span className={styles.actions}>
           <a href={src} target="_blank" rel="noopener noreferrer">
-            Open
+            {info ? "Open full" : "Open"}
           </a>
           <a href={src} download={blob.name || blob.sha256}>
             Download
           </a>
         </span>
       </div>
+      {info && (
+        <Facts
+          label="Blob details"
+          rows={[
+            ["Name", info.names.length ? info.names.join(", ") : "—"],
+            ["sha256", <span key="v" className={styles.mono}>{blob.sha256}</span>],
+            ["Type", meta ? meta.type || "unknown" : "…"],
+            ["Size", meta?.size !== undefined ? formatBytes(meta.size) : "—"],
+            ["Stored", fullDate(info.storedAt)],
+            [
+              "Tasks",
+              info.tasks.length ? (
+                <span className={styles.taskLinks}>
+                  {info.tasks.map((t) =>
+                    onOpenTask ? (
+                      <Button key={t} variant="link" onClick={() => onOpenTask(t)}>
+                        #{t}
+                      </Button>
+                    ) : (
+                      <span key={t}>#{t}</span>
+                    ),
+                  )}
+                </span>
+              ) : (
+                "None"
+              ),
+            ],
+            ["Link expires", fullDate(expires)],
+          ]}
+        />
+      )}
       {error ? (
         <Alert>Unable to load the preview: {error}</Alert>
       ) : !meta ? (
@@ -261,20 +353,48 @@ type DocBody = {
   files?: { path: string; content: string }[];
 };
 
-export function DocViewer({ base, path }: { base: string; path: string }) {
+// What the store pane knows about a doc from the listing.
+export type DocInfo = { size: number; updatedAt: string; scopes: string[] };
+type DocVersion = { version: string; at: string };
+
+// The doc's full page (app/doc): this dashboard, pointed at the same server.
+export function docPageHref(base: string, path: string) {
+  const q = new URLSearchParams({ path });
+  if (typeof location !== "undefined" && base !== location.origin) q.set("server", base);
+  return `/doc?${q}`;
+}
+
+export function DocViewer({
+  base,
+  path,
+  fill = false,
+  info,
+}: {
+  base: string;
+  path: string;
+  fill?: boolean;
+  // Show the doc's metadata and a link to its full page (the store page).
+  info?: DocInfo;
+}) {
   const session = useStoreSession(base);
   const [doc, setDoc] = useState<DocBody | null>(null);
+  const [versions, setVersions] = useState<DocVersion[] | null>(null);
   const [error, setError] = useState("");
+  const details = !!info;
   useEffect(() => {
     if (!session.read) return;
     let live = true;
     getJson<DocBody>(`${base}/api/docs/file?path=${encodeURIComponent(path)}`)
       .then((d) => live && setDoc(d))
       .catch((e) => live && setError((e as Error).message));
+    if (details)
+      getJson<DocVersion[]>(`${base}/api/docs/log?path=${encodeURIComponent(path)}`)
+        .then((v) => live && setVersions(v))
+        .catch(() => live && setVersions([]));
     return () => {
       live = false;
     };
-  }, [base, path, session.read]);
+  }, [base, path, session.read, details]);
   if (session.read === false)
     return <StoreUnlock base={base} reason="Unlock the store to read docs." />;
   if (error) return <Alert>Unable to open this doc: {error}</Alert>;
@@ -282,13 +402,43 @@ export function DocViewer({ base, path }: { base: string; path: string }) {
   const files =
     doc.kind === "folder" ? doc.files || [] : [{ path: "", content: doc.content || "" }];
   return (
-    <div className={styles.viewer} data-store-viewer>
+    <div className={cx(styles.viewer, fill && styles.fill)} data-store-viewer>
       <div className={styles.viewerHead}>
         <span className={styles.viewerName}>{doc.path}</span>
-        <span className={styles.meta}>
-          {doc.kind} · version <span className={styles.mono}>{doc.version.slice(0, 12)}</span>
-        </span>
+        {!info && (
+          <span className={styles.meta}>
+            {doc.kind} · version <span className={styles.mono}>{doc.version.slice(0, 12)}</span>
+          </span>
+        )}
+        {info && (
+          <span className={styles.actions}>
+            <a href={docPageHref(base, doc.path)} target="_blank" rel="noopener noreferrer">
+              Open full
+            </a>
+          </span>
+        )}
       </div>
+      {info && (
+        <Facts
+          label="Doc details"
+          rows={[
+            ["Path", <span key="v" className={styles.mono}>{doc.path}</span>],
+            ["Kind", doc.kind],
+            ["Version", <span key="v" className={styles.mono}>{doc.version}</span>],
+            [
+              "Versions",
+              versions === null
+                ? "…"
+                : versions.length
+                  ? `${versions.length} · first ${fullDate(versions[versions.length - 1].at)}`
+                  : "—",
+            ],
+            ["Size", formatBytes(info.size)],
+            ["Updated", fullDate(info.updatedAt)],
+            ["Scopes", info.scopes.length ? info.scopes.join(", ") : "None"],
+          ]}
+        />
+      )}
       {files.map((f) => (
         <section key={f.path} aria-label={f.path || doc.path} className={styles.docFile}>
           {f.path && <h4 className={styles.mono}>{f.path}</h4>}
