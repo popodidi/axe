@@ -260,28 +260,11 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     state.metrics.refresh(&state.conn())?;
     listener.set_nonblocking(true)?;
-    let mut last_metrics = Instant::now();
-    let mut last_tick = Instant::now() - Duration::from_secs(1);
+    {
+        let st = Arc::clone(&state);
+        std::thread::spawn(move || housekeeping_loop(&st));
+    }
     while !stop.load(Ordering::SeqCst) {
-        if last_tick.elapsed() >= Duration::from_secs(1) {
-            match routine::tick(&mut state.conn(), routine::now()) {
-                Ok(n) if n > 0 => state.notifier.bump(),
-                Err(e) => eprintln!("routine scheduler: {e:#}"),
-                _ => {}
-            }
-            match schedule::tick(&mut state.conn(), routine::now()) {
-                Ok(n) if n > 0 => state.notifier.bump(),
-                Err(e) => eprintln!("bot schedule tick: {e:#}"),
-                _ => {}
-            }
-            last_tick = Instant::now();
-        }
-        if last_metrics.elapsed() >= Duration::from_secs(15) {
-            if let Err(e) = state.metrics.refresh(&state.conn()) {
-                eprintln!("metrics snapshot: {e:#}");
-            }
-            last_metrics = Instant::now();
-        }
         match listener.accept() {
             Ok((stream, _)) => {
                 if state.connections.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -3169,6 +3152,34 @@ fn form_event(st: &State, f: &form::Form, body: &str) {
 /// Expires forms, retries deliveries held for an offline dispatcher and
 /// closes finished forms' prompts (their outcome, with a keyboard of the
 /// forms still open in that chat, or none).
+/// The once-a-second routine and bot-schedule ticks and the 15 s metrics
+/// snapshot. They take the shared DB connection, so they run here and not on
+/// the accept loop: a slow commit must never delay `accept()` (and with it
+/// `/healthz`, which needs no DB).
+fn housekeeping_loop(st: &State) {
+    let mut last_metrics = Instant::now();
+    while !st.stop.load(Ordering::SeqCst) {
+        let started = Instant::now();
+        match routine::tick(&mut st.conn(), routine::now()) {
+            Ok(n) if n > 0 => st.notifier.bump(),
+            Err(e) => eprintln!("routine scheduler: {e:#}"),
+            _ => {}
+        }
+        match schedule::tick(&mut st.conn(), routine::now()) {
+            Ok(n) if n > 0 => st.notifier.bump(),
+            Err(e) => eprintln!("bot schedule tick: {e:#}"),
+            _ => {}
+        }
+        if last_metrics.elapsed() >= Duration::from_secs(15) {
+            if let Err(e) = st.metrics.refresh(&st.conn()) {
+                eprintln!("metrics snapshot: {e:#}");
+            }
+            last_metrics = Instant::now();
+        }
+        std::thread::sleep(Duration::from_secs(1).saturating_sub(started.elapsed()));
+    }
+}
+
 fn form_loop(st: &State) {
     while !st.stop.load(Ordering::SeqCst) {
         st.forms.sweep(remote::epoch());
