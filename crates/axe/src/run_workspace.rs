@@ -29,6 +29,13 @@
 //! A repo whose canonical clone is missing but has `[repos.<name>] url` is
 //! cloned first ([`worktree::ensure_clone`]), for a task or a bot alike; the
 //! run's `run_start` event lists it in `repos_cloned`.
+//!
+//! `axe workspace` builds the same folder anywhere, through the same code in
+//! [`Mode::Local`] (`workspace.rs`): a missing task branch starts from its
+//! `origin` copy when pushed, attached docs are written in full under
+//! `docs/store/<path>`, and every file written from the store is returned
+//! with its version ([`Stored`]) for the workspace's manifest. The
+//! dispatcher's folders ([`Mode::Run`]) are unchanged.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -56,24 +63,85 @@ pub fn build(
         .as_deref()
         .context("task has no repos; it runs in its project worktree")?;
     let dir = cfg.run_root().join(format!("task-{}", task.id));
+    let out = build_task(cfg, task, repos, store, &dir, Mode::Run)?;
+    Ok((dir, out.cloned))
+}
+
+/// Who a folder is built for: a dispatcher run, or `axe workspace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Run,
+    Local,
+}
+
+/// A doc or folder written from the store into a local workspace.
+#[derive(Debug, Clone)]
+pub struct Stored {
+    /// Store path.
+    pub path: String,
+    /// Where it is, relative to the workspace.
+    pub local: PathBuf,
+    pub folder: bool,
+    /// The version that was written.
+    pub version: String,
+}
+
+/// What one build did.
+#[derive(Debug, Default)]
+pub struct Built {
+    pub cloned: Vec<String>,
+    pub refreshed: Vec<RepoRefresh>,
+    pub stored: Vec<Stored>,
+}
+
+/// The task layout in `dir`; [`build`] in [`Mode::Run`], `axe workspace`
+/// in [`Mode::Local`] (store errors fail the build instead of leaving the
+/// context out).
+pub fn build_task(
+    cfg: &Config,
+    task: &Task,
+    repos: &[String],
+    store: Option<&dyn context::Source>,
+    dir: &Path,
+    mode: Mode,
+) -> Result<Built> {
     let branch = format!("{}task-{}--work", branch_prefix(cfg), task.id);
-    let (built, cloned) = checkout(cfg, &dir, repos, &branch)?;
-    let skills = link_skills(&dir, &built)?;
-    let attached = match store {
-        Some(src) => context::resolve_or_empty(src, &context::task_scopes(task), &own(&skills)),
-        None => context::Resolution::default(),
+    let (built, cloned) = checkout(cfg, dir, repos, &branch, mode)?;
+    let skills = link_skills(dir, &built)?;
+    let attached = match (store, mode) {
+        (Some(src), Mode::Run) => {
+            context::resolve_or_empty(src, &context::task_scopes(task), &own(&skills))
+        }
+        (Some(src), Mode::Local) => {
+            context::resolve(src, &context::task_scopes(task), &own(&skills))?
+        }
+        (None, _) => context::Resolution::default(),
     };
+    let mut stored = Vec::new();
     if let Some(src) = store {
-        context::write_skills(&dir.join("skills"), &attached, src)?;
+        match mode {
+            Mode::Run => context::write_skills(&dir.join("skills"), &attached, src)?,
+            Mode::Local => stored = write_skills_local(dir, &attached, src)?,
+        }
     }
-    let mut docs = docs_index(&built)?;
-    docs.push_str(&context::docs_section(&attached));
+    let mut docs = docs_index(&built, mode)?;
+    docs.push_str(&match mode {
+        Mode::Run => context::docs_section(&attached),
+        Mode::Local => local_docs_section(&attached),
+    });
     finish(
-        &dir,
+        dir,
         &docs,
-        &agents_md(task, &branch, &built, &skills, &attached),
+        &agents_md(task, &branch, &built, &skills, &attached, mode),
     )?;
-    Ok((dir, cloned))
+    if let (Some(src), Mode::Local) = (store, mode) {
+        stored.extend(write_docs_local(dir, &attached, src)?);
+    }
+    Ok(Built {
+        cloned,
+        refreshed: Vec::new(),
+        stored,
+    })
 }
 
 /// The run folder of bot `name` with `repos` (non-empty): `<run_root>/bot-<home>`,
@@ -95,8 +163,27 @@ pub fn build_bot(
     store: &dyn context::Source,
 ) -> Result<(PathBuf, Vec<RepoRefresh>, Vec<String>)> {
     let dir = cfg.run_root().join(format!("bot-{home}"));
+    let out = build_bot_in(cfg, name, home, repos, attached, store, &dir, Mode::Run)?;
+    Ok((dir, out.refreshed, out.cloned))
+}
+
+/// The bot layout in `dir`; [`build_bot`] in [`Mode::Run`]. In
+/// [`Mode::Local`] the attached docs and bundles are also written in full and
+/// indexed, and `AGENTS.md` names the bot's system prompt (`.axe/system.md`,
+/// written by `axe workspace`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_bot_in(
+    cfg: &Config,
+    name: &str,
+    home: &str,
+    repos: &[String],
+    attached: &context::Resolution,
+    store: &dyn context::Source,
+    dir: &Path,
+    mode: Mode,
+) -> Result<Built> {
     let branch = format!("{}bot-{home}--work", branch_prefix(cfg));
-    let (built, cloned) = checkout(cfg, &dir, repos, &branch)?;
+    let (built, cloned) = checkout(cfg, dir, repos, &branch, mode)?;
     let mut refreshed = Vec::new();
     for (repo, path) in &built {
         let ready = worktree::repo_readiness(cfg, repo).map_err(anyhow::Error::msg)?;
@@ -105,8 +192,8 @@ pub fn build_bot(
             refresh: worktree::refresh(&ready, path),
         });
     }
-    let skills = link_skills(&dir, &built)?;
-    let attached = context::Resolution {
+    let skills = link_skills(dir, &built)?;
+    let skills_only = context::Resolution {
         scopes: attached.scopes.clone(),
         items: attached
             .items
@@ -116,13 +203,143 @@ pub fn build_bot(
             .cloned()
             .collect(),
     };
-    context::write_skills(&dir.join("skills"), &attached, store)?;
+    let mut stored = Vec::new();
+    let mut docs = docs_index(&built, mode)?;
+    match mode {
+        Mode::Run => context::write_skills(&dir.join("skills"), &skills_only, store)?,
+        Mode::Local => {
+            stored = write_skills_local(dir, &skills_only, store)?;
+            docs.push_str(&local_docs_section(attached));
+        }
+    }
     finish(
-        &dir,
-        &docs_index(&built)?,
-        &bot_agents_md(name, &branch, &built, &skills, &attached),
+        dir,
+        &docs,
+        &bot_agents_md(name, &branch, &built, &skills, &skills_only, mode),
     )?;
-    Ok((dir, refreshed, cloned))
+    if mode == Mode::Local {
+        stored.extend(write_docs_local(dir, attached, store)?);
+    }
+    Ok(Built {
+        cloned,
+        refreshed,
+        stored,
+    })
+}
+
+/// Writes each included attached skill like [`context::write_skills`],
+/// returning those read from the store with their versions. A skill that
+/// cannot be read fails the build: a local workspace is not a run that must
+/// start anyway.
+fn write_skills_local(
+    dir: &Path,
+    res: &context::Resolution,
+    source: &dyn context::Source,
+) -> Result<Vec<Stored>> {
+    let mut out = Vec::new();
+    for s in res.attached(context::Kind::Skill) {
+        let local = Path::new("skills").join(&s.name);
+        let at = dir.join(&local);
+        if std::fs::symlink_metadata(&at).is_ok() {
+            continue;
+        }
+        let (got, version) = source
+            .get_versioned(&s.path)
+            .with_context(|| format!("read skill {}", s.path))?;
+        let context::Fetched::Folder(files) = got else {
+            bail!("skill {} is a doc, not a folder", s.path);
+        };
+        std::fs::create_dir_all(&at)?;
+        for f in &files {
+            context::write_file(&at, f)?;
+        }
+        out.push(Stored {
+            path: s.path.clone(),
+            local,
+            folder: true,
+            version,
+        });
+    }
+    Ok(out)
+}
+
+/// Writes each included attached doc and bundle in full under
+/// `docs/store/<path>`.
+fn write_docs_local(
+    dir: &Path,
+    res: &context::Resolution,
+    source: &dyn context::Source,
+) -> Result<Vec<Stored>> {
+    let mut out = Vec::new();
+    for i in res
+        .attached(context::Kind::Doc)
+        .chain(res.attached(context::Kind::Bundle))
+    {
+        let local = Path::new("docs/store").join(crate::doc::check_path(&i.path)?);
+        let at = dir.join(&local);
+        let (got, version) = source
+            .get_versioned(&i.path)
+            .with_context(|| format!("read doc {}", i.path))?;
+        let folder = match got {
+            context::Fetched::Doc(text) => {
+                std::fs::create_dir_all(at.parent().context("doc path has no parent")?)?;
+                std::fs::write(&at, text).with_context(|| format!("write {}", at.display()))?;
+                false
+            }
+            context::Fetched::Folder(files) => {
+                std::fs::create_dir_all(&at)?;
+                for f in &files {
+                    context::write_file(&at, f)?;
+                }
+                true
+            }
+        };
+        out.push(Stored {
+            path: i.path.clone(),
+            local,
+            folder,
+            version,
+        });
+    }
+    Ok(out)
+}
+
+/// `docs/index.md`'s section for the attached docs a local workspace holds
+/// in full; empty when none.
+fn local_docs_section(res: &context::Resolution) -> String {
+    let mut s = String::new();
+    let items: Vec<&context::Item> = res
+        .attached(context::Kind::Doc)
+        .chain(res.attached(context::Kind::Bundle))
+        .collect();
+    if items.is_empty() {
+        return s;
+    }
+    s.push_str(
+        "\n## Attached\n\nDocs attached to this workspace's scopes, written in full from the axe \
+         doc store under `docs/store/`. Edit one, then run `axe workspace sync` to write it back.\n\n",
+    );
+    for i in items {
+        let slash = if i.kind == context::Kind::Bundle {
+            "/"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            s,
+            "- {} [`{}`](store/{}{slash}) ({}): {}",
+            i.kind,
+            i.path,
+            i.path.replace(' ', "%20"),
+            i.scope,
+            if i.description.is_empty() {
+                "-"
+            } else {
+                &i.description
+            }
+        );
+    }
+    s
 }
 
 /// What [`build_bot`] did to one repo's worktree before the run.
@@ -138,7 +355,7 @@ fn branch_prefix(cfg: &Config) -> String {
 }
 
 /// Each repo's name and worktree path, in the task's order.
-type Built = Vec<(String, PathBuf)>;
+type Repos = Vec<(String, PathBuf)>;
 
 /// Creates `dir` and a worktree of each repo under `dir/repos/<name>` on
 /// `branch`, first cloning a missing canonical clone that has a `url`; also
@@ -148,7 +365,8 @@ fn checkout(
     dir: &Path,
     repos: &[String],
     branch: &str,
-) -> Result<(Built, Vec<String>)> {
+    mode: Mode,
+) -> Result<(Repos, Vec<String>)> {
     match std::fs::symlink_metadata(dir) {
         Ok(m) if !m.is_dir() => bail!("{} exists and is not a directory", dir.display()),
         _ => {}
@@ -160,13 +378,22 @@ fn checkout(
         crate::db::validate_name("repo", name)?;
         if worktree::ensure_clone(cfg, name)? {
             eprintln!(
-                "axe dispatcher: cloned repo {name} into {}",
+                "{}: cloned repo {name} into {}",
+                match mode {
+                    Mode::Run => "axe dispatcher",
+                    Mode::Local => "axe",
+                },
                 cfg.repo_path(name).display()
             );
             cloned.push(name.clone());
         }
         let ready = worktree::repo_readiness(cfg, name).map_err(anyhow::Error::msg)?;
-        let path = worktree::allocate_at(&ready, &dir.join("repos").join(name), branch)?;
+        let path = worktree::allocate_from(
+            &ready,
+            &dir.join("repos").join(name),
+            branch,
+            mode == Mode::Local,
+        )?;
         built.push((name.clone(), path));
     }
     Ok((built, cloned))
@@ -290,8 +517,13 @@ pub fn explain(
 
 /// `docs/index.md`: every Markdown file under each repo's `docs/` (two levels),
 /// by its first heading.
-fn docs_index(repos: &[(String, PathBuf)]) -> Result<String> {
-    let mut s = String::from("# Docs\n\nGenerated by axe for this run; edits here are lost.\n");
+fn docs_index(repos: &[(String, PathBuf)], mode: Mode) -> Result<String> {
+    let mut s = String::from(match mode {
+        Mode::Run => "# Docs\n\nGenerated by axe for this run; edits here are lost.\n",
+        Mode::Local => {
+            "# Docs\n\nGenerated by `axe workspace`; edits here are lost when it rebuilds.\n"
+        }
+    });
     for (repo, path) in repos {
         let mut files = Vec::new();
         markdown_files(&path.join("docs"), 2, &mut files);
@@ -347,10 +579,16 @@ fn agents_md(
     repos: &[(String, PathBuf)],
     skills: &[Skill],
     attached: &context::Resolution,
+    mode: Mode,
 ) -> String {
     let mut s = format!(
-        "# Task {}: {}\n\nGenerated by axe at the start of every session; edits here are lost.\n\n",
-        task.id, task.title
+        "# Task {}: {}\n\n{}\n\n",
+        task.id,
+        task.title,
+        match mode {
+            Mode::Run => "Generated by axe at the start of every session; edits here are lost.",
+            Mode::Local => LOCAL_NOTE,
+        }
     );
     let _ = writeln!(s, "- Owner: {}", task.owner.as_deref().unwrap_or("-"));
     let mut labels = vec![task.project.clone()];
@@ -381,14 +619,26 @@ fn agents_md(
     if !attached.is_empty() {
         let _ = writeln!(
             s,
-            "\nAttached skills are written in full under `skills/`; attached docs are index entries: \
-             load a body with `axe doc get <path>`. \
-             `axe context explain {}` shows what was included and why.",
+            "\n{} `axe context explain {}` shows what was included and why.",
+            match mode {
+                Mode::Run =>
+                    "Attached skills are written in full under `skills/`; attached docs are \
+                     index entries: load a body with `axe doc get <path>`.",
+                Mode::Local => LOCAL_ATTACHED,
+            },
             task.id
         );
     }
     s
 }
+
+/// How a local workspace's `AGENTS.md` describes itself.
+const LOCAL_NOTE: &str = "Generated by `axe workspace`; edits here are lost when it rebuilds.";
+
+/// How a local workspace's `AGENTS.md` describes its attached files.
+const LOCAL_ATTACHED: &str = "Attached skills are written in full under `skills/` and attached \
+     docs under `docs/store/`; after editing them, `axe workspace sync` writes them back to the \
+     store.";
 
 /// The generated `AGENTS.md` of a bot's run folder: where things are. The
 /// bot's identity and conduct stay in its system prompt.
@@ -398,20 +648,32 @@ fn bot_agents_md(
     repos: &[(String, PathBuf)],
     skills: &[Skill],
     attached: &context::Resolution,
+    mode: Mode,
 ) -> String {
-    let mut s = format!(
-        "# Bot {name}: run folder\n\nGenerated by axe at the start of every run; edits here are lost. \
-         Your identity and conduct are in your system prompt.\n\n"
-    );
-    let _ = writeln!(
-        s,
-        "- Repos: {} (each a worktree under `repos/`, on branch `{branch}`)\n",
-        repos
-            .iter()
-            .map(|(r, _)| r.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    let mut s = match mode {
+        Mode::Run => format!(
+            "# Bot {name}: run folder\n\nGenerated by axe at the start of every run; edits here are lost. \
+             Your identity and conduct are in your system prompt.\n\n"
+        ),
+        Mode::Local => format!(
+            "# Bot {name}: local workspace\n\n{LOCAL_NOTE} The bot's system prompt (protocol, \
+             identity, conduct) is in `.axe/system.md`, for reference: you work here as yourself, \
+             not as the bot. {LOCAL_ATTACHED}\n\n"
+        ),
+    };
+    if repos.is_empty() {
+        s.push_str("- Repos: none\n\n");
+    } else {
+        let _ = writeln!(
+            s,
+            "- Repos: {} (each a worktree under `repos/`, on branch `{branch}`)\n",
+            repos
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     s.push_str(&index_md(repos, skills, attached, ""));
     s
 }

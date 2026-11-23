@@ -318,6 +318,18 @@ pub fn allocate_dir(ready: &Ready, dir: &str) -> Result<PathBuf> {
 /// created from the default branch when missing. Same reuse rules as
 /// [`allocate`].
 pub fn allocate_at(ready: &Ready, path: &Path, branch: &str) -> Result<PathBuf> {
+    allocate_from(ready, path, branch, false)
+}
+
+/// [`allocate_at`]; with `from_origin`, a branch missing locally but pushed
+/// to `origin` is created from (and tracks) `origin/<branch>` instead of the
+/// default branch: a local workspace picks up the work a run pushed.
+pub fn allocate_from(
+    ready: &Ready,
+    path: &Path,
+    branch: &str,
+    from_origin: bool,
+) -> Result<PathBuf> {
     let path = path.to_path_buf();
     let path_str = path.to_str().context("non-UTF-8 worktree path")?;
     match std::fs::symlink_metadata(&path) {
@@ -359,8 +371,22 @@ pub fn allocate_at(ready: &Ready, path: &Path, branch: &str) -> Result<PathBuf> 
         ],
     )
     .is_ok();
+    let pushed = format!("refs/remotes/origin/{branch}");
     if exists {
         git(&ready.canonical, &["worktree", "add", path_str, branch])?;
+    } else if from_origin
+        && git(
+            &ready.canonical,
+            &["rev-parse", "--verify", "--quiet", &pushed],
+        )
+        .is_ok()
+    {
+        git(
+            &ready.canonical,
+            &[
+                "worktree", "add", "--track", "-b", branch, path_str, &pushed,
+            ],
+        )?;
     } else {
         git(
             &ready.canonical,

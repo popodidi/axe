@@ -390,6 +390,30 @@ one with `axe doc put` and `axe doc attach`. A bot with no bundles still works
 fully. `axe context explain <task>` prints each candidate, its scope and why
 it was included or skipped (`context.rs`).
 
+**Working locally.** `axe workspace <task-id|bot-name> [--dir D]` builds, on
+the machine it runs on, the folder a run of that task or bot gets, through
+the dispatcher's own builder (`run_workspace.rs`, `Mode::Local`): the same
+`AGENTS.md`, `skills/`, `docs/index.md`, skill links and `repos/<r>`
+worktrees of this machine's clones (`[repos.<name>] path`, else
+`<workspace_root>/<name>`, cloned on first use when `url` is set). The
+default folder is `~/axe/task-<id>` or `~/axe/bot-<name>`. It claims nothing
+and records no run, and refuses an `in_progress` task: hold it first. A
+missing task branch starts from `origin` when a run pushed it; worktrees are
+never reset. Attached docs and bundles are written in full under
+`docs/store/<path>`, and `.axe/manifest.json` records the store version of
+every store-backed file. A bot's folder also holds its system prompt in
+`.axe/system.md`, for reference: you work there as yourself, not as the bot.
+`axe workspace sync [D]` writes each edited store-backed file back to the
+store, based on the version it was built from, then rebuilds the folder. When
+the store moved on, the edit is kept, the store's copy is written next to it
+as `<file>.store` and sync exits non-zero: merge, delete the copy and sync
+again. Generated files and new files are never sent (create docs with
+`axe doc put`), and repo changes go through git as usual (`workspace.rs`).
+Claude Code finds the root `AGENTS.md` from the folder and from
+`repos/<r>`. Codex reads it only when started in the folder, since it stops
+at the repo's git root; from `repos/<r>`, run
+`codex -c 'project_root_markers=[".axe"]'`.
+
 ## Configuration
 
 One TOML file, `$AXE_CONFIG` (default `~/.config/axe/config.toml`; built-in
