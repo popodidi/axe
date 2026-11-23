@@ -287,7 +287,7 @@ fn check_task(t: &crate::db::Task) -> Result<()> {
     if t.state == "in_progress" {
         bail!(
             "task {} is in_progress: a live session owns it and its branch. Hold it first \
-             (`axe abort {}` stops the run and holds the task), then try again",
+             (`axe task abort {}` stops the run and holds the task), then try again",
             t.id,
             t.id
         );

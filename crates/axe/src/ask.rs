@@ -2,7 +2,7 @@
 //! task session made the owner look at, read from the logs axe already keeps:
 //!
 //! - an **escalation**: one escalation episode of a task (each entry into
-//!   `escalated`, numbered like `axe classify --episode`), id `t<task>.<n>`.
+//!   `escalated`, numbered like `axe task classify --episode`), id `t<task>.<n>`.
 //!   Its bot is the task's `bot:` owner, else the bot that posted its card;
 //! - a **card**: a bot's own message sent with buttons (`flags.ask`, kept when
 //!   the card closes), id `m<message>`. A card for an escalated task
