@@ -282,7 +282,7 @@ fn neutral_defaults() {
     );
     assert_eq!(
         Prompts::render(&cfg.prompts.fresh, 3, "alpha"),
-        "Work axe task 3 in project alpha: run axe show 3 and axe log 3, then carry it to done. Around a merge or deploy: axe protect 3, then --clear."
+        "Work axe task 3 in project alpha: run axe task show 3 and axe task log 3, then carry it to done. Around a merge or deploy: axe task protect 3, then --clear."
     );
     assert_eq!(axe::client::DEFAULT_SERVER, "http://127.0.0.1:8790");
 }

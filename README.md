@@ -55,15 +55,15 @@ One host, a loopback server, one task, using the built-in defaults.
    `bot_args`; `Agent` in `crates/axe/src/config.rs`); bots need `bot_args`.
    Repos are `[repos.<name>]` (`path`, `url`).
 3. **Server**: `axe server`. On loopback it needs no token. It reads the
-   config at start; `axe add --agent` re-reads it for a name it does not
+   config at start; `axe task add --agent` re-reads it for a name it does not
    know, so a new agent needs no restart (other config edits do).
 4. **A repo**: a Git clone at `~/workspace/<name>` (or `[repos.<name>] url`
    to clone on first use) with an `origin` remote whose `origin/HEAD` is set
    (`git remote set-head origin <branch>`; `worktree.rs`). Without it the run
    escalates with "has no worktree base".
-5. **A task**: `axe add --project <p> --title <t> --repo <name> --detail
+5. **A task**: `axe task add --project <p> --title <t> --repo <name> --detail
    "## Outcome ..."` (add `--agent <name>` to pin one), then `axe dispatch`
-   (`--once` for one pass). Follow it with `axe list --all` and `axe log <id>`;
+   (`--once` for one pass). Follow it with `axe task list --all` and `axe task log <id>`;
    an escalated task says why in its block note.
 
 A bot works the same way: `axe bot create --file bot.json` (`name`,
@@ -79,36 +79,36 @@ leaves none, and the release skills tarball has `skills/axe` only.
 A task has a project, a spec (`detail`) and a **state**, and optionally an
 `owner` (the bot or person who follows it up; its creator stays the first
 event), `repos` and free-form `labels` (`--owner`, `--repo`, `--label` on
-`axe add` and `axe set`; filters treat the project as a label). Once
+`axe task add` and `axe task set`; filters treat the project as a label). Once
 dispatched, one agent session carries it from start to `done` and is resumed
 on every later run ([one agent per task](docs/design/one-agent-per-task.md)).
 There are no pipelines or transitions in code: the spec is the workflow, and the
 agent's own instructions (skills, `AGENTS.md`) say how to work a task. Every
-mutation appends to an event log (`axe log ID`), so a resumed session can see
+mutation appends to an event log (`axe task log ID`), so a resumed session can see
 what changed.
 
 | State | Meaning |
 |---|---|
 | `pending` | Eligible to run; the dispatcher claims it and starts or resumes its session |
 | `in_progress` | A session is working on it |
-| `escalated` | A hold for a human decision; resumes only when set back to `pending` (or `axe approve`) |
+| `escalated` | A hold for a human decision; resumes only when set back to `pending` (or `axe task approve`) |
 | `blocked` | A non-human external wait; also resumed explicitly |
 | `done` | The completion contract: dependents start, so set it only when the spec's outcome holds |
 
 Each task also has a derived `status`: `blocked` for a pending task still
 waiting on prerequisites, otherwise its state. Human attention is
-`axe list --state escalated`. Block notes use one format so a hold says what
-to do: `blocked:` / `resolver:` / `resume:` lines (`axe escalate`).
+`axe task list --state escalated`. Block notes use one format so a hold says what
+to do: `blocked:` / `resolver:` / `resume:` lines (`axe task escalate`).
 
-Tasks may declare prerequisites (`blocked_by`, `axe deps`). A dependency wait
+Tasks may declare prerequisites (`blocked_by`, `axe task deps`). A dependency wait
 is never stored: a task is ready when it is `pending`, every prerequisite is
 `done` and its `not_before` has passed, computed inside each claim
 transaction. Holds and dependencies stay separate; finishing a prerequisite
-never lifts a hold. A rejected prerequisite is removed (`axe deps --remove`),
+never lifts a hold. A rejected prerequisite is removed (`axe task deps --remove`),
 never marked `done` to release its dependents. Code: `db.rs`.
 
 The actor on each event is `--actor`, else `$AXE_ACTOR`, else `human`, with
-`$AXE_SESSION` alongside. `axe approve` records an owner decision and resumes
+`$AXE_SESSION` alongside. `axe task approve` records an owner decision and resumes
 a held task; dispatcher task sessions are refused, a guardrail rather than a
 security boundary since agents share one token.
 
@@ -200,9 +200,9 @@ tasks stay `pending` and spend nothing. `axe admission` shows why.
 
 **Rollouts.** SIGUSR1 starts a bounded drain: nothing new is admitted, and
 after `drain_abort_seconds` unprotected task runs are stopped and requeued on
-the same session. `axe protect ID` marks the live run as inside a
+the same session. `axe task protect ID` marks the live run as inside a
 non-repeatable step (merge, deploy, migration) so the drain waits for it;
-`--clear` ends it. `axe abort ID` force-stops a run remotely and exits zero
+`--clear` ends it. `axe task abort ID` force-stops a run remotely and exits zero
 only once termination is confirmed. An admission hold
 (`axe admission hold --until T`) gives a quiet queue without aborting
 anything.
@@ -253,7 +253,7 @@ code gains no branches for them.
 - **Routines** (`axe routine`, `routine.rs`) create ordinary pending tasks on a
   five-field cron in an IANA timezone. After downtime only the latest missed
   occurrence is created; manual triggers take a retry key. A template can set
-  the created task's owner, repos and labels like `axe add` (`routine::Template`).
+  the created task's owner, repos and labels like `axe task add` (`routine::Template`).
   Each task keeps a snapshot of the template it came from.
 - **Bots** (`axe bot`, `bot.rs`, `dispatch/bots.rs`) are persistent
   identities with one agent session resumed on every wake. Wakes come from the
@@ -266,7 +266,7 @@ code gains no branches for them.
 
 Delivery statistics (`axe stats`, `flow.rs`) and run cost (`usage.rs`) are
 computed from the event log and run usage; the only recorded classifications
-are an escalation's class (`axe escalate --class`) and a task's workload.
+are an escalation's class (`axe task escalate --class`) and a task's workload.
 
 ## Blobs
 

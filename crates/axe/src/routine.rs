@@ -75,7 +75,7 @@ pub struct Template {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<String>,
-    /// The created task's owner, repos and labels, as `axe add` sets them
+    /// The created task's owner, repos and labels, as `axe task add` sets them
     /// ([`db::Fields`]). `repos` omitted: the project checkout; `[]`: a run
     /// workspace with no repos. Unset fields are not stored, so templates saved
     /// before these fields existed are unchanged.

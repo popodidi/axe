@@ -160,7 +160,7 @@ fn block_changes(task_id: i64, blocker: &str) -> Changes {
         note: Some(db::block_note(
             blocker,
             "ops: inspect the run log and fix the cause",
-            &format!("axe set {task_id} --state pending"),
+            &format!("axe task set {task_id} --state pending"),
         )),
         ..Default::default()
     }
@@ -687,7 +687,7 @@ impl Dispatcher {
 
     /// Publishes the admission status to the server after each new resource
     /// sample, and at least every `REPORT_EVERY`, so `axe admission` and
-    /// `axe show` describe this dispatcher. Best effort: a failed report only
+    /// `axe task show` describe this dispatcher. Best effort: a failed report only
     /// lets the server's copy go stale, which it then reports as unknown.
     fn report_admission(&mut self) {
         let samples = self.gate.as_ref().map_or(0, |g| g.samples());

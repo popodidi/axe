@@ -29,7 +29,7 @@ returns to `pending`.
 - The spec is the workflow: Outcome and Verify required; Plan, Context and
   Deliver optional (see the `axe` skill, Spec format).
 - Independent review for risky work is the human approval gate
-  (`approval: owner` in the spec, then `axe approve`). Dispatcher task sessions
+  (`approval: owner` in the spec, then `axe task approve`). Dispatcher task sessions
   cannot approve. A bot session (actor `bot:<name>`, see [Bots](bots.md)) may
   approve on an explicit owner message, citing its id in the note; that counts
   as the owner's approval. A session may run a review subagent of its own.

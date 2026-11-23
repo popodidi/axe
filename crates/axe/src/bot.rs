@@ -1518,7 +1518,7 @@ pub fn inbox(
             )?;
             nudge = Some(format!(
                 "axe bot: this run has taken {} min; {waiting} owner messages are waiting; \
-                 consider offloading long work to a task (`axe add`) with a follow-up \
+                 consider offloading long work to a task (`axe task add`) with a follow-up \
                  `axe bot wake --in`, then exit",
                 (now - started) / 60
             ));

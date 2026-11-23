@@ -173,7 +173,7 @@ does not post one.
 
 A bot session has the same capabilities as a normal session in its project:
 it can edit through worktrees and PRs, create tasks and routines, resume holds
-and run `axe approve`. Its focus comes from its conduct. A bot approval made
+and run `axe task approve`. Its focus comes from its conduct. A bot approval made
 on an explicit owner message, with the message id in the note, counts as the
 owner's; the residual risk of an injected instruction is resisted by conduct
 alone and kept auditable by that note. A server-checked owner reference is

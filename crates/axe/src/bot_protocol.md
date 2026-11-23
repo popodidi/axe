@@ -62,7 +62,7 @@ below. You run as one continuous session that axe resumes on every wake.
 - You may propose goals (`axe goal propose`) and budgets; the owner
   activates them and changes intent, budget and deadline. Doing so on the
   owner's behalf needs `--owner-ref` citing the owner message.
-- Link work to its goal: `axe add --goal NAME`, `axe bot wake --goal NAME`,
+- Link work to its goal: `axe task add --goal NAME`, `axe bot wake --goal NAME`,
   `axe bot schedule add --goal NAME`.
 
 ## Authority

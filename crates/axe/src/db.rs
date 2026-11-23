@@ -1319,7 +1319,7 @@ pub fn set_task(conn: &mut Connection, actor: &Actor, id: i64, c: &Changes) -> R
 
 /// Corrects a task's escalation class and/or its workload; latest wins. The class
 /// applies to the latest escalation episode, or to the 1-based `episode` (in
-/// event order; see `axe log`), which is recorded as `episode=N`.
+/// event order; see `axe task log`), which is recorded as `episode=N`.
 pub fn classify(
     conn: &mut Connection,
     actor: &Actor,
@@ -1511,7 +1511,7 @@ pub fn claim_in(
             note: Some(block_note(
                 &format!("max_runs exceeded ({runs} >= {max})"),
                 "ops: review the run history and decide whether more runs are warranted",
-                &format!("axe set {id} --reset-runs --state pending"),
+                &format!("axe task set {id} --reset-runs --state pending"),
             )),
             ..Default::default()
         };
@@ -1571,7 +1571,7 @@ pub fn hold_in(tx: &Transaction, actor: &Actor, project: &str, blocker: &str) ->
         note: Some(block_note(
             blocker,
             "ops: give the project a canonical Git clone under workspace_root with origin/HEAD set",
-            &format!("axe set {id} --state pending"),
+            &format!("axe task set {id} --state pending"),
         )),
         ..Default::default()
     };

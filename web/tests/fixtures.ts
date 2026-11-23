@@ -68,7 +68,7 @@ export const runs = [
     started_at: at(5),
     ended_at: at(15),
     exit_code: 0,
-    current_activity: "axe set 4 --state done",
+    current_activity: "axe task set 4 --state done",
     last_activity_at: at(15),
     log_path: "/home/agent/.local/state/axe/logs/run-10.log",
     session_id: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
@@ -100,7 +100,7 @@ const queueOf = (list: FixtureTask[]) =>
             blocked_by: blockers[t.id]?.[0] ?? null,
             blocked_at: t.updated_at,
             blocker: blockers[t.id]
-              ? `blocked: ${blockers[t.id][1]}\nresolver: ops: decide\nresume: axe set ${t.id} --state pending`
+              ? `blocked: ${blockers[t.id][1]}\nresolver: ops: decide\nresume: axe task set ${t.id} --state pending`
               : null,
           }
         : {

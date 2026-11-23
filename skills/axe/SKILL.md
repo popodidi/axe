@@ -15,7 +15,7 @@ allowed-tools:
 # axe
 
 `axe` is a task queue and dispatcher, not a workflow engine. A task has a
-project, a spec and a state, and every change is logged (`axe log <id>`).
+project, a spec and a state, and every change is logged (`axe task log <id>`).
 The dispatcher runs one agent session per task, from spec to done, and resumes
 that same session every time the task comes back. The workflow is whatever the
 spec says; how a project ships, what needs a human and how to test live in the
@@ -31,7 +31,7 @@ own skills and instructions.
 - **in_progress**: a session is working on it.
 - **escalated**: a hold for a human. Needs an explicit resume.
 - **blocked**: an external wait with no known time. Needs an explicit resume.
-- **waiting**: `axe wait --for/--until` resumes automatically at the time;
+- **waiting**: `axe task wait --for/--until` resumes automatically at the time;
   `blocked_by` edges resume it when prerequisites are `done`. Edges never lift
   an escalation.
 - **done**: the completion contract. Dependents start when a task is done, so
@@ -39,11 +39,11 @@ own skills and instructions.
 
 A session that exits with its task still `in_progress` is escalated by the
 dispatcher, as are dispatcher errors and `max_runs` exhaustion (resume with
-`axe set <id> --reset-runs --state pending`).
+`axe task set <id> --reset-runs --state pending`).
 
 A known wait (a queued check, a release, a contended fixture) uses a timed or
 dependency wait, not an escalation. Poll in-session only for checks due within
-a few minutes; for longer waits, `axe wait` and exit, so the same session
+a few minutes; for longer waits, `axe task wait` and exit, so the same session
 resumes later without holding a worker slot.
 
 Size a timed wait to what it waits on, not to a round hour. For a CI run, a
@@ -59,26 +59,26 @@ scheduled time, a soak period.
 
 ```bash
 # CI run 123 started 10:02Z and usually takes ~12 min
-axe wait 42 --until 2026-01-05T10:15Z --note "check run 123; green -> merge at head abc123"
-axe wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge"
+axe task wait 42 --until 2026-01-05T10:15Z --note "check run 123; green -> merge at head abc123"
+axe task wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge"
 ```
 
 ## Commands
 
 | Situation | Command |
 |---|---|
-| Queue a spec | `axe add --project <p> --title "<imperative>" --detail-file <spec>` (`--blocked-by <ids>` for prerequisites, `--agent <name>` to pick an agent) |
-| Owner, repos, labels | `axe add`/`axe set` with `--owner <bot:name\|person>` (`none` clears), `--repo <r>` (repeat; `--no-repos` for none), `--label <l>` (`--unlabel` on set); `axe list --label <l> --owner <o>` |
-| Read a task | `axe show <id>`, `axe log <id>` (`--full` for whole event bodies) |
-| Done | `axe set <id> --state done --note "<what holds now>"` |
-| Needs a human | `axe escalate <id> --blocked ... --resolver ... --resume ... --class decision\|capability\|coordination\|runtime` |
-| A human approves shipping | `axe approve <id> --sha <head> --scope <target>` (resumes the task) |
-| Blocker resolved | `axe set <id> --state pending --note "<what changed>"` |
-| Needs another task first | `axe wait <id> --on <ids> --note "<why>"` |
-| Timed wait | `axe wait <id> --for 15m\|--until <time> --note "<what to check>"` (sized as above) |
-| Evidence | `axe note <id> "<command and key output>"`, `axe artifact <id> <url>` |
-| Before a non-repeatable step (merge, deploy, migration) | `axe protect <id> --note "<step>"`; if it fails, do not start the step. After it: `axe protect <id> --clear` |
-| Human attention queue | `axe list --state escalated` |
+| Queue a spec | `axe task add --project <p> --title "<imperative>" --detail-file <spec>` (`--blocked-by <ids>` for prerequisites, `--agent <name>` to pick an agent) |
+| Owner, repos, labels | `axe task add`/`axe task set` with `--owner <bot:name\|person>` (`none` clears), `--repo <r>` (repeat; `--no-repos` for none), `--label <l>` (`--unlabel` on set); `axe task list --label <l> --owner <o>` |
+| Read a task | `axe task show <id>`, `axe task log <id>` (`--full` for whole event bodies) |
+| Done | `axe task set <id> --state done --note "<what holds now>"` |
+| Needs a human | `axe task escalate <id> --blocked ... --resolver ... --resume ... --class decision\|capability\|coordination\|runtime` |
+| A human approves shipping | `axe task approve <id> --sha <head> --scope <target>` (resumes the task) |
+| Blocker resolved | `axe task set <id> --state pending --note "<what changed>"` |
+| Needs another task first | `axe task wait <id> --on <ids> --note "<why>"` |
+| Timed wait | `axe task wait <id> --for 15m\|--until <time> --note "<what to check>"` (sized as above) |
+| Evidence | `axe task note <id> "<command and key output>"`, `axe task artifact <id> <url>` |
+| Before a non-repeatable step (merge, deploy, migration) | `axe task protect <id> --note "<step>"`; if it fails, do not start the step. After it: `axe task protect <id> --clear` |
+| Human attention queue | `axe task list --state escalated` |
 | Owner ratings of asks (escalations, cards) | `axe ask list [--bot <name>] [--kind <kind>] [--unrated] [--by kind\|bot] [--json]`, `axe ask stats [--by kind\|bot]` (wasted-ask share per bot, kind and week). Each ask has a stable kind (`category`: approval, decision, choice, confirm, digest, access, stuck, other). Each bot sends its own weekly retro card (`[telegram.retro]`, default `mon 01:00` UTC, only with unrated asks): its 10 most useful unrated asks (one per task or card, the latest; those the owner had to act on, decision escalations and answered cards, first; then the newest; the rest stay unrated, counted in the footer), two lines each (id and topic, then the question with links shortened), each rated on its own, paged, never pinned, with a Dismiss button that closes it and leaves its asks unrated; asks no bot raised go to `telegram.retro.bot`, else the ops bot. `axe ask retro --bot <name> [--limit N]` sends it now (`--dry` previews it); the owner rates with `axe ask rate <ask> needed\|could_decide\|should_not_exist`. The bot that raised an ask may recommend its rating before the slot: `axe ask rec <ask> needed\|decide\|drop [--why "<few words>"]`, or many at once with `--file <json>` (`[{"ask","rating","why"}]`, `-` for stdin); the card marks it `(rec)` with an "Accept recs on this page" button, the owner can override any ask, and a rec is never a rating (`axe ask stats` counts `accepted`, `agreed`, `overridden`) |
 | Which harness, model and effort runs work | `axe rule list`; `axe rule add --match <key>=<value> --use <harness>[:<model>[:<effort>]]` (keys workload, repo, goal, label, bot, owner; `--default` matches all; repeat `--use` for fallbacks; `--priority` breaks ties); `axe rule rm <id>`; `axe rule log` |
 | A secret, code or file from the owner (never in chat or prompt) | `axe form ask --bot <sender> --purpose "<what for>" --field <name>:<secret\|text\|code\|choice=A\|B\|file>[:required][:env=VAR] --wait`: the owner gets a Telegram button from `--bot` (required; a bot that can write to the owner's private chat, e.g. your own `$AXE_BOT` or the task owner's bot); values land as 0600 files in `$AXE_SECRETS_DIR/<name>` (`env=VAR` also on later runs). Read them only in commands (`"$(cat "$AXE_SECRETS_DIR/token")"`), never print them. `--git <host>` stores a git credential the dispatcher's clones use. `axe form show\|wait <form>`. To test forms (post-deploy or CI checks), never prompt the owner: `axe form ask --no-telegram ...` (no `--bot`), then open the printed link in a browser or `axe form submit` a sealed reply |
@@ -92,8 +92,10 @@ authorization); `capability` means the worker lacked tooling, context,
 instructions or verification; `coordination` means scheduling, ordering or
 recovery failed; `runtime` means axe or the infrastructure failed.
 
-Dispatcher task sessions cannot approve their own task. Run `axe --help` and
-`axe <command> --help` for every flag.
+Dispatcher task sessions cannot approve their own task. Run `axe --help` for
+the commands by primitive and `axe <noun> --help` (`axe task --help`,
+`axe task <verb> --help`) for every flag. The old top-level task forms
+(`axe add`, `axe show`, ...) still work as hidden aliases.
 
 Bots are a separate primitive with their own commands under `axe bot`
 (and `axe bot tg` for the Telegram gateway); see `axe bot --help` and
@@ -143,7 +145,7 @@ applies.
 
 The session does everything the spec covers without asking: the Plan's steps,
 routine choices delegated to it and, with `approval: none`, shipping. It stops
-only at a named gate (`approval: owner` waits for `axe approve`) or for
+only at a named gate (`approval: owner` waits for `axe task approve`) or for
 something the spec does not cover, after finishing the independent work.
 
 ## Where axe runs

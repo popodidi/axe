@@ -422,7 +422,7 @@ pub(crate) enum TaskCmd {
         id: i64,
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::ESCALATION_CLASSES))]
         escalation: Option<String>,
-        /// Which escalation episode to classify, 1-based in `axe log` order
+        /// Which escalation episode to classify, 1-based in `axe task log` order
         /// (each entry into escalated starts one). Default: the latest
         #[arg(long, requires = "escalation", value_parser = clap::value_parser!(i64).range(1..))]
         episode: Option<i64>,
@@ -878,7 +878,7 @@ fn run_blob(c: &Client, command: &BlobCmd) -> Result<()> {
 /// How long `axe admission hold|release` waits for the dispatcher to report it.
 const HOLD_CONFIRM: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Longest body line `axe log` prints without `--full`.
+/// Longest body line `axe task log` prints without `--full`.
 const LOG_LINE_MAX: usize = 300;
 
 fn read_file(p: &PathBuf) -> Result<String> {
@@ -1718,7 +1718,7 @@ enum RoutineCmd {
     /// Save a complete JSON template; omit --id to create. Fields: name,
     /// project, cron, timezone (default UTC), title, detail, and optionally
     /// agent, workload, owner, repos and labels. owner, repos and labels set
-    /// each created task as `axe add --owner/--repo/--label` do: repos omitted
+    /// each created task as `axe task add --owner/--repo/--label` do: repos omitted
     /// runs in the project checkout, [] in a run workspace with no repos
     Save {
         #[arg(long)]
@@ -3954,9 +3954,9 @@ pub fn run() -> Result<()> {
             println!("first task, with the stub agent (no model):");
             println!("  mkdir -p {}", demo.display());
             println!("  axe server &");
-            println!("  axe add --project demo --title \"first task\" --agent stub");
+            println!("  axe task add --project demo --title \"first task\" --agent stub");
             println!("  axe dispatch --once");
-            println!("  axe list --all");
+            println!("  axe task list --all");
         }
         Cmd::Backup { to } => {
             client().backup(to)?;

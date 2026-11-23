@@ -52,7 +52,7 @@ intervention, the predicted outcome, the eval date and a kill criterion.
 
 1. Check open H tasks first: `axe goal show G` lists linked tasks. At most 2
    open H tasks per goal, across all its bots.
-2. Create the H task: `axe add --project P --goal G --title "H<n>: <claim>"
+2. Create the H task: `axe task add --project P --goal G --title "H<n>: <claim>"
    --detail-file spec.md`. Its Verify is the outcome measurement at the eval
    date, separate from the delivery verification.
 3. Record it: `axe goal record G --kind hypothesis --task ID "<claim>; predict
@@ -61,7 +61,7 @@ intervention, the predicted outcome, the eval date and a kill criterion.
 ### Test
 
 The H task runs under the project's normal delivery. After shipping, it
-waits for the eval date (`axe wait ID --until <eval> --note "measure H<n>"`)
+waits for the eval date (`axe task wait ID --until <eval> --note "measure H<n>"`)
 and then measures.
 Book your own follow-up: `axe bot wake --at <eval> --goal G --note "eval H<n>"`.
 
@@ -101,7 +101,7 @@ Self-start an H task (state `pending`) only if all hold:
 - it fits the remaining budget,
 - it is not on the project's "ask the owner first" list.
 
-Otherwise create it with `--state escalated`, then `axe escalate ID --class
+Otherwise create it with `--state escalated`, then `axe task escalate ID --class
 decision ...` and post its card, so it is one pinned Go/Skip in the owner's
 inbox: `axe bot tg send --task ID --buttons "Go=go;Skip=skip" "..."`. Never
 self-approve.

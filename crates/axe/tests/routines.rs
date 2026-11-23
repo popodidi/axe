@@ -233,7 +233,7 @@ fn template_sets_owner_repos_and_labels() {
     let task = db::get_task(&c, task).unwrap();
     assert_eq!((task.owner, task.repos, task.labels), (None, None, vec![]));
     // A template with the fields creates tasks carrying them, with the same
-    // events `axe add` writes.
+    // events `axe task add` writes.
     let mut t = template();
     t.owner = Some("bot:ops".into());
     t.repos = Some(vec!["axe".into(), "web".into(), "axe".into()]);
@@ -258,12 +258,12 @@ fn template_sets_owner_repos_and_labels() {
             .unwrap();
         assert_eq!(kinds, ["created", "owner", "repos", "labels"]);
     }
-    // repos: [] is a run workspace with no repos, as `axe add --no-repos`.
+    // repos: [] is a run workspace with no repos, as `axe task add --no-repos`.
     t.repos = Some(vec![]);
     routine::save(&mut c, &a, Some(id), &t, 0).unwrap();
     let task = routine::trigger(&mut c, &a, id, "empty").unwrap();
     assert_eq!(db::get_task(&c, task).unwrap().repos, Some(vec![]));
-    // Invalid fields are rejected at save, as `axe add` rejects them.
+    // Invalid fields are rejected at save, as `axe task add` rejects them.
     for bad in [
         Template {
             owner: Some("two words".into()),

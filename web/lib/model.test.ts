@@ -99,8 +99,8 @@ describe("hv commands", () => {
   });
   it("task log and spec", () => {
     expect(taskCommands({ id: 38, project: "atlas" })).toEqual({
-      log: "axe log 38",
-      spec: "axe show 38",
+      log: "axe task log 38",
+      spec: "axe task show 38",
     });
   });
   it("attach resumes in the task worktree, only after the run ended", () => {
@@ -123,11 +123,11 @@ describe("hv commands", () => {
     const remote = commandTemplate("?cmd=" + encodeURIComponent("ssh box -- {cmd}"));
     expect(remote).toBe("ssh box -- {cmd}");
     expect(taskCommands({ id: 38, project: "atlas" }, remote).log).toBe(
-      "ssh box -- axe log 38",
+      "ssh box -- axe task log 38",
     );
     const perProject = "run-in {project} {cmd}";
-    expect(command("it's", ["axe", "show", "1"], perProject)).toBe(
-      "run-in 'it'\\''s' axe show 1",
+    expect(command("it's", ["axe", "task", "show", "1"], perProject)).toBe(
+      "run-in 'it'\\''s' axe task show 1",
     );
     expect(runCommands(run("claude"), perProject).watch).toBe(
       "run-in atlas tail -f '/home/agent/.local/state/axe/logs/run 1.log'",
