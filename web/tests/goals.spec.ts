@@ -26,6 +26,12 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     await expect(digest).toContainText("Proposed");
     await expect(digest).toContainText("$3.00/$2.00");
     await expect(digest.locator("[data-over=true]")).toHaveCount(1);
+    // Open goals (proposed and active) by default; All shows every state.
+    const stateFilter = page.getByLabel("goal state", { exact: true });
+    await expect(stateFilter).toContainText("Open");
+    await expect(list.locator("tbody tr")).toHaveCount(2);
+    await choose(stateFilter, "all");
+    await expect(page).toHaveURL(/goalstate=all/);
     for (const [name, state] of [
       ["lark-replies", "Paused"],
       ["registry-certs", "Done"],
@@ -52,6 +58,15 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     await choose(page.getByLabel("project", { exact: true }), "orbit");
     await expect(ci).toHaveCount(0);
     await expect(list.locator("#goal-old-backtests")).toBeVisible();
+    // A single state; the filter survives a reload from the URL.
+    await choose(stateFilter, "dropped");
+    await expect(page).toHaveURL(/goalstate=dropped/);
+    await page.reload();
+    await expect(list.locator("tbody tr")).toHaveCount(1);
+    await expect(list.locator("#goal-old-backtests")).toBeVisible();
+    await choose(stateFilter, "");
+    await expect(page).not.toHaveURL(/goalstate=/);
+    await expect(list.locator("#goal-old-backtests")).toHaveCount(0);
     expect(reads.every((r) => r.startsWith("GET "))).toBe(true);
   });
 }

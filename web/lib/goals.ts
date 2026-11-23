@@ -42,6 +42,14 @@ export type GoalDetail = Goal & {
   next_wake: string | null;
 };
 export const goalStates = ["proposed", "active", "paused", "done", "dropped"];
+/** States the Goals list shows by default (no `goalstate` in the URL). */
+export const openGoalStates = ["proposed", "active"];
+/** Goal state filter choices, kept in the URL as `goalstate`; "" is Open. */
+export const goalStateFilters = [
+  { value: "", label: "Open" },
+  ...goalStates.map((value) => ({ value, label: value })),
+  { value: "all", label: "All" },
+];
 /** Trajectory events the detail page reads (the server maximum). */
 export const TRAJECTORY_LIMIT = 1000;
 /** Task states that close a linked task (as the goal board counts them). */
@@ -80,12 +88,15 @@ export function linkedTasks(tasks: GoalTask[]) {
     .sort((a, b) => b.id - a.id);
   return [...openTasks(tasks), ...closed];
 }
-/** Goals matching the list's project filter and search (`q`). */
+/** Goals matching the list's state (`goalstate`, open by default), project filter and search (`q`). */
 export function selectGoals(goals: Goal[], params: URLSearchParams) {
   const q = (params.get("q") || "").toLowerCase();
   const project = params.get("project");
+  const state = params.get("goalstate") || "";
+  const states = state === "all" ? null : state ? [state] : openGoalStates;
   return goals.filter(
     (g) =>
+      (!states || states.includes(g.state)) &&
       (!project || g.project === project) &&
       `${g.name} ${g.project} ${g.bots.join(" ")} ${g.intent}`
         .toLowerCase()

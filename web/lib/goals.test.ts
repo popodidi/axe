@@ -66,6 +66,18 @@ describe("goal lists", () => {
     expect(selectGoals(goals, p("q=OPS-BOT")).map((g) => g.name)).toEqual(["faster-ci"]);
     expect(selectGoals(goals, p("q=cut ci")).map((g) => g.name)).toEqual(["faster-ci"]);
   });
+  it("shows open goals by default and filters by goalstate", () => {
+    const goals = ["proposed", "active", "paused", "done", "dropped"].map((state, i) =>
+      goal({ id: i + 1, name: state, state }),
+    );
+    const names = (q: string) => selectGoals(goals, new URLSearchParams(q)).map((g) => g.name);
+    expect(names("")).toEqual(["proposed", "active"]);
+    expect(names("goalstate=dropped")).toEqual(["dropped"]);
+    expect(names("goalstate=paused")).toEqual(["paused"]);
+    expect(names("goalstate=all")).toEqual(["proposed", "active", "paused", "done", "dropped"]);
+    // The tasks view's `state` does not filter goals.
+    expect(names("state=done")).toEqual(["proposed", "active"]);
+  });
   it("keeps open linked tasks", () => {
     expect(
       openTasks([
