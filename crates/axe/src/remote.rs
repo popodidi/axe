@@ -579,7 +579,7 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                     &Changes {
                         state: Some("escalated".into()),
                         note: Some(format!(
-                            "run {run}: {}; explicitly resume with axe set {} --state pending",
+                            "run {run}: {}; explicitly resume with axe task set {} --state pending",
                             if b["aborted"] == true {
                                 "abort confirmed"
                             } else {
@@ -650,7 +650,7 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                     note: Some(db::block_note(
                         field(b, "note")?,
                         "ops: inspect the run log and fix the cause",
-                        &format!("axe set {} --state pending", r.task_id),
+                        &format!("axe task set {} --state pending", r.task_id),
                     )),
                     ..Default::default()
                 };

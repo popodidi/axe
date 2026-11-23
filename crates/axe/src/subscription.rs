@@ -370,7 +370,7 @@ pub fn unsubscribe(
 }
 
 /// The subscription event a task event is, if any. A task created in another
-/// state (`axe add --state escalated`) counts as entering that state, so it
+/// state (`axe task add --state escalated`) counts as entering that state, so it
 /// cannot slip past a subscriber as merely `new`.
 fn event_name(
     kind: &str,

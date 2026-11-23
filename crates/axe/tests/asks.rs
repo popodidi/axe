@@ -568,7 +568,7 @@ fn a_retro_holds_the_ten_most_useful_asks_one_per_task() {
     assert_eq!(after.overall.total.should_not_exist, 0);
 }
 
-/// Escalates `id` with a class and resolver, as `axe escalate` does.
+/// Escalates `id` with a class and resolver, as `axe task escalate` does.
 fn escalate(c: &mut Connection, id: i64, class: Option<&str>, resolver: &str) {
     let ch = Changes {
         state: Some("escalated".into()),

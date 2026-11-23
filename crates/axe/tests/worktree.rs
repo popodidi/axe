@@ -260,7 +260,7 @@ fn missing_default_branch_escalates_without_claim_or_run() {
     assert!(note.contains("refs/remotes/origin/HEAD"), "{note}");
     assert!(note.contains("remote set-head origin main`"), "{note}");
     assert!(
-        note.contains(&format!("resume: axe set {id} --state pending")),
+        note.contains(&format!("resume: axe task set {id} --state pending")),
         "{note}"
     );
     assert!(!f.checkout(id).exists());

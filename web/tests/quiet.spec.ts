@@ -219,7 +219,7 @@ test("Copy confirms only after clipboard success and keeps its width", async ({
     "Copied command",
   );
   expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(
-    "axe log 3",
+    "axe task log 3",
   );
   // Label resets after 1.5s.
   await expect(copy.getByText("Copied")).toHaveAttribute("data-hidden", "true", {

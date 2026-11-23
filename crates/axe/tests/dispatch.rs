@@ -157,7 +157,7 @@ fn dispatch_once_runs_agents_and_blocks_silent_exits() {
     );
     assert_eq!(
         ev[6].body.as_deref(),
-        Some(&*format!("blocked: session exited without updating task (exit 3)\nresolver: ops: inspect the run log and fix the cause\nresume: axe set {bad} --state pending"))
+        Some(&*format!("blocked: session exited without updating task (exit 3)\nresolver: ops: inspect the run log and fix the cause\nresume: axe task set {bad} --state pending"))
     );
 
     let ev = db::events(&conn, codex).unwrap();
@@ -260,11 +260,11 @@ fn log_truncates_long_body_lines_unless_full() {
 fn prompts_are_exact() {
     assert_eq!(
         fresh_prompt(7, "orchid"),
-        "Work axe task 7 in project orchid: run axe show 7 and axe log 7, then carry it to done. Around a merge or deploy: axe protect 7, then --clear."
+        "Work axe task 7 in project orchid: run axe task show 7 and axe task log 7, then carry it to done. Around a merge or deploy: axe task protect 7, then --clear."
     );
     assert_eq!(
         resume_prompt(7),
-        "Task 7 resumed; run axe log 7 for what changed."
+        "Task 7 resumed; run axe task log 7 for what changed."
     );
 }
 
@@ -367,7 +367,7 @@ fn task_resumes_its_one_session_across_runs() {
     bounce(&mut conn, id);
     run_dispatch_once(dir.path(), &path, &cfg);
 
-    // A timed wait (`axe wait --for`) that has passed.
+    // A timed wait (`axe task wait --for`) that has passed.
     db::set_task(
         &mut conn,
         &Actor::new("agent"),
@@ -382,7 +382,7 @@ fn task_resumes_its_one_session_across_runs() {
     std::thread::sleep(Duration::from_millis(2100));
     run_dispatch_once(dir.path(), &path, &cfg);
 
-    // A dependency wait (`axe wait --on`) whose prerequisite finished.
+    // A dependency wait (`axe task wait --on`) whose prerequisite finished.
     let prereq = db::add_task(
         &mut conn,
         &Actor::new("human"),
@@ -915,7 +915,7 @@ agents = ["bad"]
         let note = ev.last().unwrap().body.as_deref().unwrap();
         assert!(note.starts_with(blocker), "{note}");
         assert!(
-            note.ends_with(&format!("resume: axe set {id} --state pending")),
+            note.ends_with(&format!("resume: axe task set {id} --state pending")),
             "{note}"
         );
     }

@@ -557,10 +557,10 @@ impl Default for Prompts {
 }
 
 fn default_fresh_prompt() -> String {
-    "Work axe task {id} in project {project}: run axe show {id} and axe log {id}, then carry it to done. Around a merge or deploy: axe protect {id}, then --clear.".into()
+    "Work axe task {id} in project {project}: run axe task show {id} and axe task log {id}, then carry it to done. Around a merge or deploy: axe task protect {id}, then --clear.".into()
 }
 fn default_resume_prompt() -> String {
-    "Task {id} resumed; run axe log {id} for what changed.".into()
+    "Task {id} resumed; run axe task log {id} for what changed.".into()
 }
 fn default_interrupted_prompt() -> String {
     "Your previous run was interrupted by an axe rollout, not by a failure. Its last step may or may not have taken effect: re-check real state (PR, deploy ledger, worktree) before repeating any step.".into()
@@ -1335,12 +1335,12 @@ pub const STARTER: &str = r#"# axe config: `axe config` prints it resolved; ever
 workspace_root = "~/workspace"
 
 # A stub agent: no model. It notes where it ran and marks its task done.
-#   axe add --project demo --title "first task" --agent stub
+#   axe task add --project demo --title "first task" --agent stub
 #   axe dispatch --once
 # The built-in `claude` agent (unpinned tasks) needs the Claude Code CLI
 # installed and logged in on the dispatcher host.
 [agents.stub]
-cmd = ["sh", "-c", "axe note \"$AXE_TASK\" \"stub agent ran in $PWD\" && axe set \"$AXE_TASK\" --state done"]
+cmd = ["sh", "-c", "axe task note \"$AXE_TASK\" \"stub agent ran in $PWD\" && axe task set \"$AXE_TASK\" --state done"]
 session = "none"
 "#;
 

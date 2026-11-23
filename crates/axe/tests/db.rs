@@ -182,7 +182,7 @@ fn max_runs_guard_escalates() {
     let last = db::events(&conn, id).unwrap().pop().unwrap();
     assert_eq!(
         last.body.as_deref(),
-        Some(&*format!("blocked: max_runs exceeded (2 >= 2)\nresolver: ops: review the run history and decide whether more runs are warranted\nresume: axe set {id} --reset-runs --state pending"))
+        Some(&*format!("blocked: max_runs exceeded (2 >= 2)\nresolver: ops: review the run history and decide whether more runs are warranted\nresume: axe task set {id} --reset-runs --state pending"))
     );
     // Blocked tasks are never claimed, with or without a run budget.
     for max in [None, Some(2)] {

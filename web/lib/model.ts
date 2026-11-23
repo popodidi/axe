@@ -196,8 +196,8 @@ export const taskCommands = (
   t: Pick<Task, "id" | "project">,
   template = commandTemplate(),
 ) => ({
-  log: command(t.project, ["axe", "log", String(t.id)], template),
-  spec: command(t.project, ["axe", "show", String(t.id)], template),
+  log: command(t.project, ["axe", "task", "log", String(t.id)], template),
+  spec: command(t.project, ["axe", "task", "show", String(t.id)], template),
 });
 // Dispatcher sessions run in the task worktree (crates/axe/src/worktree.rs),
 // and Claude Code looks sessions up by cwd, so resume from that directory.
