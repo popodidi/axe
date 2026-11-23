@@ -8,9 +8,11 @@ command other than `server`, including `dispatch`, is an HTTP client of the
 server.
 
 This README explains the concepts and where each lives in the code. The code
-is the source of truth: `axe --help` and `axe <command> --help` list every
-command and flag, `axe config` prints the resolved configuration, and the
-modules named below hold the exact rules.
+is the source of truth: `axe --help` lists the commands by primitive (task,
+bot, goal, ...), store and ops, `axe <command> --help` lists every flag, `axe
+config` prints the resolved configuration, and the modules named below hold
+the exact rules. Task commands live under `axe task`; their older top-level
+forms (`axe add`, `axe show`, ...) still work and are hidden from the help.
 
 ## Install
 
