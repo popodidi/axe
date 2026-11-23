@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::builder::PossibleValuesParser;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use crate::client::Client;
@@ -33,46 +33,167 @@ fn state_parser() -> PossibleValuesParser {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Manage saved cron templates (all output is JSON)
+    /// Tasks: queue work, follow it, hold it for a human, record evidence
+    Task {
+        #[command(subcommand)]
+        command: TaskCmd,
+    },
+    /// The task commands at the top level (`axe add`, `axe show`, ...): hidden
+    /// aliases of `axe task <verb>`, kept so existing callers work unchanged
+    #[command(flatten)]
+    TaskAlias(TaskCmd),
+    /// Routines: saved cron templates that create tasks (JSON output)
     Routine {
         #[command(subcommand)]
         command: RoutineCmd,
     },
-    /// Selection rules: which harness, model and effort runs a task or bot.
+    /// Selection rules: which harness, model and effort runs a task or bot
+    ///
     /// The most specific matching rule wins, then the higher priority, then
     /// the newer rule; its use entries are tried in order
     Rule {
         #[command(subcommand)]
         command: RuleCmd,
     },
-    /// Manage bots: persistent agents woken by messages, wakes and schedules.
+    /// Bots: persistent agents woken by messages, wakes and schedules
+    ///
     /// NAME defaults to $AXE_BOT
     Bot {
         #[command(subcommand)]
         command: BotCmd,
     },
-    /// Manage goals: durable outcomes (intent, budget, trajectory) bots share.
+    /// Goals: durable outcomes (intent, budget, trajectory) bots share
+    ///
     /// Bots propose; the owner activates and edits (non-human actors need --owner-ref)
     Goal {
         #[command(subcommand)]
         command: GoalCmd,
     },
-    /// Owner asks (task escalations and bot cards with buttons) and the
-    /// owner's ratings of them: needed, could_decide, should_not_exist
+    /// Owner asks (escalations, bot cards) and the owner's ratings of them
+    ///
+    /// Asks are task escalations and bot cards with buttons; ratings are
+    /// needed, could_decide or should_not_exist
     Ask {
         #[command(subcommand)]
         command: AskCmd,
     },
-    /// Force-stop a run and hold its task; succeeds only after confirmation
-    Abort {
-        id: i64,
-        /// Pin a retry to this run (default: latest run)
-        #[arg(long)]
-        run: Option<i64>,
-        /// Seconds to wait for confirmed termination
-        #[arg(long, default_value_t = 60)]
-        timeout: u64,
+    /// Run token usage: fill it in from local run logs and report coverage
+    Usage {
+        #[command(subcommand)]
+        command: UsageCmd,
     },
+    /// Delivery statistics for a project (JSON)
+    ///
+    /// Interventions per verified shipped task, escalations by class, throughput, reopens, effort and backlog aging
+    Stats {
+        #[arg(long)]
+        project: String,
+        /// RFC3339 or an age such as 14d, 12h
+        #[arg(long, default_value = "14d")]
+        since: String,
+        /// RFC3339 or an age; default now
+        #[arg(long, default_value = "0s")]
+        until: String,
+        /// One workload, or "unset"
+        #[arg(long)]
+        workload: Option<String>,
+        /// Only tasks that came from a routine occurrence (routine) or not (task)
+        #[arg(long, value_parser = PossibleValuesParser::new(crate::flow::ORIGINS))]
+        origin: Option<String>,
+    },
+    /// Serve the HTTP API (the only process that opens the database)
+    Server {
+        #[arg(long, default_value = server::DEFAULT_LISTEN)]
+        listen: String,
+    },
+    /// Run the remote dispatcher and supervise workers
+    Dispatch {
+        #[arg(long)]
+        once: bool,
+        /// After stopping prior workers, resolve their interrupted runs with this
+        /// audit note and exit without dispatching
+        #[arg(long)]
+        reconcile_note: Option<String>,
+        /// Housekeeping tick, overriding `[dispatcher] housekeep`; a bare
+        /// `--housekeep` means dry-run
+        #[arg(long, value_enum, num_args = 0..=1, require_equals = true, default_missing_value = "dry-run")]
+        housekeep: Option<config::Housekeep>,
+    },
+    /// One dry-run housekeeping sweep: prints each decision, deletes nothing
+    ///
+    /// Removal runs only inside `axe dispatch` (`[dispatcher] housekeep`)
+    Housekeeping {
+        #[arg(long, required = true)]
+        dry_run: bool,
+    },
+    /// Validate and print the local config ($AXE_CONFIG)
+    Config,
+    /// Write a starter config ($AXE_CONFIG); never overwrites
+    ///
+    /// The config has a `stub` agent that needs no model; the command prints
+    /// the commands for a first task
+    Init {
+        /// Print the starter config instead of writing it
+        #[arg(long)]
+        print: bool,
+    },
+    /// Show or hold the dispatcher's admission of new sessions
+    ///
+    /// Shows whether the dispatcher is admitting new sessions (resource
+    /// pressure or a manual hold), or sets and releases a hold
+    Admission {
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        command: Option<AdmissionCmd>,
+    },
+    /// The dispatcher's runtimes: state, limit, last failure and quota
+    ///
+    /// A runtime is a harness plus one login, as the dispatcher last reported it
+    Runtimes {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sealed forms: ask the owner for secrets, codes or files
+    ///
+    /// Only the dispatcher can read the values. They are encrypted in the owner's browser, relayed
+    /// as ciphertext and written to the target as 0600 files ($AXE_SECRETS_DIR)
+    Form {
+        #[command(subcommand)]
+        command: FormCmd,
+    },
+    /// The web portal: every page and read needs a sign-in
+    Web {
+        #[command(subcommand)]
+        command: WebCmd,
+    },
+    /// Download a consistent server-side snapshot of the database to a new file
+    Backup { to: PathBuf },
+    /// Content-addressed files, shared through signed, expiring links
+    ///
+    /// Blobs are immutable and kept by the server
+    Blob {
+        #[command(subcommand)]
+        command: BlobCmd,
+    },
+    /// Versioned text docs: skills, docs, memory, conduct, bundles
+    ///
+    /// Kept by the server and attached to scopes: global, label:<name>, owner:<name>,
+    /// repo:<name>
+    Doc {
+        #[command(subcommand)]
+        command: DocCmd,
+    },
+    /// The docs and skills a run gets from its scopes
+    Context {
+        #[command(subcommand)]
+        command: ContextCmd,
+    },
+}
+
+/// The task verbs, under `axe task` and (hidden) at the top level.
+#[derive(Subcommand, Debug, PartialEq)]
+pub(crate) enum TaskCmd {
     /// Create a task; prints its id
     Add {
         /// Agent for fresh sessions, overriding project rules
@@ -114,21 +235,9 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         label: Vec<String>,
     },
-    /// Show a task's prerequisites (blocked_by) and dependents (blocks); --add or
-    /// --remove edges first, in one transaction
-    Deps {
-        id: i64,
-        /// Prerequisite ids to add (repeat or comma-separate)
-        #[arg(long, value_delimiter = ',')]
-        add: Vec<i64>,
-        /// Prerequisite ids to remove (repeat or comma-separate)
-        #[arg(long, value_delimiter = ',')]
-        remove: Vec<i64>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// List tasks (done hidden unless --all or --state done). --state matches the
-    /// shown status: blocked includes tasks waiting on prerequisites
+    /// List tasks (done hidden unless --all or --state done)
+    ///
+    /// --state matches the shown status: blocked includes tasks waiting on prerequisites
     List {
         #[arg(long, value_parser = state_parser())]
         state: Option<String>,
@@ -159,7 +268,8 @@ enum Cmd {
         #[arg(long)]
         full: bool,
     },
-    /// Change state/title/detail or reset runs, optionally with a note.
+    /// Change state/title/detail or reset runs, optionally with a note
+    ///
     /// Escalate with `--state escalated --note ...`
     Set {
         id: i64,
@@ -198,6 +308,30 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         unlabel: Vec<String>,
     },
+    /// Append a note
+    Note {
+        id: i64,
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        text: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Record an artifact (e.g. a PR URL)
+    Artifact { id: i64, value: String },
+    /// Approve an escalated (or blocked) task and set it pending
+    ///
+    /// Records the decision: the commit to ship and its deploy target
+    Approve {
+        id: i64,
+        /// Commit to ship
+        #[arg(long)]
+        sha: String,
+        /// Deploy target
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Escalate for ops/owner with a block note; the task's session resumes later
     Escalate {
         id: i64,
@@ -217,43 +351,9 @@ enum Cmd {
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::ESCALATION_CLASSES))]
         class: String,
     },
-    /// Correct a task's escalation class (latest episode unless --episode) and/or its workload
-    Classify {
-        id: i64,
-        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::ESCALATION_CLASSES))]
-        escalation: Option<String>,
-        /// Which escalation episode to classify, 1-based in `axe log` order
-        /// (each entry into escalated starts one). Default: the latest
-        #[arg(long, requires = "escalation", value_parser = clap::value_parser!(i64).range(1..))]
-        episode: Option<i64>,
-        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::WORKLOADS))]
-        workload: Option<String>,
-    },
-    /// Run token usage: fill it in from local run logs and report coverage
-    Usage {
-        #[command(subcommand)]
-        command: UsageCmd,
-    },
-    /// Delivery statistics for a project (JSON): interventions per verified shipped
-    /// task, escalations by class, throughput, reopens, effort and backlog aging
-    Stats {
-        #[arg(long)]
-        project: String,
-        /// RFC3339 or an age such as 14d, 12h
-        #[arg(long, default_value = "14d")]
-        since: String,
-        /// RFC3339 or an age; default now
-        #[arg(long, default_value = "0s")]
-        until: String,
-        /// One workload, or "unset"
-        #[arg(long)]
-        workload: Option<String>,
-        /// Only tasks that came from a routine occurrence (routine) or not (task)
-        #[arg(long, value_parser = PossibleValuesParser::new(crate::flow::ORIGINS))]
-        origin: Option<String>,
-    },
-    /// Wait without a human: on other tasks (--on) or until a time (--until/--for).
-    /// The task keeps its session and resumes automatically
+    /// Wait without a human: on other tasks (--on) or until a time
+    ///
+    /// --on waits for prerequisites, --until/--for for a time. The task keeps its session and resumes automatically
     Wait {
         id: i64,
         /// Prerequisite task ids (repeat or comma-separate)
@@ -269,16 +369,39 @@ enum Cmd {
         #[arg(long)]
         note: String,
     },
-    /// Append a note
-    Note {
+    /// Show or edit a task's prerequisites and dependents
+    ///
+    /// Shows blocked_by and blocks; --add or --remove edges first, in one
+    /// transaction
+    Deps {
         id: i64,
-        #[arg(required_unless_present = "file", conflicts_with = "file")]
-        text: Option<String>,
+        /// Prerequisite ids to add (repeat or comma-separate)
+        #[arg(long, value_delimiter = ',')]
+        add: Vec<i64>,
+        /// Prerequisite ids to remove (repeat or comma-separate)
+        #[arg(long, value_delimiter = ',')]
+        remove: Vec<i64>,
         #[arg(long)]
-        file: Option<PathBuf>,
+        json: bool,
     },
-    /// Mark this task's live run as inside a non-repeatable step (merge, deploy,
-    /// migration): a rollout drain waits for it instead of aborting it
+    /// Correct a task's escalation class and/or its workload
+    ///
+    /// The escalation class of the latest episode unless --episode
+    Classify {
+        id: i64,
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::ESCALATION_CLASSES))]
+        escalation: Option<String>,
+        /// Which escalation episode to classify, 1-based in `axe log` order
+        /// (each entry into escalated starts one). Default: the latest
+        #[arg(long, requires = "escalation", value_parser = clap::value_parser!(i64).range(1..))]
+        episode: Option<i64>,
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(db::WORKLOADS))]
+        workload: Option<String>,
+    },
+    /// Shield a non-repeatable step (merge, deploy) from rollout aborts
+    ///
+    /// Marks this task's live run as inside a non-repeatable step (merge,
+    /// deploy, migration): a rollout drain waits for it instead of aborting it
     Protect {
         id: i64,
         /// The step is over; the run can be aborted again
@@ -288,19 +411,15 @@ enum Cmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Record an artifact (e.g. a PR URL)
-    Artifact { id: i64, value: String },
-    /// Approve an escalated (or blocked) task; records the decision and sets it pending
-    Approve {
+    /// Force-stop a run and hold its task; succeeds only after confirmation
+    Abort {
         id: i64,
-        /// Commit to ship
+        /// Pin a retry to this run (default: latest run)
         #[arg(long)]
-        sha: String,
-        /// Deploy target
-        #[arg(long)]
-        scope: String,
-        #[arg(long)]
-        note: Option<String>,
+        run: Option<i64>,
+        /// Seconds to wait for confirmed termination
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
     },
     /// Claim the oldest ready task; exits 1 if none
     Claim {
@@ -308,85 +427,6 @@ enum Cmd {
         project: Option<String>,
         #[arg(long)]
         by: String,
-    },
-    /// Serve the HTTP API (the only process that opens the database)
-    Server {
-        #[arg(long, default_value = server::DEFAULT_LISTEN)]
-        listen: String,
-    },
-    /// Run the remote dispatcher and supervise workers
-    Dispatch {
-        #[arg(long)]
-        once: bool,
-        /// After stopping prior workers, resolve their interrupted runs with this
-        /// audit note and exit without dispatching
-        #[arg(long)]
-        reconcile_note: Option<String>,
-        /// Housekeeping tick, overriding `[dispatcher] housekeep`; a bare
-        /// `--housekeep` means dry-run
-        #[arg(long, value_enum, num_args = 0..=1, require_equals = true, default_missing_value = "dry-run")]
-        housekeep: Option<config::Housekeep>,
-    },
-    /// One housekeeping sweep that prints each decision and deletes nothing
-    /// (removal runs only inside `axe dispatch`, `[dispatcher] housekeep`)
-    Housekeeping {
-        #[arg(long, required = true)]
-        dry_run: bool,
-    },
-    /// Validate and print the local config ($AXE_CONFIG)
-    Config,
-    /// Write a starter config ($AXE_CONFIG) with a `stub` agent that needs no
-    /// model, and print the commands for a first task. Never overwrites
-    Init {
-        /// Print the starter config instead of writing it
-        #[arg(long)]
-        print: bool,
-    },
-    /// Show whether the dispatcher is admitting new sessions (resource
-    /// pressure or a manual hold), or set and release a hold
-    Admission {
-        #[arg(long)]
-        json: bool,
-        #[command(subcommand)]
-        command: Option<AdmissionCmd>,
-    },
-    /// The dispatcher's runtimes (a harness plus one login): state, limit,
-    /// last failure and quota, as it last reported them
-    Runtimes {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Sealed forms: ask the owner for values (secrets, codes, files) only the
-    /// dispatcher can read. They are encrypted in the owner's browser, relayed
-    /// as ciphertext and written to the target as 0600 files ($AXE_SECRETS_DIR)
-    Form {
-        #[command(subcommand)]
-        command: FormCmd,
-    },
-    /// The web portal: every page and read needs a sign-in
-    Web {
-        #[command(subcommand)]
-        command: WebCmd,
-    },
-    /// Download a consistent server-side snapshot of the database to a new file
-    Backup { to: PathBuf },
-    /// Immutable, content-addressed files kept by the server, shared through
-    /// signed, expiring links
-    Blob {
-        #[command(subcommand)]
-        command: BlobCmd,
-    },
-    /// Versioned text docs kept by the server (skills, docs, memory, conduct,
-    /// bundles), attached to scopes: global, label:<name>, owner:<name>,
-    /// repo:<name>
-    Doc {
-        #[command(subcommand)]
-        command: DocCmd,
-    },
-    /// The docs and skills a run gets from its scopes
-    Context {
-        #[command(subcommand)]
-        command: ContextCmd,
     },
 }
 
@@ -3620,11 +3660,76 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
     Ok(())
 }
 
+/// The sections of `axe --help`, each a list of top-level commands. Every
+/// visible command is in exactly one section (a test checks it).
+const HELP_SECTIONS: &[(&str, &[&str])] = &[
+    (
+        "Primitives",
+        &["task", "bot", "goal", "routine", "rule", "ask", "form"],
+    ),
+    ("Store", &["blob", "doc", "context"]),
+    (
+        "Ops and admin",
+        &[
+            "server",
+            "dispatch",
+            "admission",
+            "runtimes",
+            "housekeeping",
+            "config",
+            "init",
+            "backup",
+            "web",
+            "usage",
+            "stats",
+        ],
+    ),
+];
+
+/// The CLI: the derived commands, with the top-level task aliases hidden and
+/// `--help` listing the commands by section.
+pub(crate) fn command() -> clap::Command {
+    let aliases: Vec<String> = TaskCmd::augment_subcommands(clap::Command::new("task"))
+        .get_subcommands()
+        .map(|s| s.get_name().to_string())
+        .collect();
+    let cmd = Cli::command().mut_subcommands(|s| {
+        let hide = aliases.iter().any(|a| a == s.get_name());
+        s.hide(hide)
+    });
+    let width = HELP_SECTIONS
+        .iter()
+        .flat_map(|(_, names)| names.iter())
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(0);
+    let mut listing = String::new();
+    for (heading, names) in HELP_SECTIONS {
+        listing.push_str(&format!("{heading}:\n"));
+        for name in *names {
+            let about = cmd
+                .find_subcommand(name)
+                .and_then(|s| s.get_about())
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            listing.push_str(&format!("  {name:<width$}  {about}\n"));
+        }
+        listing.push('\n');
+    }
+    let template = format!(
+        "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{listing}Options:\n{{options}}\n\n\
+         Run `axe <command> --help` for a command's details. The task verbs also\n\
+         work at the top level (`axe add`, `axe show`, ...), as before."
+    );
+    cmd.help_template(template)
+}
+
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     let client = || Client::from_env(cli.actor.clone()).retrying(crate::client::retry_budget());
 
     match &cli.cmd {
+        Cmd::Task { command } | Cmd::TaskAlias(command) => run_task(&client, command)?,
         Cmd::Bot { command } => run_bot(&client(), command)?,
         Cmd::Blob { command } => run_blob(&client(), command)?,
         Cmd::Doc { command } => run_doc(&client(), command)?,
@@ -3807,139 +3912,6 @@ pub fn run() -> Result<()> {
             client().backup(to)?;
             println!("{}", to.display());
         }
-        Cmd::Abort { id, run, timeout } => {
-            let c = client();
-            let run = match run {
-                Some(run) => *run,
-                None => {
-                    let runs: Value =
-                        c.get("/api/runs", &[("task", &id.to_string()), ("limit", "1")])?;
-                    runs[0]["id"].as_i64().context("task has no run")?
-                }
-            };
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(*timeout);
-            loop {
-                let v: Value = c.send(
-                    "POST",
-                    &format!("/api/tasks/{id}/abort"),
-                    json!({"run":run}),
-                )?;
-                if v["status"] == "confirmed" {
-                    println!(
-                        "task {id} run {run}: abort confirmed; current task state: {}",
-                        v["task_state"].as_str().unwrap_or("unknown")
-                    );
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    anyhow::bail!("task {id} run {run}: abort requested, termination NOT confirmed; retry with --run {run}");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-        }
-        Cmd::Add {
-            agent,
-            project,
-            title,
-            detail,
-            detail_file,
-            state,
-            blocked_by,
-            workload,
-            goal,
-            owner,
-            repo,
-            no_repos,
-            label,
-        } => {
-            let detail = detail_arg(detail.clone(), detail_file.clone())?.unwrap_or_default();
-            let repos = (*no_repos || !repo.is_empty()).then_some(repo);
-            let v: Value = client().send(
-                "POST",
-                "/api/tasks",
-                json!({
-                    "project": project,
-                    "title": title,
-                    "detail": detail,
-                    "state": state,
-                    "blocked_by": blocked_by,
-                    "agent": agent,
-                    "workload": workload,
-                    "goal": goal,
-                    "owner": owner,
-                    "repos": repos,
-                    "labels": label,
-                }),
-            )?;
-            println!("{}", v["id"]);
-        }
-        Cmd::Deps {
-            id,
-            add,
-            remove,
-            json,
-        } => {
-            let t: db::Task = if add.is_empty() && remove.is_empty() {
-                client().get(&format!("/api/tasks/{id}"), &[])?
-            } else {
-                let v: Value = client().send(
-                    "POST",
-                    &format!("/api/tasks/{id}/deps"),
-                    json!({ "add": add, "remove": remove }),
-                )?;
-                serde_json::from_value(v["task"].clone())?
-            };
-            if *json {
-                print_json(&t)?;
-            } else {
-                println!("{}", dispatch::format_deps(&t));
-            }
-        }
-        Cmd::List {
-            state,
-            project,
-            label,
-            owner,
-            all,
-            json,
-        } => {
-            let mut q: Vec<(&str, &str)> = Vec::new();
-            for (k, v) in [
-                ("state", state),
-                ("project", project),
-                ("label", label),
-                ("owner", owner),
-            ] {
-                if let Some(v) = v {
-                    q.push((k, v));
-                }
-            }
-            if *all {
-                q.push(("all", "1"));
-            }
-            let tasks: Vec<db::Task> = client().get("/api/tasks", &q)?;
-            if *json {
-                print_json(&tasks)?;
-            } else {
-                print_table(&tasks);
-            }
-        }
-        Cmd::Show { id, json } => {
-            let t: db::Task = client().get(&format!("/api/tasks/{id}"), &[])?;
-            if *json {
-                print_json(&t)?;
-            } else {
-                println!("{}", dispatch::format_show(&t));
-                if t.status == "pending" {
-                    // Older servers have no admission endpoint; say nothing then.
-                    if let Ok(a) = client().get::<Value>("/api/admission", &[]) {
-                        if let Some(line) = admission_wait(&a) {
-                            println!("waiting: {line}");
-                        }
-                    }
-                }
-            }
-        }
         Cmd::Admission {
             command: Some(command),
             ..
@@ -4019,7 +3991,168 @@ pub fn run() -> Result<()> {
                 print!("{}", format_admission(&a));
             }
         }
-        Cmd::Log { id, json, full } => {
+        Cmd::Usage { command } => run_usage(&client(), command)?,
+        Cmd::Stats {
+            project,
+            since,
+            until,
+            workload,
+            origin,
+        } => {
+            let mut q = vec![
+                ("project", project.as_str()),
+                ("since", since.as_str()),
+                ("until", until.as_str()),
+            ];
+            if let Some(w) = workload {
+                q.push(("workload", w.as_str()));
+            }
+            if let Some(o) = origin {
+                q.push(("origin", o.as_str()));
+            }
+            let v: Value = client().get("/api/stats/flow", &q)?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+    }
+    Ok(())
+}
+
+fn run_task(client: &dyn Fn() -> Client, command: &TaskCmd) -> Result<()> {
+    match command {
+        TaskCmd::Abort { id, run, timeout } => {
+            let c = client();
+            let run = match run {
+                Some(run) => *run,
+                None => {
+                    let runs: Value =
+                        c.get("/api/runs", &[("task", &id.to_string()), ("limit", "1")])?;
+                    runs[0]["id"].as_i64().context("task has no run")?
+                }
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(*timeout);
+            loop {
+                let v: Value = c.send(
+                    "POST",
+                    &format!("/api/tasks/{id}/abort"),
+                    json!({"run":run}),
+                )?;
+                if v["status"] == "confirmed" {
+                    println!(
+                        "task {id} run {run}: abort confirmed; current task state: {}",
+                        v["task_state"].as_str().unwrap_or("unknown")
+                    );
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!("task {id} run {run}: abort requested, termination NOT confirmed; retry with --run {run}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        TaskCmd::Add {
+            agent,
+            project,
+            title,
+            detail,
+            detail_file,
+            state,
+            blocked_by,
+            workload,
+            goal,
+            owner,
+            repo,
+            no_repos,
+            label,
+        } => {
+            let detail = detail_arg(detail.clone(), detail_file.clone())?.unwrap_or_default();
+            let repos = (*no_repos || !repo.is_empty()).then_some(repo);
+            let v: Value = client().send(
+                "POST",
+                "/api/tasks",
+                json!({
+                    "project": project,
+                    "title": title,
+                    "detail": detail,
+                    "state": state,
+                    "blocked_by": blocked_by,
+                    "agent": agent,
+                    "workload": workload,
+                    "goal": goal,
+                    "owner": owner,
+                    "repos": repos,
+                    "labels": label,
+                }),
+            )?;
+            println!("{}", v["id"]);
+        }
+        TaskCmd::Deps {
+            id,
+            add,
+            remove,
+            json,
+        } => {
+            let t: db::Task = if add.is_empty() && remove.is_empty() {
+                client().get(&format!("/api/tasks/{id}"), &[])?
+            } else {
+                let v: Value = client().send(
+                    "POST",
+                    &format!("/api/tasks/{id}/deps"),
+                    json!({ "add": add, "remove": remove }),
+                )?;
+                serde_json::from_value(v["task"].clone())?
+            };
+            if *json {
+                print_json(&t)?;
+            } else {
+                println!("{}", dispatch::format_deps(&t));
+            }
+        }
+        TaskCmd::List {
+            state,
+            project,
+            label,
+            owner,
+            all,
+            json,
+        } => {
+            let mut q: Vec<(&str, &str)> = Vec::new();
+            for (k, v) in [
+                ("state", state),
+                ("project", project),
+                ("label", label),
+                ("owner", owner),
+            ] {
+                if let Some(v) = v {
+                    q.push((k, v));
+                }
+            }
+            if *all {
+                q.push(("all", "1"));
+            }
+            let tasks: Vec<db::Task> = client().get("/api/tasks", &q)?;
+            if *json {
+                print_json(&tasks)?;
+            } else {
+                print_table(&tasks);
+            }
+        }
+        TaskCmd::Show { id, json } => {
+            let t: db::Task = client().get(&format!("/api/tasks/{id}"), &[])?;
+            if *json {
+                print_json(&t)?;
+            } else {
+                println!("{}", dispatch::format_show(&t));
+                if t.status == "pending" {
+                    // Older servers have no admission endpoint; say nothing then.
+                    if let Ok(a) = client().get::<Value>("/api/admission", &[]) {
+                        if let Some(line) = admission_wait(&a) {
+                            println!("waiting: {line}");
+                        }
+                    }
+                }
+            }
+        }
+        TaskCmd::Log { id, json, full } => {
             let events: Vec<db::Event> = client().get(&format!("/api/tasks/{id}/events"), &[])?;
             if *json {
                 print_json(&events)?;
@@ -4030,7 +4163,7 @@ pub fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Set {
+        TaskCmd::Set {
             id,
             reset_runs,
             state,
@@ -4067,7 +4200,7 @@ pub fn run() -> Result<()> {
                 }),
             )?;
         }
-        Cmd::Escalate {
+        TaskCmd::Escalate {
             id,
             blocked,
             resolver,
@@ -4090,7 +4223,7 @@ pub fn run() -> Result<()> {
                 json!({ "state": "escalated", "note": note, "escalation_class": class }),
             )?;
         }
-        Cmd::Classify {
+        TaskCmd::Classify {
             id,
             escalation,
             episode,
@@ -4102,29 +4235,7 @@ pub fn run() -> Result<()> {
                 json!({ "escalation": escalation, "episode": episode, "workload": workload }),
             )?;
         }
-        Cmd::Usage { command } => run_usage(&client(), command)?,
-        Cmd::Stats {
-            project,
-            since,
-            until,
-            workload,
-            origin,
-        } => {
-            let mut q = vec![
-                ("project", project.as_str()),
-                ("since", since.as_str()),
-                ("until", until.as_str()),
-            ];
-            if let Some(w) = workload {
-                q.push(("workload", w.as_str()));
-            }
-            if let Some(o) = origin {
-                q.push(("origin", o.as_str()));
-            }
-            let v: Value = client().get("/api/stats/flow", &q)?;
-            println!("{}", serde_json::to_string_pretty(&v)?);
-        }
-        Cmd::Wait {
+        TaskCmd::Wait {
             id,
             on,
             until,
@@ -4155,7 +4266,7 @@ pub fn run() -> Result<()> {
                 )?;
             }
         }
-        Cmd::Note { id, text, file } => {
+        TaskCmd::Note { id, text, file } => {
             let body = match (text, file) {
                 (Some(t), _) => t.clone(),
                 (None, Some(f)) => read_file(f)?,
@@ -4167,21 +4278,21 @@ pub fn run() -> Result<()> {
                 json!({ "body": body }),
             )?;
         }
-        Cmd::Protect { id, clear, note } => {
+        TaskCmd::Protect { id, clear, note } => {
             let _: Value = client().send(
                 "POST",
                 &format!("/api/tasks/{id}/protect"),
                 json!({ "clear": clear, "note": note }),
             )?;
         }
-        Cmd::Artifact { id, value } => {
+        TaskCmd::Artifact { id, value } => {
             let _: Value = client().send(
                 "POST",
                 &format!("/api/tasks/{id}/artifacts"),
                 json!({ "value": value }),
             )?;
         }
-        Cmd::Approve {
+        TaskCmd::Approve {
             id,
             sha,
             scope,
@@ -4193,7 +4304,7 @@ pub fn run() -> Result<()> {
                 json!({ "sha": sha, "scope": scope, "note": note }),
             )?;
         }
-        Cmd::Claim { project, by } => {
+        TaskCmd::Claim { project, by } => {
             let v: Value = client().send(
                 "POST",
                 "/api/claim",
@@ -4284,6 +4395,186 @@ fn run_usage(client: &Client, command: &UsageCmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::parse_buttons;
+    use super::{command, Cli, Cmd, TaskCmd, HELP_SECTIONS};
+    use clap::{FromArgMatches, Subcommand};
+
+    /// One sample invocation per task verb, as written after `axe` (old form)
+    /// or after `axe task` (new form).
+    const TASK_CASES: &[&[&str]] = &[
+        &[
+            "add",
+            "--project",
+            "p",
+            "--title",
+            "t",
+            "--repo",
+            "a,b",
+            "--label",
+            "x",
+            "--owner",
+            "bot:o",
+        ],
+        &[
+            "add",
+            "--project",
+            "p",
+            "--title",
+            "t",
+            "--detail",
+            "d",
+            "--state",
+            "escalated",
+            "--blocked-by",
+            "1,2",
+            "--no-repos",
+        ],
+        &[
+            "list",
+            "--state",
+            "pending",
+            "--project",
+            "p",
+            "--label",
+            "l",
+            "--owner",
+            "o",
+            "--all",
+            "--json",
+        ],
+        &["show", "7", "--json"],
+        &["log", "7", "--full"],
+        &[
+            "set",
+            "7",
+            "--state",
+            "done",
+            "--note",
+            "n",
+            "--label",
+            "a",
+            "--unlabel",
+            "b",
+            "--reset-runs",
+        ],
+        &["note", "7", "some text"],
+        &["note", "7", "--file", "f.md"],
+        &["artifact", "7", "https://example.invalid/pr/1"],
+        &[
+            "approve", "7", "--sha", "abc", "--scope", "prod", "--note", "ok",
+        ],
+        &[
+            "escalate",
+            "7",
+            "--blocked",
+            "b",
+            "--resolver",
+            "r",
+            "--resume",
+            "s",
+            "--class",
+            "decision",
+        ],
+        &["wait", "7", "--on", "3,4", "--note", "n"],
+        &["wait", "7", "--for", "15m", "--note", "n"],
+        &["deps", "7", "--add", "1", "--remove", "2", "--json"],
+        &[
+            "classify",
+            "7",
+            "--escalation",
+            "runtime",
+            "--episode",
+            "1",
+            "--workload",
+            "feature",
+        ],
+        &["protect", "7", "--note", "merge"],
+        &["protect", "7", "--clear"],
+        &["abort", "7", "--run", "3", "--timeout", "5"],
+        &["claim", "--project", "p", "--by", "me"],
+    ];
+
+    fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
+        let argv = std::iter::once("axe").chain(args.iter().copied());
+        let m = command().try_get_matches_from(argv)?;
+        Ok(Cli::from_arg_matches(&m)?.cmd)
+    }
+
+    fn task_cmd(args: &[&str]) -> TaskCmd {
+        match parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
+            Cmd::Task { command } | Cmd::TaskAlias(command) => command,
+            _ => panic!("{args:?} is not a task command"),
+        }
+    }
+
+    #[test]
+    fn old_top_level_task_commands_parse_as_their_task_form() {
+        for case in TASK_CASES {
+            let mut new = vec!["task"];
+            new.extend_from_slice(case);
+            assert!(matches!(parse(case), Ok(Cmd::TaskAlias(_))), "{case:?}");
+            assert!(matches!(parse(&new), Ok(Cmd::Task { .. })), "{new:?}");
+            assert_eq!(task_cmd(case), task_cmd(&new), "{case:?}");
+        }
+        // Both forms reject the same bad input.
+        for bad in [
+            &["show"][..],
+            &["wait", "7", "--note", "n"],
+            &["add", "--project", "p"],
+        ] {
+            let mut new = vec!["task"];
+            new.extend_from_slice(bad);
+            assert!(parse(bad).is_err(), "{bad:?}");
+            assert!(parse(&new).is_err(), "{new:?}");
+        }
+        // Every task verb has a case.
+        let verbs = TaskCmd::augment_subcommands(clap::Command::new("t"));
+        for verb in verbs.get_subcommands() {
+            assert!(
+                TASK_CASES.iter().any(|c| c[0] == verb.get_name()),
+                "no alias case for `{}`",
+                verb.get_name()
+            );
+        }
+    }
+
+    #[test]
+    fn help_lists_every_visible_command_in_one_section_and_hides_aliases() {
+        let cmd = command();
+        let listed: Vec<&str> = HELP_SECTIONS
+            .iter()
+            .flat_map(|(_, n)| n.iter().copied())
+            .collect();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            let n = listed.iter().filter(|l| **l == name).count();
+            if sub.is_hide_set() || name == "help" {
+                assert_eq!(n, 0, "`{name}` is hidden but listed");
+            } else {
+                assert_eq!(n, 1, "`{name}` must be in exactly one help section");
+            }
+        }
+        for name in &listed {
+            assert!(
+                cmd.find_subcommand(name).is_some(),
+                "unknown command `{name}`"
+            );
+        }
+        let help = command().render_help().to_string();
+        for (heading, _) in HELP_SECTIONS {
+            assert!(help.contains(&format!("{heading}:\n")), "{help}");
+        }
+        assert!(!help.contains("\n  add "), "aliases are hidden: {help}");
+        // Short descriptions: one line each.
+        for line in help
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        {
+            assert!(
+                line.len() <= 90,
+                "too long for a one-line description: {line}"
+            );
+        }
+    }
 
     fn b(l: &str, d: &str) -> (String, String) {
         (l.into(), d.into())
