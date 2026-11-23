@@ -354,14 +354,8 @@ fn write_config(dir: &Path, api: &str, token_file: &Path) -> PathBuf {
     write_config_with(dir, api, token_file, "")
 }
 
-/// `extra` goes into the `[telegram]` table. The weekly retro send is off
-/// unless `extra` sets `[telegram.retro]`, so no test meets its slot.
+/// `extra` goes into the `[telegram]` table.
 fn write_config_with(dir: &Path, api: &str, token_file: &Path, extra: &str) -> PathBuf {
-    let extra = if extra.contains("[telegram.retro]") {
-        extra.to_string()
-    } else {
-        format!("{extra}\n[telegram.retro]\nenabled = false\n")
-    };
     let cfg = format!(
         r#"
 workspace_root = "{ws}"
@@ -427,7 +421,39 @@ impl Rig {
         std::fs::write(&f, json!({"name":"cos","project":"p"}).to_string()).unwrap();
         rig.srv()
             .ok(&["bot", "create", "--file", f.to_str().unwrap()]);
+        rig.retro_off("cos");
         rig
+    }
+
+    /// Turns bot `name`'s retro off, so no test meets its slot by chance (a
+    /// bot just created has no asks, so a slot met before this sends
+    /// nothing).
+    fn retro_off(&self, name: &str) {
+        self.srv()
+            .ok(&["bot", "edit", name, "--retro", "off", "--why", "test"]);
+    }
+
+    /// Turns bot `name`'s retro on with its slot a minute ago: due now.
+    fn retro_due_now(&self, name: &str, extra: &[&str]) {
+        let mut args = vec!["bot", "edit", name, "--retro", "on", "--retro-every", "7d"];
+        let at = retro_at_a_minute_ago();
+        args.extend_from_slice(&["--retro-at", &at]);
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--why", "test"]);
+        self.srv().ok(&args);
+    }
+
+    /// The retro wakes queued so far (`retro-closed-<card>`): key and body.
+    fn retro_wakes(&self) -> Vec<(String, String)> {
+        self.db()
+            .prepare(
+                "SELECT key, body FROM bot_wakes WHERE key LIKE 'wake:retro-closed-%' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
     }
 
     /// Creates axe bot `name` for a `[[telegram.bot]]` from `extra_bots`,
@@ -437,6 +463,7 @@ impl Rig {
         std::fs::write(&f, json!({"name": name, "project": "p"}).to_string()).unwrap();
         self.srv()
             .ok(&["bot", "create", "--file", f.to_str().unwrap()]);
+        self.retro_off(name);
         self.srv().ok(&["bot", "pause", name]);
     }
 
@@ -1504,15 +1531,20 @@ fn telegram_config_is_validated() {
     use axe::config::Config;
     let base = |extra: &str| format!("[telegram]\nowner_user_id = 1\n{extra}");
     assert!(Config::parse(&base("")).unwrap().telegram.is_some());
-    // The weekly retro send: on, Monday 01:00Z, from the first bot by default.
-    let r = Config::parse(&base("")).unwrap().telegram.unwrap().retro;
-    assert!(r.enabled && r.at == "mon 01:00" && r.bot.is_none());
-    let r = Config::parse(&base("[telegram.retro]\nat = \"fri 17:30\"\nbot = \"a\"\n[[telegram.bot]]\nname = \"a\"\ntoken_file = \"t\"\nchats = [1]\n"))
-        .unwrap()
-        .telegram
-        .unwrap()
-        .retro;
-    assert_eq!((r.at.as_str(), r.bot.as_deref()), ("fri 17:30", Some("a")));
+    // The retired [telegram.retro] table (retro settings are per bot now):
+    // still loads, including its old keys and values, and is reported.
+    let t = Config::parse(&base("")).unwrap().telegram.unwrap();
+    assert!(t.retro.is_none() && t.warnings().is_empty());
+    for old in [
+        "[telegram.retro]\nat = \"fri 17:30\"\nbot = \"a\"\nenabled = false\n",
+        "[telegram.retro]\nat = \"monday\"\n",
+        "[telegram.retro]\nbot = \"nope\"\n",
+    ] {
+        let t = Config::parse(&base(old)).unwrap().telegram.unwrap();
+        let w = t.warnings();
+        assert_eq!(w.len(), 1, "{old}");
+        assert!(w[0].contains("[telegram.retro] is ignored"), "{}", w[0]);
+    }
     assert!(
         Config::parse("").unwrap().telegram.is_none(),
         "disabled when absent"
@@ -1523,8 +1555,7 @@ fn telegram_config_is_validated() {
         (base("[[telegram.bot]]\nname = \"a\"\ntoken_file = \"t\"\nchats = []\n"), "chats allowlist is empty"),
         (base("[[telegram.bot]]\nname = \"a\"\ntoken_file = \"t\"\nchats = [1]\n[[telegram.bot]]\nname = \"a\"\ntoken_file = \"u\"\nchats = [1]\n"), "configured twice"),
         (base("token = \"x\"\n"), "unknown field"),
-        (base("[telegram.retro]\nat = \"monday\"\n"), "telegram.retro.at"),
-        (base("[telegram.retro]\nbot = \"nope\"\n"), "not a [[telegram.bot]]"),
+        (base("[telegram.retro]\nhome = \"a\"\n"), "unknown field"),
     ] {
         let e = format!("{:#}", Config::parse(&bad).unwrap_err());
         assert!(e.contains(msg), "{bad}: {e}");
@@ -2837,9 +2868,16 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     let card = rig.messages().len() as i64;
     assert_eq!(flags_of(&rig, card)["ask"], true, "a card is marked an ask");
     // Closing the card by a text edit keeps it an ask.
-    rig.tg_ok(&["edit", &card.to_string(), "Decided: yes"]);
+    rig.tg_ok(&["edit", &card.to_string(), "Rotated it: yes"]);
     assert_eq!(flags_of(&rig, card)["ask"], true);
     assert!(flags_of(&rig, card)["buttons"].is_null());
+    // Unless the edit settles it ("Decided:" or "Closed:", never pressed):
+    // then it is no ask at all.
+    rig.tg_ok(&["send", "--buttons", "Yes=y,No=n", "Restart the worker?"]);
+    let settled = rig.messages().len() as i64;
+    rig.tg_ok(&["edit", &settled.to_string(), "Decided: restarted it myself"]);
+    let all = rig.srv().ok(&["ask", "list", "--json"]);
+    assert!(!all.contains(&format!("\"m{settled}\"")), "{all}");
     rig.tg_ok(&["send", "--buttons", "Yes=y,No=n", "Archive the logs?"]);
     let card2 = rig.messages().len() as i64;
     // The closed card kept its answer label only: it is "other".
@@ -2863,7 +2901,7 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     // newest first.
     assert!(
         text.starts_with(&format!(
-            "Weekly retro, cos: last week's asks (4, 4 unrated)\n\n1. #2: pick a name\n   needs a call Ask: decide\n2. #1: pick a region\n   needs a call Ask: decide\n3. msg {card2}: Archive the logs?\n4. msg {card}: Decided: yes\n\n"
+            "Weekly retro, cos: last week's asks (4, 4 unrated)\n\n1. #2: pick a name\n   needs a call Ask: decide\n2. #1: pick a region\n   needs a call Ask: decide\n3. msg {card2}: Archive the logs?\n4. msg {card}: Rotated it: yes\n\n"
         )),
         "{text}"
     );
@@ -2919,6 +2957,7 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     assert_eq!(asks[1]["rating"], "needed");
     assert!(rig.message_wakes().iter().all(|w| w.0 != "button"));
     assert!(rig.inbound().is_empty());
+    assert!(rig.retro_wakes().is_empty(), "single ratings wake nobody");
 
     // An ask not on the card is refused; a by-kind button rates nothing.
     rig.stub.push(press(54, tg, "rate:t9.1:n"));
@@ -2952,6 +2991,23 @@ fn the_retro_card_rates_each_ask_in_place_without_waking_the_bot() {
     assert_eq!(m2["rating"], "should_not_exist");
     let out = rig.srv().ok(&["ask", "retro", "--dry"]);
     assert!(out.contains("no unrated asks"), "{out}");
+    // Rating the last item closed the card: its bot gets one wake to read
+    // the ratings back.
+    let wakes = rig.retro_wakes();
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    assert_eq!(wakes[0].0, format!("wake:retro-closed-{retro}"));
+    assert!(
+        wakes[0].1.starts_with(&format!(
+            "Retro #{retro} closed: 4 new ratings. Read them: axe ask list --bot cos --since "
+        )),
+        "{wakes:?}"
+    );
+    // A re-rating or Dismiss after that adds none.
+    rig.stub.push(press(59, tg, "rate:t1.1:n"));
+    rig.stub.wait_confirmed(59);
+    rig.stub.push(press(60, tg, "rd"));
+    rig.stub.wait_confirmed(60);
+    assert_eq!(rig.retro_wakes().len(), 1);
 }
 
 #[test]
@@ -3055,7 +3111,7 @@ fn the_retro_card_is_never_pinned_and_dismiss_closes_it_unrated() {
     rig.tg_ok(&["send", "--buttons", "Yes=y,No=n", "Rotate the key?"]);
     let card = rig.messages().len() as i64;
     wait_for("card pinned", 20, || flags_of(&rig, card)["pinned"] == true);
-    rig.tg_ok(&["edit", &card.to_string(), "Decided: yes"]);
+    rig.tg_ok(&["edit", &card.to_string(), "Rotated it: yes"]);
     wait_for("card unpinned", 20, || {
         flags_of(&rig, card)["pinned"] == false
     });
@@ -3115,6 +3171,7 @@ fn the_retro_card_is_never_pinned_and_dismiss_closes_it_unrated() {
     assert_eq!(flags_of(&rig, retro)["dismissed"], true);
     assert!(flags_of(&rig, retro)["buttons"].is_null());
     assert!(rig.message_wakes().iter().all(|w| w.0 != "button"));
+    assert!(rig.retro_wakes().is_empty(), "nothing rated: no wake");
     // A stale press on the dismissed card rates nothing.
     rig.stub.push(press(62, tg, &format!("rate:m{card}:n")));
     rig.stub.wait_confirmed(62);
@@ -3129,7 +3186,7 @@ fn the_retro_card_is_never_pinned_and_dismiss_closes_it_unrated() {
 }
 
 #[test]
-fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
+fn each_bot_retro_holds_only_its_own_asks_paged() {
     let tokens = tempfile::tempdir().unwrap();
     let rig = Rig::with(&extra_bots(tokens.path()));
     rig.srv().ok(&["bot", "pause", "cos"]);
@@ -3196,9 +3253,15 @@ fn each_bot_retro_holds_its_own_asks_paged_and_the_home_bot_the_rest() {
         (3..=12).rev().map(|i| i.to_string()).collect::<Vec<_>>()
     );
     assert!(aux.contains("[next ›]") && !aux.contains("prev"), "{aux}");
-    // cos is the ops bot: its retro also holds the ask no bot raised.
+    // The bot's retro size is the default limit.
+    rig.srv()
+        .ok(&["bot", "edit", "aux", "--retro-size", "12", "--why", "test"]);
+    let sized = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "aux"]);
+    assert_eq!(sized, aux);
+    // cos is the ops bot, but its retro holds only its own ask: the ask no
+    // bot raised is on no card.
     let cos = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "cos"]);
-    assert_eq!(ids(&cos), ["14", "13"], "{cos}");
+    assert_eq!(ids(&cos), ["13"], "{cos}");
     let grp = rig.srv().ok(&["ask", "retro", "--dry", "--bot", "grp"]);
     assert!(grp.contains("no unrated asks"), "{grp}");
 
@@ -3274,17 +3337,13 @@ fn a_retro_card_sent_by_kind_re_renders_one_line_per_ask() {
     );
 }
 
-/// `[telegram.retro]` with its slot a minute ago: due now.
-fn retro_due_now() -> String {
+/// A UTC weekday and time a minute ago (`--retro-at`): a slot due now.
+fn retro_at_a_minute_ago() -> String {
     let t = axe::remote::epoch() - 60;
     let day = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
         [((t.div_euclid(86_400) + 3).rem_euclid(7)) as usize];
     let s = t.rem_euclid(86_400);
-    format!(
-        "[telegram.retro]\nat = \"{day} {:02}:{:02}\"\n",
-        s / 3600,
-        s % 3600 / 60
-    )
+    format!("{day} {:02}:{:02}", s / 3600, s % 3600 / 60)
 }
 
 fn retro_sends(rig: &Rig) -> usize {
@@ -3300,40 +3359,38 @@ fn retro_sends(rig: &Rig) -> usize {
 }
 
 #[test]
-fn the_weekly_retro_goes_out_at_its_slot_once_and_only_with_asks() {
+fn each_bot_retro_goes_out_at_its_own_slot_once_with_its_size_and_only_when_on() {
     let tokens = tempfile::tempdir().unwrap();
-    let mut rig = Rig::with(&format!("{}{}", extra_bots(tokens.path()), retro_due_now()));
+    let mut rig = Rig::with(&extra_bots(tokens.path()));
     rig.add_bot("aux");
     rig.add_bot("grp");
-    // Due, but nothing to rate: nothing is sent.
+    // The retired [telegram.retro] table is not needed: each bot's slot is
+    // its own. Due, but nothing to rate: nothing is sent.
+    rig.retro_due_now("cos", &[]);
+    rig.retro_due_now("aux", &["--retro-size", "1"]);
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(retro_sends(&rig), 0);
 
-    rig.srv().ok(&[
-        "add",
-        "--project",
-        "p",
-        "--title",
-        "ask me",
-        "--owner",
-        "bot:cos",
-    ]);
-    rig.srv().ok(&[
-        "add",
-        "--project",
-        "p",
-        "--title",
-        "ask aux",
-        "--owner",
-        "bot:aux",
-    ]);
-    escalate(&rig, "1");
-    escalate(&rig, "2");
-    // The restart still meets the slot (it is a minute old): each bot with
-    // asks sends its own card, from its own token, to the owner's chat;
-    // grp has none and sends nothing.
+    for (title, owner) in [
+        ("ask me", "bot:cos"),
+        ("ask aux", "bot:aux"),
+        ("ask aux again", "bot:aux"),
+        ("ask grp", "bot:grp"),
+    ] {
+        rig.srv()
+            .ok(&["add", "--project", "p", "--title", title, "--owner", owner]);
+    }
+    for i in 1..=4 {
+        escalate(&rig, &i.to_string());
+    }
+    // grp is due too, but its retro is off.
+    rig.retro_due_now("grp", &[]);
+    rig.retro_off("grp");
+    // The restart still meets the slots (a minute old): each bot that is
+    // on and has asks sends its own card, from its own token, to the
+    // owner's chat, holding its own size of asks; grp sends nothing.
     rig.restart();
-    wait_for("weekly retros sent", 20, || retro_sends(&rig) == 2);
+    wait_for("retros sent", 20, || retro_sends(&rig) == 2);
     let sent: Vec<_> = rig
         .stub
         .calls("sendMessage")
@@ -3360,17 +3417,102 @@ fn the_weekly_retro_goes_out_at_its_slot_once_and_only_with_asks() {
     let aux = of(AUX_TOKEN);
     assert!(
         aux.starts_with(
-            "Weekly retro, aux: last week's asks (1, 1 unrated)\n\n1. #2: ask aux\n   needs a call Ask: decide\n"
+            "Weekly retro, aux: last week's asks (2, 2 unrated)\n\n1. #3: ask aux again\n   needs a call Ask: decide\n"
         ),
         "{aux}"
     );
+    assert!(aux.contains("\n1 of 2 asks shown"), "{aux}");
+    assert!(sent.iter().all(|c| c.token != GRP_TOKEN));
     let retro = rig.messages().len() as i64;
     assert!(flags_of(&rig, retro)["retro"].is_object());
+    assert_eq!(flags_of(&rig, retro)["retro"]["every"], 7 * 86_400);
 
     // A card already sent since the slot: a restart sends no second one.
     rig.restart();
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(retro_sends(&rig), 2);
+}
+
+#[test]
+fn a_closed_retro_card_wakes_its_bot_once_and_an_open_one_at_the_next_slot() {
+    let mut rig = Rig::new();
+    for title in ["one", "two", "three"] {
+        rig.srv().ok(&[
+            "add",
+            "--project",
+            "p",
+            "--title",
+            title,
+            "--owner",
+            "bot:cos",
+        ]);
+    }
+    for i in 1..=3 {
+        escalate(&rig, &i.to_string());
+    }
+    // Dismiss with one rating: one wake, naming the card and the window.
+    rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
+    let first = rig.messages().len() as i64;
+    let tg = tg_id(&rig, first);
+    rig.stub.push(press(81, tg, "rate:t1.1:c"));
+    rig.stub.wait_confirmed(81);
+    assert!(rig.retro_wakes().is_empty(), "a single rating wakes nobody");
+    rig.stub.push(press(82, tg, "rd"));
+    rig.stub.wait_confirmed(82);
+    let wakes = rig.retro_wakes();
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    assert_eq!(wakes[0].0, format!("wake:retro-closed-{first}"));
+    assert!(
+        wakes[0].1.starts_with(&format!(
+            "Retro #{first} closed: 1 new rating. Read them: axe ask list --bot cos --since "
+        )) && wakes[0]
+            .1
+            .ends_with(" --json (final ratings). Propose rule changes to the owner as a card."),
+        "{wakes:?}"
+    );
+    // The bot sees it as a telegram wake.
+    let inbox = rig.srv().ok(&["bot", "inbox", "cos"]);
+    assert!(
+        inbox.contains("[wake by telegram ") && inbox.contains(&format!("Retro #{first} closed")),
+        "{inbox}"
+    );
+    // A second Dismiss and a restart add none.
+    rig.stub.push(press(83, tg, "rd"));
+    rig.stub.wait_confirmed(83);
+    rig.restart();
+    assert_eq!(rig.retro_wakes().len(), 1);
+
+    // A card left open with a rating, sent before the bot's slot: the wake
+    // comes at the slot, once.
+    rig.srv().ok(&["ask", "retro", "--bot", "cos"]);
+    let open = rig.messages().len() as i64;
+    let tg = tg_id(&rig, open);
+    rig.stub.push(press(84, tg, "rate:t2.1:n"));
+    rig.stub.wait_confirmed(84);
+    assert_eq!(rig.retro_wakes().len(), 1);
+    let two_days_ago = bot::ts(axe::remote::epoch() - 2 * 86_400);
+    rig.db()
+        .execute(
+            "UPDATE bot_messages SET at=?1 WHERE id=?2",
+            rusqlite::params![two_days_ago, open],
+        )
+        .unwrap();
+    rig.retro_due_now("cos", &[]);
+    wait_for("open retro wake", 20, || rig.retro_wakes().len() == 2);
+    let wakes = rig.retro_wakes();
+    assert_eq!(wakes[1].0, format!("wake:retro-closed-{open}"));
+    assert!(
+        wakes[1].1.starts_with(&format!(
+            "Retro #{open} left open at your next retro slot: 1 new rating."
+        )),
+        "{wakes:?}"
+    );
+    // Closing it later, or meeting the slot again, adds none.
+    rig.stub.push(press(85, tg, "rd"));
+    rig.stub.wait_confirmed(85);
+    rig.restart();
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(rig.retro_wakes().len(), 2);
 }
 
 fn post(rig: &Rig, path: &str, body: Value) -> Value {

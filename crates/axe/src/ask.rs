@@ -7,7 +7,9 @@
 //! - a **card**: a bot's own message sent with buttons (`flags.ask`, kept when
 //!   the card closes), id `m<message>`. A card for an escalated task
 //!   (`flags.task`) is that task's escalation, not a second ask, and the
-//!   weekly retro card (`flags.retro`) is not an ask.
+//!   retro card (`flags.retro`) is not an ask. Neither is a card its bot
+//!   settled without an owner press ([`settled`]: closed with a text edit
+//!   that starts `Decided:` or `Closed:`).
 //!
 //! A rating is `needed`, `could_decide` (the bot could have decided itself) or
 //! `should_not_exist`, with who rated and when. It is an event in the ask's
@@ -44,6 +46,7 @@ pub const REC_EVENT: &str = "ask_rec";
 /// The longest recommendation reason, in characters.
 pub const REC_WHY: usize = 120;
 const WEEK: i64 = 7 * 86_400;
+const DAY: i64 = 86_400;
 
 /// Ask categories, in display order: `(id, label)`. The ids are stable API
 /// values (`category`, `--kind`, `kinds` in stats); `other` is always last.
@@ -479,6 +482,24 @@ fn first_line(text: &str, html: bool) -> String {
         .to_string()
 }
 
+/// Whether a card was settled by its bot, not the owner: its buttons are
+/// gone, the owner never pressed one, and its text now starts `Decided:` or
+/// `Closed:` (`axe bot tg edit <id> --clear-buttons "Decided: X"`). Such a
+/// card is not an ask. A card the owner pressed stays one, and so does a
+/// card with live buttons whatever its text.
+fn settled(text: &str, flags: &Value) -> bool {
+    let live = flags["buttons"].as_array().is_some_and(|b| !b.is_empty());
+    if live || !flags["answered"].is_null() {
+        return false;
+    }
+    let first = first_line(text, flags["html"] == true);
+    ["decided:", "closed:"].iter().any(|p| {
+        first
+            .get(..p.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(p))
+    })
+}
+
 fn cards(conn: &Connection, project: Option<&str>, only: Option<i64>) -> Result<Vec<Ask>> {
     let ratings = card_ratings_of(conn, EVENT)?;
     let recs = card_ratings_of(conn, REC_EVENT)?;
@@ -494,6 +515,9 @@ fn cards(conn: &Connection, project: Option<&str>, only: Option<i64>) -> Result<
         let id: i64 = r.get(0)?;
         let text: String = r.get(1)?;
         let flags: Value = serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default();
+        if settled(&text, &flags) {
+            continue;
+        }
         let mut labels: Vec<String> = flags["buttons"]
             .as_array()
             .into_iter()
@@ -710,13 +734,18 @@ fn resolve(conn: &Connection, id: &str) -> Result<Target> {
             Target::Task(task, n)
         }
         AskId::Message(m) => {
-            let bot: i64 = conn
+            let (bot, text, flags): (i64, String, String) = conn
                 .query_row(
-                    &format!("SELECT m.bot_id FROM bot_messages m WHERE m.id=?1 AND {CARD_ASK}"),
+                    &format!(
+                        "SELECT m.bot_id, m.text, m.flags FROM bot_messages m WHERE m.id=?1 AND {CARD_ASK}"
+                    ),
                     [m],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .map_err(|_| anyhow::anyhow!("message {m} is not a card ask"))?;
+            if settled(&text, &serde_json::from_str(&flags).unwrap_or_default()) {
+                bail!("message {m} is not a card ask: its bot settled it without an owner press");
+            }
             Target::Message(m, bot)
         }
     })
@@ -971,24 +1000,26 @@ pub fn parse_weekly(s: &str) -> Result<i64> {
     Ok(d * 86_400 + h * 3600 + m * 60)
 }
 
-/// The latest weekly slot at or before `now` (`at` from [`parse_weekly`]).
-pub fn last_slot(now: i64, at: i64) -> i64 {
-    // 1970-01-01 was a Thursday, 3 days after a Monday.
-    let days = now.div_euclid(86_400);
-    let monday = (days - (days + 3).rem_euclid(7)) * 86_400;
-    let slot = monday + at;
-    if slot > now {
-        slot - WEEK
-    } else {
-        slot
-    }
+/// The latest slot at or before `now`: slots are `at` (from
+/// [`parse_weekly`]) after a Monday 00:00Z and repeat every `every` seconds,
+/// so with 7 days they fall on that weekday and time each week.
+pub fn last_slot(now: i64, at: i64, every: i64) -> i64 {
+    // 1970-01-05 was a Monday.
+    let anchor = 4 * DAY + at;
+    anchor + (now - anchor).div_euclid(every.max(1)) * every.max(1)
 }
 
-/// The slot a weekly retro is due for at `now`, if any: the latest slot,
-/// at most [`RETRO_CATCH_UP`] ago, with no retro card sent since it
-/// (`last_sent`) and not already tried (`tried`).
-pub fn retro_due(now: i64, at: i64, last_sent: Option<i64>, tried: Option<i64>) -> Option<i64> {
-    let slot = last_slot(now, at);
+/// The slot a retro is due for at `now`, if any: the latest slot
+/// ([`last_slot`]), at most [`RETRO_CATCH_UP`] ago, with no retro card sent
+/// since it (`last_sent`) and not already tried (`tried`).
+pub fn retro_due(
+    now: i64,
+    at: i64,
+    every: i64,
+    last_sent: Option<i64>,
+    tried: Option<i64>,
+) -> Option<i64> {
+    let slot = last_slot(now, at, every);
     (now - slot <= RETRO_CATCH_UP && last_sent.is_none_or(|t| t < slot) && tried != Some(slot))
         .then_some(slot)
 }
@@ -1005,6 +1036,171 @@ pub fn last_retro(conn: &Connection, bot: &str) -> Result<Option<i64>> {
         )
         .optional()?;
     Ok(at.as_deref().and_then(epoch_of))
+}
+
+/// A retro card as stored: its message id, when it went out (epoch), its
+/// items, and whether it was dismissed.
+pub type SentRetro = (i64, i64, Vec<RetroItem>, bool);
+
+/// The latest retro card bot `bot` sent before `before` (epoch).
+pub fn previous_retro(conn: &Connection, bot: &str, before: i64) -> Result<Option<SentRetro>> {
+    let row: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT m.id, m.at, m.flags FROM bot_messages m JOIN bots b ON b.id=m.bot_id
+             WHERE b.name=?1 AND m.direction='out' AND json_type(m.flags,'$.retro') IS NOT NULL
+               AND m.at < ?2
+             ORDER BY m.id DESC LIMIT 1",
+            params![bot, ts(before)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, at, flags)) = row else {
+        return Ok(None);
+    };
+    let flags: Value = serde_json::from_str(&flags).unwrap_or_default();
+    let items: Vec<RetroItem> =
+        serde_json::from_value(flags["retro"]["items"].clone()).unwrap_or_default();
+    Ok(Some((
+        id,
+        epoch_of(&at).unwrap_or(before),
+        items,
+        flags["dismissed"] == true,
+    )))
+}
+
+/// A bot's retro card settings (`bots.retro`; NULL is [`Default`]): whether
+/// it goes out, how often and from when, and how many asks it holds. It is
+/// the owner's attention budget for that bot, set with `axe bot edit
+/// --retro*`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RetroConfig {
+    /// Whether the card goes out.
+    pub on: bool,
+    /// The interval, in whole days (`7d`, 1d-28d). The card holds the asks
+    /// of the last interval.
+    pub every: String,
+    /// The first slot: a UTC weekday and time (`mon 01:00`); slots repeat
+    /// every `every` from it.
+    pub at: String,
+    /// The most asks on the card (1-1000).
+    pub size: u32,
+}
+
+impl Default for RetroConfig {
+    fn default() -> Self {
+        RetroConfig {
+            on: true,
+            every: "7d".into(),
+            at: "mon 01:00".into(),
+            size: RETRO_LIMIT as u32,
+        }
+    }
+}
+
+/// The shortest and longest retro interval, in days.
+pub const RETRO_DAYS: (i64, i64) = (1, 28);
+
+/// A retro interval (`7d`, or `2w`) as seconds: whole days, 1d-28d.
+pub fn parse_every(s: &str) -> Result<i64> {
+    let t = s.trim().to_lowercase();
+    let bad = || {
+        anyhow::anyhow!(
+            "retro interval {s:?}: expected whole days from {}d to {}d (e.g. 7d)",
+            RETRO_DAYS.0,
+            RETRO_DAYS.1
+        )
+    };
+    let (n, mult) = match t.char_indices().last() {
+        Some((i, 'd')) => (&t[..i], 1),
+        Some((i, 'w')) => (&t[..i], 7),
+        _ => return Err(bad()),
+    };
+    let days = n.parse::<i64>().map_err(|_| bad())? * mult;
+    if !(RETRO_DAYS.0..=RETRO_DAYS.1).contains(&days) {
+        return Err(bad());
+    }
+    Ok(days * DAY)
+}
+
+impl RetroConfig {
+    /// Checks every field and returns the canonical form (`every` in days,
+    /// `at` as `mon 01:00`).
+    pub fn normalized(&self) -> Result<RetroConfig> {
+        let every = parse_every(&self.every)?;
+        let at = parse_weekly(&self.at)?;
+        if !(1..=RETRO_ITEMS as u32).contains(&self.size) {
+            bail!("retro size {}: expected 1 to {RETRO_ITEMS} asks", self.size);
+        }
+        Ok(RetroConfig {
+            on: self.on,
+            every: format!("{}d", every / DAY),
+            at: format!(
+                "{} {:02}:{:02}",
+                DAYS[(at / DAY) as usize],
+                at % DAY / 3600,
+                at % 3600 / 60
+            ),
+            size: self.size,
+        })
+    }
+
+    /// The interval in seconds; a bad stored value is the default 7 days.
+    pub fn period(&self) -> i64 {
+        parse_every(&self.every).unwrap_or(WEEK)
+    }
+
+    /// The start time ([`parse_weekly`]); a bad stored value is `mon 01:00`.
+    pub fn offset(&self) -> i64 {
+        parse_weekly(&self.at).unwrap_or(3600)
+    }
+
+    /// The next slot after `now`.
+    pub fn next_slot(&self, now: i64) -> i64 {
+        last_slot(now, self.offset(), self.period()) + self.period()
+    }
+
+    /// One line for `axe bot show`: `on, every 7d from mon 01:00Z, 10 asks,
+    /// next 2026-11-30T01:00Z`.
+    pub fn line(&self, now: i64) -> String {
+        if !self.on {
+            return format!(
+                "off (every {} from {}Z, {} asks)",
+                self.every, self.at, self.size
+            );
+        }
+        let next = ts(self.next_slot(now));
+        format!(
+            "on, every {} from {}Z, {} asks, next {}Z",
+            self.every,
+            self.at,
+            self.size,
+            next.get(..16).unwrap_or(&next)
+        )
+    }
+}
+
+/// The wake a bot gets once per retro card with new ratings: when the card
+/// closes (Dismiss, or its last item rated), or at the bot's next retro slot
+/// if the card was left open. Its key, so one card never wakes twice.
+pub fn retro_wake_key(msg: i64) -> String {
+    format!("retro-closed-{msg}")
+}
+
+/// The text of a retro wake ([`retro_wake_key`]) for card `msg` of bot
+/// `bot`, sent at `sent` (epoch) with interval `every`: `rated` of its
+/// items have a rating; `open` when the card was never closed.
+pub fn retro_wake(msg: i64, bot: &str, sent: i64, every: i64, rated: usize, open: bool) -> String {
+    let what = if open {
+        "left open at your next retro slot"
+    } else {
+        "closed"
+    };
+    let n = if rated == 1 { "rating" } else { "ratings" };
+    format!(
+        "Retro #{msg} {what}: {rated} new {n}. Read them: axe ask list --bot {bot} --since {} --json (final ratings). Propose rule changes to the owner as a card.",
+        ts(sent - every)
+    )
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -1086,41 +1282,55 @@ pub const DISMISS: &str = "rd";
 /// Whose asks a retro card holds.
 #[derive(Debug, Default, Clone)]
 pub struct RetroScope<'a> {
-    /// The bot whose retro it is; `None` holds every ask.
+    /// The bot whose retro it is: the card holds only the asks it raised.
+    /// `None` holds every ask.
     pub bot: Option<&'a str>,
-    /// Whether this bot's retro also holds the asks no sending bot raised:
-    /// those with no bot, or whose bot is not in `senders`. The owner's
-    /// default bot (`telegram.retro.bot`, else the ops bot) has them.
-    pub home: bool,
-    /// The bots that send retros.
-    pub senders: &'a [String],
     /// How many asks the card holds; `None` is [`RETRO_LIMIT`]. Capped to
     /// [`RETRO_ITEMS`].
     pub limit: Option<usize>,
+    /// The interval in seconds: the card holds the asks of the last one.
+    /// `None` is 7 days.
+    pub every: Option<i64>,
 }
 
 impl RetroScope<'_> {
     fn holds(&self, ask: Option<&str>) -> bool {
-        let Some(bot) = self.bot else {
-            return true;
-        };
-        match ask {
-            Some(a) if a == bot => true,
-            Some(a) => self.home && !self.senders.iter().any(|s| s == a),
-            None => self.home,
+        match self.bot {
+            None => true,
+            Some(bot) => ask == Some(bot),
         }
     }
 }
 
-/// The weekly retro card of one bot: of the asks of the 7 days before `now`
-/// it raised that nobody rated yet, the most useful few ([`select`]), two
-/// lines each. An ask not shown, or shown and left alone, stays unrated; it
-/// is never taken as `needed`.
+/// The retro card of bot `bot` now, with its own settings (`bots.retro`):
+/// its interval and, unless `limit` is given, its size. A bot not in the
+/// store gets the defaults.
+pub fn bot_retro(conn: &Connection, now: i64, bot: &str, limit: Option<usize>) -> Result<Retro> {
+    let cfg = crate::bot::get(conn, bot)
+        .ok()
+        .and_then(|b| b.retro)
+        .unwrap_or_default();
+    retro(
+        conn,
+        now,
+        &RetroScope {
+            bot: Some(bot),
+            limit: Some(limit.unwrap_or(cfg.size as usize)),
+            every: Some(cfg.period()),
+        },
+    )
+}
+
+/// The retro card of one bot: of the asks of the interval before `now`
+/// (7 days by default) it raised that nobody rated yet, the most useful few
+/// ([`select`]), two lines each. An ask not shown, or shown and left alone,
+/// stays unrated; it is never taken as `needed`.
 pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
+    let every = scope.every.unwrap_or(WEEK);
     let mut asks = list(
         conn,
         &Filter {
-            since: now - WEEK,
+            since: now - every,
             // Through the current second.
             until: now + 1,
             unrated: true,
@@ -1156,7 +1366,14 @@ pub fn retro(conn: &Connection, now: i64, scope: &RetroScope) -> Result<Retro> {
         });
     }
     let more = total - items.len();
-    Ok(render_retro(&items, more, &HashMap::new(), 0, scope.bot))
+    Ok(render_retro(
+        &items,
+        more,
+        &HashMap::new(),
+        0,
+        scope.bot,
+        every,
+    ))
 }
 
 /// What one retro item stands for, so repeats show once: an escalation's
@@ -1600,12 +1817,33 @@ pub fn page_items(items: &[RetroItem], page: usize) -> &[RetroItem] {
     &items[start.min(items.len())..(start + RETRO_PAGE).min(items.len())]
 }
 
-/// A retro card's title: whose retro it is.
-fn retro_title(bot: Option<&str>) -> String {
+/// A retro card's title: whose retro it is, "Weekly" when its interval
+/// (`every`, seconds) is 7 days.
+fn retro_title(bot: Option<&str>, every: i64) -> String {
+    let kind = if every == WEEK {
+        "Weekly retro"
+    } else {
+        "Retro"
+    };
     match bot {
-        Some(b) => format!("Weekly retro, {}", crate::board::cap(b, 32)),
-        None => "Weekly retro".to_string(),
+        Some(b) => format!("{kind}, {}", crate::board::cap(b, 32)),
+        None => kind.to_string(),
     }
+}
+
+/// The span a retro card covers, in words: `last week` or `the last 14 days`.
+fn retro_span(every: i64) -> String {
+    match every {
+        WEEK => "last week".into(),
+        DAY => "the last day".into(),
+        e => format!("the last {} days", e / DAY),
+    }
+}
+
+/// The interval stored on a retro card (`flags.retro.every`); cards sent
+/// before it existed are weekly.
+pub fn card_every(retro: &Value) -> i64 {
+    retro["every"].as_i64().filter(|e| *e > 0).unwrap_or(WEEK)
 }
 
 /// The text a dismissed retro card is edited to: it has no buttons, and its
@@ -1614,11 +1852,12 @@ pub fn dismissed_retro(
     items: &[RetroItem],
     rated: &HashMap<String, String>,
     bot: Option<&str>,
+    every: i64,
 ) -> String {
     let left = items.iter().filter(|i| !rated.contains_key(&i.ask)).count();
     format!(
         "{}: dismissed. {left} of {} asks left unrated.",
-        retro_title(bot),
+        retro_title(bot, every),
         items.len()
     )
 }
@@ -1628,8 +1867,8 @@ pub fn dismissed_retro(
 /// rated ask can be re-rated), a recommended rating marked `(rec)` on its
 /// button and shown as a third line with its reason, an accept button while
 /// an unrated ask on the page has a recommendation, prev / next, a Dismiss
-/// row, and the kind totals as a footer. `bot` names whose retro it is.
-/// Pure, so presses re-render the
+/// row, and the kind totals as a footer. `bot` names whose retro it is and
+/// `every` (seconds) the span it covers. Pure, so presses re-render the
 /// stored items.
 pub fn render_retro(
     items: &[RetroItem],
@@ -1637,20 +1876,27 @@ pub fn render_retro(
     rated: &HashMap<String, String>,
     page: usize,
     bot: Option<&str>,
+    every: i64,
 ) -> Retro {
-    let title = retro_title(bot);
+    let title = retro_title(bot, every);
+    let span = retro_span(every);
     if items.is_empty() {
         return Retro {
-            text: format!("{title}: no unrated asks last week."),
+            text: format!("{title}: no unrated asks {span}."),
             ..Default::default()
         };
     }
+    let asks = if every == WEEK {
+        "last week's asks".to_string()
+    } else {
+        format!("asks of {span}")
+    };
     let pages = items.len().div_ceil(RETRO_PAGE);
     let page = page.min(pages - 1);
     let left = items.iter().filter(|i| !rated.contains_key(&i.ask)).count();
     // Asks not on the card stay unrated.
     let mut text = format!(
-        "{title}: last week's asks ({}, {} unrated)",
+        "{title}: {asks} ({}, {} unrated)",
         items.len() + more,
         left + more
     );
@@ -1788,7 +2034,7 @@ mod tests {
             kitem(2, "decision", "a"),
             rec(3, "needed", ""),
         ];
-        let r = render_retro(&items, 0, &HashMap::new(), 0, Some("a"));
+        let r = render_retro(&items, 0, &HashMap::new(), 0, Some("a"), WEEK);
         assert!(
             r.text.contains(
                 "\n1. #1: thing 1\n   rec: decide (reversible, in scope)\n2. #2: thing 2\n3. #3: thing 3\n   rec: needed\n"
@@ -1821,7 +2067,7 @@ mod tests {
             ("t1.1".to_string(), "needed".to_string()),
             ("t3.1".to_string(), "needed".to_string()),
         ]);
-        let r = render_retro(&items, 0, &rated, 0, Some("a"));
+        let r = render_retro(&items, 0, &rated, 0, Some("a"), WEEK);
         assert!(r.buttons.iter().any(|b| b.0 == "1 needed ✓"));
         assert!(r.buttons.iter().any(|b| b.0 == "1 decide (rec)"));
         assert!(r.buttons.iter().any(|b| b.0 == "3 needed ✓"));
@@ -1830,13 +2076,20 @@ mod tests {
         assert_eq!(r.rows, [3, 3, 3, 1]);
 
         // No recs: as before, no accept button.
-        let plain = render_retro(&[kitem(2, "decision", "a")], 0, &HashMap::new(), 0, None);
+        let plain = render_retro(
+            &[kitem(2, "decision", "a")],
+            0,
+            &HashMap::new(),
+            0,
+            None,
+            WEEK,
+        );
         assert!(plain.buttons.iter().all(|b| !b.1.starts_with("ra:")));
         assert!(!plain.text.contains("rec"), "{}", plain.text);
 
         // The accept button covers only its page.
         let many: Vec<_> = (0..15).map(|i| rec(i, "needed", "")).collect();
-        let p2 = render_retro(&many, 0, &HashMap::new(), 1, None);
+        let p2 = render_retro(&many, 0, &HashMap::new(), 1, None, WEEK);
         assert!(p2.buttons.contains(&(ACCEPT_LABEL.into(), "ra:1".into())));
         assert_eq!(page_items(&many, 1).len(), 5);
         assert_eq!(page_items(&many, 1)[0].ask, "t10.1");
@@ -1866,7 +2119,7 @@ mod tests {
 
     #[test]
     fn retro_renders_zero_one_and_marks_ratings() {
-        let r = render_retro(&[], 0, &HashMap::new(), 0, Some("a"));
+        let r = render_retro(&[], 0, &HashMap::new(), 0, Some("a"), WEEK);
         assert!(r.buttons.is_empty() && r.items.is_empty());
         assert_eq!(r.text, "Weekly retro, a: no unrated asks last week.");
 
@@ -1876,6 +2129,7 @@ mod tests {
             &HashMap::new(),
             0,
             Some("a"),
+            WEEK,
         );
         assert_eq!(
             r.buttons,
@@ -1899,7 +2153,7 @@ mod tests {
 
         // A rated ask shows its rating and can be re-rated.
         let rated = HashMap::from([("t7.1".to_string(), "could_decide".to_string())]);
-        let r = render_retro(&[kitem(7, "decision", "a")], 0, &rated, 0, Some("a"));
+        let r = render_retro(&[kitem(7, "decision", "a")], 0, &rated, 0, Some("a"), WEEK);
         assert!(r.text.contains("1. #7: thing 7 = decide"), "{}", r.text);
         assert!(r
             .buttons
@@ -1910,7 +2164,7 @@ mod tests {
         // Dismissed: no buttons, the unrated asks counted as left unrated.
         let two = [kitem(7, "decision", "a"), kitem(8, "confirm", "a")];
         assert_eq!(
-            dismissed_retro(&two, &rated, Some("a")),
+            dismissed_retro(&two, &rated, Some("a"), WEEK),
             "Weekly retro, a: dismissed. 1 of 2 asks left unrated."
         );
     }
@@ -2127,7 +2381,7 @@ mod tests {
         let bot = "b".repeat(64);
         let mut seen = 0;
         for page in 0..pages {
-            let r = render_retro(&items, 40, &rated, page, Some(&bot));
+            let r = render_retro(&items, 40, &rated, page, Some(&bot), WEEK);
             assert!(
                 crate::board::utf16(&r.text) < 4096,
                 "page {page}: {}",
@@ -2182,8 +2436,8 @@ mod tests {
         assert_eq!(seen, total);
         // A page past the end shows the last one.
         assert_eq!(
-            render_retro(&items, 0, &rated, 99, None).text,
-            render_retro(&items, 0, &rated, pages - 1, None).text
+            render_retro(&items, 0, &rated, 99, None, WEEK).text,
+            render_retro(&items, 0, &rated, pages - 1, None, WEEK).text
         );
         assert_eq!(page_of(&items, &items[RETRO_PAGE].ask), 1);
         assert_eq!(page_of(&items, "t0.1"), 0);
@@ -2198,26 +2452,144 @@ mod tests {
     }
 
     #[test]
-    fn retro_scope_holds_own_asks_and_home_holds_the_rest() {
-        let senders = s(&["a", "b"]);
+    fn retro_scope_holds_only_its_bots_asks() {
         let a = RetroScope {
             bot: Some("a"),
-            home: false,
-            senders: &senders,
-            limit: None,
+            ..Default::default()
         };
         assert!(a.holds(Some("a")));
+        // Asks no bot raised are on no bot's card.
         assert!(!a.holds(Some("b")) && !a.holds(None) && !a.holds(Some("gone")));
-        let home = RetroScope {
-            bot: Some("b"),
-            home: true,
-            senders: &senders,
-            limit: None,
-        };
-        assert!(home.holds(Some("b")) && home.holds(None) && home.holds(Some("gone")));
-        assert!(!home.holds(Some("a")));
         let all = RetroScope::default();
         assert!(all.holds(Some("a")) && all.holds(None));
+    }
+
+    #[test]
+    fn settled_cards_are_the_ones_a_bot_closed_without_a_press() {
+        let closed = json!({"ask": true});
+        assert!(settled("Decided: ship it", &closed));
+        assert!(settled("  closed: superseded by #12", &closed));
+        assert!(settled(
+            "<b>Decided:</b> later",
+            &json!({"ask": true, "html": true})
+        ));
+        // Live buttons: still open, whatever the text says.
+        assert!(!settled(
+            "Decided: X",
+            &json!({"ask": true, "buttons": [["Ok", "ok"]]})
+        ));
+        // The owner pressed it: an ask.
+        assert!(!settled(
+            "Decided: X",
+            &json!({"ask": true, "answered": {"label": "Ok"}})
+        ));
+        assert!(!settled("Merge #12?", &closed));
+        assert!(!settled("Undecided: X", &closed));
+    }
+
+    #[test]
+    fn retro_config_validates_and_normalizes() {
+        let d = RetroConfig::default();
+        assert_eq!(d.normalized().unwrap(), d);
+        assert_eq!(d.period(), WEEK);
+        let c = RetroConfig {
+            on: false,
+            every: "2w".into(),
+            at: "Wednesday 9:05".into(),
+            size: 25,
+        };
+        let n = c.normalized().unwrap();
+        assert_eq!((n.every.as_str(), n.at.as_str()), ("14d", "wed 09:05"));
+        for every in ["0d", "29d", "5w", "7", "7h", "xd", ""] {
+            let c = RetroConfig {
+                every: every.into(),
+                ..d.clone()
+            };
+            assert!(c.normalized().is_err(), "{every}");
+        }
+        for size in [0, RETRO_ITEMS as u32 + 1] {
+            let c = RetroConfig { size, ..d.clone() };
+            assert!(c.normalized().is_err(), "{size}");
+        }
+        let c = RetroConfig {
+            at: "mon 25:00".into(),
+            ..d.clone()
+        };
+        assert!(c.normalized().is_err());
+        // 2026-11-23 is a Monday.
+        let now = epoch_of("2026-11-23T12:00:00Z").unwrap();
+        assert_eq!(
+            d.line(now),
+            "on, every 7d from mon 01:00Z, 10 asks, next 2026-11-30T01:00Z"
+        );
+        assert!(RetroConfig { on: false, ..d }.line(now).starts_with("off"));
+    }
+
+    #[test]
+    fn slots_follow_the_interval() {
+        let mon_1am = parse_weekly("mon 01:00").unwrap();
+        // 2026-11-16 is a Monday.
+        let slot = epoch_of("2026-11-16T01:00:00Z").unwrap();
+        // 7 days: the old weekly slot, for every start time and moment.
+        for at in [0, mon_1am, parse_weekly("sun 23:59").unwrap()] {
+            for now in (slot - 2 * WEEK..slot + 2 * WEEK).step_by(3 * 3600 + 7) {
+                let days = now.div_euclid(DAY);
+                let monday = (days - (days + 3).rem_euclid(7)) * DAY;
+                let old = if monday + at > now {
+                    monday + at - WEEK
+                } else {
+                    monday + at
+                };
+                assert_eq!(last_slot(now, at, WEEK), old, "{now} {at}");
+            }
+        }
+        // 1 day: every day at the start time.
+        assert_eq!(
+            ts(last_slot(slot + 3 * DAY + 3600, mon_1am, DAY)),
+            "2026-11-19T01:00:00Z"
+        );
+        assert_eq!(
+            ts(last_slot(slot + 3 * DAY - 1, mon_1am, DAY)),
+            "2026-11-18T01:00:00Z"
+        );
+        // 14 days: every other Monday, so a week after a slot is not one.
+        let two = 2 * WEEK;
+        let s = last_slot(slot, mon_1am, two);
+        assert!(s == slot || s == slot - WEEK, "{}", ts(s));
+        assert_eq!(last_slot(s + WEEK, mon_1am, two), s);
+        assert_eq!(last_slot(s + two, mon_1am, two), s + two);
+        assert_eq!(retro_due(s + WEEK, mon_1am, two, None, None), None);
+        assert_eq!(retro_due(s + two, mon_1am, two, None, None), Some(s + two));
+        // A 14-day card holds the asks of 14 days.
+        assert_eq!(retro_span(two), "the last 14 days");
+        assert_eq!(retro_title(Some("a"), two), "Retro, a");
+        assert_eq!(retro_title(Some("a"), WEEK), "Weekly retro, a");
+        let r = render_retro(
+            &[kitem(1, "decision", "a")],
+            0,
+            &HashMap::new(),
+            0,
+            Some("a"),
+            two,
+        );
+        assert!(
+            r.text
+                .starts_with("Retro, a: asks of the last 14 days (1, 1 unrated)"),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn retro_wake_text_names_the_card_and_its_window() {
+        let sent = epoch_of("2026-11-23T01:00:00Z").unwrap();
+        assert_eq!(
+            retro_wake(42, "a", sent, WEEK, 3, false),
+            "Retro #42 closed: 3 new ratings. Read them: axe ask list --bot a --since 2026-11-16T01:00:00Z --json (final ratings). Propose rule changes to the owner as a card."
+        );
+        assert!(retro_wake(42, "a", sent, WEEK, 1, true)
+            .starts_with("Retro #42 left open at your next retro slot: 1 new rating."));
+        assert_eq!(retro_wake_key(42), "retro-closed-42");
     }
 
     #[test]
@@ -2349,29 +2721,32 @@ mod tests {
         }
         // 2026-11-16 is a Monday.
         let slot = epoch_of("2026-11-16T01:00:00Z").unwrap();
-        assert_eq!(last_slot(slot, mon_1am), slot);
-        assert_eq!(last_slot(slot - 1, mon_1am), slot - WEEK);
-        assert_eq!(last_slot(slot + 3 * 86_400, mon_1am), slot);
+        assert_eq!(last_slot(slot, mon_1am, WEEK), slot);
+        assert_eq!(last_slot(slot - 1, mon_1am, WEEK), slot - WEEK);
+        assert_eq!(last_slot(slot + 3 * 86_400, mon_1am, WEEK), slot);
         let wed = parse_weekly("wed 09:30").unwrap();
-        assert_eq!(ts(last_slot(slot, wed)), "2026-11-11T09:30:00Z");
+        assert_eq!(ts(last_slot(slot, wed, WEEK)), "2026-11-11T09:30:00Z");
 
         // Due at the slot and up to a day late, once.
-        assert_eq!(retro_due(slot, mon_1am, None, None), Some(slot));
+        assert_eq!(retro_due(slot, mon_1am, WEEK, None, None), Some(slot));
         assert_eq!(
-            retro_due(slot + RETRO_CATCH_UP, mon_1am, None, None),
+            retro_due(slot + RETRO_CATCH_UP, mon_1am, WEEK, None, None),
             Some(slot)
         );
         assert_eq!(
-            retro_due(slot + RETRO_CATCH_UP + 1, mon_1am, None, None),
+            retro_due(slot + RETRO_CATCH_UP + 1, mon_1am, WEEK, None, None),
             None
         );
-        assert_eq!(retro_due(slot - 60, mon_1am, None, None), None);
-        assert_eq!(retro_due(slot + 60, mon_1am, None, Some(slot)), None);
+        assert_eq!(retro_due(slot - 60, mon_1am, WEEK, None, None), None);
+        assert_eq!(retro_due(slot + 60, mon_1am, WEEK, None, Some(slot)), None);
         // A card sent since the slot (by hand or before a restart) counts;
         // last week's does not.
-        assert_eq!(retro_due(slot + 60, mon_1am, Some(slot + 10), None), None);
         assert_eq!(
-            retro_due(slot + 60, mon_1am, Some(slot - WEEK), None),
+            retro_due(slot + 60, mon_1am, WEEK, Some(slot + 10), None),
+            None
+        );
+        assert_eq!(
+            retro_due(slot + 60, mon_1am, WEEK, Some(slot - WEEK), None),
             Some(slot)
         );
     }

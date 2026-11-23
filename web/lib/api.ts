@@ -64,6 +64,11 @@ heartbeat_seconds: number, nudge_after_seconds: number, state: string, session_a
  */
 repos: Array<string> | null, 
 /**
+ * The bot's retro card settings (`bots.retro`): the stored ones, else
+ * the defaults. `None` from servers that predate per-bot retros.
+ */
+retro?: RetroConfig, 
+/**
  * Derived: the live run, if any.
  */
 live_run: number | null, 
@@ -90,6 +95,26 @@ attention: boolean,
  * `None` from servers that predate renames: the name.
  */
 home: string | null, };
+
+export type RetroConfig = { 
+/**
+ * Whether the card goes out.
+ */
+on: boolean, 
+/**
+ * The interval, in whole days (`7d`, 1d-28d). The card holds the asks
+ * of the last interval.
+ */
+every: string, 
+/**
+ * The first slot: a UTC weekday and time (`mon 01:00`); slots repeat
+ * every `every` from it.
+ */
+at: string, 
+/**
+ * The most asks on the card (1-1000).
+ */
+size: number, };
 
 export type Message = { id: number, kind: string, text: string, reply_to: number | null, edit_of: number | null, attachments: JsonValue, flags: JsonValue, at: string, };
 

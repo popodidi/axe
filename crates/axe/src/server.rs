@@ -2909,17 +2909,14 @@ fn retro_limit(s: Option<&str>) -> Result<Option<usize>> {
 }
 
 /// `GET /api/asks/retro[?bot=&limit=]`: the retro card bot `bot` would send
-/// now (through the gateway, which knows the home bot), or every unrated ask.
+/// now (its own asks of its interval, its size unless `limit`), or every
+/// unrated ask of the last 7 days.
 fn retro_preview(st: &State, bot: Option<&str>, limit: Option<usize>) -> Result<crate::ask::Retro> {
     let now = crate::routine::now();
-    #[cfg(feature = "telegram")]
-    if let (Some(b), Some(gw)) = (bot, &st.telegram) {
-        if gw.bot(b).is_ok() {
-            return gw.retro_of(&st.conn(), b, limit);
-        }
+    if let Some(b) = bot {
+        return crate::ask::bot_retro(&st.conn(), now, b, limit);
     }
     let scope = crate::ask::RetroScope {
-        bot,
         limit,
         ..Default::default()
     };

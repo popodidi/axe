@@ -67,8 +67,8 @@ A rename is refused while the bot has a live run (its `AXE_BOT` would be
 stale): stop it or let the run end first. A name in use is refused, and so is
 a former name of another bot: an old name stays reserved and resolves to the
 renamed bot in two places only. `axe bot show OLD` fails with "renamed to
-NEW". The server config's names (`[[telegram.bot]] name`, `ops_bot`,
-`retro.bot`) still bind to the renamed bot, on the live gateway at once and
+NEW". The server config's names (`[[telegram.bot]] name`, `ops_bot`)
+still bind to the renamed bot, on the live gateway at once and
 after a restart, so a rename needs no config, Secret or schema change; the
 config may be updated to NEW at leisure. `[housekeeping.alert] bot` in the
 dispatcher config is not resolved and must be edited by hand.

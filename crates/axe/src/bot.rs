@@ -172,6 +172,11 @@ pub struct Bot {
     /// project worktree.
     #[serde(default)]
     pub repos: Option<Vec<String>>,
+    /// The bot's retro card settings (`bots.retro`): the stored ones, else
+    /// the defaults. `None` from servers that predate per-bot retros.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub retro: Option<crate::ask::RetroConfig>,
     /// Derived: the live run, if any.
     #[serde(default)]
     pub live_run: Option<i64>,
@@ -228,6 +233,11 @@ impl Bot {
             repos: r
                 .get::<_, Option<String>>("repos")?
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            retro: Some(
+                r.get::<_, Option<String>>("retro")?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+            ),
             live_run: r.get("live_run")?,
             next_wake: r.get("next_wake")?,
             queued: r.get("queued")?,
@@ -573,6 +583,29 @@ pub struct Edit {
     /// project they name.
     #[serde(default)]
     pub project: Option<String>,
+    /// Changes the retro card settings; unset fields keep their value. The
+    /// retro is the owner's attention budget: an actor other than `human`
+    /// needs `owner_ref`.
+    #[serde(default)]
+    pub retro: Option<RetroEdit>,
+    /// The owner decision a retro change rests on (`msg #N`); recorded on its
+    /// event.
+    #[serde(default)]
+    pub owner_ref: Option<String>,
+}
+
+/// A change to a bot's retro settings (`ask::RetroConfig`); `None` keeps
+/// the field.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RetroEdit {
+    #[serde(default)]
+    pub on: Option<bool>,
+    #[serde(default)]
+    pub every: Option<String>,
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub size: Option<u32>,
 }
 
 /// Applies an edit and records each change as a diff event with the reason.
@@ -581,9 +614,48 @@ pub fn edit(conn: &mut Connection, actor: &Actor, name: &str, e: &Edit, why: &st
         bail!("--why must not be empty");
     }
     refuse_heartbeat(e.heartbeat.as_ref())?;
+    let owner_ref = e
+        .owner_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    let retro_edit = e.retro.as_ref().filter(|r| **r != RetroEdit::default());
+    if retro_edit.is_some() && owner_ref.is_none() && actor.name != "human" {
+        return Err(crate::db::Forbidden(format!(
+            "a bot's retro is the owner's attention budget: actor {} needs --owner-ref citing the owner's message (e.g. \"msg #873\")",
+            actor.name
+        ))
+        .into());
+    }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = get(&tx, name)?;
     let mut changed = false;
+    if let Some(r) = retro_edit {
+        let old = b.retro.clone().unwrap_or_default();
+        let new = crate::ask::RetroConfig {
+            on: r.on.unwrap_or(old.on),
+            every: r.every.clone().unwrap_or_else(|| old.every.clone()),
+            at: r.at.clone().unwrap_or_else(|| old.at.clone()),
+            size: r.size.unwrap_or(old.size),
+        }
+        .normalized()?;
+        if new != old {
+            tx.execute(
+                "UPDATE bots SET retro=?1 WHERE id=?2",
+                params![serde_json::to_string(&new)?, b.id],
+            )?;
+            let now = crate::remote::epoch();
+            let owner = owner_ref.map_or(String::new(), |o| format!("owner_ref: {o}\n"));
+            event(
+                &tx,
+                b.id,
+                actor,
+                "retro",
+                &format!("why: {why}\n{owner}{} -> {}", old.line(now), new.line(now)),
+            )?;
+            changed = true;
+        }
+    }
     for (field, new, old, cap) in [
         ("identity", &e.identity, &b.identity, IDENTITY_CAP),
         ("conduct", &e.conduct, &b.conduct, CONDUCT_CAP),

@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -115,6 +115,21 @@ fn migrate_bot_repos(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// v20: a bot's retro card settings, `bots.retro` (a JSON object; NULL means
+/// the defaults, `ask::RetroConfig::default`). Additive and idempotent like
+/// [`migrate_bot_repos`].
+fn migrate_bot_retro(tx: &Transaction) -> Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='retro')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        tx.execute_batch("ALTER TABLE bots ADD COLUMN retro TEXT")?;
+    }
+    Ok(())
+}
+
 /// v17: the task fields `owner` (who follows the task up; its creator stays the
 /// first event), `repos` (a JSON array of repo names; NULL means the project's
 /// own checkout, as before v17) and `labels` (a JSON array). Additive and
@@ -157,14 +172,15 @@ pub fn default_path() -> Result<PathBuf> {
         .context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v19 schema, or migrates v8-v18 to v19. Older
+/// Opens the database: creates a fresh v20 schema, or migrates v8-v19 to v20. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
 /// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
 /// tables (`usage::SCHEMA`), v16 only adds goal tables and a nullable column
 /// (`goal::migrate`), v17 only adds the task field columns
 /// ([`migrate_task_fields`]), v18 only adds `bots.repos`
-/// ([`migrate_bot_repos`]) and v19 only adds the rule tables (`rule::SCHEMA`),
-/// so a database lowered to `user_version` 18, 17, 16, 15, 14, 13, 12 or 11
+/// ([`migrate_bot_repos`]), v19 only adds the rule tables (`rule::SCHEMA`) and
+/// v20 only adds `bots.retro` ([`migrate_bot_retro`]), so a database lowered to
+/// `user_version` 19, 18, 17, 16, 15, 14, 13, 12 or 11
 /// still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -196,11 +212,12 @@ pub fn open(path: &Path) -> Result<Connection> {
         crate::goal::migrate(&tx)?;
         migrate_task_fields(&tx)?;
         migrate_bot_repos(&tx)?;
+        migrate_bot_retro(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=18).contains(&version) {
+    if (11..=19).contains(&version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(crate::rule::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
@@ -208,6 +225,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         crate::goal::migrate(&tx)?;
         migrate_task_fields(&tx)?;
         migrate_bot_repos(&tx)?;
+        migrate_bot_retro(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -230,6 +248,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         crate::goal::migrate(&tx)?;
         migrate_task_fields(&tx)?;
         migrate_bot_repos(&tx)?;
+        migrate_bot_retro(&tx)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -255,6 +274,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     crate::goal::migrate(&tx)?;
     migrate_task_fields(&tx)?;
     migrate_bot_repos(&tx)?;
+    migrate_bot_retro(&tx)?;
     let violations: i64 =
         tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
