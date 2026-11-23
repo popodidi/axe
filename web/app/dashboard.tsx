@@ -31,7 +31,12 @@ import {
   cx,
 } from "../components/ui";
 import { ArtifactTable } from "../components/dashboard/artifact-table";
-import { Store } from "../components/dashboard/store";
+import {
+  Store,
+  StoreItem,
+  storeItemKey,
+  useStoreData,
+} from "../components/dashboard/store";
 import { RunList } from "../components/dashboard/run-card";
 import { RunLog } from "../components/dashboard/run-log";
 import {
@@ -140,7 +145,8 @@ export default function Dashboard() {
       const u = new URL(location.href);
       snapshotPaneScroll(u);
       if (u.href !== location.href) history.replaceState(history.state, "", u);
-      if ("task" in patch || "tab" in patch) u.searchParams.delete("detailY");
+      if (["task", "tab", "blob", "doc"].some((k) => k in patch))
+        u.searchParams.delete("detailY");
       if (
         ["view", "project", "state", "status", "q", "sort", "page", "bot", "goal"].some(
           (k) => k in patch,
@@ -253,17 +259,21 @@ export default function Dashboard() {
   const pages = Math.max(1, Math.ceil(filtered.length / 25));
   const rows = filtered.slice((page - 1) * 25, page * 25);
   const focus = Number(p.get("focus"));
-  // The newest open/close/reselect wins; a closing pane keeps the last task
+  // The detail pane shows a task (`task:<id>`) or, on the Store view, a store
+  // item (`blob:<sha256>`, `doc:<path>`); a task opened over an item wins.
+  const storeItem = view === "store" ? storeItemKey(p) : null;
+  const paneItem = selected ? `task:${selected}` : storeItem;
+  // The newest open/close/reselect wins; a closing pane keeps the last item
   // mounted (inert) until its transition ends, then unmounts.
-  const [last, setLast] = useState(selected);
+  const [last, setLast] = useState(paneItem);
   const [exiting, setExiting] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>(null);
-  if (selected !== last) {
-    setLast(selected);
+  if (paneItem !== last) {
+    setLast(paneItem);
     if (!userNavigation) {
       setExiting(null);
       setPhase(null);
-    } else if (selected) {
+    } else if (paneItem) {
       setExiting(null);
       setPhase(!last && !exiting ? "enter" : exiting ? "opening" : phase);
     } else if (last) {
@@ -271,7 +281,10 @@ export default function Dashboard() {
       setPhase("closing");
     }
   }
-  const shown = selected || exiting;
+  const shownItem = paneItem || exiting;
+  const shown = shownItem?.startsWith("task:") ? shownItem.slice(5) : null;
+  const shownStore = shownItem && !shown ? shownItem : null;
+  const store = useStoreData(base, view === "store");
   useEffect(() => {
     if (phase !== "enter") return;
     // Paint the zero width once, then let the boundary transition run.
@@ -303,7 +316,7 @@ export default function Dashboard() {
   const detailScroll = usePaneScroll(
     query,
     "detailY",
-    !!selected && detail?.task.id === Number(selected),
+    selected ? detail?.task.id === Number(selected) : !!storeItem,
   );
   // Focus returns to the invoking row before the pane becomes inert; when the
   // row is hidden (phone) or gone, it moves after the list reappears.
@@ -338,6 +351,16 @@ export default function Dashboard() {
     focusReturnTarget(returnFocus.current);
     returnFocus.current = null;
   }, [selected]);
+  // Closing a store item returns focus to its row.
+  const closeStoreItem = useCallback(() => {
+    const item = storeItemKey(new URLSearchParams(location.search));
+    if (!item) return;
+    if (document.getElementById("store-detail")?.contains(document.activeElement))
+      document
+        .querySelector<HTMLElement>(`[data-store-item="${CSS.escape(item)}"]`)
+        ?.focus();
+    update({ blob: null, doc: null });
+  }, [update]);
   // Routines: the routine pane, with a task pane stacked on its right.
   const routineId = view === "routines" ? p.get("routine") : null;
   const routines = useRoutines(base, view === "routines");
@@ -429,10 +452,12 @@ export default function Dashboard() {
         e.preventDefault();
         searchRef.current?.focus();
       }
-      // Escape closes the topmost pane: the task, then its routine.
+      // Escape closes the topmost pane: the task, then its routine or store
+      // item.
       if (e.key === "Escape") {
         const q = new URLSearchParams(location.search);
         if (q.has("task")) closeTask();
+        else if (q.get("view") === "store" && storeItemKey(q)) closeStoreItem();
         else if (q.get("view") === "routines" && q.has("routine"))
           closeRoutine();
         else if (q.has("bot")) closeBot();
@@ -465,7 +490,7 @@ export default function Dashboard() {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [rows, focus, view, update, closeTask, closeRoutine, closeBot, closeGoal]);
+  }, [rows, focus, view, update, closeTask, closeRoutine, closeBot, closeGoal, closeStoreItem]);
   // Polite announcement; failures are also shown, and the button stays "Copy".
   const [copied, setCopied] = useState({ text: "", failed: false });
   const announce = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -629,7 +654,7 @@ export default function Dashboard() {
       <main
         className={cx(
           styles.main,
-          (selected || routineId) && styles.hasDetail,
+          (paneItem || routineId) && styles.hasDetail,
           routineId && styles.hasRoutine,
           routineId && shown && styles.stacked,
         )}
@@ -769,7 +794,11 @@ export default function Dashboard() {
               <Store
                 base={base}
                 params={p}
-                onChange={(patch) => update(patch)}
+                state={store}
+                // Selecting a store item replaces a task opened over it.
+                onChange={(patch) =>
+                  update(patch.blob || patch.doc ? { ...patch, task: null, tab: null } : patch)
+                }
                 onOpenTask={(id) => update({ task: String(id), tab: "artifacts" })}
               />
             ) : view === "cost" ? (
@@ -916,7 +945,37 @@ export default function Dashboard() {
               onOpenTask={(id) => update({ task: String(id), tab: null })}
             />
           )}
-          {shown && <DetailResizer controls="task-detail" />}
+          {shownItem && (
+            <DetailResizer controls={shown ? "task-detail" : "store-detail"} />
+          )}
+          {shownStore && (
+            <section
+              {...detailScroll}
+              id="store-detail"
+              className={styles.detailPane}
+              data-phase={phase || undefined}
+              inert={phase === "closing" || overlay}
+              aria-label="Store item"
+            >
+              <div className={styles.detailInner}>
+                <header className={styles.detailHeader}>
+                  <div className={styles.detailTop}>
+                    <span className={styles.detailId}>
+                      {shownStore.startsWith("doc:") ? "Doc" : "Blob"}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      className={styles.back}
+                      onClick={closeStoreItem}
+                    >
+                      Close <Kbd>Esc</Kbd>
+                    </Button>
+                  </div>
+                </header>
+                <StoreItem base={base} item={shownStore} state={store} />
+              </div>
+            </section>
+          )}
           {shown && (
             <section
               {...detailScroll}

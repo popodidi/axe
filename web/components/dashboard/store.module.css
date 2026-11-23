@@ -1,8 +1,3 @@
-.page {
-  display: grid;
-  gap: var(--section-gap);
-  min-width: 0;
-}
 .toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -103,7 +98,10 @@
   font-size: var(--text-label);
   font-weight: var(--weight-medium);
 }
+/* Block, not the button's centered flex box, so a long name ends in an
+   ellipsis instead of clipping on both sides. */
 .rowButton {
+  display: block;
   text-align: left;
   max-width: 100%;
   overflow: hidden;
@@ -112,6 +110,89 @@
 }
 .taskLinks {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-quarter);
+  gap: var(--space-half);
+}
+
+/* Blobs: Type, Size, Stored and Tasks size to their content on one line;
+   Name (a truncating cell) takes the rest. */
+.blobs td,
+.blobs th {
+  white-space: nowrap;
+}
+.fit {
+  width: 1%;
+}
+.blobs td.type {
+  max-width: calc(var(--space-8) + var(--space-2));
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Docs: a folder tree. Nested groups indent; rows keep the compact height. */
+.tree,
+.treeGroup {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+}
+.treeGroup {
+  margin-left: var(--space-1);
+  padding-left: var(--space-1);
+  border-left: var(--border-subtle);
+}
+/* Same size and inset as file rows (beats the compact button size). */
+.tree .folder {
+  width: 100%;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  padding: var(--space-quarter) var(--space-1);
+  justify-content: flex-start;
+  gap: var(--space-half);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chevron {
+  flex-shrink: 0;
+  width: var(--space-compact);
+  height: var(--space-compact);
+  border-right: var(--space-quarter) solid currentcolor;
+  border-bottom: var(--space-quarter) solid currentcolor;
+  transform: rotate(-45deg);
+  transition: transform var(--transition-hover);
+  color: var(--text-tertiary);
+}
+.tree .folder[aria-expanded="true"] .chevron {
+  transform: rotate(45deg);
+}
+.treeRow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-quarter) var(--space-1);
+  border-radius: var(--radius-xs);
+}
+.treeRow:hover {
+  background: var(--row-hover-bg);
+}
+.treeRow[aria-current="true"] {
+  background: var(--row-selected-bg);
+}
+.treeRow[aria-current="true"] button {
+  font-weight: var(--weight-semibold);
+}
+.treeRow .rowButton {
+  flex: 1;
+  min-width: 0;
+}
+.treeMeta {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--space-1);
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+  white-space: nowrap;
 }
