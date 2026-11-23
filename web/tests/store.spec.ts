@@ -226,10 +226,20 @@ test("the store page lists, searches and opens blobs and docs", async ({ page })
   await page.getByLabel("Search blobs").fill("");
   await blobsTable.getByRole("button", { name: "#3" }).click();
   await expect(page).toHaveURL(/task=3/);
+  await expect(page.getByLabel("Task detail", { exact: true })).toBeVisible();
+  // Selecting a store item replaces the task in the pane.
+  await blobsTable.getByRole("button", { name: "shot.png" }).click();
+  await expect(page).not.toHaveURL(/task=3/);
+  await expect(pane.getByRole("img", { name: "Preview of shot.png" })).toBeVisible();
+  await blobsTable.getByRole("button", { name: "#3" }).click();
+  await expect(page.getByLabel("Task detail", { exact: true })).toBeVisible();
+  // Escape closes the task, then the store item under it.
   await page.keyboard.press("Escape");
+  await expect(pane.getByRole("img", { name: "Preview of shot.png" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-store-viewer]")).toHaveCount(0);
   await page.getByRole("button", { name: "Lock" }).click();
-  // The list and the open doc both ask to unlock again.
-  await expect(page.getByRole("form", { name: "Unlock the store" })).toHaveCount(2);
+  await expect(page.getByRole("form", { name: "Unlock the store" })).toBeVisible();
 });
 
 test("store rows stay on one line and docs browse as folders", async ({ page }) => {

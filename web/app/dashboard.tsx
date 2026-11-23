@@ -795,7 +795,10 @@ export default function Dashboard() {
                 base={base}
                 params={p}
                 state={store}
-                onChange={(patch) => update(patch)}
+                // Selecting a store item replaces a task opened over it.
+                onChange={(patch) =>
+                  update(patch.blob || patch.doc ? { ...patch, task: null, tab: null } : patch)
+                }
                 onOpenTask={(id) => update({ task: String(id), tab: "artifacts" })}
               />
             ) : view === "cost" ? (
