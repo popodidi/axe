@@ -104,6 +104,25 @@ export type StoreDoc = {
   version: string;
   updated_at: string;
 };
+// `GET /api/store/stats` (server.rs `store_stats`): sums over the whole
+// store, not the listed page.
+export type StoreTally = { count: number; bytes: number };
+export type StoreStats = {
+  total: StoreTally;
+  recent: StoreTally;
+  recent_days: number;
+  recent_since: string;
+  types: (StoreTally & { content_type: string })[];
+  other_types: StoreTally;
+  unreferenced: StoreTally;
+  docs: StoreTally | null;
+};
+
+// "1 blob", "1,862 blobs".
+export function countOf(n: number, noun: string) {
+  return `${n.toLocaleString("en-US")} ${noun}${n === 1 ? "" : "s"}`;
+}
+
 // `GET /api/docs/attachments` rows.
 export type DocAttachment = { scope: string; path: string; exists: boolean };
 

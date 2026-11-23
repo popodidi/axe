@@ -298,6 +298,105 @@ pub fn check_sha(sha: &str) -> Result<()> {
     }
 }
 
+/// How many blobs, and their bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Tally {
+    pub count: u64,
+    pub bytes: u64,
+}
+
+impl Tally {
+    pub fn add(&mut self, bytes: u64) {
+        self.count += 1;
+        self.bytes += bytes;
+    }
+}
+
+/// Blobs of one content type (parameters dropped, `unknown` when the backend
+/// listing has none).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TypeTally {
+    pub content_type: String,
+    pub count: u64,
+    pub bytes: u64,
+}
+
+/// The store at a glance (`GET /api/store/stats`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Stats {
+    pub total: Tally,
+    /// Blobs first stored at or after `recent_since`.
+    pub recent: Tally,
+    pub recent_since: String,
+    /// The largest content types by bytes, at most the `top` asked for.
+    pub types: Vec<TypeTally>,
+    /// Every content type not in `types`.
+    pub other_types: Tally,
+    /// Blobs no task event links (as [`crate::blob_refs::index`] finds).
+    pub unreferenced: Tally,
+}
+
+/// Sums `blobs`: totals, those stored since `since`, the `top` content types
+/// by bytes, and those `referenced` says no task links.
+pub fn stats(
+    blobs: &[Meta],
+    since: time::OffsetDateTime,
+    top: usize,
+    referenced: impl Fn(&str) -> bool,
+) -> Result<Stats> {
+    use time::format_description::well_known::Rfc3339;
+    let mut total = Tally::default();
+    let mut recent = Tally::default();
+    let mut unreferenced = Tally::default();
+    let mut by_type: std::collections::BTreeMap<String, Tally> = Default::default();
+    for b in blobs {
+        total.add(b.size);
+        let created = b
+            .created_at
+            .as_deref()
+            .and_then(|t| time::OffsetDateTime::parse(t, &Rfc3339).ok());
+        if created.is_some_and(|t| t >= since) {
+            recent.add(b.size);
+        }
+        if !referenced(&b.sha256) {
+            unreferenced.add(b.size);
+        }
+        let ct = b.content_type.split(';').next().unwrap_or("").trim();
+        let ct = if ct.is_empty() {
+            "unknown".to_string()
+        } else {
+            ct.to_ascii_lowercase()
+        };
+        by_type.entry(ct).or_default().add(b.size);
+    }
+    let mut types: Vec<TypeTally> = by_type
+        .into_iter()
+        .map(|(content_type, t)| TypeTally {
+            content_type,
+            count: t.count,
+            bytes: t.bytes,
+        })
+        .collect();
+    types.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then(a.content_type.cmp(&b.content_type))
+    });
+    let mut other_types = Tally::default();
+    for t in types.drain(top.min(types.len())..) {
+        other_types.count += t.count;
+        other_types.bytes += t.bytes;
+    }
+    Ok(Stats {
+        total,
+        recent,
+        recent_since: since.replace_nanosecond(0)?.format(&Rfc3339)?,
+        types,
+        other_types,
+        unreferenced,
+    })
+}
+
 /// A content type safe to send back in a header; anything else is
 /// `application/octet-stream`.
 pub fn clean_content_type(ct: &str) -> String {
@@ -735,6 +834,62 @@ pub fn sigv4(r: &SigV4) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_sum_recent_types_and_unreferenced() {
+        let meta = |sha: &str, size, ct: &str, at: Option<&str>| Meta {
+            sha256: sha.into(),
+            size,
+            content_type: ct.into(),
+            created_at: at.map(String::from),
+        };
+        let blobs = [
+            meta("a", 100, "image/png", Some("2026-11-01T00:00:00Z")),
+            meta(
+                "b",
+                50,
+                "text/plain; charset=utf-8",
+                Some("2026-11-20T00:00:00Z"),
+            ),
+            meta("c", 30, "Text/Plain", Some("2026-11-22T10:00:00.000Z")),
+            meta("d", 5, "", None),
+            meta("e", 1, "application/json", Some("2026-11-19T23:59:59Z")),
+        ];
+        let since = time::macros::datetime!(2026-11-20 0:00 UTC);
+        let s = stats(&blobs, since, 2, |sha| sha == "a" || sha == "c").unwrap();
+        assert_eq!(
+            s.total,
+            Tally {
+                count: 5,
+                bytes: 186
+            }
+        );
+        assert_eq!(
+            s.recent,
+            Tally {
+                count: 2,
+                bytes: 80
+            }
+        );
+        assert_eq!(s.recent_since, "2026-11-20T00:00:00Z");
+        let types: Vec<_> = s
+            .types
+            .iter()
+            .map(|t| (t.content_type.as_str(), t.count, t.bytes))
+            .collect();
+        assert_eq!(types, [("image/png", 1, 100), ("text/plain", 2, 80)]);
+        assert_eq!(s.other_types, Tally { count: 2, bytes: 6 });
+        assert_eq!(
+            s.unreferenced,
+            Tally {
+                count: 3,
+                bytes: 56
+            }
+        );
+        let none = stats(&[], since, 4, |_| false).unwrap();
+        assert_eq!(none.total, Tally::default());
+        assert!(none.types.is_empty());
+    }
 
     #[test]
     fn hmac_matches_rfc4231_case_2() {

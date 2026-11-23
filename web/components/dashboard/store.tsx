@@ -4,6 +4,7 @@
 // need the read session (lib/store.ts).
 import { useEffect, useMemo, useState } from "react";
 import {
+  countOf,
   docScopes,
   docTree,
   formatBytes,
@@ -16,6 +17,7 @@ import {
   type DocNode,
   type StoreBlob,
   type StoreDoc,
+  type StoreStats,
 } from "../../lib/store";
 import {
   Alert,
@@ -31,6 +33,8 @@ import {
   Th,
 } from "../ui";
 import { BlobViewer, DocViewer, StoreUnlock } from "./store-viewer";
+import { Kpi } from "./stats";
+import kpi from "./stats.module.css";
 import styles from "./store.module.css";
 
 // Blob rows shown before asking for a narrower search.
@@ -40,6 +44,8 @@ type Loaded = {
   blobs: StoreBlob[];
   docs: StoreDoc[];
   attachments: DocAttachment[];
+  // Null when the server has no stats endpoint or it failed.
+  stats: StoreStats | null;
 };
 type ScopedDoc = StoreDoc & { scopes: string[] };
 
@@ -56,10 +62,11 @@ export function useStoreData(base: string, enabled: boolean): StoreState {
       getJson<StoreBlob[]>(`${base}/api/blobs?refs=1`),
       getJson<StoreDoc[]>(`${base}/api/docs`).catch(() => []),
       getJson<DocAttachment[]>(`${base}/api/docs/attachments`).catch(() => []),
+      getJson<StoreStats>(`${base}/api/store/stats`).catch(() => null),
     ])
-      .then(([blobs, docs, attachments]) => {
+      .then(([blobs, docs, attachments, stats]) => {
         if (!live) return;
-        setData({ blobs, docs, attachments });
+        setData({ blobs, docs, attachments, stats });
         setError("");
       })
       .catch((e) => live && setError((e as Error).message));
@@ -160,6 +167,7 @@ export function Store({
           Lock
         </Button>
       </PanelHead>
+      {data?.stats && <StoreStatsRow stats={data.stats} />}
       <Tabs
         tabs={["blobs", "docs"]}
         value={kind}
@@ -256,6 +264,44 @@ export function Store({
         />
       )}
     </Panel>
+  );
+}
+
+// The store at a glance, from the server's sums (not the listed rows).
+function StoreStatsRow({ stats }: { stats: StoreStats }) {
+  const types = stats.types.map((t) => `${t.content_type} ${formatBytes(t.bytes)}`);
+  if (stats.other_types.count) types.push(`other ${formatBytes(stats.other_types.bytes)}`);
+  return (
+    <section className={kpi.kpis} aria-label="Store stats">
+      <Kpi
+        label="Blobs"
+        value={formatBytes(stats.total.bytes)}
+        detail={countOf(stats.total.count, "blob")}
+      />
+      <Kpi
+        label={`Added in ${stats.recent_days} days`}
+        value={formatBytes(stats.recent.bytes)}
+        detail={countOf(stats.recent.count, "blob")}
+      />
+      <div className={kpi.kpi}>
+        <div className={kpi.kpiLabel}>Size by type</div>
+        <ul className={styles.statTypes}>
+          {types.length ? types.map((t) => <li key={t}>{t}</li>) : <li>—</li>}
+        </ul>
+      </div>
+      <Kpi
+        label="Not linked by a task"
+        value={stats.unreferenced.count.toLocaleString("en-US")}
+        detail={`${formatBytes(stats.unreferenced.bytes)} no task event links`}
+      />
+      {stats.docs && (
+        <Kpi
+          label="Docs"
+          value={stats.docs.count.toLocaleString("en-US")}
+          detail={formatBytes(stats.docs.bytes)}
+        />
+      )}
+    </section>
   );
 }
 

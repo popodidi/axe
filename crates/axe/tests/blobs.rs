@@ -318,6 +318,10 @@ fn read_session_cookie_reads_but_never_writes() {
         fetch_with(&format!("{}/api/docs", srv.url), Some(&cookie)).0,
         200
     );
+    assert_eq!(
+        fetch_with(&format!("{}/api/store/stats", srv.url), Some(&cookie)).0,
+        200
+    );
     let link = ureq::post(&format!("{}/api/blobs/{sha}/link", srv.url))
         .set("Cookie", &cookie)
         .send_json(serde_json::json!({"ttl": 60, "name": "page.html"}))
@@ -434,4 +438,24 @@ fn refs_and_resolve_use_links_and_link_maps() {
         .call();
     assert!(matches!(miss, Err(ureq::Error::Status(404, _))));
     assert_eq!(fetch(&format!("{}{}", srv.url, q(old_url))).0, 401);
+
+    // Stats: every blob is new, `lone` is the one no task links.
+    let st = get("/api/store/stats");
+    let tally = |count: u64, bytes: u64| serde_json::json!({"count": count, "bytes": bytes});
+    assert_eq!(st["total"], tally(3, 6));
+    assert_eq!(st["recent"], tally(3, 6));
+    assert_eq!(st["recent_days"], 7);
+    assert_eq!(st["unreferenced"], tally(1, 1));
+    assert_eq!(
+        st["types"],
+        serde_json::json!([
+            {"content_type": "image/png", "count": 1, "bytes": 3},
+            {"content_type": "application/json", "count": 1, "bytes": 2},
+            {"content_type": "text/plain", "count": 1, "bytes": 1},
+        ])
+    );
+    assert_eq!(st["other_types"], tally(0, 0));
+    let map_len = std::fs::metadata(&map).unwrap().len();
+    assert_eq!(st["docs"], tally(1, map_len));
+    assert_eq!(fetch(&format!("{}/api/store/stats", srv.url)).0, 401);
 }

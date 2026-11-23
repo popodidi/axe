@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  countOf,
   docScopes,
   docTree,
   formatBytes,
@@ -107,5 +108,13 @@ describe("short dates", () => {
     expect(d.title).toMatch(/2026/);
     expect(shortDate(new Date(2025, 0, 2).toISOString(), now).text).toMatch(/2025/);
     expect(shortDate(undefined, now)).toEqual({ text: "—", title: undefined });
+  });
+});
+
+describe("store stats", () => {
+  test("counts read with a noun and thousands separators", () => {
+    expect(countOf(0, "blob")).toBe("0 blobs");
+    expect(countOf(1, "blob")).toBe("1 blob");
+    expect(countOf(1862, "blob")).toBe("1,862 blobs");
   });
 });
