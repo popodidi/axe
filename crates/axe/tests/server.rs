@@ -1320,3 +1320,33 @@ fn a_login_link_signs_in_once() {
         200
     );
 }
+
+/// `/healthz` must answer while a request waits on the DB (task 1587): a
+/// write blocked behind another SQLite writer holds the shared connection, and
+/// the accept loop must not wait for it.
+#[test]
+fn healthz_answers_while_the_db_is_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    let other = rusqlite::Connection::open(&srv.db).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let add_url = format!("{}/api/tasks", srv.url);
+    let writer = std::thread::spawn(move || {
+        post(
+            &add_url,
+            Some(&format!("Bearer {TOKEN}")),
+            r#"{"project":"p","title":"t"}"#,
+        )
+    });
+    // Let the write take the connection and the housekeeping tick queue on it.
+    std::thread::sleep(Duration::from_millis(1500));
+    let started = std::time::Instant::now();
+    let health = ureq::get(&format!("{}/healthz", srv.url))
+        .timeout(Duration::from_secs(1))
+        .call()
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    other.execute_batch("COMMIT").unwrap();
+    assert_eq!(writer.join().unwrap(), 201);
+}
