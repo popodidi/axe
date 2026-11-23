@@ -54,6 +54,7 @@ import {
   GoalList,
   useGoals,
 } from "../components/dashboard/goals";
+import { goalStateFilters } from "../lib/goals";
 import { Dependencies } from "../components/dashboard/dependencies";
 import {
   DetailResizer,
@@ -148,7 +149,7 @@ export default function Dashboard() {
       if (["task", "tab", "blob", "doc"].some((k) => k in patch))
         u.searchParams.delete("detailY");
       if (
-        ["view", "project", "state", "status", "q", "sort", "page", "bot", "goal"].some(
+        ["view", "project", "state", "goalstate", "status", "q", "sort", "page", "bot", "goal"].some(
           (k) => k in patch,
         )
       )
@@ -709,6 +710,15 @@ export default function Dashboard() {
                     ]}
                   />
                 ),
+              )}
+              {view === "goals" && (
+                <Filter
+                  label="state"
+                  aria-label="goal state"
+                  value={p.get("goalstate") || ""}
+                  onChange={(v) => changeFilter("goalstate", v)}
+                  options={goalStateFilters}
+                />
               )}
               {view === "routines" && (
                 <Filter
