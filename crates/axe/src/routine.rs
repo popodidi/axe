@@ -161,6 +161,39 @@ fn audit(conn: &Connection, id: i64, actor: &Actor, kind: &str, body: &str) -> R
     conn.execute("INSERT INTO routine_events(routine_id,at,actor,session,kind,body) VALUES (?1,?2,?3,?4,?5,?6)", params![id, db::now(), actor.name, actor.session, kind, body])?;
     Ok(())
 }
+/// Moves every routine whose created tasks are owned by `bot:old` to
+/// `bot:new`, inside the caller's transaction, each with a `bot-renamed`
+/// event. Returns how many routines changed.
+pub(crate) fn rename_bot(tx: &Transaction, actor: &Actor, old: &str, new: &str) -> Result<usize> {
+    let rows: Vec<(i64, String)> = tx
+        .prepare("SELECT id, config FROM routines ORDER BY id")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let (old_owner, new_owner) = (format!("bot:{old}"), format!("bot:{new}"));
+    let mut n = 0;
+    for (id, raw) in rows {
+        let Ok(mut t) = serde_json::from_str::<Template>(&raw) else {
+            continue;
+        };
+        if t.owner.as_deref() != Some(old_owner.as_str()) {
+            continue;
+        }
+        t.owner = Some(new_owner.clone());
+        tx.execute(
+            "UPDATE routines SET config=?2, updated_at=?3 WHERE id=?1",
+            params![id, serde_json::to_string(&t)?, db::now()],
+        )?;
+        audit(
+            tx,
+            id,
+            actor,
+            "bot-renamed",
+            &json!({"from": old_owner, "to": new_owner}).to_string(),
+        )?;
+        n += 1;
+    }
+    Ok(n)
+}
 pub fn save(
     conn: &mut Connection,
     actor: &Actor,

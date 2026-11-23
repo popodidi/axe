@@ -888,6 +888,45 @@ impl Store {
             changed,
         })
     }
+
+    /// Moves every attachment of scope `from` to scope `to` (merged with
+    /// what `to` holds) in one commit, as a rename of what the scope names
+    /// does. Returns the paths moved; none: no commit.
+    pub fn move_scope(&self, from: &Scope, to: &Scope, author: &str) -> Result<Vec<String>> {
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(head) = self.head()? else {
+            return Ok(Vec::new());
+        };
+        let (old_file, new_file) = (from.file(), to.file());
+        if self.kind_at(&head, &old_file)? != Some("doc") {
+            return Ok(Vec::new());
+        }
+        let moved = self.attach_list(&head, &old_file)?;
+        let mut list = match self.kind_at(&head, &new_file)? {
+            Some("doc") => self.attach_list(&head, &new_file)?,
+            _ => Vec::new(),
+        };
+        list.extend(moved.iter().cloned());
+        list.sort();
+        list.dedup();
+        let msg = format!("move attachments of {from} to {to}");
+        self.commit(Some(&head), author, &msg, |idx| {
+            idx.git(&["update-index", "--force-remove", "--", &old_file], None)?;
+            let body = format!("{}\n", list.join("\n"));
+            let blob = idx.git(&["hash-object", "-w", "--stdin"], Some(body.as_bytes()))?;
+            idx.git(
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{},{new_file}", blob.trim()),
+                ],
+                None,
+            )?;
+            Ok(())
+        })?;
+        Ok(moved)
+    }
 }
 
 /// A temporary index over the store's repository.

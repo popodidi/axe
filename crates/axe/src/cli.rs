@@ -1323,7 +1323,14 @@ fn run_form(c: &Client, command: FormCmd) -> Result<()> {
             let target = match (git, task, for_bot) {
                 (Some(host), _, _) => crate::sealed::Target::Git { host },
                 (None, Some(task), _) => crate::sealed::Target::Task { task },
-                (None, None, Some(bot)) => crate::sealed::Target::Bot { bot },
+                // A renamed bot keeps its folders under its first name (`home`).
+                (None, None, Some(bot)) => crate::sealed::Target::Bot {
+                    bot: c
+                        .get::<Value>(&format!("/api/bots/{bot}"), &[])
+                        .ok()
+                        .and_then(|b| b["home"].as_str().map(str::to_string))
+                        .unwrap_or(bot),
+                },
                 (None, None, None) => anyhow::bail!(
                     "no target: run inside a task ($AXE_TASK) or bot ($AXE_BOT), or pass --task, --for-bot or --git"
                 ),
@@ -1717,6 +1724,19 @@ enum BotCmd {
         no_repos: bool,
         #[arg(long)]
         why: String,
+    },
+    /// Rename a bot (an owner decision; refused while it runs). Its id,
+    /// session, notes, wakes, schedules, subscriptions, goals, cards and
+    /// Telegram bot stay; task owners, rules and attached docs move to the
+    /// new name. The old name stays reserved and keys the bot's folders.
+    Rename {
+        name: String,
+        new_name: String,
+        #[arg(long)]
+        why: String,
+        /// Owner decision this rests on (e.g. "msg #873"); required unless human
+        #[arg(long)]
+        owner_ref: Option<String>,
     },
     /// Print the notebook; --edit-file F --why W replaces it
     Notes {
@@ -3555,6 +3575,33 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 .filter(|b| !b.is_empty())
                 .context("give --bot NAME or set $AXE_BOT")?;
             run_tg(c, bot, command)?;
+        }
+        BotCmd::Rename {
+            name,
+            new_name,
+            why,
+            owner_ref,
+        } => {
+            let r: Value = c.send(
+                "POST",
+                &format!("/api/bots/{name}/rename"),
+                json!({"to": new_name, "why": why, "owner_ref": owner_ref}),
+            )?;
+            let m = &r["moved"];
+            println!(
+                "bot {name} renamed to {}: {} task owner(s), {} rule(s), {} routine(s), {} attached doc(s) moved",
+                r["bot"]["name"].as_str().unwrap_or(new_name),
+                m["tasks"],
+                m["rules"],
+                m["routines"],
+                r["docs"].as_array().map_or(0, Vec::len),
+            );
+            if let Some(t) = r["telegram"].as_str().filter(|t| t != new_name) {
+                println!("telegram: [[telegram.bot]] {t} now talks for {new_name}; the config may name it {new_name} at the next restart");
+            }
+            for w in r["warnings"].as_array().into_iter().flatten() {
+                eprintln!("warning: {}", w.as_str().unwrap_or_default());
+            }
         }
         BotCmd::Pause { name }
         | BotCmd::Resume { name }

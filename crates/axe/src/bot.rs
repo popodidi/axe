@@ -187,13 +187,21 @@ pub struct Bot {
     /// Derived: paused by repeated failures (needs the owner).
     #[serde(default)]
     pub attention: bool,
+    /// Derived: the name the bot's folders on the dispatcher host are keyed
+    /// by (run folder, project worktree, logs, sealed form values): its first
+    /// name, so a rename keeps them and the agent session that lives in them.
+    /// `None` from servers that predate renames: the name.
+    #[serde(default)]
+    pub home: Option<String>,
 }
 
 const BOT_COLS: &str = "b.*,
  (SELECT id FROM bot_runs r WHERE r.bot_id=b.id AND r.ended_at IS NULL ORDER BY id DESC LIMIT 1) AS live_run,
  (SELECT MIN(due_at) FROM bot_wakes w WHERE w.bot_id=b.id AND w.run_id IS NULL) AS next_wake,
  (SELECT COUNT(*) FROM bot_wakes w WHERE w.bot_id=b.id AND w.run_id IS NULL) AS queued,
- (SELECT MAX(ended_at) FROM bot_runs r WHERE r.bot_id=b.id) AS last_run_end";
+ (SELECT MAX(ended_at) FROM bot_runs r WHERE r.bot_id=b.id) AS last_run_end,
+ (SELECT json_extract(e.body,'$.from') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='rename'
+  ORDER BY e.id LIMIT 1) AS first_name";
 
 impl Bot {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -224,8 +232,46 @@ impl Bot {
             next_wake: r.get("next_wake")?,
             queued: r.get("queued")?,
             last_run_end: r.get("last_run_end")?,
+            home: Some(
+                r.get::<_, Option<String>>("first_name")?
+                    .map_or_else(|| r.get("name"), Ok)?,
+            ),
         })
     }
+
+    /// The name the bot's folders are keyed by ([`Bot::home`]).
+    pub fn home(&self) -> &str {
+        self.home.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// The current name of the bot that was once called `old` (its latest
+/// rename away from `old`), if any.
+fn renamed_to(conn: &Connection, old: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT b.name FROM bot_events e JOIN bots b ON b.id=e.bot_id
+             WHERE e.kind='rename' AND json_extract(e.body,'$.from')=?1
+             ORDER BY e.id DESC LIMIT 1",
+            [old],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The bot a name held outside the database (the server config's
+/// `[[telegram.bot]]`, `ops_bot`, `retro.bot`) stands for: the bot of that
+/// name, else the bot renamed away from it. `None`: no such bot.
+pub fn bound_name(conn: &Connection, name: &str) -> Result<Option<String>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bots WHERE name=?1)",
+        [name],
+        |r| r.get(0),
+    )?;
+    if exists {
+        return Ok(Some(name.to_string()));
+    }
+    renamed_to(conn, name)
 }
 
 pub fn get(conn: &Connection, name: &str) -> Result<Bot> {
@@ -235,7 +281,13 @@ pub fn get(conn: &Connection, name: &str) -> Result<Bot> {
         Bot::from_row,
     )
     .optional()?
-    .with_context(|| format!("bot {name} not found"))
+    .map_or_else(
+        || match renamed_to(conn, name)? {
+            Some(new) => bail!("bot {name} not found: it was renamed to {new}"),
+            None => bail!("bot {name} not found"),
+        },
+        Ok,
+    )
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<Bot>> {
@@ -356,6 +408,12 @@ pub fn create(conn: &mut Connection, actor: &Actor, b: &NewBot, now: i64) -> Res
     if exists {
         bail!("bot {} already exists", b.name);
     }
+    if let Some(other) = renamed_to(&tx, &b.name)? {
+        bail!(
+            "bot {other} was once called {}: a former name stays reserved, so its history and folders stay unambiguous",
+            b.name
+        );
+    }
     let at = ts(now);
     tx.execute(
         "INSERT INTO bots (name, project, agent, identity, conduct, notes,
@@ -404,6 +462,100 @@ pub(crate) fn insert_wake(
         params![bot, kind, key, message, body, due, created, actor.name],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// What [`rename`] moved, beside the bot itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Renamed {
+    pub from: String,
+    pub to: String,
+    /// Tasks whose owner moved from `bot:<from>` to `bot:<to>`.
+    pub tasks: usize,
+    /// Rules matching `bot=<from>` or `owner=bot:<from>`.
+    pub rules: usize,
+    /// Routines creating tasks owned by `bot:<from>`.
+    pub routines: usize,
+}
+
+/// Renames a bot (an owner decision; a non-human actor needs `owner_ref`).
+/// The id, session, identity, conduct, notes, wakes, schedules,
+/// subscriptions and watches, goal links, runs, messages, cards and pins are
+/// keyed by the id and stay; the name references stored as text move in one
+/// transaction: task owners, rules and routine owners. Past actor strings
+/// stay as written; the `rename` event records the old name, which stays
+/// reserved, resolves to the bot for the server config's Telegram binding,
+/// and keys the bot's folders ([`Bot::home`]). Refused while a run is live:
+/// the run's `AXE_BOT` would be the old name.
+pub fn rename(
+    conn: &mut Connection,
+    actor: &Actor,
+    name: &str,
+    new: &str,
+    why: &str,
+    owner_ref: Option<&str>,
+) -> Result<(Bot, Renamed)> {
+    if why.trim().is_empty() {
+        bail!("--why must not be empty");
+    }
+    check_name(new)?;
+    let owner_ref = owner_ref.map(str::trim).filter(|r| !r.is_empty());
+    if owner_ref.is_none() && actor.name != "human" {
+        return Err(crate::db::Forbidden(format!(
+            "renaming a bot is an owner decision: actor {} needs --owner-ref (e.g. \"msg #873\")",
+            actor.name
+        ))
+        .into());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let b = get(&tx, name)?;
+    if b.name == new {
+        bail!("bot {name} already has that name");
+    }
+    if let Some(run) = b.live_run {
+        bail!(
+            "bot {name} is running (run #{run}): stop it (`axe bot stop {name}`) or wait for the run to end, then rename"
+        );
+    }
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bots WHERE name=?1)",
+        [new],
+        |r| r.get(0),
+    )?;
+    if taken {
+        bail!("bot {new} already exists; pick another name");
+    }
+    if let Some(other) = renamed_to(&tx, new)?.filter(|o| *o != b.name) {
+        bail!("bot {other} was once called {new}: a former name stays reserved; pick another name");
+    }
+    let at = ts(crate::remote::epoch());
+    tx.execute(
+        "UPDATE bots SET name=?1, updated_at=?2 WHERE id=?3",
+        params![new, at, b.id],
+    )?;
+    let tasks = tx.execute(
+        "UPDATE tasks SET owner=?2 WHERE owner=?1",
+        params![format!("bot:{}", b.name), format!("bot:{new}")],
+    )?;
+    let rules = crate::rule::rename_bot(&tx, actor, &b.name, new)?;
+    let routines = crate::routine::rename_bot(&tx, actor, &b.name, new)?;
+    let moved = Renamed {
+        from: b.name.clone(),
+        to: new.to_string(),
+        tasks,
+        rules,
+        routines,
+    };
+    event(
+        &tx,
+        b.id,
+        actor,
+        "rename",
+        &json!({"from": b.name, "to": new, "why": why, "owner_ref": owner_ref,
+            "tasks": tasks, "rules": rules, "routines": routines})
+        .to_string(),
+    )?;
+    tx.commit()?;
+    Ok((get(conn, new)?, moved))
 }
 
 /// Fields `axe bot edit` may change; `None` keeps the value.

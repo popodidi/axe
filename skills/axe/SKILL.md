@@ -98,7 +98,10 @@ Dispatcher task sessions cannot approve their own task. Run `axe --help` and
 Bots are a separate primitive with their own commands under `axe bot`
 (and `axe bot tg` for the Telegram gateway); see `axe bot --help` and
 `axe bot tg --help`. A bot follows a task with `axe bot watch <task>`, or all
-tasks it owns with `axe bot subscribe --owned-wake done,escalated`.
+tasks it owns with `axe bot subscribe --owned-wake done,escalated`. To rename a bot
+and keep everything it has: `axe bot rename OLD NEW --why "..." --owner-ref
+"msg #N"` (an owner decision; refused while it runs). The old name stays
+reserved, and the Telegram bot keeps talking for it without a config change.
 
 Bots pursuing goals: see [references/goals.md](references/goals.md).
 

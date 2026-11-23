@@ -4125,3 +4125,55 @@ fn sealed_messages_reach_the_owner_as_ciphertext_only() {
         .send_json(json!({"text": "x", "link": "https://evil.example/#m=x"}));
     assert!(matches!(bad, Err(ureq::Error::Status(400, _))));
 }
+
+#[test]
+fn a_renamed_bot_keeps_its_telegram_bot_across_a_restart() {
+    let mut rig = Rig::new();
+    wait_for("poller", 20, || !rig.stub.calls("getUpdates").is_empty());
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    let out = rig
+        .srv()
+        .ok(&["bot", "rename", "cos", "chief", "--why", "clearer"]);
+    assert!(
+        out.contains("[[telegram.bot]] cos now talks for chief"),
+        "{out}"
+    );
+    let check = |rig: &Rig, update: i64, text: &str| {
+        let sent = rig.srv().ok(&[
+            "bot",
+            "tg",
+            "--bot",
+            "chief",
+            "send",
+            "--chat",
+            &OWNER.to_string(),
+            text,
+        ]);
+        assert!(!sent.is_empty());
+        assert!(rig.sent_to(OWNER).iter().any(|m| m["text"] == text));
+        rig.stub.push(text_msg(
+            update,
+            update,
+            OWNER,
+            OWNER,
+            &format!("in {text}"),
+        ));
+        wait_for("inbound", 20, || {
+            rig.inbound().iter().any(|m| m.2 == format!("in {text}"))
+        });
+        let history = rig
+            .srv()
+            .ok(&["bot", "tg", "--bot", "chief", "history", "--limit", "10"]);
+        assert!(history.contains(&format!("in {text}")), "{history}");
+        assert_eq!(
+            rig.srv().get("/api/config")["config"]["telegram"],
+            json!({"bots": ["chief"]})
+        );
+    };
+    check(&rig, 70, "after rename");
+    // The config still names it cos: the restarted gateway binds it to chief.
+    rig.restart();
+    check(&rig, 71, "after restart");
+    let out = rig.srv().run(&["bot", "show", "cos"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("renamed to chief"));
+}

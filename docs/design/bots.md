@@ -41,13 +41,43 @@ routines. Nothing in code or in the dashboard is specific to one kind of bot.
 | bot | Name, project, agent, identity, conduct, notes, active or paused, and its stored session |
 | wake | A queued reason to run (self or owner wake, message, button, schedule, subscription batch), with a due time |
 | bot run | One spawned agent process. A bot has at most one live run, so wakes are serialized |
-| bot event | Append-only audit: identity, conduct and notes diffs, lifecycle, run start and end, security drops |
+| bot event | Append-only audit: identity, conduct and notes diffs, lifecycle, renames, run start and end, security drops |
 
 A bot is ready when it is active, has no live run, and has a due wake.
 Elapsed time alone never starts a run, and sleeping means exiting: a bot with
 no schedules sleeps until something wakes it. Recurring work is a named
 schedule with one objective each, not a periodic heartbeat, because a wake
 with several objectives is bad for focus (2026-11-09).
+
+### Renaming a bot
+
+`axe bot rename OLD NEW --why W` (task 1523, 2026-11-23) is an owner
+decision: a non-human actor needs `--owner-ref`. Everything keyed by the bot's
+id stays as it is: session, identity, conduct, notes, wakes, schedules,
+subscriptions and watches, goal links, runs, messages, cards and pins. The
+references that hold the name as text move in one transaction: task owners
+(`bot:OLD`, so asks and their ratings follow), rules matching `bot=OLD` or
+`owner=bot:OLD`, and routine owners. The server then moves the docs attached
+to `owner:bot:OLD` to `owner:bot:NEW` in one doc commit; a failure there is a
+warning, not a rollback. Past actor strings stay as written; the `rename`
+bot event records old and new name, actor, `why` and `owner_ref`, so history
+stays searchable.
+
+A rename is refused while the bot has a live run (its `AXE_BOT` would be
+stale): stop it or let the run end first. A name in use is refused, and so is
+a former name of another bot: an old name stays reserved and resolves to the
+renamed bot in two places only. `axe bot show OLD` fails with "renamed to
+NEW". The server config's names (`[[telegram.bot]] name`, `ops_bot`,
+`retro.bot`) still bind to the renamed bot, on the live gateway at once and
+after a restart, so a rename needs no config, Secret or schema change; the
+config may be updated to NEW at leisure. `[housekeeping.alert] bot` in the
+dispatcher config is not resolved and must be edited by hand.
+
+On the dispatcher host a bot's folders (run folder `bot-<home>`, its
+worktrees and branch, project worktree, logs, sealed form values) are keyed
+by `home`, the bot's first name, so a rename keeps them. That matters for the
+session: Claude Code stores sessions per working directory, so moving the
+folder would lose the session the rename is meant to keep.
 
 ## What goes where in the agent's context
 
