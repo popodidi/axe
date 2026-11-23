@@ -1,5 +1,14 @@
 import { describe, expect, test } from "vitest";
-import { docScopes, formatBytes, matches, previewKind, storeLink } from "./store";
+import {
+  docScopes,
+  docTree,
+  formatBytes,
+  matches,
+  parentFolders,
+  previewKind,
+  shortDate,
+  storeLink,
+} from "./store";
 import { artifactReference } from "./artifact-reference";
 
 const sha = "a".repeat(64);
@@ -58,4 +67,45 @@ test("sizes, search and doc labels", () => {
   expect(docScopes("skills/axe/SKILL.md", att)).toEqual(["global", "label:ops"]);
   expect(docScopes("harvis/docs/x.md", att)).toEqual(["label:harvis"]);
   expect(docScopes("skills/axel/SKILL.md", att)).toEqual([]);
+});
+
+describe("docs tree", () => {
+  const docs = [
+    { path: "harvis/docs/operations/runbooks/axe-server.md" },
+    { path: "harvis/docs/index.md" },
+    { path: "harvis/docs/operations/delivery.md" },
+    { path: "skills/axe" },
+    { path: "skills/axe/SKILL.md" },
+    { path: "README.md" },
+  ];
+  test("folders from path segments, folders before files", () => {
+    const tree = docTree(docs);
+    expect(tree.map((n) => n.name)).toEqual(["harvis", "skills", "README.md"]);
+    const ops = tree[0].children[0].children;
+    expect(ops.map((n) => [n.name, n.path, !!n.doc])).toEqual([
+      ["operations", "harvis/docs/operations", false],
+      ["index.md", "harvis/docs/index.md", true],
+    ]);
+    expect(ops[0].children.map((n) => n.name)).toEqual(["runbooks", "delivery.md"]);
+  });
+  test("a path that is a doc and a folder keeps both", () => {
+    const axe = docTree(docs)[1].children[0];
+    expect(axe.doc?.path).toBe("skills/axe");
+    expect(axe.children.map((n) => n.path)).toEqual(["skills/axe/SKILL.md"]);
+  });
+  test("parent folders", () => {
+    expect(parentFolders("a/b/c.md")).toEqual(["a", "a/b"]);
+    expect(parentFolders("c.md")).toEqual([]);
+  });
+});
+
+describe("short dates", () => {
+  const now = new Date(2026, 10, 23);
+  test("this year drops the year; others keep it", () => {
+    const d = shortDate(new Date(2026, 10, 23, 6, 57).toISOString(), now);
+    expect(d.text).not.toMatch(/2026/);
+    expect(d.title).toMatch(/2026/);
+    expect(shortDate(new Date(2025, 0, 2).toISOString(), now).text).toMatch(/2025/);
+    expect(shortDate(undefined, now)).toEqual({ text: "—", title: undefined });
+  });
 });

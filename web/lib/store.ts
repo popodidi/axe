@@ -204,3 +204,52 @@ export function useStoreSession(base: string) {
     lock,
   };
 }
+
+// A compact date for one-line table cells ("Nov 23"; the year only when it
+// is not this year), with the full local timestamp for a tooltip.
+export function shortDate(s?: string, now = new Date()) {
+  if (!s || !Number.isFinite(Date.parse(s))) return { text: "—", title: undefined };
+  const d = new Date(s);
+  return {
+    text: d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+    }),
+    title: d.toLocaleString(undefined, { dateStyle: "full", timeStyle: "long" }),
+  };
+}
+
+// The docs list as a folder tree, from `/`-separated path segments. A path
+// that is both a doc and a folder above other docs is one node with both.
+export type DocNode<T> = { name: string; path: string; doc?: T; children: DocNode<T>[] };
+export function docTree<T extends { path: string }>(docs: T[]): DocNode<T>[] {
+  const root: DocNode<T> = { name: "", path: "", children: [] };
+  for (const d of docs) {
+    let node = root;
+    const parts = d.path.split("/").filter(Boolean);
+    parts.forEach((name, i) => {
+      const path = parts.slice(0, i + 1).join("/");
+      let next = node.children.find((c) => c.name === name);
+      if (!next) node.children.push((next = { name, path, children: [] }));
+      node = next;
+    });
+    if (node !== root) node.doc = d;
+  }
+  const sort = (n: DocNode<T>) => {
+    // Folders first, then files, each by name.
+    n.children.sort(
+      (a, b) =>
+        Number(!a.children.length) - Number(!b.children.length) || a.name.localeCompare(b.name),
+    );
+    n.children.forEach(sort);
+  };
+  sort(root);
+  return root.children;
+}
+
+// The folders above a path, outermost first.
+export function parentFolders(path: string) {
+  const parts = path.split("/").filter(Boolean);
+  return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+}

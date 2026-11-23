@@ -197,16 +197,30 @@ test("the store page lists, searches and opens blobs and docs", async ({ page })
   await page.getByLabel("Search blobs").fill("shot");
   await blobsTable.getByRole("button", { name: "shot.png" }).click();
   await expect(page).toHaveURL(new RegExp(`blob=${sha("1")}`));
-  await expect(page.getByRole("img", { name: "Preview of shot.png" })).toBeVisible();
-  await page.getByRole("button", { name: "Close" }).click();
+  // The item opens in the side pane; the list stays.
+  const pane = page.getByRole("region", { name: "Store item" });
+  await expect(pane.getByRole("img", { name: "Preview of shot.png" })).toBeVisible();
+  await expect(blobsTable).toBeVisible();
+  await expect(blobsTable.locator("tbody tr[aria-selected=true]")).toContainText("shot.png");
+  // Escape closes it and focus returns to the row.
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-store-viewer]")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/blob=/);
+  await expect(blobsTable.getByRole("button", { name: "shot.png" })).toBeFocused();
+  await blobsTable.getByRole("button", { name: "shot.png" }).click();
+  await pane.getByRole("button", { name: "Close" }).click();
   await expect(page.locator("[data-store-viewer]")).toHaveCount(0);
 
   await page.getByRole("tab", { name: "docs" }).click();
-  const docsTable = page.getByRole("table", { name: "Docs" });
+  const tree = page.getByRole("list", { name: "Docs" });
   await page.getByLabel("Search docs").fill("label:harvis");
-  await expect(docsTable.locator("tbody tr")).toHaveCount(1);
-  await docsTable.getByRole("button", { name: "harvis/docs/reference/brand-guide.md" }).click();
-  await expect(page.locator("[data-store-viewer]").getByRole("heading", { name: "Quiet" })).toBeVisible();
+  // A search opens every folder holding a match.
+  await expect(tree.getByRole("button", { name: "reference/" })).toHaveAttribute("aria-expanded", "true");
+  await expect(tree.getByRole("button", { name: "SKILL.md" })).toHaveCount(0);
+  await tree.getByRole("button", { name: "brand-guide.md" }).click();
+  await expect(page).toHaveURL(/doc=harvis%2Fdocs%2Freference%2Fbrand-guide.md/);
+  await expect(pane.getByRole("heading", { name: "Quiet" })).toBeVisible();
+  await expect(tree).toBeVisible();
   // A linked task opens from its blob.
   await page.getByRole("tab", { name: "blobs" }).click();
   await page.getByLabel("Search blobs").fill("");
@@ -214,5 +228,42 @@ test("the store page lists, searches and opens blobs and docs", async ({ page })
   await expect(page).toHaveURL(/task=3/);
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Lock" }).click();
-  await expect(page.getByRole("form", { name: "Unlock the store" })).toBeVisible();
+  // The list and the open doc both ask to unlock again.
+  await expect(page.getByRole("form", { name: "Unlock the store" })).toHaveCount(2);
+});
+
+test("store rows stay on one line and docs browse as folders", async ({ page }) => {
+  await mockDesk(page);
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`/?server=http://axe.test&view=store&blob=${sha("5")}`);
+  const blobsTable = page.getByRole("table", { name: "Blobs" });
+  await expect(page.getByRole("region", { name: "Store item" })).toBeVisible();
+  // With the pane open, every cell keeps one line: the short date, the full
+  // timestamp on hover.
+  const row = blobsTable.locator("tbody tr").first();
+  const heights = await row
+    .locator("td")
+    .evaluateAll((cells) => cells.map((c) => Math.round(c.getBoundingClientRect().height)));
+  expect(new Set(heights).size).toBe(1);
+  const stored = row.locator("td").nth(3);
+  await expect(stored).not.toContainText("2026");
+  await expect(stored).toHaveAttribute("title", /2026/);
+  await expect(row.locator("td").nth(1)).toHaveAttribute("title", "text/tab-separated-values");
+
+  // Docs: top-level folders open, deeper ones collapsed until toggled.
+  await page.goto("/?server=http://axe.test&view=store&kind=docs");
+  const tree = page.getByRole("list", { name: "Docs" });
+  const docs = tree.getByRole("button", { name: "docs/" });
+  await expect(docs).toHaveAttribute("aria-expanded", "false");
+  await expect(tree.getByRole("button", { name: "brand-guide.md" })).toHaveCount(0);
+  await docs.click();
+  await tree.getByRole("button", { name: "reference/" }).click();
+  await tree.getByRole("button", { name: "brand-guide.md" }).click();
+  await expect(page.getByRole("region", { name: "Store item" }).getByRole("heading", { name: "Quiet" })).toBeVisible();
+  await tree.getByRole("button", { name: "reference/" }).click();
+  await expect(tree.getByRole("button", { name: "brand-guide.md" })).toHaveCount(0);
+  // A deep link opens the folders above the selected doc.
+  await page.goto("/?server=http://axe.test&view=store&kind=docs&doc=harvis/docs/reference/brand-guide.md");
+  await expect(tree.getByRole("button", { name: "brand-guide.md" })).toBeVisible();
 });
