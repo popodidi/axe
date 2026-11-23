@@ -95,7 +95,7 @@ function Comparison({ title, groups }: { title: string; groups: Breakdown[] }) {
     </Panel>
   );
 }
-function Kpi({
+export function Kpi({
   label,
   value,
   detail,

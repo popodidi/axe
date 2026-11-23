@@ -532,7 +532,10 @@ fn private_read(path: &[String]) -> bool {
     (path.len() >= 4 && path[0] == "api" && path[1] == "bots" && path[3] == "tg")
         || (path.len() >= 2
             && path[0] == "api"
-            && matches!(path[1].as_str(), "blobs" | "docs" | "asks" | "forms"))
+            && matches!(
+                path[1].as_str(),
+                "blobs" | "docs" | "store" | "asks" | "forms"
+            ))
 }
 
 /// Store reads a dashboard read session (`/api/session`) may make without
@@ -540,7 +543,7 @@ fn private_read(path: &[String]) -> bool {
 fn store_read(req: &Request) -> bool {
     let p: Vec<&str> = req.path.iter().map(String::as_str).collect();
     match (req.method.as_str(), p.as_slice()) {
-        ("GET", ["api", "blobs" | "docs", ..]) => true,
+        ("GET", ["api", "blobs" | "docs" | "store", ..]) => true,
         ("POST", ["api", "blobs", sha, "link"]) => blob::check_sha(sha).is_ok(),
         _ => false,
     }
@@ -1376,6 +1379,35 @@ fn stream_events(st: &State, w: &mut TcpStream, cors: Option<&str>) -> std::io::
     Ok(())
 }
 
+/// Days `GET /api/store/stats` counts as recent.
+const STORE_RECENT_DAYS: i64 = 7;
+/// Content types `GET /api/store/stats` names; the rest are summed.
+const STORE_TOP_TYPES: usize = 4;
+
+/// `GET /api/store/stats`: blob totals, recent and by content type, blobs no
+/// task links, and the doc count (`docs` is null when the doc store is off).
+fn store_stats(st: &State) -> Result<Response> {
+    let maps = crate::blob_refs::link_maps(st.docs.as_ref())?;
+    let refs = crate::blob_refs::index(&st.conn(), &maps)?;
+    let since = time::OffsetDateTime::now_utc() - time::Duration::days(STORE_RECENT_DAYS);
+    let stats = blob::stats(&st.blobs.list()?, since, STORE_TOP_TYPES, |sha| {
+        refs.contains_key(sha)
+    })?;
+    let mut v = serde_json::to_value(&stats)?;
+    v["recent_days"] = STORE_RECENT_DAYS.into();
+    v["docs"] = match &st.docs {
+        Some(docs) => {
+            let mut t = blob::Tally::default();
+            for d in docs.list(None)? {
+                t.add(d.size);
+            }
+            serde_json::to_value(t)?
+        }
+        None => serde_json::Value::Null,
+    };
+    ok(200, &v)
+}
+
 /// `/api/docs` routes (the token was checked: doc reads are private too).
 fn doc_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
     let docs = st
@@ -1586,6 +1618,9 @@ fn route(st: &State, req: &Request) -> Result<Response> {
     }
     if path.get(1) == Some(&"docs") && path[0] == "api" {
         return doc_route(st, req, &path);
+    }
+    if req.method == "GET" && path == ["api", "store", "stats"] {
+        return store_stats(st);
     }
     if path.get(1) == Some(&"goals") && path[0] == "api" {
         if let Some(r) = goal_route(st, req, &path)? {

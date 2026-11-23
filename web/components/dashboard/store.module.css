@@ -196,3 +196,17 @@
   color: var(--text-tertiary);
   white-space: nowrap;
 }
+.statTypes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.statTypes li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -58,7 +58,7 @@ async function mockStore(page: Page, read: boolean) {
       store.read = false;
       return json({ read: false });
     }
-    if (p.startsWith("/api/blobs") || p.startsWith("/api/docs")) {
+    if (p.startsWith("/api/blobs") || p.startsWith("/api/docs") || p.startsWith("/api/store")) {
       if (!store.read) return json({ error: "unauthorized" }, 401);
       const signedLink = p.match(/^\/api\/blobs\/([0-9a-f]{64})\/link$/);
       if (signedLink && req.method() === "POST") {
@@ -83,6 +83,21 @@ async function mockStore(page: Page, read: boolean) {
           { path: "harvis/docs/reference/brand-guide.md", size: 120, version: "c".repeat(40), updated_at: "2026-11-10T00:00:00+00:00" },
           { path: "skills/axe/SKILL.md", size: 900, version: "d".repeat(40), updated_at: "2026-11-11T00:00:00+00:00" },
         ]);
+      if (p === "/api/store/stats")
+        // Sums over the whole store, more than the three listed rows.
+        return json({
+          total: { count: 1862, bytes: 360 * 1024 * 1024 },
+          recent: { count: 41, bytes: 12 * 1024 * 1024 },
+          recent_days: 7,
+          recent_since: "2026-11-16T00:00:00Z",
+          types: [
+            { content_type: "image/png", count: 700, bytes: 200 * 1024 * 1024 },
+            { content_type: "video/webm", count: 60, bytes: 90 * 1024 * 1024 },
+          ],
+          other_types: { count: 1102, bytes: 70 * 1024 * 1024 },
+          unreferenced: { count: 15, bytes: 2048 },
+          docs: { count: 2, bytes: 1020 },
+        });
       if (p === "/api/docs/attachments")
         return json([{ scope: "label:harvis", path: "harvis/docs/reference/brand-guide.md", exists: true }]);
       if (p === "/api/docs/file")
@@ -188,6 +203,16 @@ test("the store page lists, searches and opens blobs and docs", async ({ page })
   await unlock.getByRole("button", { name: "Unlock" }).click();
   const blobsTable = page.getByRole("table", { name: "Blobs" });
   await expect(blobsTable.locator("tbody tr")).toHaveCount(3);
+  // The stats row shows the server's sums, not the listed rows.
+  const stats = page.getByRole("region", { name: "Store stats" });
+  await expect(stats).toContainText("360 MiB");
+  await expect(stats).toContainText("1,862 blobs");
+  await expect(stats).toContainText("Added in 7 days");
+  await expect(stats).toContainText("41 blobs");
+  await expect(stats).toContainText("image/png 200 MiB");
+  await expect(stats).toContainText("other 70 MiB");
+  await expect(stats).toContainText("2.0 KiB no task event links");
+  await expect(stats.getByText("Docs", { exact: true })).toBeVisible();
   // Newest first.
   await expect(blobsTable.locator("tbody tr").first()).toContainText("dufs-artifact-map.tsv");
   await page.getByLabel("Search blobs").fill("#1241");
