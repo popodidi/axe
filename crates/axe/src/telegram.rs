@@ -245,9 +245,20 @@ impl Api {
     }
 }
 
+impl TgBot {
+    /// The axe bot this Telegram bot talks for.
+    pub fn name(&self) -> String {
+        self.bound.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 /// One configured Telegram bot.
 pub struct TgBot {
-    pub name: String,
+    /// Its `[[telegram.bot]] name` in the server config.
+    config: String,
+    /// The axe bot it talks for: the config name, or the bot's current name
+    /// after a rename ([`Gateway::bind`], [`Gateway::renamed`]).
+    bound: std::sync::RwLock<String>,
     pub chats: Vec<i64>,
     api: Api,
     /// Per-chat outbound pacing: the earliest next send.
@@ -419,7 +430,7 @@ fn poll_recovered(b: &TgBot, store: &dyn Store, id: i64, since: i64, polls: u32,
     let secs = now() - since;
     eprintln!(
         "telegram: bot {}: getUpdates recovered after {polls} failed polls over {secs}s (since {})",
-        b.name,
+        b.name(),
         bot::ts(since)
     );
     if secs < min_secs as i64 {
@@ -433,7 +444,7 @@ fn poll_recovered(b: &TgBot, store: &dyn Store, id: i64, since: i64, polls: u32,
         "poll_recovered",
         &body.to_string(),
     ) {
-        eprintln!("telegram: bot {}: poll_recovered event: {e:#}", b.name);
+        eprintln!("telegram: bot {}: poll_recovered event: {e:#}", b.name());
     }
 }
 
@@ -465,7 +476,8 @@ impl Gateway {
             bots.insert(
                 b.name.clone(),
                 Arc::new(TgBot {
-                    name: b.name.clone(),
+                    config: b.name.clone(),
+                    bound: std::sync::RwLock::new(b.name.clone()),
                     chats: b.chats.clone(),
                     api: Api::new(&cfg.api_base, &token, cfg.poll_timeout),
                     queues: Mutex::new(HashMap::new()),
@@ -502,16 +514,48 @@ impl Gateway {
         }
     }
 
+    /// The Telegram bot that talks for axe bot `name`; also found by its
+    /// config name, which a renamed bot's config may still hold.
     pub fn bot(&self, name: &str) -> Result<&Arc<TgBot>> {
         self.bots
-            .get(name)
+            .values()
+            .find(|b| b.name() == name)
+            .or_else(|| self.bots.get(name))
             .with_context(|| format!("telegram is not configured for bot {name}"))
     }
 
+    /// The axe bots the gateway talks for.
     pub fn names(&self) -> Vec<String> {
-        let mut n: Vec<String> = self.bots.keys().cloned().collect();
+        let mut n: Vec<String> = self.bots.values().map(|b| b.name()).collect();
         n.sort();
         n
+    }
+
+    /// Binds each configured bot to the axe bot its config name stands for
+    /// (`bot::bound_name`): a bot renamed since the config was written keeps
+    /// its Telegram bot until the config names it anew.
+    pub fn bind(&self, conn: &Connection) {
+        for b in self.bots.values() {
+            match bot::bound_name(conn, &b.config) {
+                Ok(Some(name)) if name != b.config => {
+                    eprintln!(
+                        "telegram: bot {}: bound to axe bot {name} (renamed); the config may name it {name}",
+                        b.config
+                    );
+                    *b.bound.write().unwrap_or_else(|e| e.into_inner()) = name;
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("telegram: bot {}: bind: {e:#}", b.config),
+            }
+        }
+    }
+
+    /// Re-binds the Telegram bot of axe bot `old`, just renamed to `new`.
+    /// Returns its config name, if the gateway has one for it.
+    pub fn renamed(&self, old: &str, new: &str) -> Option<String> {
+        let b = self.bots.values().find(|b| b.name() == old)?;
+        *b.bound.write().unwrap_or_else(|e| e.into_inner()) = new.to_string();
+        Some(b.config.clone())
     }
 
     /// Starts one poller, one typing and one board thread per bot.
@@ -608,7 +652,7 @@ impl Gateway {
         // (first failure, failed polls) since the last successful getUpdates.
         let mut outage: Option<(i64, u32)> = None;
         while !store.stopping() {
-            let id = bot_id(&store.conn(), &b.name).ok();
+            let id = bot_id(&store.conn(), &b.name()).ok();
             let Some(id) = id else {
                 // Updates wait up to 24 h on Telegram until the bot exists.
                 std::thread::sleep(Duration::from_secs(1));
@@ -627,7 +671,7 @@ impl Gateway {
                 started = true;
             }
             if let Err(e) = self.attention_alerts(b, store, id, &mut last_attention) {
-                eprintln!("telegram: bot {}: attention alerts: {e:#}", b.name);
+                eprintln!("telegram: bot {}: attention alerts: {e:#}", b.name());
             }
             let mut params =
                 json!({"timeout": self.poll_timeout, "allowed_updates": ALLOWED_UPDATES});
@@ -642,7 +686,7 @@ impl Gateway {
                     u
                 }
                 Err(e) => {
-                    eprintln!("telegram: bot {}: {e}", b.name);
+                    eprintln!("telegram: bot {}: {e}", b.name());
                     outage.get_or_insert((now(), 0)).1 += 1;
                     std::thread::sleep(Duration::from_secs(
                         e.retry_after.unwrap_or(3).min(MAX_RETRY_AFTER),
@@ -663,7 +707,7 @@ impl Gateway {
                         *n += 1;
                         eprintln!(
                             "telegram: bot {}: update {uid} (attempt {n}): {e:#}",
-                            b.name
+                            b.name()
                         );
                         if *n < UPDATE_ATTEMPTS {
                             // Not confirmed: Telegram redelivers it on the next poll.
@@ -698,12 +742,12 @@ impl Gateway {
                     eprintln!(
                         "telegram: bot {} (@{}) can join groups but no group is allowlisted; \
                          disable it with BotFather /setjoingroups",
-                        b.name,
+                        b.name(),
                         me["username"].as_str().unwrap_or("?")
                     );
                 }
             }
-            Err(e) => eprintln!("telegram: bot {}: {e}", b.name),
+            Err(e) => eprintln!("telegram: bot {}: {e}", b.name()),
         }
     }
 
@@ -724,7 +768,7 @@ impl Gateway {
             *last = *max;
         }
         for (_, body) in events {
-            self.notify_owner(b, store, &format!("axe bot {}: {body}", b.name));
+            self.notify_owner(b, store, &format!("axe bot {}: {body}", b.name()));
         }
         Ok(())
     }
@@ -736,7 +780,7 @@ impl Gateway {
             Ok(sent) => {
                 if let Err(e) = record_out(
                     store,
-                    &b.name,
+                    &b.name(),
                     &sent,
                     "text",
                     text,
@@ -744,10 +788,10 @@ impl Gateway {
                     json!([]),
                     json!({"system": true}),
                 ) {
-                    eprintln!("telegram: bot {}: record alert: {e:#}", b.name);
+                    eprintln!("telegram: bot {}: record alert: {e:#}", b.name());
                 }
             }
-            Err(e) => eprintln!("telegram: bot {}: alert: {e}", b.name),
+            Err(e) => eprintln!("telegram: bot {}: alert: {e}", b.name()),
         }
     }
 
@@ -764,7 +808,7 @@ impl Gateway {
     ) -> Result<()> {
         {
             let conn = store.conn();
-            let id = bot_id(&conn, &b.name)?;
+            let id = bot_id(&conn, &b.name())?;
             bot::event(
                 &conn,
                 id,
@@ -796,7 +840,7 @@ impl Gateway {
                 &format!(
                     "axe bot {}: dropped a Telegram {kind} from {who} in {chat} ({reason}). \
                      Later drops from this source are only logged (`axe bot log`).",
-                    b.name
+                    b.name()
                 ),
             );
         }
@@ -879,7 +923,7 @@ impl Gateway {
         }
         let (dup, msg) = {
             let mut conn = store.conn();
-            let id = bot_id(&conn, &b.name)?;
+            let id = bot_id(&conn, &b.name())?;
             let edit_of = if edit {
                 local_id(&conn, id, chat, tg_id)?
             } else {
@@ -910,7 +954,7 @@ impl Gateway {
                 .is_some();
             let (msg, _) = bot::record_message(
                 &mut conn,
-                &b.name,
+                &b.name(),
                 &NewMessage {
                     direction: "in".into(),
                     chat_id: chat,
@@ -938,7 +982,7 @@ impl Gateway {
                     &json!({"chat_id":chat,"message_id":tg_id,"reaction":[{"type":"emoji","emoji":ACK_EMOJI}]}),
                 );
                 if let Err(e) = r {
-                    eprintln!("telegram: bot {}: ack #{msg}: {e}", b.name);
+                    eprintln!("telegram: bot {}: ack #{msg}: {e}", b.name());
                 }
             }
             b.typing(chat, m["message_thread_id"].as_i64());
@@ -973,12 +1017,14 @@ impl Gateway {
         }
         let (target, answered) = {
             let mut conn = store.conn();
-            let id = bot_id(&conn, &b.name)?;
+            let id = bot_id(&conn, &b.name())?;
             let target = match tg_msg {
                 Some(t) => local_id(&conn, id, chat, t)?,
                 None => None,
             };
-            let stored = target.map(|t| get_message(&conn, &b.name, t)).transpose()?;
+            let stored = target
+                .map(|t| get_message(&conn, &b.name(), t))
+                .transpose()?;
             // A later press on an answered keyboard is not a new wake.
             let answered = stored.as_ref().is_some_and(|m| {
                 !m.flags["answered"].is_null() && m.flags["answered"]["update"] != uid
@@ -986,7 +1032,7 @@ impl Gateway {
             if !answered {
                 bot::record_message(
                     &mut conn,
-                    &b.name,
+                    &b.name(),
                     &NewMessage {
                         direction: "in".into(),
                         chat_id: chat,
@@ -1029,7 +1075,7 @@ impl Gateway {
                 &json!({"callback_query_id": qid, "text": text}),
             );
             if let Err(e) = r {
-                eprintln!("telegram: bot {}: {e}", b.name);
+                eprintln!("telegram: bot {}: {e}", b.name());
             }
         }
         if answered {
@@ -1059,9 +1105,9 @@ impl Gateway {
         }
         let stored = {
             let conn = store.conn();
-            let id = bot_id(&conn, &b.name)?;
+            let id = bot_id(&conn, &b.name())?;
             match local_id(&conn, id, chat, tg_msg)? {
-                Some(l) => Some(get_message(&conn, &b.name, l)?),
+                Some(l) => Some(get_message(&conn, &b.name(), l)?),
                 None => None,
             }
         };
@@ -1078,7 +1124,7 @@ impl Gateway {
                 .api
                 .call("answerCallbackQuery", &json!({"callback_query_id": qid}))
             {
-                eprintln!("telegram: bot {}: {e}", b.name);
+                eprintln!("telegram: bot {}: {e}", b.name());
             }
         }
         let thread = None;
@@ -1120,7 +1166,7 @@ impl Gateway {
             }
             Some(Some((name, method))) => {
                 let text = store
-                    .runtime_login(&b.name, name, method)
+                    .runtime_login(&b.name(), name, method)
                     .unwrap_or_else(|e| format!("Login of runtime {name} not started: {e:#}"));
                 self.system_say(b, store, chat, tg_msg, &text, &[], &[], json!({}));
             }
@@ -1170,7 +1216,7 @@ impl Gateway {
             Ok(sent) => {
                 let r = record_out(
                     store,
-                    &b.name,
+                    &b.name(),
                     &sent,
                     "text",
                     &text,
@@ -1179,10 +1225,10 @@ impl Gateway {
                     json!({"system": true, "runtimes_list": true}),
                 );
                 if let Err(e) = r {
-                    eprintln!("telegram: bot {}: record runtimes reply: {e:#}", b.name);
+                    eprintln!("telegram: bot {}: record runtimes reply: {e:#}", b.name());
                 }
             }
-            Err(e) => eprintln!("telegram: bot {}: runtimes reply: {e}", b.name),
+            Err(e) => eprintln!("telegram: bot {}: runtimes reply: {e}", b.name()),
         }
     }
 
@@ -1211,13 +1257,20 @@ impl Gateway {
         }
         match b.paced(chat, || b.api.call("sendMessage", &p)) {
             Ok(sent) => {
-                if let Err(e) =
-                    record_out(store, &b.name, &sent, "text", text, None, json!([]), flags)
-                {
-                    eprintln!("telegram: bot {}: record reply: {e:#}", b.name);
+                if let Err(e) = record_out(
+                    store,
+                    &b.name(),
+                    &sent,
+                    "text",
+                    text,
+                    None,
+                    json!([]),
+                    flags,
+                ) {
+                    eprintln!("telegram: bot {}: record reply: {e:#}", b.name());
                 }
             }
-            Err(e) => eprintln!("telegram: bot {}: reply: {e}", b.name),
+            Err(e) => eprintln!("telegram: bot {}: reply: {e}", b.name()),
         }
     }
 
@@ -1255,7 +1308,7 @@ impl Gateway {
         let (text, open) = match &outcome {
             Ok(f) => (
                 crate::form::outcome_text(f),
-                store.form_close(&f.spec.form, &b.name, chat),
+                store.form_close(&f.spec.form, &b.name(), chat),
             ),
             Err(e) => (format!("Sealed form reply refused: {e:#}."), None),
         };
@@ -1286,7 +1339,7 @@ impl Gateway {
             Ok(sent) => {
                 let r = record_out(
                     store,
-                    &b.name,
+                    &b.name(),
                     &sent,
                     "text",
                     text,
@@ -1295,10 +1348,10 @@ impl Gateway {
                     json!({"system": true}),
                 );
                 if let Err(e) = r {
-                    eprintln!("telegram: bot {}: record form reply: {e:#}", b.name);
+                    eprintln!("telegram: bot {}: record form reply: {e:#}", b.name());
                 }
             }
-            Err(e) => eprintln!("telegram: bot {}: form reply: {e}", b.name),
+            Err(e) => eprintln!("telegram: bot {}: form reply: {e}", b.name()),
         }
     }
 
@@ -1418,7 +1471,12 @@ impl Gateway {
     /// Sends the owner one card for a runtime alert (`runtime::Alert`) from
     /// the ops bot, in the owner's private chat when the bot may write there.
     pub fn runtime_alert(&self, store: &dyn Store, a: &Value) -> Result<Value> {
-        let Some(name) = self.ops.clone() else {
+        let Some(name) = self
+            .ops
+            .as_deref()
+            .and_then(|o| self.bot(o).ok())
+            .map(|b| b.name())
+        else {
             return Ok(json!({"sent": false, "reason": "no telegram bot to send runtime cards"}));
         };
         // The bot exists once it was created; until then the dispatcher retries.
@@ -1461,9 +1519,9 @@ impl Gateway {
     ) -> Result<bool> {
         let stored = {
             let conn = store.conn();
-            let id = bot_id(&conn, &b.name)?;
+            let id = bot_id(&conn, &b.name())?;
             match local_id(&conn, id, chat, tg_msg)? {
-                Some(m) => get_message(&conn, &b.name, m)?,
+                Some(m) => get_message(&conn, &b.name(), m)?,
                 None => return Ok(false),
             }
         };
@@ -1483,9 +1541,9 @@ impl Gateway {
             // Closes the card: no keyboard, so it is not open, and the inbox
             // pass unpins it if it was pinned. Its asks stay as they are.
             let text =
-                ask::dismissed_retro(&items, &ask::ratings(&store.conn(), &ids)?, Some(&b.name));
-            if let Err(e) = self.edit(store, &b.name, stored.id, Some(&text), false, None, &[]) {
-                eprintln!("telegram: bot {}: retro card: {e:#}", b.name);
+                ask::dismissed_retro(&items, &ask::ratings(&store.conn(), &ids)?, Some(&b.name()));
+            if let Err(e) = self.edit(store, &b.name(), stored.id, Some(&text), false, None, &[]) {
+                eprintln!("telegram: bot {}: retro card: {e:#}", b.name());
             }
             set_flag(store, stored.id, "$.dismissed", json!(true))?;
             store.changed();
@@ -1523,18 +1581,18 @@ impl Gateway {
                 more,
                 &ask::ratings(&store.conn(), &ids)?,
                 page,
-                Some(&b.name),
+                Some(&b.name()),
             );
             if let Err(e) = self.edit(
                 store,
-                &b.name,
+                &b.name(),
                 stored.id,
                 Some(&r.text),
                 false,
                 Some(&r.buttons),
                 &r.rows,
             ) {
-                eprintln!("telegram: bot {}: retro card: {e:#}", b.name);
+                eprintln!("telegram: bot {}: retro card: {e:#}", b.name());
             }
         }
         self.toast(b, query, &toast);
@@ -1550,7 +1608,7 @@ impl Gateway {
                 &json!({"callback_query_id": qid, "text": truncate(text, TOAST_LIMIT)}),
             );
             if let Err(e) = r {
-                eprintln!("telegram: bot {}: {e}", b.name);
+                eprintln!("telegram: bot {}: {e}", b.name());
             }
         }
     }
@@ -1570,7 +1628,11 @@ impl Gateway {
             now(),
             &ask::RetroScope {
                 bot: Some(name),
-                home: self.retro_home.as_deref() == Some(name),
+                home: self
+                    .retro_home
+                    .as_deref()
+                    .and_then(|h| self.bot(h).ok())
+                    .is_some_and(|b| b.name() == name),
                 senders: &senders,
                 limit,
             },
@@ -1636,13 +1698,13 @@ impl Gateway {
                 }
                 match b.api.call("editMessageText", &p) {
                     Ok(_) => return,
-                    Err(e) => eprintln!("telegram: bot {}: {e}", b.name),
+                    Err(e) => eprintln!("telegram: bot {}: {e}", b.name()),
                 }
             }
         }
         let p = json!({"chat_id": chat, "message_id": tg_msg, "reply_markup": none});
         if let Err(e) = b.api.call("editMessageReplyMarkup", &p) {
-            eprintln!("telegram: bot {}: {e}", b.name);
+            eprintln!("telegram: bot {}: {e}", b.name());
         }
     }
 
@@ -1659,7 +1721,7 @@ impl Gateway {
                 Some(c) => match b.api.call("leaveChat", &json!({"chat_id": c})) {
                     Ok(_) => "added to a chat that is not allowlisted; left it",
                     Err(e) => {
-                        eprintln!("telegram: bot {}: {e}", b.name);
+                        eprintln!("telegram: bot {}: {e}", b.name());
                         "added to a chat that is not allowlisted; leaveChat failed"
                     }
                 },
@@ -1703,14 +1765,14 @@ impl Gateway {
         }
         {
             let mut conn = store.conn();
-            let id = bot_id(&conn, &b.name)?;
+            let id = bot_id(&conn, &b.name())?;
             let target = match r["message_id"].as_i64() {
                 Some(t) => local_id(&conn, id, chat, t)?,
                 None => None,
             };
             bot::record_message(
                 &mut conn,
-                &b.name,
+                &b.name(),
                 &NewMessage {
                     direction: "in".into(),
                     chat_id: chat,
@@ -1750,21 +1812,20 @@ impl Gateway {
         let reply = {
             let mut conn = store.conn();
             let r = match cmd {
-                "status" => status(&conn, &b.name),
+                "status" => status(&conn, &b.name()),
                 "runtimes" => Ok(crate::runtime::render(&store.runtimes())),
-                "stop" => bot::change(&mut conn, &actor, &b.name, "stop")
+                "stop" => bot::change(&mut conn, &actor, &b.name(), "stop")
                     .map(|_| "stopping the live run; queued wakes are kept".to_string()),
-                "pause" => bot::change(&mut conn, &actor, &b.name, "pause")
+                "pause" => bot::change(&mut conn, &actor, &b.name(), "pause")
                     .map(|_| "paused: no new wakes; a live run is stopped".to_string()),
-                "resume" => {
-                    bot::change(&mut conn, &actor, &b.name, "resume").map(|_| "resumed".to_string())
-                }
-                "reset" => bot::change(&mut conn, &actor, &b.name, "reset")
+                "resume" => bot::change(&mut conn, &actor, &b.name(), "resume")
+                    .map(|_| "resumed".to_string()),
+                "reset" => bot::change(&mut conn, &actor, &b.name(), "reset")
                     .map(|_| "session cleared; the next run starts fresh".to_string()),
                 _ => {
                     let note = if arg.is_empty() { "owner /wake" } else { arg };
                     let key = format!("tg-update-{uid}");
-                    bot::add_wake(&mut conn, &actor, &b.name, now(), note, Some(&key), now())
+                    bot::add_wake(&mut conn, &actor, &b.name(), now(), note, Some(&key), now())
                         .map(|(w, _)| format!("wake {w} queued"))
                 }
             };
@@ -1783,7 +1844,7 @@ impl Gateway {
             Ok(sent) => {
                 if let Err(e) = record_out(
                     store,
-                    &b.name,
+                    &b.name(),
                     &sent,
                     "text",
                     &reply,
@@ -1791,10 +1852,10 @@ impl Gateway {
                     json!([]),
                     json!({"system": true}),
                 ) {
-                    eprintln!("telegram: bot {}: record /{cmd} reply: {e:#}", b.name);
+                    eprintln!("telegram: bot {}: record /{cmd} reply: {e:#}", b.name());
                 }
             }
-            Err(e) => eprintln!("telegram: bot {}: /{cmd} reply: {e}", b.name),
+            Err(e) => eprintln!("telegram: bot {}: /{cmd} reply: {e}", b.name()),
         }
         Ok(())
     }
@@ -1810,7 +1871,7 @@ impl Gateway {
     ) -> Result<(i64, Option<StoredMessage>)> {
         let conn = store.conn();
         let reply = reply_to
-            .map(|r| get_message(&conn, &b.name, r))
+            .map(|r| get_message(&conn, &b.name(), r))
             .transpose()?;
         if let Some(r) = &reply {
             if r.kind == "edit" || r.kind == "button" || r.kind == "reaction" {
@@ -1831,7 +1892,7 @@ impl Gateway {
             (Some(c), _) => c,
             (None, Some(r)) => r.chat_id,
             (None, None) => {
-                let id = bot_id(&conn, &b.name)?;
+                let id = bot_id(&conn, &b.name())?;
                 conn.query_row(
                     "SELECT chat_id FROM bot_messages WHERE bot_id=?1 AND direction='in' ORDER BY id DESC LIMIT 1",
                     [id],
@@ -1985,7 +2046,7 @@ impl Gateway {
     }
 
     fn own_message(&self, b: &TgBot, store: &dyn Store, msg: i64) -> Result<StoredMessage> {
-        let m = get_message(&store.conn(), &b.name, msg)?;
+        let m = get_message(&store.conn(), &b.name(), msg)?;
         if m.kind == "edit" || m.kind == "button" || m.kind == "reaction" {
             bail!("message {msg} is a {}, not a Telegram message", m.kind);
         }
@@ -2221,7 +2282,7 @@ fn typing_loop(b: &TgBot, store: &dyn Store) {
     let mut last: HashMap<(i64, Option<i64>), Instant> = HashMap::new();
     while !store.stopping() {
         // The bot may not exist yet.
-        let chats = live_chats(&store.conn(), &b.name).unwrap_or_default();
+        let chats = live_chats(&store.conn(), &b.name()).unwrap_or_default();
         last.retain(|k, _| chats.contains(k));
         for (chat, thread) in chats {
             if !b.chats.contains(&chat) {
@@ -2257,11 +2318,11 @@ fn board_loop(b: &TgBot, store: &dyn Store) {
                 backoff = Some(d);
                 eprintln!(
                     "telegram: bot {}: board: {e:#}; retrying in {}s",
-                    b.name,
+                    b.name(),
                     d.as_secs()
                 );
                 let conn = store.conn();
-                if let Ok(id) = bot_id(&conn, &b.name) {
+                if let Ok(id) = bot_id(&conn, &b.name()) {
                     let body = json!({"error": format!("{e:#}"), "retry_seconds": d.as_secs()});
                     let _ = bot::event(
                         &conn,
@@ -2298,11 +2359,11 @@ fn board_loop(b: &TgBot, store: &dyn Store) {
 /// what is left.
 fn inbox_pass(b: &TgBot, store: &dyn Store) -> Result<()> {
     let conn = store.conn();
-    if bot_id(&conn, &b.name).is_err() {
+    if bot_id(&conn, &b.name()).is_err() {
         return Ok(());
     }
-    let goal_board = goal_board::message(&conn, &b.name)?;
-    let Some(m) = board::message(&conn, &b.name)? else {
+    let goal_board = goal_board::message(&conn, &b.name())?;
+    let Some(m) = board::message(&conn, &b.name())? else {
         return Ok(());
     };
     drop(conn);
@@ -2329,7 +2390,7 @@ fn skip_refused(b: &TgBot, store: &dyn Store, step: &str, msg: i64, e: ApiError)
     let body = json!({"error": e.to_string(), "step": step, "message": msg, "skipped": true});
     bot::event(
         &conn,
-        bot_id(&conn, &b.name)?,
+        bot_id(&conn, &b.name())?,
         &Actor::new("telegram"),
         "board_error",
         &body.to_string(),
@@ -2361,7 +2422,7 @@ fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<
             params![text, g.id],
         )?;
     }
-    goal_board::set_message(&mut store.conn(), &b.name, None)?;
+    goal_board::set_message(&mut store.conn(), &b.name(), None)?;
     store.changed();
     Ok(())
 }
@@ -2372,7 +2433,7 @@ fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<
 /// [`board::fallback_card`] in the board message's chat. Open cards of tasks no
 /// longer escalated lose their keyboard (closed).
 fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Result<()> {
-    let needs = board::card_needs(&store.conn(), &b.name)?;
+    let needs = board::card_needs(&store.conn(), &b.name())?;
     let t = now();
     for n in needs {
         // The wake is due at once; its due time is when the bot was asked.
@@ -2380,7 +2441,7 @@ fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> R
         let (_, asked) = bot::add_wake(
             &mut store.conn(),
             &Actor::new("telegram"),
-            &b.name,
+            &b.name(),
             t,
             &board::card_wake_note(&n, t + board::CARD_WAIT),
             Some(&key),
@@ -2400,7 +2461,7 @@ fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> R
         let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
         let id = record_out(
             store,
-            &b.name,
+            &b.name(),
             &sent,
             "text",
             &text,
@@ -2411,15 +2472,15 @@ fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> R
         let conn = store.conn();
         bot::event(
             &conn,
-            bot_id(&conn, &b.name)?,
+            bot_id(&conn, &b.name())?,
             &Actor::new("telegram"),
             "card_fallback",
             &json!({"message": id, "task": n.task}).to_string(),
         )?;
     }
-    let stale = board::stale_task_cards(&store.conn(), &b.name)?;
+    let stale = board::stale_task_cards(&store.conn(), &b.name())?;
     for (msg, task, state) in stale {
-        let m = get_message(&store.conn(), &b.name, msg)?;
+        let m = get_message(&store.conn(), &b.name(), msg)?;
         if b.allowed(m.chat_id).is_ok() {
             let p = json!({"chat_id": m.chat_id, "message_id": m.message_id,
                 "reply_markup": {"inline_keyboard": []}});
@@ -2442,7 +2503,7 @@ fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> R
 /// the cards the server pinned once they are closed. A pin Telegram refuses
 /// (400) is logged and not retried (`flags.pin_skipped`).
 fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
-    let closed = board::closed_pins(&store.conn(), &b.name)?;
+    let closed = board::closed_pins(&store.conn(), &b.name())?;
     for m in closed {
         if m.flags["deleted"] != true && b.allowed(m.chat_id).is_ok() {
             let p = json!({"chat_id": m.chat_id, "message_id": m.message_id});
@@ -2453,9 +2514,9 @@ fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
         set_flag(store, m.id, "$.pinned", json!(false))?;
         store.changed();
     }
-    let lines = board::lines(&store.conn(), &b.name)?;
+    let lines = board::lines(&store.conn(), &b.name())?;
     for l in lines.iter().filter(|l| l.kind == "card") {
-        let m = get_message(&store.conn(), &b.name, l.id)?;
+        let m = get_message(&store.conn(), &b.name(), l.id)?;
         if m.flags["pinned"] == true || m.flags["pin_skipped"] == true {
             continue;
         }
@@ -2489,7 +2550,7 @@ fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
 fn retire_overview(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
     let mut old = vec![m.clone()];
     if let Some(from) = m.flags["board_from"].as_i64() {
-        if let Ok(f) = get_message(&store.conn(), &b.name, from) {
+        if let Ok(f) = get_message(&store.conn(), &b.name(), from) {
             old.push(f);
         }
     }
@@ -2568,8 +2629,8 @@ fn drop_goal_pin(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> 
 /// drops the pin, so the next pass posts a new one.
 fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Result<()> {
     let conn = store.conn();
-    let goals = goal_board::pinned_lines(&conn, &b.name, b.web.as_deref())?;
-    let pins = goal_board::pins(&conn, &b.name)?;
+    let goals = goal_board::pinned_lines(&conn, &b.name(), b.web.as_deref())?;
+    let pins = goal_board::pins(&conn, &b.name())?;
     drop(conn);
     let mut kept: HashMap<i64, StoredMessage> = HashMap::new();
     for m in pins {
@@ -2582,7 +2643,7 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
                 .query_row("SELECT name FROM goals WHERE id=?1", [gid], |r| r.get(0))
                 .optional()?
                 .unwrap_or_else(|| gid.to_string());
-            goal_pin_event(store, &b.name, m.id, &name, "unpinned")?;
+            goal_pin_event(store, &b.name(), m.id, &name, "unpinned")?;
             continue;
         }
         kept.insert(gid, m);
@@ -2601,7 +2662,7 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
                 let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
                 let id = record_out(
                     store,
-                    &b.name,
+                    &b.name(),
                     &sent,
                     "text",
                     &text,
@@ -2609,8 +2670,8 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
                     json!([]),
                     json!({"html": true, "goal_pin": g.id, "goal_pin_key": text}),
                 )?;
-                goal_pin_event(store, &b.name, id, &g.name, "posted")?;
-                get_message(&store.conn(), &b.name, id)?
+                goal_pin_event(store, &b.name(), id, &g.name, "posted")?;
+                get_message(&store.conn(), &b.name(), id)?
             }
         };
         if m.flags["goal_pin_key"].as_str() != Some(text.as_str()) {
@@ -2626,7 +2687,7 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
                 Err(e) if e.code == Some(400) => {
                     skip_refused(b, store, "edit goal", m.id, e)?;
                     drop_goal_pin(b, store, &m)?;
-                    goal_pin_event(store, &b.name, m.id, &g.name, "unpinned")?;
+                    goal_pin_event(store, &b.name(), m.id, &g.name, "unpinned")?;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -2635,7 +2696,7 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
                 "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.goal_pin_key',?1,'$.edited',json('true')) WHERE id=?2",
                 params![text, m.id],
             )?;
-            goal_pin_event(store, &b.name, m.id, &g.name, "edited")?;
+            goal_pin_event(store, &b.name(), m.id, &g.name, "edited")?;
         }
         if m.flags["pinned"] != true && m.flags["pin_skipped"] != true {
             if b.allowed(m.chat_id).is_err() {
@@ -2858,7 +2919,7 @@ impl TgBot {
         if !self.chats.contains(&chat) {
             return Err(Forbidden(format!(
                 "chat {chat} is not in bot {}'s Telegram allowlist",
-                self.name
+                self.name()
             ))
             .into());
         }
@@ -2872,7 +2933,7 @@ impl TgBot {
             p["message_thread_id"] = json!(t);
         }
         if let Err(e) = self.api.call("sendChatAction", &p) {
-            eprintln!("telegram: bot {}: {e}", self.name);
+            eprintln!("telegram: bot {}: {e}", self.name());
         }
     }
 

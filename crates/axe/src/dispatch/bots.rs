@@ -200,6 +200,7 @@ impl Dispatcher {
                 let (dir, r, cloned) = crate::run_workspace::build_bot(
                     &self.cfg,
                     &b.name,
+                    b.home(),
                     b.repos.as_deref().unwrap(),
                     &attached,
                     &self.store.client,
@@ -219,7 +220,10 @@ impl Dispatcher {
             Some(_) => {
                 let ready =
                     worktree::readiness(&self.cfg, &b.project).map_err(anyhow::Error::msg)?;
-                Some(worktree::allocate_dir(&ready, &format!("bot-{}", b.name))?)
+                Some(worktree::allocate_dir(
+                    &ready,
+                    &format!("bot-{}", b.home()),
+                )?)
             }
             None => None,
         };
@@ -229,7 +233,7 @@ impl Dispatcher {
         if !cwd.is_dir() {
             anyhow::bail!("project directory {} does not exist", cwd.display());
         }
-        let dir = self.cfg.log_dir().join("bots").join(&b.name);
+        let dir = self.cfg.log_dir().join("bots").join(b.home());
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let system_file = dir.join("system.md");
         let system = bot::system_prompt(b, &crate::context::bot_prompt_parts(&attached))
@@ -314,7 +318,7 @@ impl Dispatcher {
         let secrets = crate::sealed::secrets_dir(
             &self.cfg.run_root(),
             &crate::sealed::Target::Bot {
-                bot: b.name.clone(),
+                bot: b.home().to_string(),
             },
         )
         .expect("a bot has a secrets folder");

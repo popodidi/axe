@@ -76,8 +76,10 @@ pub fn build(
     Ok((dir, cloned))
 }
 
-/// The run folder of bot `name` with `repos` (non-empty): `<run_root>/bot-<name>`,
-/// laid out like a task's, each repo on branch `<branch_prefix>bot-<name>--work`.
+/// The run folder of bot `name` with `repos` (non-empty): `<run_root>/bot-<home>`,
+/// laid out like a task's, each repo on branch `<branch_prefix>bot-<home>--work`.
+/// `home` is the bot's first name (`Bot::home`), so a rename keeps the folder,
+/// its worktrees and the agent session that lives there.
 /// Worktrees persist across runs and are refreshed before each one
 /// ([`worktree::refresh`]); the outcome per repo is returned for the run's
 /// start event, with the repos cloned first. The caller guarantees the bot has no live run. The skills
@@ -87,12 +89,13 @@ pub fn build(
 pub fn build_bot(
     cfg: &Config,
     name: &str,
+    home: &str,
     repos: &[String],
     attached: &context::Resolution,
     store: &dyn context::Source,
 ) -> Result<(PathBuf, Vec<RepoRefresh>, Vec<String>)> {
-    let dir = cfg.run_root().join(format!("bot-{name}"));
-    let branch = format!("{}bot-{name}--work", branch_prefix(cfg));
+    let dir = cfg.run_root().join(format!("bot-{home}"));
+    let branch = format!("{}bot-{home}--work", branch_prefix(cfg));
     let (built, cloned) = checkout(cfg, &dir, repos, &branch)?;
     let mut refreshed = Vec::new();
     for (repo, path) in &built {

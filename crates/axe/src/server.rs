@@ -250,6 +250,7 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     #[cfg(feature = "telegram")]
     if let Some(gw) = &state.telegram {
+        gw.bind(&state.conn());
         eprintln!("axe server: telegram gateway for bots {:?}", gw.names());
         gw.start(Arc::clone(&state) as Arc<dyn channel::Store>);
     }
@@ -2451,6 +2452,34 @@ fn goal_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Respons
 }
 
 /// `/api/bots` and `/api/bot-runs` routes; `None` when the path is not a bot route.
+/// After a bot rename is stored: moves the docs attached to `owner:bot:<old>`
+/// and re-binds the Telegram gateway. Neither is part of the database
+/// transaction; a failure is reported in `warnings`, the rename stands.
+fn bot_renamed(st: &State, actor: &Actor, b: bot::Bot, moved: bot::Renamed) -> serde_json::Value {
+    let mut warnings = Vec::new();
+    let mut docs = Vec::new();
+    if let Some(store) = &st.docs {
+        let (from, to) = (
+            doc::Scope::Owner(format!("bot:{}", moved.from)),
+            doc::Scope::Owner(format!("bot:{}", moved.to)),
+        );
+        match store.move_scope(&from, &to, &actor.name) {
+            Ok(paths) => docs = paths,
+            Err(e) => warnings.push(format!(
+                "docs attached to {from} were not moved ({e:#}); attach them to {to} by hand"
+            )),
+        }
+    }
+    #[cfg(feature = "telegram")]
+    let telegram = st
+        .telegram
+        .as_ref()
+        .and_then(|gw| gw.renamed(&moved.from, &moved.to));
+    #[cfg(not(feature = "telegram"))]
+    let telegram: Option<String> = None;
+    json!({"bot": b, "moved": moved, "docs": docs, "telegram": telegram, "warnings": warnings})
+}
+
 fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response>> {
     #[derive(Deserialize)]
     struct Create {
@@ -2524,6 +2553,14 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
     #[derive(Deserialize)]
     struct ScheduleChange {
         why: String,
+        #[serde(flatten)]
+        who: Who,
+    }
+    #[derive(Deserialize)]
+    struct RenameBody {
+        to: String,
+        why: String,
+        owner_ref: Option<String>,
         #[serde(flatten)]
         who: Who,
     }
@@ -2730,6 +2767,19 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                     now,
                 )?,
             )
+        }
+        ("POST", ["api", "bots", name, "rename"]) => {
+            let b: RenameBody = req.json()?;
+            let actor = b.who.actor();
+            let (renamed, moved) = bot::rename(
+                &mut st.conn(),
+                &actor,
+                name,
+                b.to.trim(),
+                &b.why,
+                b.owner_ref.as_deref(),
+            )?;
+            ok(200, &bot_renamed(st, &actor, renamed, moved))
         }
         ("POST", ["api", "bots", name, action @ ("pause" | "resume" | "stop" | "reset")]) => {
             let who: Who = req.json()?;

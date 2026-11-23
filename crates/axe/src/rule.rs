@@ -6,7 +6,7 @@
 //! run (`dispatch.rs`). Every edit is a row in `rule_events`.
 use crate::db::{self, Actor};
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt;
@@ -365,6 +365,48 @@ fn insert(conn: &Connection, actor: &Actor, r: &NewRule, kind: &str) -> Result<i
     let id = conn.last_insert_rowid();
     audit(conn, Some(id), actor, kind, &serde_json::to_value(r)?)?;
     Ok(id)
+}
+
+/// Moves every rule that names bot `old` (`bot=old` or `owner=bot:old`) to
+/// `new`, inside the caller's transaction, each with a `bot-renamed` event.
+/// Returns how many rules changed.
+pub(crate) fn rename_bot(tx: &Transaction, actor: &Actor, old: &str, new: &str) -> Result<usize> {
+    let rows: Vec<(i64, String)> = tx
+        .prepare("SELECT id, matcher FROM rules ORDER BY id")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let (old_owner, new_owner) = (format!("bot:{old}"), format!("bot:{new}"));
+    let mut n = 0;
+    for (id, matcher) in rows {
+        let Ok(mut m) = serde_json::from_str::<Match>(&matcher) else {
+            continue;
+        };
+        let mut changed = false;
+        if m.bot.as_deref() == Some(old) {
+            m.bot = Some(new.to_string());
+            changed = true;
+        }
+        if m.owner.as_deref() == Some(old_owner.as_str()) {
+            m.owner = Some(new_owner.clone());
+            changed = true;
+        }
+        if !changed {
+            continue;
+        }
+        tx.execute(
+            "UPDATE rules SET matcher=?2 WHERE id=?1",
+            params![id, serde_json::to_string(&m)?],
+        )?;
+        audit(
+            tx,
+            Some(id),
+            actor,
+            "bot-renamed",
+            &json!({"from": old, "to": new, "matcher": m}),
+        )?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// Adds a rule and logs an `added` event.

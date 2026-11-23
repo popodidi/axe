@@ -1877,18 +1877,37 @@ fn bot_with_repos_runs_in_a_run_folder_and_an_empty_list_keeps_the_project_folde
     assert_eq!(rig.file("pwd-2").trim(), run.display().to_string());
     assert!(run.join("repos/one/scratch.txt").is_file());
 
+    // Renamed: the same run folder, worktrees and branch; the new name in it,
+    // and the skill attached to the bot moved along.
+    rig.srv
+        .ok(&["bot", "rename", "b", "nb", "--why", "clearer"]);
+    rig.srv
+        .ok(&["bot", "wake", "nb", "--now", "--note", "renamed"]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.file("pwd-3").trim(), run.display().to_string());
+    assert!(run.join("repos/one/scratch.txt").is_file());
+    assert_eq!(head_branch(&run.join("repos/one")), "axe/bot-b--work");
+    let agents = std::fs::read_to_string(run.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("# Bot nb: run folder\n"), "{agents}");
+    assert!(
+        agents.contains("- `skills/chase` (owner:bot:nb, attached): Chase issues\n"),
+        "{agents}"
+    );
+    assert!(!base.join("ws/.runs/bot-nb").exists());
+
     // Cleared: back to the project folder, as before repos existed.
     rig.srv
-        .ok(&["bot", "edit", "b", "--no-repos", "--why", "clear"]);
+        .ok(&["bot", "edit", "nb", "--no-repos", "--why", "clear"]);
     rig.srv
-        .ok(&["bot", "wake", "b", "--now", "--note", "third"]);
+        .ok(&["bot", "wake", "nb", "--now", "--note", "third"]);
     let out = rig.dispatcher(true, "exit0").wait();
     assert!(out.status.success(), "{out:?}");
     assert_eq!(
-        rig.file("pwd-3").trim(),
+        rig.file("pwd-4").trim(),
         base.join("ws/a").display().to_string()
     );
-    assert!(!rig.file("env-3").contains("AXE_WORKTREE="));
+    assert!(!rig.file("env-4").contains("AXE_WORKTREE="));
 }
 
 #[test]
@@ -2044,4 +2063,215 @@ fn edit_moves_a_bot_to_another_project_and_keeps_its_subscriptions() {
         assert!(!out.status.success(), "{bad:?} refused: {out:?}");
     }
     assert_eq!(rig.bot()["project"], "q");
+}
+
+#[test]
+fn rename_keeps_the_bot_and_moves_what_names_it() {
+    let rig = Rig::new(1);
+    rig.create(json!({}));
+    assert!(rig.dispatcher(true, "exit0").wait().status.success());
+    let session = rig.bot()["session_id"].as_str().unwrap().to_string();
+    let srv = &rig.srv;
+    let note = rig.out.join("note.md");
+    std::fs::write(&note, "attached\n").unwrap();
+    srv.ok(&["doc", "put", "bots/b.md", note.to_str().unwrap()]);
+    srv.ok(&["doc", "attach", "bots/b.md", "owner:bot:b"]);
+    srv.ok(&[
+        "bot",
+        "schedule",
+        "--bot",
+        "b",
+        "add",
+        "digest",
+        "--cron",
+        "0 9 * * *",
+        "--objective",
+        "SWEEP",
+        "--why",
+        "w",
+    ]);
+    srv.ok(&["bot", "wake", "b", "--in", "1h", "--note", "LATER"]);
+    srv.ok(&["bot", "subscribe", "b", "--why", "w"]);
+    let add = |title: &str, owner: Option<&str>| {
+        let mut args = vec!["add", "--project", "a", "--title", title, "--detail", "x"];
+        if let Some(o) = owner {
+            args.extend(["--owner", o]);
+        }
+        let out = srv.ok(&args);
+        out.split_whitespace()
+            .find_map(|w| w.trim_start_matches('#').parse::<i64>().ok())
+            .unwrap()
+            .to_string()
+    };
+    let watched = add("watched", None);
+    srv.ok(&["bot", "watch", &watched, "--bot", "b", "--why", "w"]);
+    let owned = add("owned", Some("bot:b"));
+    srv.ok(&[
+        "escalate",
+        &owned,
+        "--blocked",
+        "x",
+        "--resolver",
+        "owner: y",
+        "--resume",
+        "z",
+        "--class",
+        "decision",
+    ]);
+    srv.ok(&["ask", "rate", &format!("t{owned}.1"), "needed"]);
+    let goal = rig.out.join("goal.json");
+    std::fs::write(
+        &goal,
+        r#"{"name":"g","project":"a","intent":"i","bots":["b"]}"#,
+    )
+    .unwrap();
+    srv.ok(&["goal", "propose", "--file", goal.to_str().unwrap()]);
+    srv.ok(&["rule", "add", "--match", "bot=b", "--use", "claude-code"]);
+    let before = rig.bot();
+
+    // Refusals: a bot actor without an owner ref, an existing name, the same name.
+    let fail = |args: &[&str], actor: Option<&str>| {
+        let mut c = srv.cli(args);
+        if let Some(a) = actor {
+            c.env("AXE_ACTOR", a);
+        }
+        let out = c.output().unwrap();
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let err = fail(&["bot", "rename", "b", "b2", "--why", "w"], Some("bot:b"));
+    assert!(err.contains("--owner-ref"), "{err}");
+    let other = rig.out.join("other.json");
+    std::fs::write(&other, r#"{"name":"c","project":"a","agent":"fake"}"#).unwrap();
+    srv.ok(&["bot", "create", "--file", other.to_str().unwrap()]);
+    let err = fail(&["bot", "rename", "b", "c", "--why", "w"], None);
+    assert!(err.contains("bot c already exists"), "{err}");
+    let err = fail(&["bot", "rename", "b", "b", "--why", "w"], None);
+    assert!(err.contains("already has that name"), "{err}");
+
+    let mut c = srv.cli(&[
+        "bot",
+        "rename",
+        "b",
+        "b2",
+        "--why",
+        "clearer",
+        "--owner-ref",
+        "msg #9",
+    ]);
+    c.env("AXE_ACTOR", "bot:c");
+    let out = c.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with(
+            "bot b renamed to b2: 1 task owner(s), 1 rule(s), 0 routine(s), 1 attached doc(s) moved"
+        ),
+        "{stdout}"
+    );
+
+    // The same bot under the new name; the old name fails clearly.
+    let after = srv.get("/api/bots/b2");
+    for k in [
+        "id",
+        "session_id",
+        "identity",
+        "conduct",
+        "notes",
+        "next_wake",
+        "queued",
+        "created_at",
+    ] {
+        assert_eq!(after[k], before[k], "{k}");
+    }
+    assert_eq!(after["home"], "b");
+    let err = fail(&["bot", "show", "b"], None);
+    assert!(
+        err.contains("bot b not found: it was renamed to b2"),
+        "{err}"
+    );
+    assert_eq!(srv.ok(&["bot", "notes", "b2"]), "NOTES-TEXT\n");
+    assert!(srv
+        .ok(&["bot", "schedule", "--bot", "b2", "list"])
+        .starts_with("digest  0 9 * * *"));
+    let subs = srv.ok(&["bot", "subscriptions", "b2"]);
+    assert!(subs.starts_with("a\twake=escalated"), "{subs}");
+    assert!(subs.contains(&format!("#{watched}\twatch")), "{subs}");
+    assert_eq!(srv.get(&format!("/api/tasks/{owned}"))["owner"], "bot:b2");
+    let asks: Value =
+        serde_json::from_str(&srv.ok(&["ask", "list", "--bot", "b2", "--json"])).unwrap();
+    assert_eq!(asks[0]["id"], format!("t{owned}.1"));
+    assert_eq!(asks[0]["rating"], "needed");
+    assert_eq!(srv.get("/api/goals/g")["bots"], json!(["b2"]));
+    let rules = srv.ok(&["rule", "list"]);
+    assert!(
+        rules.contains("bot=b2") && !rules.contains("bot=b "),
+        "{rules}"
+    );
+    let attached = srv.ok(&["doc", "ls", "--scope", "owner:bot:b2"]);
+    assert!(attached.contains("bots/b.md"), "{attached}");
+    let log = srv.ok(&["bot", "log", "b2", "--limit", "5"]);
+    assert!(log.contains("bot:c rename"), "{log}");
+    assert!(
+        log.contains(r#""owner_ref":"msg #9""#) && log.contains(r#""from":"b""#),
+        "{log}"
+    );
+
+    // The old name stays reserved.
+    let again = rig.out.join("again.json");
+    std::fs::write(&again, r#"{"name":"b","project":"a","agent":"fake"}"#).unwrap();
+    let err = fail(&["bot", "create", "--file", again.to_str().unwrap()], None);
+    assert!(err.contains("was once called b"), "{err}");
+    let err = fail(&["bot", "rename", "c", "b", "--why", "w"], None);
+    assert!(err.contains("was once called b"), "{err}");
+
+    // The schedule and the wake fire for b2, resuming its session in its folder.
+    let rule_id = srv.ok(&["rule", "list", "--json"]);
+    let rule_id: Value = serde_json::from_str(&rule_id).unwrap();
+    srv.ok(&["rule", "rm", &rule_id[0]["id"].to_string()]);
+    rig.db()
+        .execute_batch(
+            "UPDATE bot_schedules SET next_at='2020-01-01T00:00:00Z';
+             UPDATE bot_wakes SET due_at='2020-01-01T00:00:00Z' WHERE body='LATER';",
+        )
+        .unwrap();
+    wait_for("the scheduled wake", 10, || {
+        srv.get("/api/bots/b2/wakes?undelivered=1")
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["actor"] == "schedule:digest")
+    });
+    assert!(rig.dispatcher(true, "exit0").wait().status.success());
+    let runs: Vec<Value> = serde_json::from_value(srv.get("/api/bot-runs?bot=b2")).unwrap();
+    let run = runs[0]["id"].to_string();
+    let prompt = rig.file(&format!("prompt-{run}"));
+    assert!(prompt.contains("[wake by schedule:digest "), "{prompt}");
+    assert!(prompt.contains("LATER"), "{prompt}");
+    assert_eq!(
+        rig.file(&format!("mode-{run}")),
+        format!("resume {session}\n")
+    );
+    assert_eq!(rig.file(&format!("pwd-{run}")), rig.file("pwd-1"));
+    let env = rig.file(&format!("env-{run}"));
+    assert!(env.lines().any(|l| l == "AXE_BOT=b2"), "{env}");
+}
+
+#[test]
+fn rename_is_refused_while_the_bot_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = db::open(&dir.path().join("axe.db")).unwrap();
+    let human = Actor::new("human");
+    bot::create(&mut conn, &human, &new_bot("r"), T0).unwrap();
+    let c = claim(&mut conn, "r", T0).unwrap();
+    let err = bot::rename(&mut conn, &human, "r", "r2", "w", None).unwrap_err();
+    assert!(format!("{err:#}").contains("is running"), "{err:#}");
+    finish(&conn, c.run, 0, T0 + 1);
+    let (b, moved) = bot::rename(&mut conn, &human, "r", "r2", "w", None).unwrap();
+    assert_eq!((b.name.as_str(), b.home()), ("r2", "r"));
+    assert_eq!(moved.tasks, 0);
+    // Renamed back: the first name keys its folders still.
+    let (b, _) = bot::rename(&mut conn, &human, "r2", "r", "w", None).unwrap();
+    assert_eq!((b.name.as_str(), b.home()), ("r", "r"));
+    assert_eq!(bot::bound_name(&conn, "r2").unwrap().as_deref(), Some("r"));
 }
