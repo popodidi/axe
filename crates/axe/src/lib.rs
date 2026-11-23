@@ -32,6 +32,7 @@ pub mod telegram;
 pub mod usage;
 #[cfg(feature = "embed-ui")]
 pub mod web;
+pub mod workspace;
 pub mod worktree;
 
 pub mod remote;

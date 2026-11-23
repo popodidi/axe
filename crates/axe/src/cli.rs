@@ -388,6 +388,33 @@ enum Cmd {
         #[command(subcommand)]
         command: ContextCmd,
     },
+    /// Build, on this machine, the folder a task's or bot's run gets
+    /// (AGENTS.md, skills/, docs/, repos/<r> worktrees), with the attached
+    /// docs in full under docs/store/. Claims nothing and records no run;
+    /// refuses an in_progress task. `axe workspace sync` writes edits to
+    /// its store-backed files back to the doc store
+    #[command(args_conflicts_with_subcommands = true)]
+    Workspace {
+        #[command(subcommand)]
+        command: Option<WorkspaceCmd>,
+        /// Task id or bot name
+        target: Option<String>,
+        /// Folder to build in (default ~/axe/task-<id> or ~/axe/bot-<name>)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCmd {
+    /// Write each edited store-backed file (attached doc, bundle or skill)
+    /// back to the store, based on the version it was built from, then
+    /// rebuild. A file the store changed since is kept, the store's copy is
+    /// written next to it as <file>.store, and sync exits non-zero
+    Sync {
+        /// The workspace (default: the one holding the current directory)
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3650,6 +3677,25 @@ pub fn run() -> Result<()> {
                     );
                 }
                 print!("{}", crate::context::explain(&res));
+            }
+        }
+        Cmd::Workspace {
+            command,
+            target,
+            dir,
+        } => {
+            let cfg = Config::load(&config::default_path()?)?;
+            match (command, target) {
+                (Some(WorkspaceCmd::Sync { dir }), _) => {
+                    let dir = crate::workspace::find(dir.as_deref())?;
+                    crate::workspace::sync(&client(), &cfg, &dir)?;
+                }
+                (None, Some(t)) => {
+                    let t = crate::workspace::Target::parse(t);
+                    let dir = crate::workspace::build(&client(), &cfg, &t, dir.as_deref())?;
+                    println!("{}", dir.display());
+                }
+                (None, None) => anyhow::bail!("name a task id or bot name, or `sync`"),
             }
         }
         Cmd::Goal { command } => run_goal(&client(), command)?,

@@ -2370,3 +2370,140 @@ fn rename_is_refused_while_the_bot_runs() {
     assert_eq!((b.name.as_str(), b.home()), ("r", "r"));
     assert_eq!(bot::bound_name(&conn, "r2").unwrap().as_deref(), Some("r"));
 }
+
+/// Each path under `dir` outside `repos/` with its content (`None` for a
+/// folder, the target for a link).
+fn files(dir: &Path) -> std::collections::BTreeMap<String, Option<String>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Option<String>>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p.strip_prefix(root).unwrap().display().to_string();
+            if rel == "repos" {
+                continue;
+            }
+            let m = std::fs::symlink_metadata(&p).unwrap();
+            if m.file_type().is_symlink() {
+                let to = std::fs::read_link(&p).unwrap().display().to_string();
+                out.insert(rel, Some(format!("-> {to}")));
+            } else if m.is_dir() {
+                out.insert(rel, None);
+                walk(root, &p, out);
+            } else {
+                out.insert(rel, Some(std::fs::read_to_string(&p).unwrap()));
+            }
+        }
+    }
+    let mut out = Default::default();
+    walk(dir, dir, &mut out);
+    out
+}
+
+#[test]
+fn local_bot_workspace_matches_its_run_folder_and_writes_its_system_prompt() {
+    let rig = Rig::new(1);
+    let base = rig._dir.path().canonicalize().unwrap();
+    for name in ["one", "two"] {
+        canonical_clone(&base, name);
+    }
+    let src = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(src.path().join("scripts")).unwrap();
+    std::fs::write(
+        src.path().join("SKILL.md"),
+        "---\nname: chase\ndescription: Chase issues\n---\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(src.path().join("scripts/chase.sh"), "#!/bin/sh\n").unwrap();
+    rig.srv
+        .ok(&["doc", "put", "skills/chase", src.path().to_str().unwrap()]);
+    rig.srv
+        .ok(&["doc", "attach", "skills/chase", "owner:bot:b"]);
+    let doc = src.path().join("plan.md");
+    std::fs::write(&doc, "# Plan\nbody\n").unwrap();
+    rig.srv
+        .ok(&["doc", "put", "notes/plan.md", doc.to_str().unwrap()]);
+    rig.srv.ok(&["doc", "attach", "notes/plan.md", "label:a"]);
+    rig.create(json!({}));
+    rig.srv
+        .ok(&["bot", "edit", "b", "--repo", "one,two", "--why", "repos"]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let run = base.join("ws/.runs/bot-b");
+    let ran = files(&run);
+    // The run's worktrees hold the bot's branch; free it for the local copy.
+    for repo in ["one", "two"] {
+        let out = std::process::Command::new("git")
+            .current_dir(base.join("ws").join(repo))
+            .args(["worktree", "remove", "--force"])
+            .arg(run.join("repos").join(repo))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    let dir = base.join("local");
+    let out = rig
+        .srv
+        .cli(&["workspace", "b", "--dir", dir.to_str().unwrap()])
+        .env("AXE_CONFIG", &rig.srv.config)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    for repo in ["one", "two"] {
+        assert_eq!(
+            head_branch(&dir.join("repos").join(repo)),
+            "axe/bot-b--work"
+        );
+    }
+    // The bot's system prompt, exactly as its run got it.
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".axe/system.md")).unwrap(),
+        rig.file("system-1")
+    );
+    let mut local = files(&dir);
+    for p in [
+        ".axe",
+        ".axe/system.md",
+        ".axe/manifest.json",
+        "docs/store",
+        "docs/store/notes",
+    ] {
+        assert!(local.remove(p).is_some(), "{p}");
+    }
+    assert_eq!(
+        local.remove("docs/store/notes/plan.md").unwrap().unwrap(),
+        "# Plan\nbody\n"
+    );
+    // The same layout; only the generated headers and the docs held in full
+    // differ.
+    let agents = local.remove("AGENTS.md").unwrap().unwrap();
+    let docs = local.remove("docs/index.md").unwrap().unwrap();
+    let mut ran = ran;
+    let ran_agents = ran.remove("AGENTS.md").unwrap().unwrap();
+    let ran_docs = ran.remove("docs/index.md").unwrap().unwrap();
+    assert_eq!(local, ran);
+    let body = |s: &str| s.split_once("\n\n- Repos:").unwrap().1.to_string();
+    assert_eq!(body(&agents), body(&ran_agents));
+    assert!(agents.starts_with("# Bot b: local workspace\n"), "{agents}");
+    assert!(agents.contains("`.axe/system.md`"), "{agents}");
+    assert!(agents.contains("not as the bot"), "{agents}");
+    let (head, attached) = docs.split_once("\n## Attached\n").unwrap();
+    assert_eq!(
+        head.split_once("\n\n")
+            .unwrap()
+            .1
+            .split_once('\n')
+            .unwrap()
+            .1,
+        ran_docs
+            .split_once("\n\n")
+            .unwrap()
+            .1
+            .split_once('\n')
+            .unwrap()
+            .1
+    );
+    assert!(
+        attached.contains("- doc [`notes/plan.md`](store/notes/plan.md) (label:a): Plan\n"),
+        "{attached}"
+    );
+}
