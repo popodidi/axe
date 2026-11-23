@@ -307,17 +307,14 @@ fn stats_give_wasted_share_per_bot_and_week() {
     );
     assert!(r.text.ends_with("\nBy kind: decisions 2"), "{}", r.text);
     assert_eq!(r.rows, [3, 3, 1], "a row of ratings per ask, then Dismiss");
-    // Bot a's retro has its own ask only; the home bot's has the bot-less one.
-    let senders = vec!["a".to_string(), "b".to_string()];
-    let mine = |bot: &str, home: bool| {
+    // Bot a's retro has its own ask only; no bot's card has the bot-less one.
+    let mine = |bot: &str| {
         ask::retro(
             &c,
             end,
             &RetroScope {
                 bot: Some(bot),
-                home,
-                senders: &senders,
-                limit: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -326,9 +323,8 @@ fn stats_give_wasted_share_per_bot_and_week() {
         .map(|i| i.ask)
         .collect::<Vec<_>>()
     };
-    assert_eq!(mine("a", false), [format!("t{}.1", ids[4])]);
-    assert!(mine("b", false).is_empty());
-    assert_eq!(mine("b", true), [format!("t{none}.1")]);
+    assert_eq!(mine("a"), [format!("t{}.1", ids[4])]);
+    assert!(mine("b").is_empty());
     // Per kind too.
     assert_eq!(s.kinds["decision"].total.asks, 6);
     assert_eq!(s.kinds["other"].total.wasted_share, Some(1.0));
@@ -370,12 +366,10 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
         "A's question?",
         json!({"buttons": [["Y","y"],["N","n"]], "ask": true}),
     );
-    let senders = vec!["a".to_string(), "b".to_string()];
     let scope = RetroScope {
         bot: Some("a"),
-        home: false,
-        senders: &senders,
         limit: Some(20),
+        ..Default::default()
     };
     let r = ask::retro(&c, now() + 1, &scope).unwrap();
     assert_eq!(r.items.len(), 14);
@@ -420,7 +414,7 @@ fn a_bots_retro_holds_only_its_asks_two_lines_each_paged() {
         r.text
     );
     assert!(r.text.encode_utf16().count() < 4096);
-    let page2 = ask::render_retro(&r.items, r.more, &Default::default(), 1, Some("a"));
+    let page2 = ask::render_retro(&r.items, r.more, &Default::default(), 1, Some("a"), 7 * DAY);
     assert!(page2.text.contains("page 2/2") && page2.text.contains(&format!("\n14. msg {card}: ")));
     assert_eq!(page2.rows, [3, 3, 3, 3, 1, 1], "prev only, then Dismiss");
 }
@@ -469,12 +463,10 @@ fn a_retro_holds_the_ten_most_useful_asks_one_per_task() {
         yn.clone(),
     );
     let total = 14 + 2 + 3 + 2 + 1 + 1;
-    let senders = vec!["a".to_string(), "b".to_string()];
     let scope = |limit| RetroScope {
         bot: Some("a"),
-        home: false,
-        senders: &senders,
         limit,
+        ..Default::default()
     };
     let task_of = |ask: &str| -> Option<i64> {
         let id = ask.strip_prefix('t')?;
@@ -554,7 +546,14 @@ fn a_retro_holds_the_ten_most_useful_asks_one_per_task() {
         .all(|a| a.starts_with('m') || task_of(a).is_some_and(|t| stuck.contains(&t))));
     // Every page fits a Telegram message.
     for page in 0..ids.len().div_ceil(ask::RETRO_PAGE) {
-        let p = ask::render_retro(&r.items, r.more, &Default::default(), page, Some("a"));
+        let p = ask::render_retro(
+            &r.items,
+            r.more,
+            &Default::default(),
+            page,
+            Some("a"),
+            7 * DAY,
+        );
         assert!(p.text.encode_utf16().count() < 4096, "{}", p.text);
     }
     // The same store gives the same card.
@@ -902,12 +901,10 @@ fn recs_are_stored_apart_accepted_per_page_and_overridden() {
     .unwrap();
 
     // The retro card carries the recs and marks them.
-    let senders = vec!["a".to_string(), "b".to_string()];
     let scope = RetroScope {
         bot: Some("a"),
-        home: false,
-        senders: &senders,
         limit: Some(20),
+        ..Default::default()
     };
     let r = ask::retro(&c, now() + 1, &scope).unwrap();
     assert_eq!(r.items.len(), 13);
@@ -964,6 +961,7 @@ fn recs_are_stored_apart_accepted_per_page_and_overridden() {
         &ask::ratings(&c, &ids).unwrap(),
         0,
         Some("a"),
+        7 * DAY,
     );
     assert!(shown.buttons.iter().all(|b| b.0 != ask::ACCEPT_LABEL));
 
@@ -1078,4 +1076,148 @@ fn cli_recommends_one_or_many() {
     let v: Value = serde_json::from_str(&srv.ok(&["ask", "stats", "--since", "7d"])).unwrap();
     assert_eq!(v["overall"]["recommended"], 2);
     assert_eq!(v["overall"]["rated"], 0);
+}
+
+#[test]
+fn a_card_its_bot_settled_without_a_press_is_not_an_ask() {
+    let (_d, mut c) = setup();
+    // Closed with `tg edit --clear-buttons "Decided: ..."`: buttons gone,
+    // never pressed. Its rating, given while open, drops out too.
+    let decided = message(
+        &mut c,
+        "a",
+        1,
+        "Merge #5?",
+        json!({"ask": true, "buttons": [["Y","y"]]}),
+    );
+    ask::rate(&mut c, &owner(), &format!("m{decided}"), "should_not_exist").unwrap();
+    let settle = |c: &Connection, id: i64, text: &str| {
+        c.execute(
+            "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.buttons') WHERE id=?2",
+            params![text, id],
+        )
+        .unwrap();
+    };
+    settle(&c, decided, "Decided: merged #5 myself");
+    let closed = message(
+        &mut c,
+        "a",
+        2,
+        "Retry #6?",
+        json!({"ask": true, "buttons": [["Y","y"]]}),
+    );
+    settle(&c, closed, "Closed: superseded by #7");
+    // Pressed, then edited "Decided:": still an ask.
+    let pressed = message(
+        &mut c,
+        "a",
+        3,
+        "Deploy #8?",
+        json!({"ask": true, "buttons": [["Y","y"]]}),
+    );
+    c.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,'$.answered',json('{\"label\":\"Y\",\"data\":\"y\",\"update\":1}')) WHERE id=?1",
+        [pressed],
+    )
+    .unwrap();
+    settle(&c, pressed, "Decided: deploying #8");
+    // Sent with "Decided:" text and live buttons: still an ask.
+    let live = message(
+        &mut c,
+        "a",
+        4,
+        "Decided: X unless you object",
+        json!({"ask": true, "buttons": [["Object","o"]]}),
+    );
+    let ids: Vec<String> = all(&c).into_iter().map(|a| a.id).collect();
+    assert_eq!(ids, [format!("m{pressed}"), format!("m{live}")]);
+    // It cannot be rated any more.
+    let e = ask::rate(&mut c, &owner(), &format!("m{closed}"), "needed").unwrap_err();
+    assert!(format!("{e:#}").contains("settled"), "{e:#}");
+    // Not in stats either: the earlier rating is gone with its ask.
+    let s = ask::stats(&c, None, now() - DAY, now() + 1).unwrap();
+    assert_eq!(s.overall.total.asks, 2);
+    assert_eq!(s.overall.total.rated, 0);
+    // Nor on a retro card.
+    let r = ask::retro(
+        &c,
+        now() + 1,
+        &RetroScope {
+            bot: Some("a"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let on_card: Vec<_> = r.items.iter().map(|i| i.ask.clone()).collect();
+    assert_eq!(on_card.len(), 2);
+    assert!(!on_card.contains(&format!("m{decided}")) && !on_card.contains(&format!("m{closed}")));
+}
+
+#[test]
+fn a_bots_retro_window_follows_its_interval() {
+    let (_d, mut c) = setup();
+    let old = message(
+        &mut c,
+        "a",
+        1,
+        "Old?",
+        json!({"ask": true, "buttons": [["Y","y"]]}),
+    );
+    c.execute(
+        "UPDATE bot_messages SET at=?1 WHERE id=?2",
+        params![ts(now() - 10 * DAY), old],
+    )
+    .unwrap();
+    let new = message(
+        &mut c,
+        "a",
+        2,
+        "New?",
+        json!({"ask": true, "buttons": [["Y","y"]]}),
+    );
+    let held = |c: &Connection| -> Vec<String> {
+        ask::bot_retro(c, now() + 1, "a", None)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.ask)
+            .collect()
+    };
+    // 7 days by default: the 10-day-old ask is not on the card.
+    assert_eq!(held(&c), [format!("m{new}")]);
+    let edit = |every: &str, size: Option<u32>| bot::Edit {
+        retro: Some(bot::RetroEdit {
+            every: Some(every.into()),
+            size,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // 14 days: the card does not lose its first week.
+    bot::edit(&mut c, &Actor::new("human"), "a", &edit("14d", None), "w").unwrap();
+    assert_eq!(held(&c), [format!("m{new}"), format!("m{old}")]);
+    let r = ask::bot_retro(&c, now() + 1, "a", None).unwrap();
+    assert!(
+        r.text
+            .starts_with("Retro, a: asks of the last 14 days (2, 2 unrated)"),
+        "{}",
+        r.text
+    );
+    // Its size is the default limit; an explicit one still wins.
+    bot::edit(
+        &mut c,
+        &Actor::new("human"),
+        "a",
+        &edit("14d", Some(1)),
+        "w",
+    )
+    .unwrap();
+    assert_eq!(held(&c).len(), 1);
+    assert_eq!(
+        ask::bot_retro(&c, now() + 1, "a", Some(5))
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
 }

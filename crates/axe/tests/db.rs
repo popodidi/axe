@@ -259,7 +259,7 @@ fn tables(conn: &rusqlite::Connection) -> Vec<String> {
 fn fresh_database_is_created_at_v18() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open(&dir.path().join("t.db")).unwrap();
-    assert_eq!(user_version(&conn), 19);
+    assert_eq!(user_version(&conn), 20);
     assert!(!tables(&conn).contains(&"dream_attempts".to_string()));
     // v17's `owner` is the task's follow-up owner, not the persona column v9 dropped.
     assert!(columns(&conn, "tasks").ends_with(&["owner".into(), "repos".into(), "labels".into()]));
@@ -305,7 +305,7 @@ fn migrates_v8_to_one_session_per_task() {
     drop(conn);
 
     let mut conn = db::open(&path).unwrap();
-    assert_eq!(user_version(&conn), 19);
+    assert_eq!(user_version(&conn), 20);
     assert!(!tables(&conn).contains(&"dream_attempts".to_string()));
     // The v8 persona `owner` is dropped; v17 adds an empty follow-up owner.
     let owners: i64 = conn
@@ -613,7 +613,7 @@ fn migrates_v10_agent_column_and_retains_it_after_compatibility_downgrade() {
         .unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     assert_eq!(db::get_task(&c, id).unwrap().title, before);
     assert_eq!(db::get_task(&c, id).unwrap().agent, None);
     c.execute("UPDATE tasks SET agent='claude' WHERE id=?1", [id])
@@ -621,7 +621,7 @@ fn migrates_v10_agent_column_and_retains_it_after_compatibility_downgrade() {
     c.pragma_update(None, "user_version", 10).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     assert_eq!(
         db::get_task(&c, id).unwrap().agent.as_deref(),
         Some("claude")
@@ -638,7 +638,7 @@ fn migrates_v12_to_v14_subscription_tables_and_keeps_rows_after_downgrade() {
         .unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     for t in ["bot_feed", "bot_subscriptions"] {
         assert!(tables(&c).contains(&t.to_string()), "{t}");
     }
@@ -646,7 +646,7 @@ fn migrates_v12_to_v14_subscription_tables_and_keeps_rows_after_downgrade() {
     c.pragma_update(None, "user_version", 12).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     assert_eq!(db::get_task(&c, id).unwrap().title, "t");
 }
 
@@ -663,7 +663,7 @@ fn migrates_v11_to_v12_bot_tables_and_retains_them_after_compatibility_downgrade
     .unwrap();
     drop(c);
     let mut c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     for t in [
         "bots",
         "bot_messages",
@@ -690,7 +690,7 @@ fn migrates_v11_to_v12_bot_tables_and_retains_them_after_compatibility_downgrade
     c.pragma_update(None, "user_version", 11).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     assert_eq!(count(&c, "bots"), 1);
     assert_eq!(count(&c, "bot_wakes"), 1);
 }
@@ -708,7 +708,7 @@ fn migrates_v16_task_fields_and_keeps_them_after_downgrade() {
     .unwrap();
     drop(c);
     let mut c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     for col in ["owner", "repos", "labels"] {
         assert!(columns(&c, "tasks").contains(&col.to_string()), "{col}");
     }
@@ -732,7 +732,7 @@ fn migrates_v16_task_fields_and_keeps_them_after_downgrade() {
     c.pragma_update(None, "user_version", 16).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     let t = db::get_task(&c, id).unwrap();
     assert_eq!(t.owner.as_deref(), Some("bot:b"));
     assert_eq!(t.repos, Some(vec!["a".to_string(), "b".to_string()]));
@@ -759,7 +759,7 @@ fn migrates_v17_bot_repos_and_keeps_them_after_downgrade() {
         .unwrap();
     drop(c);
     let mut c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     assert!(columns(&c, "bots").contains(&"repos".to_string()));
     // An existing bot has no repo list: it keeps its project worktree.
     assert_eq!(axe::bot::get(&c, "b").unwrap().repos, None);
@@ -771,9 +771,55 @@ fn migrates_v17_bot_repos_and_keeps_them_after_downgrade() {
     c.pragma_update(None, "user_version", 17).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
-    assert_eq!(user_version(&c), 19);
+    assert_eq!(user_version(&c), 20);
     assert_eq!(
         axe::bot::get(&c, "b").unwrap().repos,
         Some(vec!["a".to_string(), "b".to_string()])
     );
+}
+
+#[test]
+fn migrates_v19_bot_retro_and_keeps_it_after_downgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v19.db");
+    let mut c = db::open(&path).unwrap();
+    let bot = axe::bot::NewBot {
+        name: "b".into(),
+        project: "orchid".into(),
+        agent: None,
+        identity: String::new(),
+        conduct: String::new(),
+        notes: String::new(),
+        heartbeat: None,
+        nudge_after: None,
+    };
+    axe::bot::create(&mut c, &Actor::new("test"), &bot, 1_800_000_000).unwrap();
+    c.execute_batch("ALTER TABLE bots DROP COLUMN retro; PRAGMA user_version=19;")
+        .unwrap();
+    drop(c);
+    let mut c = db::open(&path).unwrap();
+    assert_eq!(user_version(&c), 20);
+    assert!(columns(&c, "bots").contains(&"retro".to_string()));
+    // An existing bot has no stored retro: it keeps the defaults.
+    let stored: Option<String> = c
+        .query_row("SELECT retro FROM bots WHERE name='b'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, None);
+    assert_eq!(
+        axe::bot::get(&c, "b").unwrap().retro,
+        Some(axe::ask::RetroConfig::default())
+    );
+    let edit = axe::bot::Edit {
+        retro: Some(axe::bot::RetroEdit {
+            every: Some("14d".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    axe::bot::edit(&mut c, &Actor::new("human"), "b", &edit, "test").unwrap();
+    c.pragma_update(None, "user_version", 19).unwrap();
+    drop(c);
+    let c = db::open(&path).unwrap();
+    assert_eq!(user_version(&c), 20);
+    assert_eq!(axe::bot::get(&c, "b").unwrap().retro.unwrap().every, "14d");
 }

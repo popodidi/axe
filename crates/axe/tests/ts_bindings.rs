@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use axe::{bot, db, goal, schedule};
+use axe::{ask, bot, db, goal, schedule};
 use ts_rs::{Config, TS};
 
 fn bindings() -> String {
@@ -18,6 +18,7 @@ fn bindings() -> String {
         db::Event::decl(&cfg),
         db::RunRecord::decl(&cfg),
         bot::Bot::decl(&cfg),
+        ask::RetroConfig::decl(&cfg),
         bot::Message::decl(&cfg),
         bot::Wake::decl(&cfg),
         bot::BotRun::decl(&cfg),

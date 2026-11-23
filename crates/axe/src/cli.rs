@@ -1772,7 +1772,7 @@ enum BotCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Change identity, conduct, nudge, repos or project; each change is recorded with --why
+    /// Change identity, conduct, nudge, repos, project or retro; each change is recorded with --why
     Edit {
         #[arg(env = "AXE_BOT")]
         name: String,
@@ -1793,6 +1793,24 @@ enum BotCmd {
         /// Clear the repo list: runs use the project worktree again
         #[arg(long)]
         no_repos: bool,
+        /// Turn the bot's retro card on or off (the owner's attention budget:
+        /// a bot needs --owner-ref)
+        #[arg(long, value_parser = PossibleValuesParser::new(["on", "off"]))]
+        retro: Option<String>,
+        /// Retro interval in whole days (1d-28d, e.g. 7d or 14d); the card
+        /// holds the asks of the last interval
+        #[arg(long)]
+        retro_every: Option<String>,
+        /// First retro slot, a UTC weekday and time (e.g. "mon 01:00"); slots
+        /// repeat every --retro-every from it
+        #[arg(long)]
+        retro_at: Option<String>,
+        /// Most asks on the retro card (1-1000)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=crate::ask::RETRO_ITEMS as i64))]
+        retro_size: Option<u32>,
+        /// Owner decision a retro change rests on (e.g. "msg #873"); required unless human
+        #[arg(long)]
+        owner_ref: Option<String>,
         #[arg(long)]
         why: String,
     },
@@ -2117,18 +2135,19 @@ enum AskCmd {
         #[arg(long, value_parser = PossibleValuesParser::new(["kind", "bot"]))]
         by: Option<String>,
     },
-    /// A bot's weekly retro card: last week's unrated asks it raised, two
-    /// lines (id and topic, then the question) and one row of rating buttons
-    /// each, paged. It holds the 10 most useful asks (--limit): one per task
-    /// or card, those the owner had to act on first, then the newest; the
-    /// rest stay unrated. Sends it from the bot (default $AXE_BOT); --dry
-    /// prints its first page instead (every bot's asks without a bot)
+    /// A bot's retro card: the unrated asks it raised in its retro interval
+    /// (`axe bot show`), two lines (id and topic, then the question) and one
+    /// row of rating buttons each, paged. It holds the bot's retro size of
+    /// most useful asks (--limit): one per task or card, those the owner had
+    /// to act on first, then the newest; the rest stay unrated. Sends it from
+    /// the bot (default $AXE_BOT); --dry prints its first page instead (every
+    /// unrated ask of the last 7 days without a bot)
     Retro {
         #[arg(long)]
         bot: Option<String>,
         #[arg(long)]
         dry: bool,
-        /// Most asks on the card (1-1000; default 10)
+        /// Most asks on the card (1-1000; default the bot's retro size)
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=crate::ask::RETRO_ITEMS as u64))]
         limit: Option<u64>,
     },
@@ -3253,7 +3272,7 @@ fn format_bot(b: &crate::bot::Bot) -> String {
         b.state.clone()
     };
     format!(
-        "name: {}\nproject: {}\nrepos: {}\nagent: {}\nstate: {state}\nfailures: {}\nnudge_after: {}s\nsession: {}\nlive_run: {}\nnext_wake: {}\nqueued: {}\nlast_run_end: {}\ncreated_at: {}\nupdated_at: {}\n\n# Identity\n\n{}\n\n# Conduct\n\n{}",
+        "name: {}\nproject: {}\nrepos: {}\nagent: {}\nstate: {state}\nfailures: {}\nnudge_after: {}s\n{}session: {}\nlive_run: {}\nnext_wake: {}\nqueued: {}\nlast_run_end: {}\ncreated_at: {}\nupdated_at: {}\n\n# Identity\n\n{}\n\n# Conduct\n\n{}",
         b.name,
         b.project,
         match b.repos.as_deref() {
@@ -3263,6 +3282,10 @@ fn format_bot(b: &crate::bot::Bot) -> String {
         b.agent,
         b.failures,
         b.nudge_after_seconds,
+        b.retro.as_ref().map_or(String::new(), |r| format!(
+            "retro: {}\n",
+            r.line(crate::remote::epoch())
+        )),
         b.session_id.as_deref().unwrap_or("-"),
         b.live_run.map_or("-".into(), |r| r.to_string()),
         b.next_wake.as_deref().unwrap_or("-"),
@@ -3432,16 +3455,36 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
             nudge_after,
             repo,
             no_repos,
+            retro,
+            retro_every,
+            retro_at,
+            retro_size,
+            owner_ref,
             why,
         } => {
             let read = |f: &Option<PathBuf>| f.as_ref().map(read_file).transpose();
             let repos = (*no_repos || !repo.is_empty()).then_some(repo);
+            let retro_edit = (retro.is_some()
+                || retro_every.is_some()
+                || retro_at.is_some()
+                || retro_size.is_some())
+            .then(|| {
+                json!({"on": retro.as_deref().map(|r| r == "on"), "every": retro_every,
+                    "at": retro_at, "size": retro_size})
+            });
             let b: Bot = c.send(
                 "PATCH",
                 &format!("/api/bots/{name}"),
                 json!({"identity":read(identity_file)?,"conduct":read(conduct_file)?,
-                    "nudge_after":nudge_after,"repos":repos,"project":project,"why":why}),
+                    "nudge_after":nudge_after,"repos":repos,"project":project,
+                    "retro":retro_edit,"owner_ref":owner_ref,"why":why}),
             )?;
+            // A server from before per-bot retros ignores the field.
+            if retro_edit.is_some() && b.retro.is_none() {
+                anyhow::bail!(
+                    "the server did not apply the retro change; it predates per-bot retros"
+                );
+            }
             if let Some(p) = project {
                 if b.project != p.trim() {
                     anyhow::bail!("the server did not move the bot; it predates bot projects");

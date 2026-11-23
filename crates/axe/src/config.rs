@@ -594,44 +594,43 @@ pub struct Telegram {
     pub board: BoardMode,
     #[serde(rename = "bot", default)]
     pub bots: Vec<TelegramBot>,
-    /// The weekly retro cards (`ask.rs`): once a week each bot sends the
-    /// owner its own, when it has unrated asks from last week.
-    #[serde(default)]
-    pub retro: RetroSend,
+    /// Ignored: each bot's retro card is set on the bot (`axe bot edit
+    /// --retro*`). Accepted so older configs still load, with a warning
+    /// ([`Telegram::warnings`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retro: Option<RetroSend>,
     /// The bot that sends the owner runtime cards (a runtime needs a login
     /// or hit its limit); default the first `[[telegram.bot]]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ops_bot: Option<String>,
 }
 
-/// `telegram.retro`: when the weekly retro cards go out.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The retired `telegram.retro` table (one global retro slot, and a home
+/// bot for asks no bot raised). Its keys are still accepted and ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetroSend {
-    /// Send it automatically (default true).
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// UTC weekday and time, `mon 01:00` by default.
-    #[serde(default = "default_retro_at")]
-    pub at: String,
-    /// The bot whose retro also holds the asks no sending bot raised (an
-    /// escalation of a task no bot owns, with no card); default the ops bot.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot: Option<String>,
 }
 
-impl Default for RetroSend {
-    fn default() -> Self {
-        RetroSend {
-            enabled: true,
-            at: default_retro_at(),
-            bot: None,
+impl Telegram {
+    /// Settings that load but do nothing, one line each, for the server to
+    /// print at startup.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.retro.is_some() {
+            out.push(
+                "[telegram.retro] is ignored: each bot's retro is set on the bot (axe bot edit <bot> --retro on|off --retro-every 7d --retro-at \"mon 01:00\" --retro-size 10)"
+                    .to_string(),
+            );
         }
+        out
     }
-}
-
-fn default_retro_at() -> String {
-    "mon 01:00".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1132,12 +1131,6 @@ impl Config {
             }
             if t.poll_timeout == 0 || t.poll_timeout > 50 {
                 bail!("telegram.poll_timeout must be 1..=50 seconds");
-            }
-            crate::ask::parse_weekly(&t.retro.at).context("telegram.retro.at")?;
-            if let Some(name) = &t.retro.bot {
-                if !t.bots.iter().any(|b| &b.name == name) {
-                    bail!("telegram.retro.bot {name:?} is not a [[telegram.bot]]");
-                }
             }
             if let Some(name) = &t.ops_bot {
                 if !t.bots.iter().any(|b| &b.name == name) {

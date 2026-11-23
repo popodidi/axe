@@ -283,17 +283,11 @@ pub struct Gateway {
     owner: i64,
     poll_timeout: u64,
     bots: HashMap<String, Arc<TgBot>>,
-    /// The weekly retro send's slot (`ask::parse_weekly`): every bot sends
-    /// its own.
-    retro: Option<i64>,
-    /// The bot whose retro also holds the asks no sending bot raised
-    /// (`telegram.retro.bot`, else the ops bot).
-    retro_home: Option<String>,
     /// The bot that sends runtime cards (`telegram.ops_bot`).
     ops: Option<String>,
 }
 
-/// How often the weekly retro send checks whether its slot came.
+/// How often the retro send checks whether a bot's slot came.
 const RETRO_TICK: Duration = Duration::from_secs(10);
 
 /// Kinds whose `message_id` is a Telegram update id, not a message.
@@ -488,28 +482,18 @@ impl Gateway {
                 }),
             );
         }
-        let retro = cfg
-            .retro
-            .enabled
-            .then(|| ask::parse_weekly(&cfg.retro.at).ok())
-            .flatten();
+        for w in cfg.warnings() {
+            eprintln!("telegram: {w}");
+        }
         let ops = cfg
             .ops_bot
             .clone()
             .or(cfg.bots.first().map(|b| b.name.clone()))
             .filter(|n| bots.contains_key(n));
-        let retro_home = cfg
-            .retro
-            .bot
-            .clone()
-            .filter(|n| bots.contains_key(n))
-            .or(ops.clone());
         Gateway {
             owner: cfg.owner_user_id,
             poll_timeout: cfg.poll_timeout,
             bots,
-            retro,
-            retro_home,
             ops,
         }
     }
@@ -568,27 +552,23 @@ impl Gateway {
             let (b, store) = (Arc::clone(b), Arc::clone(&store));
             std::thread::spawn(move || typing_loop(&b, store.as_ref()));
         }
-        if self.retro.is_some() {
-            let (gw, store) = (Arc::clone(self), Arc::clone(&store));
-            std::thread::spawn(move || gw.retro_loop(store.as_ref()));
-        }
+        let (gw, store) = (Arc::clone(self), Arc::clone(&store));
+        std::thread::spawn(move || gw.retro_loop(store.as_ref()));
     }
 
-    /// Sends each bot's weekly retro card at its slot (`telegram.retro`),
-    /// once per slot and bot: not when that bot's retro card already went
-    /// out since the slot (by hand or before a restart), and not at all when
-    /// it has no unrated asks from last week. A slot missed while the server
-    /// was down is still sent up to `ask::RETRO_CATCH_UP` late.
+    /// Sends each bot's retro card at its own slots (`bots.retro`, read
+    /// from the store on every tick), once per slot and bot: not when that
+    /// bot's retro is off, not when its retro card already went out since
+    /// the slot (by hand or before a restart), and not at all when it has
+    /// no unrated asks from the last interval. A slot missed while the
+    /// server was down is still sent up to `ask::RETRO_CATCH_UP` late.
     fn retro_loop(&self, store: &dyn Store) {
-        let Some(at) = self.retro else {
-            return;
-        };
         let mut tried: HashMap<String, i64> = HashMap::new();
         while !store.stopping() {
             for name in self.names() {
                 let mut t = tried.get(&name).copied();
-                if let Err(e) = self.retro_tick(store, &name, at, &mut t) {
-                    eprintln!("telegram: bot {name}: weekly retro: {e:#}");
+                if let Err(e) = self.retro_tick(store, &name, &mut t) {
+                    eprintln!("telegram: bot {name}: retro: {e:#}");
                 }
                 if let Some(t) = t {
                     tried.insert(name, t);
@@ -601,24 +581,31 @@ impl Gateway {
         }
     }
 
-    fn retro_tick(
-        &self,
-        store: &dyn Store,
-        name: &str,
-        at: i64,
-        tried: &mut Option<i64>,
-    ) -> Result<()> {
-        let now = now();
-        let Some(slot) = ask::retro_due(now, at, None, *tried) else {
+    fn retro_tick(&self, store: &dyn Store, name: &str, tried: &mut Option<i64>) -> Result<()> {
+        // The bot exists once it was created; until then, try again.
+        let Some(cfg) = bot::get(&store.conn(), name).ok().map(|b| b.retro) else {
             return Ok(());
         };
+        let cfg = cfg.unwrap_or_default();
+        if !cfg.on {
+            return Ok(());
+        }
+        let (at, every) = (cfg.offset(), cfg.period());
+        let now = now();
+        let Some(slot) = ask::retro_due(now, at, every, None, *tried) else {
+            return Ok(());
+        };
+        // The card before this slot, left open with ratings on it: its
+        // bot gets the wake now, once per card. A failure here does not
+        // hold up the new card.
+        if let Err(e) = self.retro_wake_open(store, name, slot) {
+            eprintln!("telegram: bot {name}: retro wake: {e:#}");
+        }
         let last = ask::last_retro(&store.conn(), name)?;
-        if ask::retro_due(now, at, last, *tried).is_none() {
+        if ask::retro_due(now, at, every, last, *tried).is_none() {
             *tried = Some(slot);
             return Ok(());
         }
-        // The bot exists once it was created; until then, try again.
-        bot_id(&store.conn(), name)?;
         // The owner's private chat when the bot may write there.
         let chat = self
             .bot(name)?
@@ -637,7 +624,7 @@ impl Gateway {
         *tried = Some(slot);
         if v["sent"] == true {
             eprintln!(
-                "telegram: bot {name}: weekly retro sent #{} ({} asks)",
+                "telegram: bot {name}: retro sent #{} ({} asks)",
                 v["id"], v["items"]
             );
         }
@@ -1504,10 +1491,12 @@ impl Gateway {
         Ok(json!({"sent": true, "bot": name, "id": id}))
     }
 
-    /// A press on a weekly retro card (`flags.retro`): rates an item, accepts
-    /// the recommendations of a page's unrated items, or turns a page, then
-    /// re-renders the card in place and wakes no bot. Returns false when the
-    /// message is not a retro card.
+    /// A press on a retro card (`flags.retro`): rates an item, accepts the
+    /// recommendations of a page's unrated items, turns a page or dismisses
+    /// the card, then re-renders it in place. A single rating wakes no bot;
+    /// the card closing (Dismiss, or its last item rated) with ratings on it
+    /// wakes its bot once ([`retro_closed`]). Returns false when the message
+    /// is not a retro card.
     fn retro_press(
         &self,
         b: &TgBot,
@@ -1531,6 +1520,7 @@ impl Gateway {
         let items: Vec<ask::RetroItem> =
             serde_json::from_value(stored.flags["retro"]["items"].clone()).unwrap_or_default();
         let more = stored.flags["retro"]["more"].as_u64().unwrap_or(0) as usize;
+        let every = ask::card_every(&stored.flags["retro"]);
         let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
         let press = ask::Press::parse(data);
         if stored.flags["dismissed"] == true {
@@ -1540,20 +1530,25 @@ impl Gateway {
         if press == Some(ask::Press::Dismiss) {
             // Closes the card: no keyboard, so it is not open, and the inbox
             // pass unpins it if it was pinned. Its asks stay as they are.
-            let text =
-                ask::dismissed_retro(&items, &ask::ratings(&store.conn(), &ids)?, Some(&b.name()));
+            let rated = ask::ratings(&store.conn(), &ids)?;
+            let text = ask::dismissed_retro(&items, &rated, Some(&b.name()), every);
             if let Err(e) = self.edit(store, &b.name(), stored.id, Some(&text), false, None, &[]) {
                 eprintln!("telegram: bot {}: retro card: {e:#}", b.name());
             }
             set_flag(store, stored.id, "$.dismissed", json!(true))?;
+            retro_closed(store, &b.name(), &stored, every, rated.len(), false)?;
             store.changed();
             self.toast(b, query, "Dismissed; unrated asks stay unrated");
             return Ok(true);
         }
         let (toast, page) = match press {
             Some(ask::Press::Item(a, rating)) if ids.contains(&a) => {
-                ask::rate(&mut store.conn(), &owner_actor(), &a, rating)?;
-                (format!("Rated: {rating}"), Some(ask::page_of(&items, &a)))
+                match ask::rate(&mut store.conn(), &owner_actor(), &a, rating) {
+                    Ok(_) => (format!("Rated: {rating}"), Some(ask::page_of(&items, &a))),
+                    // An ask gone since the card was sent (a card its bot
+                    // settled): nothing to rate.
+                    Err(e) => (format!("Not rated: {e:#}"), None),
+                }
             }
             Some(ask::Press::Page(p)) => (format!("Page {}", p + 1), Some(p)),
             // Accept the shown recommendations of the page's unrated asks.
@@ -1575,14 +1570,13 @@ impl Gateway {
             _ => ("Not an item on this card".to_string(), None),
         };
         if let Some(page) = page {
+            let rated = ask::ratings(&store.conn(), &ids)?;
+            // The last item rated closes the card: its bot reads the ratings.
+            if !items.is_empty() && items.iter().all(|i| rated.contains_key(&i.ask)) {
+                retro_closed(store, &b.name(), &stored, every, rated.len(), false)?;
+            }
             store.changed();
-            let r = ask::render_retro(
-                &items,
-                more,
-                &ask::ratings(&store.conn(), &ids)?,
-                page,
-                Some(&b.name()),
-            );
+            let r = ask::render_retro(&items, more, &rated, page, Some(&b.name()), every);
             if let Err(e) = self.edit(
                 store,
                 &b.name(),
@@ -1613,35 +1607,38 @@ impl Gateway {
         }
     }
 
-    /// Bot `name`'s weekly retro card (`ask::retro`): the asks it raised,
-    /// and on the home bot's card the asks no sending bot raised; at most
-    /// `limit` of them (`None`: [`ask::RETRO_LIMIT`]).
+    /// At bot `name`'s retro slot `slot`: its card from before the slot,
+    /// if the owner rated some of it but never closed it, wakes the bot
+    /// (once per card, the same wake a close queues).
+    fn retro_wake_open(&self, store: &dyn Store, name: &str, slot: i64) -> Result<()> {
+        let Some((id, _, items, dismissed)) = ask::previous_retro(&store.conn(), name, slot)?
+        else {
+            return Ok(());
+        };
+        if dismissed {
+            return Ok(());
+        }
+        let ids: Vec<String> = items.iter().map(|i| i.ask.clone()).collect();
+        let rated = ask::ratings(&store.conn(), &ids)?.len();
+        let stored = get_message(&store.conn(), name, id)?;
+        let every = ask::card_every(&stored.flags["retro"]);
+        retro_closed(store, name, &stored, every, rated, rated < items.len())
+    }
+
+    /// Bot `name`'s retro card (`ask::bot_retro`): the asks it raised in its
+    /// interval, at most `limit` of them (`None`: its retro size).
     pub fn retro_of(
         &self,
         conn: &Connection,
         name: &str,
         limit: Option<usize>,
     ) -> Result<ask::Retro> {
-        let senders = self.names();
-        ask::retro(
-            conn,
-            now(),
-            &ask::RetroScope {
-                bot: Some(name),
-                home: self
-                    .retro_home
-                    .as_deref()
-                    .and_then(|h| self.bot(h).ok())
-                    .is_some_and(|b| b.name() == name),
-                senders: &senders,
-                limit,
-            },
-        )
+        ask::bot_retro(conn, now(), name, limit)
     }
 
-    /// Sends bot `name`'s weekly retro card (`retro_of`): one message, paged
-    /// in place, one row of rating buttons per ask of the last 7 days it
-    /// raised that nobody rated. With nothing to rate it sends nothing.
+    /// Sends bot `name`'s retro card (`retro_of`): one message, paged in
+    /// place, one row of rating buttons per ask of its interval it raised
+    /// that nobody rated. With nothing to rate it sends nothing.
     pub fn send_retro(
         &self,
         store: &dyn Store,
@@ -1650,6 +1647,11 @@ impl Gateway {
         limit: Option<usize>,
     ) -> Result<Value> {
         self.bot(name)?;
+        let every = bot::get(&store.conn(), name)
+            .ok()
+            .and_then(|b| b.retro)
+            .unwrap_or_default()
+            .period();
         let r = self.retro_of(&store.conn(), name, limit)?;
         if r.items.is_empty() {
             return Ok(json!({"sent": false, "text": r.text}));
@@ -1659,7 +1661,7 @@ impl Gateway {
             rows: r.rows.clone(),
             html: false,
             task: None,
-            retro: Some(json!({"items": r.items, "more": r.more})),
+            retro: Some(json!({"items": r.items, "more": r.more, "every": every})),
             ..o.clone()
         };
         let out = self.send(store, name, &r.text, &opts)?;
@@ -2424,6 +2426,35 @@ fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<
     }
     goal_board::set_message(&mut store.conn(), &b.name(), None)?;
     store.changed();
+    Ok(())
+}
+
+/// Queues the one wake a retro card gives its bot (`ask::retro_wake_key`)
+/// when the owner rated `rated` of its items: on close (`open` false) or at
+/// the bot's next slot with the card still open. No ratings, no wake; a
+/// repeat (another press, a restart, the next slot) adds none.
+fn retro_closed(
+    store: &dyn Store,
+    name: &str,
+    card: &StoredMessage,
+    every: i64,
+    rated: usize,
+    open: bool,
+) -> Result<()> {
+    if rated == 0 {
+        return Ok(());
+    }
+    let t = now();
+    let sent = bot::epoch_of(&card.at).unwrap_or(t);
+    bot::add_wake(
+        &mut store.conn(),
+        &Actor::new("telegram"),
+        name,
+        t,
+        &ask::retro_wake(card.id, name, sent, every, rated, open),
+        Some(&ask::retro_wake_key(card.id)),
+        t,
+    )?;
     Ok(())
 }
 

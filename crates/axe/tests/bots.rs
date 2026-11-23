@@ -2507,3 +2507,113 @@ fn local_bot_workspace_matches_its_run_folder_and_writes_its_system_prompt() {
         "{attached}"
     );
 }
+
+#[test]
+fn bot_retro_is_set_shown_validated_and_logged_and_a_bot_needs_an_owner_ref() {
+    let rig = Rig::new(1);
+    rig.create(json!({}));
+    // Defaults until set: on, every 7 days from Monday 01:00Z, 10 asks.
+    assert_eq!(
+        rig.bot()["retro"],
+        json!({"on": true, "every": "7d", "at": "mon 01:00", "size": 10})
+    );
+    let show = rig.srv.ok(&["bot", "show", "b"]);
+    assert!(
+        show.contains("\nretro: on, every 7d from mon 01:00Z, 10 asks, next "),
+        "{show}"
+    );
+    // The owner (human) sets it without an owner reference.
+    rig.srv.ok(&[
+        "bot",
+        "edit",
+        "b",
+        "--retro-every",
+        "2w",
+        "--retro-at",
+        "Wed 9:30",
+        "--retro-size",
+        "25",
+        "--why",
+        "fewer asks",
+    ]);
+    assert_eq!(
+        rig.bot()["retro"],
+        json!({"on": true, "every": "14d", "at": "wed 09:30", "size": 25})
+    );
+    let show = rig.srv.ok(&["bot", "show", "b"]);
+    assert!(
+        show.contains("\nretro: on, every 14d from wed 09:30Z, 25 asks, next "),
+        "{show}"
+    );
+    // Bad values are refused and change nothing.
+    for bad in [
+        &["--retro-every", "29d"][..],
+        &["--retro-every", "12h"],
+        &["--retro-at", "someday 01:00"],
+        &["--retro-size", "0"],
+        &["--retro-size", "1001"],
+        &["--retro", "maybe"],
+    ] {
+        let mut args = vec!["bot", "edit", "b"];
+        args.extend_from_slice(bad);
+        args.extend_from_slice(&["--why", "bad"]);
+        let out = rig.srv.run(&args);
+        assert!(!out.status.success(), "{bad:?}");
+    }
+    assert_eq!(rig.bot()["retro"]["every"], "14d");
+    // A bot changing a retro (its own included) needs the owner's message.
+    let as_bot = |extra: &[&str]| {
+        let mut args = vec!["bot", "edit", "b", "--retro", "off", "--why", "owner asked"];
+        args.extend_from_slice(extra);
+        rig.srv
+            .cli(&args)
+            .env("AXE_ACTOR", "bot:b")
+            .output()
+            .unwrap()
+    };
+    let out = as_bot(&[]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("needs --owner-ref"), "{err}");
+    assert_eq!(rig.bot()["retro"]["on"], true);
+    let out = as_bot(&["--owner-ref", "msg #873"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(rig.bot()["retro"]["on"], false);
+    let show = rig.srv.ok(&["bot", "show", "b"]);
+    assert!(
+        show.contains("\nretro: off (every 14d from wed 09:30Z, 25 asks)\n"),
+        "{show}"
+    );
+    // Other edits by a bot need no owner reference.
+    let out = rig
+        .srv
+        .cli(&["bot", "edit", "b", "--nudge-after", "20m", "--why", "slow"])
+        .env("AXE_ACTOR", "bot:b")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    // Each change is a retro diff event with the reason; a bot's names the
+    // owner's message. An unchanged value records nothing.
+    rig.srv
+        .ok(&["bot", "edit", "b", "--retro-size", "25", "--why", "same"]);
+    let log = rig.srv.ok(&["bot", "log", "b"]);
+    let retro: Vec<&str> = log.lines().filter(|l| l.contains(" retro: ")).collect();
+    assert_eq!(retro.len(), 2, "{log}");
+    assert!(
+        retro[0].contains("human") && retro[0].contains("why: fewer asks"),
+        "{log}"
+    );
+    assert!(
+        log.contains("on, every 7d from mon 01:00Z, 10 asks, next "),
+        "{log}"
+    );
+    assert!(
+        retro[1].contains("bot:b") && retro[1].contains("why: owner asked"),
+        "{log}"
+    );
+    assert!(log.contains("owner_ref: msg #873"), "{log}");
+    assert!(
+        log.contains("-> off (every 14d from wed 09:30Z, 25 asks)"),
+        "{log}"
+    );
+}
