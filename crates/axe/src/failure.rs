@@ -70,6 +70,11 @@ const CLAUDE_AUTH: &[&str] = &[
     "gateway_signin_required",
     "gateway_session_expired",
 ];
+/// Claude Code's typed `error` on the `assistant` message an API error ended the
+/// turn with (the Agent SDK's `SDKAssistantMessageError`). A runtime that was
+/// never logged in reports only this: its `result` says "Not logged in" with no
+/// `api_error` kind or status.
+const CLAUDE_AUTH_MESSAGE: &str = "authentication_failed";
 const CLAUDE_OUTAGE: &[&str] = &[
     "connection_failed",
     "stream_idle_timeout",
@@ -80,11 +85,21 @@ const CLAUDE_OUTAGE: &[&str] = &[
 pub fn classify(path: &Path) -> Option<Failure> {
     let reader = BufReader::new(File::open(path).ok()?);
     let mut result = None;
+    // The typed error of the latest assistant message since the last result.
+    let mut message_error = None;
+    let mut result_message_error = None;
     let mut rate_limit = None;
     let mut codex_error = None;
     for line in reader.split(b'\n') {
         let Ok(line) = line else { break };
         let text = String::from_utf8_lossy(&line);
+        // An assistant message is parsed only for its typed `error`; one without
+        // clears an earlier one (that turn went on).
+        let assistant = text.contains("\"type\":\"assistant\"");
+        let typed_error = assistant && text.contains("\"error\":\"");
+        if assistant && !typed_error {
+            message_error = None;
+        }
         // Cheap filter: only top-level event types we read; JSON nested in tool
         // output is escaped and never matches.
         if ![
@@ -95,6 +110,7 @@ pub fn classify(path: &Path) -> Option<Failure> {
         ]
         .iter()
         .any(|k| text.contains(k))
+            && !typed_error
         {
             continue;
         }
@@ -102,7 +118,11 @@ pub fn classify(path: &Path) -> Option<Failure> {
             continue;
         };
         match v["type"].as_str() {
-            Some("result") => result = Some(v),
+            Some("result") => {
+                result = Some(v);
+                result_message_error = message_error.take();
+            }
+            Some("assistant") => message_error = v["error"].as_str().map(String::from),
             Some("rate_limit_event") => rate_limit = Some(v["rate_limit_info"].clone()),
             Some("turn.started" | "turn.completed") => codex_error = None,
             Some("turn.failed") => codex_error = v["error"]["message"].as_str().map(String::from),
@@ -111,7 +131,7 @@ pub fn classify(path: &Path) -> Option<Failure> {
         }
     }
     match result {
-        Some(r) => claude(&r, rate_limit.as_ref()),
+        Some(r) => claude(&r, result_message_error.as_deref(), rate_limit.as_ref()),
         None => codex(codex_error.as_deref()?),
     }
 }
@@ -119,8 +139,9 @@ pub fn classify(path: &Path) -> Option<Failure> {
 /// Claude Code: the last `result` must be an error. A quota shows as the typed
 /// `usage_limit_reached` or a latest `rate_limit_event` with status `rejected`
 /// (its `resetsAt` is the retry time); an expired login as 401 or a typed login
-/// kind; an outage as a transient status or a typed network kind.
-fn claude(r: &Value, rate_limit: Option<&Value>) -> Option<Failure> {
+/// kind (or an API error after an `authentication_failed` assistant message,
+/// e.g. "Not logged in"); an outage as a transient status or a typed network kind.
+fn claude(r: &Value, message_error: Option<&str>, rate_limit: Option<&Value>) -> Option<Failure> {
     if r["is_error"] != true {
         return None;
     }
@@ -130,7 +151,9 @@ fn claude(r: &Value, rate_limit: Option<&Value>) -> Option<Failure> {
     let rejected = rate_limit.filter(|l| l["status"] == "rejected");
     let class = if CLAUDE_QUOTA.contains(&kind) || rejected.is_some() {
         QUOTA_EXHAUSTED
-    } else if CLAUDE_AUTH.contains(&kind) || (api_error && status == Some(401)) {
+    } else if CLAUDE_AUTH.contains(&kind)
+        || (api_error && (status == Some(401) || message_error == Some(CLAUDE_AUTH_MESSAGE)))
+    {
         AUTH_INVALID
     } else if CLAUDE_OUTAGE.contains(&kind) || (api_error && status.is_some_and(transient_status)) {
         PROVIDER_UNAVAILABLE
