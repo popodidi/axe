@@ -48,6 +48,30 @@ const longDoc = [
   "The end of the long report.",
 ].join("\n\n");
 
+// One stored doc of each kind the doc page renders.
+const typedDocs: Record<string, string> = {
+  "research/report.html": [
+    "<!doctype html><html><head><title>Report</title></head><body>",
+    "<h1>HTML report</h1><p>See <a href='https://example.com/'>out</a>",
+    " and <a href='notes.html'>notes</a>.</p><img src='chart.png' alt='chart'>",
+    "<script>document.body.dataset.ran = '1';",
+    "try { parent.document.title = 'escaped'; } catch (e) {}",
+    "try { parent.localStorage.setItem('leak', '1'); } catch (e) {}",
+    "try { document.body.dataset.cookie = document.cookie || 'none'; } catch (e) {}</script>",
+    "<img src='x' onerror=\"document.body.dataset.ran = 'onerror'\">",
+    "</body></html>",
+  ].join(""),
+  "ops/config.json": '{"name":"axe","replicas":2,"tags":["a","b"]}',
+  "ops/deploy.yaml": "kind: Deployment\nspec:\n  replicas: 2 # two\n",
+  "src/main.rs": 'fn main() {\n    let n = 1;\n    println!("{n}");\n}\n',
+  "img/dot.png": PNG.toString("base64"),
+  "img/mark.svg":
+    "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/><script>parent.document.title='svg'</script></svg>",
+  "data/rows.csv": 'name,note\nalpha,"one, two"\nbeta,plain\n',
+  "notes/readme.weird": "Plain words\n  keep their indent.",
+  "bin/blob.dat": "\u0000\u0001\ufffd\ufffd\u0000",
+};
+
 type Store = {
   read: boolean;
   tokens: string[];
@@ -126,7 +150,10 @@ async function mockStore(page: Page, read: boolean) {
           path: url.searchParams.get("path"),
           version: "c".repeat(40),
           kind: "doc",
-          content: url.searchParams.get("path") === longDocPath ? longDoc : "# Quiet\n\nGroup with **space** first.",
+          content:
+            url.searchParams.get("path") === longDocPath
+              ? longDoc
+              : typedDocs[url.searchParams.get("path") || ""] ?? "# Quiet\n\nGroup with **space** first.",
         });
     }
     const signedPath = p.match(/^\/b\/([0-9a-f]{64})(\/[^/]+)?$/);
@@ -396,6 +423,88 @@ test("the doc page scrolls with the window to the doc's end", async ({ page }) =
   await expect(facts).toContainText("Long report");
   await expect(facts).toContainText("draft");
   await expect(page.getByText("title:")).toHaveCount(0);
+});
+
+test("the doc page renders code, images, tables and falls back to text", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const open = async (path: string, kind: string) => {
+    await page.goto(`/doc?server=http://axe.test&path=${encodeURIComponent(path)}`);
+    const body = page.locator(`[data-doc-kind='${kind}']`);
+    await expect(body).toBeVisible();
+    // The metadata rail for every kind; contents only for markdown.
+    await expect(page.getByLabel("Doc details")).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Contents" })).toHaveCount(0);
+    return body;
+  };
+  // JSON pretty-printed and highlighted, one numbered line per line.
+  let body = await open("ops/config.json", "code");
+  await expect(body.locator("pre")).toHaveAttribute("data-language", "json");
+  await expect(body.locator("[class*='line']")).toHaveCount(8);
+  await expect(body.locator(".hljs-attr").first()).toHaveText('"name"');
+  body = await open("ops/deploy.yaml", "code");
+  await expect(body.locator(".hljs-comment")).toHaveText("# two");
+  body = await open("src/main.rs", "code");
+  await expect(body.locator(".hljs-keyword").first()).toHaveText("fn");
+  await expect(body.locator("[class*='line']")).toHaveCount(4);
+  // The gutter numbers stay out of the copied text.
+  expect(await body.locator("code").innerText()).toContain("fn main() {");
+  body = await open("img/dot.png", "image");
+  const img = body.getByRole("img", { name: "img/dot.png" });
+  await expect.poll(() => img.evaluate((e: HTMLImageElement) => e.naturalWidth)).toBe(1);
+  body = await open("img/mark.svg", "image");
+  await expect.poll(() => body.locator("img").evaluate((e: HTMLImageElement) => e.naturalWidth)).toBe(8);
+  expect(await page.title()).not.toBe("svg");
+  body = await open("data/rows.csv", "table");
+  await expect(body.getByRole("columnheader")).toHaveText(["name", "note"]);
+  await expect(body.getByRole("row").nth(1).getByRole("cell")).toHaveText(["alpha", "one, two"]);
+  body = await open("notes/readme.weird", "text");
+  await expect(body.locator("pre")).toHaveText("Plain words\n  keep their indent.");
+  body = await open("bin/blob.dat", "binary");
+  await expect(body.getByRole("link", { name: "Download" })).toHaveAttribute("download", "blob.dat");
+});
+
+test("a stored HTML doc renders sandboxed and cannot reach the app", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/doc?server=http://axe.test");
+  await page.evaluate(() => {
+    document.cookie = "axe_session=app-secret; path=/";
+    localStorage.setItem("app", "secret");
+  });
+  await page.goto("/doc?server=http://axe.test&path=research%2Freport.html");
+  const frame = page.locator("iframe[title='Rendered research/report.html']");
+  await expect(frame).toBeVisible();
+  const sandbox = (await frame.getAttribute("sandbox"))!.split(/\s+/);
+  expect(sandbox).not.toContain("allow-scripts");
+  expect(sandbox).not.toContain("allow-same-origin");
+  const inner = page.frameLocator("iframe[title='Rendered research/report.html']");
+  await expect(inner.getByRole("heading", { name: "HTML report" })).toBeVisible();
+  // No script ran: not inline, not an event handler.
+  await expect(inner.locator("body")).not.toHaveAttribute("data-ran", /.*/);
+  await expect(inner.locator("body")).not.toHaveAttribute("data-cookie", /.*/);
+  expect(await page.title()).not.toBe("escaped");
+  expect(await page.evaluate(() => localStorage.getItem("leak"))).toBeNull();
+  // The frame has an opaque origin: no app cookies or storage inside it.
+  const origin = await frame.evaluate((f: HTMLIFrameElement) => {
+    try {
+      return f.contentWindow!.document.cookie;
+    } catch {
+      return "blocked";
+    }
+  });
+  expect(origin).toBe("blocked");
+  // Absolute links open in a new tab; relative ones and images degrade.
+  await expect(inner.getByRole("link", { name: "out" })).toHaveAttribute("href", "https://example.com/");
+  await expect(inner.getByText("notes", { exact: true })).not.toHaveAttribute("href", /.*/);
+  await expect(inner.getByText("[chart]")).toBeVisible();
+  // The Source toggle shows the stored markup, script and all, as code.
+  await expect(page.getByRole("navigation", { name: "Contents" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Source" }).click();
+  await expect(frame).toHaveCount(0);
+  await expect(page.locator("[data-doc-kind='html'] pre")).toContainText("<script>document.body.dataset.ran");
+  await page.getByRole("tab", { name: "Rendered" }).click();
+  await expect(frame).toBeVisible();
 });
 
 test("an open store item narrows the store column instead of covering it", async ({ page }) => {
