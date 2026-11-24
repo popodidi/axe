@@ -1190,6 +1190,15 @@ pub struct Desk {
     logins: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// Where a reply key form writes the owner's [`ReplyKey`].
     reply_key: PathBuf,
+    /// Runtimes just logged in, for the dispatcher to check at once.
+    logged_in: std::sync::Arc<Mutex<Vec<String>>>,
+}
+
+fn push_login(logged_in: &Mutex<Vec<String>>, runtime: &str) {
+    let mut l = logged_in.lock().unwrap_or_else(|e| e.into_inner());
+    if !l.iter().any(|r| r == runtime) {
+        l.push(runtime.to_string());
+    }
 }
 
 /// How long a device login's first output is collected for the owner.
@@ -1217,6 +1226,7 @@ impl Desk {
             used: Mutex::new(used),
             cfg: None,
             logins: Default::default(),
+            logged_in: Default::default(),
         }
     }
 
@@ -1238,6 +1248,17 @@ impl Desk {
         )
         .with_config(cfg.clone())
         .with_reply_key(cfg.forms.reply_key_path()))
+    }
+
+    /// The desk telling the dispatcher, through `logged_in`, which runtimes
+    /// a login just finished for.
+    pub fn with_logged_in(mut self, logged_in: std::sync::Arc<Mutex<Vec<String>>>) -> Desk {
+        self.logged_in = logged_in;
+        self
+    }
+
+    fn logged_in(&self, runtime: &str) {
+        push_login(&self.logged_in, runtime);
     }
 
     /// The desk writing the owner's reply key to `path`.
@@ -1305,12 +1326,15 @@ impl Desk {
             bail!("a login of runtime {name} is already in progress");
         }
         let logins = std::sync::Arc::clone(&self.logins);
+        let logged_in = std::sync::Arc::clone(&self.logged_in);
         let key = name.to_string();
         let r = rt.device_login(&cfg, DEVICE_OUTPUT_WAIT, move |_| {
             logins
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&key);
+            // Checked whatever the CLI said: the check tells the owner.
+            push_login(&logged_in, &key);
         });
         if r.is_err() {
             self.logins
@@ -1382,8 +1406,9 @@ impl Desk {
                 };
                 let (cfg, rt) = self.runtime(runtime)?;
                 rt.login(&cfg, login, value)?;
+                self.logged_in(runtime);
                 Ok(json!({"target": spec.target.describe(), "runtime": runtime,
-                          "note": "the runtime is ok again at its next login check"}))
+                          "note": "the login is checked now; a runtime card follows with the result"}))
             }
             Target::Reply => {
                 let pass = match vals.get("passphrase") {

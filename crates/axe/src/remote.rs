@@ -736,6 +736,9 @@ pub struct LocalLog {
 }
 pub struct Store {
     pub aborts: Arc<Mutex<Vec<i64>>>,
+    /// Runtimes a sealed form or device login just logged in; the dispatcher
+    /// checks each login at once (`runtime::Registry::check_now`).
+    pub logins: Arc<Mutex<Vec<String>>>,
     pub client: Client,
     pub journal: Arc<Mutex<Journal>>,
     path: PathBuf,
@@ -831,6 +834,7 @@ impl Store {
         save(&path, &journal)?;
         Ok(Self {
             aborts: Arc::default(),
+            logins: Arc::default(),
             client,
             journal: Arc::new(Mutex::new(journal)),
             path,
@@ -925,6 +929,7 @@ impl Store {
             let id = self.journal.lock().unwrap().id.clone();
             match crate::sealed::Desk::open(cfg, &id) {
                 Ok(d) => {
+                    let d = d.with_logged_in(Arc::clone(&self.logins));
                     eprintln!(
                         "axe dispatcher: sealed form key {} ({})",
                         d.key().fingerprint(),

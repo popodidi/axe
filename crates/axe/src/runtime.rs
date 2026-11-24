@@ -32,6 +32,10 @@ pub const NEEDS_LOGIN: &str = "needs_login";
 pub const DEGRADED: &str = "degraded";
 pub const DISABLED: &str = "disabled";
 
+/// Alert classes of a login check right after a login ([`Registry::check_now`]).
+pub const LOGIN_OK: &str = "login_ok";
+pub const LOGIN_FAILED: &str = "login_failed";
+
 /// How long a runtime stays limited when the quota reset time is unknown.
 pub const LIMITED_DEFAULT_SECONDS: i64 = 3600;
 /// How often a runtime that needs a login is probed (`probe`).
@@ -419,6 +423,27 @@ impl Runtime {
         Ok(())
     }
 
+    /// Where a probe's output goes: `<name>/probe.log`, next to `state.json`.
+    fn probe_log(&self) -> Option<PathBuf> {
+        self.state_path
+            .as_ref()
+            .map(|p| p.with_file_name("probe.log"))
+    }
+
+    /// The last probe's output, one line, without the login's own values
+    /// and at most [`MAX_MESSAGE`] characters; `None` when it printed nothing.
+    fn probe_output(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.probe_log()?).ok()?;
+        let mut text = strip_ansi(&text);
+        for (_, v) in self.env().0 {
+            if !v.is_empty() {
+                text = text.replace(&v, "<redacted>");
+            }
+        }
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!line.is_empty()).then(|| line.chars().take(MAX_MESSAGE).collect())
+    }
+
     fn save(&self) -> Result<()> {
         let Some(path) = &self.state_path else {
             return Ok(());
@@ -436,6 +461,10 @@ pub struct Registry {
     pub managed: bool,
     probes: BTreeMap<String, (Child, Instant)>,
     probed: BTreeMap<String, Instant>,
+    /// Probes that check a login just made: their outcome is a card.
+    checks: std::collections::BTreeSet<String>,
+    /// Check cards ready before their probe ran (it could not start).
+    ready: Vec<Alert>,
 }
 
 impl Registry {
@@ -498,6 +527,8 @@ impl Registry {
             managed,
             probes: BTreeMap::new(),
             probed: BTreeMap::new(),
+            checks: Default::default(),
+            ready: Vec::new(),
         }
     }
 
@@ -632,45 +663,107 @@ impl Registry {
         }
     }
 
+    /// Checks the login of `name` now, as a probe does, because a login was
+    /// just made: a probe already running is replaced, and the outcome comes
+    /// back from [`Registry::probe`] as a card for the owner (ok, or still
+    /// needing a login with the probe's output). The periodic probe keeps
+    /// its cadence from here.
+    pub fn check_now(&mut self, name: &str) {
+        if !self.managed {
+            return;
+        }
+        let Some(rt) = self.get(name) else {
+            eprintln!(
+                "axe dispatcher: runtime {name}: logged in, but not in this dispatcher's registry"
+            );
+            return;
+        };
+        if rt.disabled || rt.probe.is_empty() {
+            eprintln!(
+                "axe dispatcher: runtime {name}: logged in; no login check (disabled or no probe)"
+            );
+            return;
+        }
+        if let Some((mut child, _)) = self.probes.remove(name) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        eprintln!("axe dispatcher: runtime {name}: logged in; checking the login now");
+        self.checks.insert(name.to_string());
+        self.start_probe(name);
+    }
+
+    fn start_probe(&mut self, name: &str) {
+        let Some(rt) = self.get(name) else {
+            return;
+        };
+        let argv = rt.probe.clone();
+        let (set, remove) = rt.env();
+        let out = rt.probe_log();
+        self.probed.insert(name.to_string(), Instant::now());
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]).stdin(Stdio::null());
+        match out.as_ref().map(std::fs::File::create) {
+            Some(Ok(f)) => {
+                let err = f.try_clone().map_or(Stdio::null(), Stdio::from);
+                cmd.stdout(f).stderr(err);
+            }
+            _ => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
+        for v in remove {
+            cmd.env_remove(v);
+        }
+        for (k, v) in set {
+            cmd.env(k, v);
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                self.probes
+                    .insert(name.to_string(), (child, Instant::now()));
+            }
+            Err(e) => {
+                eprintln!("axe dispatcher: runtime {name}: probe {argv:?}: {e}");
+                let status = format!("the login check did not start: {e}");
+                if let Some(a) = self.finished(name, false, &status) {
+                    self.ready.push(a);
+                }
+            }
+        }
+    }
+
     /// Probes runtimes that need a login, at most every [`PROBE_EVERY`], with
     /// the harness's status command in the runtime's environment: a zero exit
     /// makes the runtime ok again. A probe never marks a runtime unhealthy.
-    /// Non-blocking: a started probe is collected on a later call.
-    pub fn probe(&mut self) {
+    /// Non-blocking: a started probe is collected on a later call. Returns
+    /// the cards of finished [`Registry::check_now`] checks.
+    pub fn probe(&mut self) -> Vec<Alert> {
         let mut done = Vec::new();
         for (name, (child, started)) in &mut self.probes {
             match child.try_wait() {
-                Ok(Some(status)) => done.push((name.clone(), status.success())),
+                Ok(Some(status)) => done.push((name.clone(), status.success(), status.to_string())),
                 Ok(None) if started.elapsed() < PROBE_TIMEOUT => {}
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    done.push((name.clone(), false));
+                    done.push((
+                        name.clone(),
+                        false,
+                        format!("timed out after {}s", PROBE_TIMEOUT.as_secs()),
+                    ));
                 }
             }
         }
-        for (name, ok) in done {
+        let mut alerts = std::mem::take(&mut self.ready);
+        for (name, ok, status) in done {
             self.probes.remove(&name);
-            if !ok {
-                continue;
-            }
-            let Some(rt) = self.get_mut(&name) else {
-                continue;
-            };
-            if rt.health.state == NEEDS_LOGIN {
-                eprintln!("axe dispatcher: runtime {name}: login probe passed; ok again");
-                rt.health.state = OK.into();
-                rt.health.until = None;
-                rt.health.alerted = None;
-                if let Err(e) = rt.save() {
-                    eprintln!("axe dispatcher: runtime {name}: {e:#}");
-                }
-            }
+            alerts.extend(self.finished(&name, ok, &status));
         }
         if !self.managed {
-            return;
+            return alerts;
         }
-        let due: Vec<(String, Vec<String>, LoginEnv)> = self
+        let due: Vec<String> = self
             .runtimes
             .iter()
             .filter(|r| r.health.state == NEEDS_LOGIN && !r.disabled && !r.probe.is_empty())
@@ -680,28 +773,47 @@ impl Registry {
                     .get(&r.name)
                     .is_none_or(|at| at.elapsed() >= PROBE_EVERY)
             })
-            .map(|r| (r.name.clone(), r.probe.clone(), r.env()))
+            .map(|r| r.name.clone())
             .collect();
-        for (name, argv, (set, remove)) in due {
-            self.probed.insert(name.clone(), Instant::now());
-            let mut cmd = Command::new(&argv[0]);
-            cmd.args(&argv[1..])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            for v in remove {
-                cmd.env_remove(v);
-            }
-            for (k, v) in set {
-                cmd.env(k, v);
-            }
-            match cmd.spawn() {
-                Ok(child) => {
-                    self.probes.insert(name, (child, Instant::now()));
-                }
-                Err(e) => eprintln!("axe dispatcher: runtime {name}: probe {argv:?}: {e}"),
+        for name in due {
+            self.start_probe(&name);
+        }
+        alerts
+    }
+
+    /// A probe of `name` ended: a pass makes a runtime that needs a login ok
+    /// again. Returns the card when it was a [`Registry::check_now`] check.
+    fn finished(&mut self, name: &str, ok: bool, status: &str) -> Option<Alert> {
+        let check = self.checks.remove(name);
+        let rt = self.get_mut(name)?;
+        if ok && rt.health.state == NEEDS_LOGIN {
+            eprintln!("axe dispatcher: runtime {name}: login probe passed; ok again");
+            rt.health.state = OK.into();
+            rt.health.until = None;
+            rt.health.alerted = None;
+            if let Err(e) = rt.save() {
+                eprintln!("axe dispatcher: runtime {name}: {e:#}");
             }
         }
+        if !check {
+            return None;
+        }
+        let message = match ok {
+            true => String::new(),
+            false => rt.probe_output().unwrap_or_else(|| status.to_string()),
+        };
+        eprintln!(
+            "axe dispatcher: runtime {name}: login check {}",
+            if ok { "passed" } else { "failed" }
+        );
+        Some(Alert {
+            runtime: rt.name.clone(),
+            harness: rt.harness.clone(),
+            state: rt.health.state.clone(),
+            class: if ok { LOGIN_OK } else { LOGIN_FAILED }.into(),
+            message,
+            until: None,
+        })
     }
 
     /// What the server gets about each runtime: name, harness, plan, state,
@@ -928,23 +1040,37 @@ pub fn alert_text(a: &Value) -> String {
     let name = a["runtime"].as_str().unwrap_or("?");
     let harness = a["harness"].as_str().unwrap_or("?");
     let message = a["message"].as_str().unwrap_or("");
-    let head = match a["state"].as_str() {
-        Some(NEEDS_LOGIN) => format!(
+    let head = match (a["class"].as_str(), a["state"].as_str()) {
+        (Some(LOGIN_OK), _) => {
+            return format!("Runtime {name} ({harness}): the new login works; the runtime is ok.")
+        }
+        (Some(LOGIN_FAILED), Some(NEEDS_LOGIN)) => format!(
+            "Runtime {name} ({harness}): the new login failed its check, so the runtime still \
+             needs a login. Log in again from /runtimes; it is also rechecked every {} minutes.",
+            PROBE_EVERY.as_secs() / 60
+        ),
+        (Some(LOGIN_FAILED), s) => format!(
+            "Runtime {name} ({harness}): the new login failed its check; the runtime stays {} \
+             until a run says otherwise. Log in again from /runtimes if runs fail.",
+            s.unwrap_or("?")
+        ),
+        (_, Some(NEEDS_LOGIN)) => format!(
             "Runtime {name} ({harness}) needs a new login. Its runs go to other healthy \
              runtimes meanwhile; it is probed every {} minutes and is ok again once the \
              login works.",
             PROBE_EVERY.as_secs() / 60
         ),
-        Some(LIMITED) => format!(
+        (_, Some(LIMITED)) => format!(
             "Runtime {name} ({harness}) hit its usage limit until {}. Its runs go to other \
              healthy runtimes or wait for the reset.",
             when(&a["until"])
         ),
-        s => format!("Runtime {name} ({harness}) is {}.", s.unwrap_or("?")),
+        (_, s) => format!("Runtime {name} ({harness}) is {}.", s.unwrap_or("?")),
     };
-    match message.is_empty() {
-        true => head,
-        false => format!("{head}\n\n{} {message}", a["class"].as_str().unwrap_or("")),
+    match (message.is_empty(), a["class"].as_str()) {
+        (true, _) => head,
+        (false, Some(LOGIN_FAILED)) => format!("{head}\n\nThe check said: {message}"),
+        (false, class) => format!("{head}\n\n{} {message}", class.unwrap_or("")),
     }
 }
 
@@ -1073,5 +1199,101 @@ exit 2
             .unwrap()
             .device_login(&cfg, Duration::ZERO, |_| {})
             .is_err());
+    }
+
+    /// Collects `reg`'s probes until `f` holds or 10 seconds pass.
+    fn collect(reg: &mut Registry, f: impl Fn(&Registry, &[Alert]) -> bool) -> Vec<Alert> {
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut all = Vec::new();
+        loop {
+            all.extend(reg.probe());
+            if f(reg, &all) || Instant::now() > end {
+                return all;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_stored_login_is_checked_at_once_and_its_outcome_is_a_card() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, _) = registry(tmp.path());
+        let dir = tmp.path().join("runtimes/claude-1");
+        // Passes only with the good token; otherwise says why, with the token.
+        std::fs::write(
+            dir.join("runtime.toml"),
+            "harness = \"claude-code\"\nprobe = [\"sh\", \"-c\", \
+             \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = good ] || \
+             { printf '\\\\033[1mInvalid token %s\\\\033[0m\\\\n' \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" >&2; exit 1; }\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("state.json"),
+            r#"{"state":"needs_login","alerted":"needs_login"}"#,
+        )
+        .unwrap();
+        let mut reg = Registry::load(&cfg).unwrap();
+
+        // The periodic probe runs and fails: no card, still needs a login.
+        let alerts = collect(&mut reg, |r, _| {
+            r.probes.is_empty() && r.probed.contains_key("claude-1")
+        });
+        assert!(alerts.is_empty(), "{alerts:?}");
+        assert_eq!(reg.get("claude-1").unwrap().health.state, NEEDS_LOGIN);
+        // Its next run is minutes away.
+        assert!(reg.probe().is_empty() && reg.probes.is_empty());
+
+        // A bad login: checked now, the card says why and hides the value.
+        let rt = reg.get("claude-1").unwrap().clone();
+        rt.login(&cfg, "token", "bad-oat-77").unwrap();
+        reg.check_now("claude-1");
+        let alerts = collect(&mut reg, |_, a| !a.is_empty());
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        let a = &alerts[0];
+        assert_eq!(
+            (a.class.as_str(), a.state.as_str()),
+            (LOGIN_FAILED, NEEDS_LOGIN)
+        );
+        assert_eq!(a.message, "Invalid token <redacted>");
+        let text = alert_text(&a.to_json());
+        assert!(text.contains("the new login failed its check"), "{text}");
+        assert!(
+            text.ends_with("The check said: Invalid token <redacted>"),
+            "{text}"
+        );
+
+        // A good login: checked now, ok again, and the card says so.
+        rt.login(&cfg, "token", "good").unwrap();
+        reg.check_now("claude-1");
+        let alerts = collect(&mut reg, |_, a| !a.is_empty());
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(
+            (alerts[0].class.as_str(), alerts[0].state.as_str()),
+            (LOGIN_OK, OK)
+        );
+        assert_eq!(
+            alert_text(&alerts[0].to_json()),
+            "Runtime claude-1 (claude-code): the new login works; the runtime is ok."
+        );
+        let rt = reg.get("claude-1").unwrap();
+        assert_eq!(
+            (rt.health.state.as_str(), rt.health.alerted.as_deref()),
+            (OK, None)
+        );
+        let saved: Health =
+            serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(saved.state, OK);
+
+        // An ok runtime is checked too; a failure reports but keeps it ok.
+        rt.login(&cfg, "token", "worse").unwrap();
+        reg.check_now("claude-1");
+        let alerts = collect(&mut reg, |_, a| !a.is_empty());
+        assert_eq!(
+            (alerts[0].class.as_str(), alerts[0].state.as_str()),
+            (LOGIN_FAILED, OK)
+        );
+        assert!(alert_text(&alerts[0].to_json()).contains("stays ok"));
+        // The periodic probe of an ok runtime never runs, nor makes a card.
+        assert!(reg.probe().is_empty() && reg.probes.is_empty());
     }
 }
