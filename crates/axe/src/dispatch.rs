@@ -528,7 +528,12 @@ impl Dispatcher {
             return;
         }
         self.runtimes.tick(now_unix());
-        self.runtimes.probe();
+        let logins = std::mem::take(&mut *self.store.logins.lock().unwrap());
+        for name in logins {
+            self.runtimes.check_now(&name);
+        }
+        let checked = self.runtimes.probe();
+        self.alerts.extend(checked);
         let mut i = 0;
         while i < self.alerts.len() {
             let a = self.alerts[i].clone();
@@ -552,7 +557,10 @@ impl Dispatcher {
                         "axe dispatcher: runtime {} turned {}: card {v}",
                         a.runtime, a.state
                     );
-                    self.runtimes.alerted(&a.runtime, &a.state);
+                    // A login check's card is no state episode of its own.
+                    if !matches!(a.class.as_str(), runtime::LOGIN_OK | runtime::LOGIN_FAILED) {
+                        self.runtimes.alerted(&a.runtime, &a.state);
+                    }
                     self.alerts.remove(i);
                     self.alert_failed = false;
                 }

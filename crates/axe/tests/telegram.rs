@@ -3974,9 +3974,18 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     let dir = tempfile::tempdir().unwrap();
     let reg = dir.path().join("runtimes");
     std::fs::create_dir_all(reg.join("claude-1")).unwrap();
+    // The login check passes only with the token the form delivers.
     std::fs::write(
         reg.join("claude-1/runtime.toml"),
-        "harness = \"claude-code\"\nprobe = [\"false\"]\n",
+        "harness = \"claude-code\"\nprobe = [\"sh\", \"-c\", \
+         \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = oat-dummy-4411 ] || { echo Not logged in; exit 1; }\"]\n",
+    )
+    .unwrap();
+    // It needs a login: the dispatcher's first probe fails, and the next
+    // periodic one is minutes away.
+    std::fs::write(
+        reg.join("claude-1/state.json"),
+        r#"{"state":"needs_login","alerted":"needs_login"}"#,
     )
     .unwrap();
     // The owner types /runtimes in bot aux, not the ops bot cos.
@@ -4078,12 +4087,33 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     );
     rig.stub.wait_confirmed(103);
     wait_for("the delivery", 20, || {
-        rig.sent_to(OWNER)
-            .iter()
-            .any(|p| p["text"] == "Sealed form delivered: runtime claude-1 login (token).")
+        rig.sent_to(OWNER).iter().any(|p| {
+            p["text"]
+                == "Sealed form delivered: runtime claude-1 login (token). The login is \
+                    checked now; a runtime card follows with the result."
+        })
     });
     let file = reg.join("claude-1/login/CLAUDE_CODE_OAUTH_TOKEN");
     assert_eq!(std::fs::read_to_string(file).unwrap(), "oat-dummy-4411");
+    // The stored login is checked at once, not at the next periodic probe:
+    // the runtime is ok and the owner gets its card.
+    wait_for("the login check card", 20, || {
+        rig.sent_to(OWNER).iter().any(|p| {
+            p["text"] == "Runtime claude-1 (claude-code): the new login works; the runtime is ok."
+        })
+    });
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(reg.join("claude-1/state.json")).unwrap()).unwrap();
+    assert_eq!(
+        (&state["state"], &state["alerted"]),
+        (&json!("ok"), &Value::Null),
+        "{state}"
+    );
+    wait_for("the runtime report", 20, || {
+        rig.srv()
+            .ok(&["runtimes"])
+            .contains("claude-1 (claude-code): ok")
+    });
     assert!(rig.message_wakes().is_empty(), "no bot was woken");
 
     // Runtime login forms come only from the owner's Telegram.

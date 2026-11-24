@@ -212,7 +212,10 @@ runtime (`runtime::login_methods`):
   --with-api-key` on stdin. Or `codex login --device-auth` runs on the
   dispatcher, and its link and code are relayed to the owner.
 
-A runtime that needs a login is ok again at its next login check.
+A login made this way is checked at once (`runtime::Registry::check_now`): the
+runtime is ok again when the check passes, and the owner gets a runtime card
+with the outcome. A runtime that needs a login is also rechecked every few
+minutes (`runtime::PROBE_EVERY`).
 
 **Session continuity.** Every later run resumes the first run's session with
 the agent's `resume_cmd`. A failed resume with no axe change

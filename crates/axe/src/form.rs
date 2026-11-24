@@ -380,6 +380,13 @@ pub fn prompt_text(f: &Form) -> String {
     )
 }
 
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
 /// The owner-facing outcome of a reply.
 pub fn outcome_text(f: &Form) -> String {
     match f.state {
@@ -395,12 +402,17 @@ pub fn outcome_text(f: &Form) -> String {
                     })
                     .unwrap_or_default()
             });
-            match files.filter(|s| !s.is_empty()) {
+            let head = match files.filter(|s| !s.is_empty()) {
                 Some(files) => format!(
                     "Sealed form delivered to {}: {files}.",
                     f.spec.target.describe()
                 ),
                 None => format!("Sealed form delivered: {}.", f.spec.target.describe()),
+            };
+            // What happens next, from the dispatcher (a runtime login's check).
+            match f.delivered.as_ref().and_then(|d| d["note"].as_str()) {
+                Some(note) if !note.is_empty() => format!("{head} {}.", capitalize(note)),
+                _ => head,
             }
         }
         SUBMITTED => "Sealed form received and held until the dispatcher reconnects. \
