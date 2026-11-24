@@ -205,6 +205,31 @@ fn any_command_refreshes_a_stale_stamped_install() {
 }
 
 #[test]
+fn concurrent_commands_refresh_once_and_leave_nothing_behind() {
+    let h = Home::new();
+    assert!(h.axe(&["skill", "install"], &[]).status.success());
+    make_stale(&h);
+    let children: Vec<_> = (0..8)
+        .map(|_| h.cmd(Path::new(BIN)).args(ANY).output())
+        .collect();
+    let mut updated = 0;
+    for c in children {
+        let o = c.unwrap();
+        assert!(o.status.success(), "{o:?}");
+        updated += stderr(&o).matches("updated the skill").count();
+    }
+    assert!(updated >= 1);
+    let names: Vec<_> = std::fs::read_dir(h.skill().parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["axe".to_string()]);
+    let mut got = files(&h.skill());
+    got.remove(".axe-skill.json");
+    assert_eq!(got, files(&repo_skill()));
+}
+
+#[test]
 fn auto_refresh_leaves_edited_and_unstamped_copies_alone_with_a_hint() {
     // Hand-edited since stamping.
     let h = Home::new();

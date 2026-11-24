@@ -215,6 +215,7 @@ pub fn install(dir: Option<&Path>, force: bool, no_link: bool) -> Result<Vec<Str
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default.clone());
     let mut lines = Vec::new();
+    let _lock = lock(true);
     match inspect(&dir)? {
         State::Symlink => bail!(
             "{} is a symlink; axe does not replace it (remove it, or pass --dir)",
@@ -355,6 +356,10 @@ pub fn auto_refresh() {
     let Ok(dir) = default_dir() else {
         return;
     };
+    // Another command is installing or refreshing it: leave it to that one.
+    let Some(_lock) = lock(false) else {
+        return;
+    };
     let hint = match inspect(&dir) {
         Ok(State::Stamped {
             current: false,
@@ -385,6 +390,36 @@ pub fn auto_refresh() {
          left as is, `axe skill install --force` replaces it",
         dir.display()
     );
+}
+
+/// The skill lock (`<cache dir>/axe/skill.lock`), held while a copy is
+/// inspected and rewritten so concurrent commands never interleave renames.
+/// `wait` false returns None when another process holds it. Without a cache
+/// dir there is no lock (`Some(None)`).
+fn lock(wait: bool) -> Option<Option<std::fs::File>> {
+    use fs2::FileExt;
+    let Some(dir) = cache_dir() else {
+        return Some(None);
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("skill.lock"))
+    else {
+        return Some(None);
+    };
+    let locked = if wait {
+        file.lock_exclusive().is_ok()
+    } else {
+        file.try_lock_exclusive().is_ok()
+    };
+    match (locked, wait) {
+        (true, _) => Some(Some(file)),
+        (false, true) => Some(None),
+        (false, false) => None,
+    }
 }
 
 /// Whether the hint for `dir` in its current state has not been printed in
