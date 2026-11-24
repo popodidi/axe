@@ -156,6 +156,12 @@ Only the owner controls a bot:
 5. **Read privacy.** Message text and files need the token, unlike other axe
    reads; the dashboard shows metadata only and files are proxied, not stored.
 
+Owner commands (`/status`, `/runtimes`, ...) are handled by the server and
+never wake the bot. Each bot's `/` menu lists them (`setMyCommands` at server
+start, from the same table the router uses: `OWNER_COMMANDS` in
+`telegram.rs`), scoped to the owner's private chat and to the owner in
+allowlisted groups.
+
 The owner's inbox is the bot chat's pinned list, rendered by the server
 (`board.rs`, `goal_board.rs`): one pinned card per open decision and one
 pinned message per active goal, edited in place as the goal changes, so the

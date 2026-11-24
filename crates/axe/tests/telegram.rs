@@ -4349,3 +4349,62 @@ fn a_renamed_bot_keeps_its_telegram_bot_across_a_restart() {
     let out = rig.srv().run(&["bot", "show", "cos"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("renamed to chief"));
 }
+
+#[test]
+fn command_menu_lists_the_routed_commands_for_the_owner_only() {
+    let rig = Rig::new();
+    wait_for("setMyCommands", 20, || {
+        rig.stub.calls("setMyCommands").len() >= 2
+    });
+    let calls = rig.stub.calls("setMyCommands");
+    assert_eq!(calls.len(), 2, "one call per owner scope: {calls:?}");
+    let scopes: Vec<&Value> = calls.iter().map(|c| &c.params["scope"]).collect();
+    assert_eq!(
+        scopes,
+        [
+            &json!({"type": "chat", "chat_id": OWNER}),
+            &json!({"type": "chat_member", "chat_id": GROUP, "user_id": OWNER}),
+        ]
+    );
+    let expected: Vec<Value> = axe::telegram::OWNER_COMMANDS
+        .iter()
+        .map(|(c, d)| json!({"command": c, "description": d}))
+        .collect();
+    for c in &calls {
+        assert_eq!(c.token, TG_TOKEN);
+        assert_eq!(c.params["commands"], json!(expected));
+    }
+    // BotCommand limits (Bot API): at most 100 commands, each 1-32 of
+    // [a-z0-9_] with a 1-256 character description.
+    assert!(!expected.is_empty() && expected.len() <= 100);
+    for (c, d) in axe::telegram::OWNER_COMMANDS {
+        assert!((1..=32).contains(&c.len()), "{c}");
+        assert!(c
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'));
+        assert!((1..=256).contains(&d.chars().count()), "{d}");
+    }
+    let names: Vec<&str> = axe::telegram::OWNER_COMMANDS
+        .iter()
+        .map(|(c, _)| *c)
+        .collect();
+    assert!(names.contains(&"runtimes"), "{names:?}");
+
+    // Every menu entry is routed: each gets a reply and none is stored as a
+    // message or wakes the bot.
+    for (i, c) in names.iter().enumerate() {
+        rig.stub.push(text_msg(
+            300 + i as i64,
+            400 + i as i64,
+            OWNER,
+            OWNER,
+            &format!("/{c}"),
+        ));
+    }
+    rig.stub.wait_confirmed(300 + names.len() as i64 - 1);
+    wait_for("command replies", 20, || {
+        rig.sent_to(OWNER).len() >= names.len()
+    });
+    assert!(rig.inbound().is_empty(), "{:?}", rig.inbound());
+    assert!(rig.message_wakes().is_empty());
+}

@@ -61,8 +61,18 @@ const MAX_RETRY_AFTER: u64 = 60;
 const ALERT_INTERVAL: Duration = Duration::from_secs(60);
 /// Attempts at one update before it is skipped (recorded as an event).
 const UPDATE_ATTEMPTS: u32 = 3;
-const OWNER_COMMANDS: [&str; 7] = [
-    "status", "stop", "pause", "resume", "reset", "wake", "runtimes",
+/// The owner commands [`command`] routes, with the description each bot's
+/// `/` menu shows ([`Gateway::publish_commands`]). `BotCommand`: the command
+/// is 1-32 lowercase letters, digits and underscores; the description 1-256
+/// characters.
+pub const OWNER_COMMANDS: [(&str, &str); 7] = [
+    ("status", "Bot state, live run and next wake"),
+    ("wake", "Queue a wake, with an optional note"),
+    ("stop", "Stop the live run; queued wakes are kept"),
+    ("pause", "Pause: no new wakes, stop the live run"),
+    ("resume", "Resume a paused bot"),
+    ("reset", "Clear the session; the next run starts fresh"),
+    ("runtimes", "Agent runtimes and their logins"),
 ];
 /// Callback data of the button on a runtime card.
 const RUNTIMES_BUTTON: &str = "runtimes";
@@ -735,6 +745,26 @@ impl Gateway {
                 }
             }
             Err(e) => eprintln!("telegram: bot {}: {e}", b.name()),
+        }
+        self.publish_commands(b);
+    }
+
+    /// Sets the `/` menu to [`OWNER_COMMANDS`] where the owner can use them:
+    /// the owner's private chat (a `chat` scope; its id is the owner's user
+    /// id) and, for each allowlisted group, the owner there (`chat_member`).
+    /// Nobody else gets a menu. Runs at every start, so a changed command set
+    /// ships with the binary; `setMyCommands` replaces the list, so it is
+    /// idempotent.
+    fn publish_commands(&self, b: &TgBot) {
+        let commands: Vec<Value> = OWNER_COMMANDS
+            .iter()
+            .map(|(c, d)| json!({"command": c, "description": d}))
+            .collect();
+        for scope in command_scopes(self.owner, &b.chats) {
+            let params = json!({"commands": commands, "scope": scope});
+            if let Err(e) = b.api.call("setMyCommands", &params) {
+                eprintln!("telegram: bot {}: command menu for {scope}: {e}", b.name());
+            }
         }
     }
 
@@ -2873,8 +2903,21 @@ fn command<'a>(text: &'a str, me: Option<&str>) -> Option<(&'static str, &'a str
     }
     OWNER_COMMANDS
         .iter()
-        .find(|c| **c == cmd)
-        .map(|c| (*c, arg.trim()))
+        .find(|(c, _)| *c == cmd)
+        .map(|(c, _)| (*c, arg.trim()))
+}
+
+/// The `BotCommandScope`s of the owner's command menu: the owner's private
+/// chat when it is allowlisted, and the owner in each allowlisted group.
+fn command_scopes(owner: i64, chats: &[i64]) -> Vec<Value> {
+    chats
+        .iter()
+        .filter_map(|&c| match c {
+            c if c == owner => Some(json!({"type": "chat", "chat_id": c})),
+            c if c < 0 => Some(json!({"type": "chat_member", "chat_id": c, "user_id": owner})),
+            _ => None,
+        })
+        .collect()
 }
 
 fn status(conn: &Connection, name: &str) -> Result<String> {
