@@ -8,6 +8,7 @@ import {
   parentFolders,
   previewKind,
   shortDate,
+  splitFrontmatter,
   storeLink,
 } from "./store";
 import { artifactReference } from "./artifact-reference";
@@ -116,5 +117,42 @@ describe("store stats", () => {
     expect(countOf(0, "blob")).toBe("0 blobs");
     expect(countOf(1, "blob")).toBe("1 blob");
     expect(countOf(1862, "blob")).toBe("1,862 blobs");
+  });
+});
+
+describe("doc frontmatter", () => {
+  test("leading YAML becomes key/value rows and leaves the body", () => {
+    const doc = [
+      "---",
+      'title: "Core loops"',
+      "date: 20261124",
+      "tags: [a, b]",
+      "aliases:",
+      "  - one",
+      "  - 'two'",
+      "---",
+      "# Heading",
+      "",
+      "Text",
+    ].join("\n");
+    expect(splitFrontmatter(doc)).toEqual({
+      meta: [
+        ["title", "Core loops"],
+        ["date", "20261124"],
+        ["tags", "[a, b]"],
+        ["aliases", "one, two"],
+      ],
+      body: "# Heading\n\nText",
+    });
+  });
+  test("no frontmatter, a rule later on or no closing fence: body unchanged", () => {
+    for (const doc of ["# Title\n\n---\n\nmore", "---\ntitle: x\nno close", "text"])
+      expect(splitFrontmatter(doc)).toEqual({ meta: [], body: doc });
+  });
+  test("CRLF line ends", () => {
+    expect(splitFrontmatter("---\r\na: 1\r\n---\r\nbody")).toEqual({
+      meta: [["a", "1"]],
+      body: "body",
+    });
   });
 });

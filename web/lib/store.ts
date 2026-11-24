@@ -267,3 +267,30 @@ export function parentFolders(path: string) {
   const parts = path.split("/").filter(Boolean);
   return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
 }
+
+// A markdown doc's leading YAML frontmatter (`---` ... `---`) as key/value
+// rows, and the body after it. Shown as a small facts block instead of a
+// paragraph. Only top-level `key: value` lines become rows; indented or list
+// lines continue the previous value. No closing fence: no frontmatter.
+export function splitFrontmatter(text: string): {
+  meta: [string, string][];
+  body: string;
+} {
+  const m = text.match(/^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/);
+  if (!m) return { meta: [], body: text };
+  const meta: [string, string][] = [];
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = line.match(/^([A-Za-z0-9_][\w .-]*?)\s*:\s?(.*)$/);
+    if (kv) meta.push([kv[1], unquote(kv[2].trim())]);
+    else if (line.trim() && meta.length) {
+      const last = meta[meta.length - 1];
+      const item = line.trim().replace(/^-\s*/, "");
+      last[1] = last[1] ? `${last[1]}, ${unquote(item)}` : unquote(item);
+    }
+  }
+  return { meta, body: text.slice(m[0].length) };
+}
+
+function unquote(s: string) {
+  return /^(["']).*\1$/.test(s) ? s.slice(1, -1) : s;
+}

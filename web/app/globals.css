@@ -15,8 +15,14 @@ body {
   interpolate-size: allow-keywords;
 }
 
+/* Dashboard panes scroll themselves; the doc page (app/doc) scrolls with the
+   window. */
 body {
   overflow: hidden;
+}
+
+body:has([data-doc-page]) {
+  overflow: auto;
 }
 
 details::details-content {

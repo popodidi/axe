@@ -10,6 +10,7 @@ import {
   getJson,
   previewKind,
   signLink,
+  splitFrontmatter,
   storeLink,
   TEXT_PREVIEW_BYTES,
   useStoreSession,
@@ -43,6 +44,18 @@ function Facts({ label, rows }: { label: string; rows: [string, ReactNode][] }) 
 }
 
 // What the store pane knows about a blob beyond its link.
+// Rendered markdown; leading YAML frontmatter shows as a small facts block,
+// like the metadata above it, not as a bold paragraph.
+function MarkdownText({ text }: { text: string }) {
+  const { meta, body } = splitFrontmatter(text);
+  return (
+    <div className={styles.text}>
+      {meta.length > 0 && <Facts label="Frontmatter" rows={meta} />}
+      <Markdown body={body} compact />
+    </div>
+  );
+}
+
 export type BlobInfo = { names: string[]; tasks: number[]; storedAt?: string };
 
 export function StoreUnlock({ base, reason }: { base: string; reason: string }) {
@@ -329,9 +342,7 @@ function BlobPreview({
         text === null ? (
           <Skeleton label="Loading preview…" lines={3} />
         ) : meta.kind === "markdown" ? (
-          <div className={styles.text}>
-            <Markdown body={text} compact />
-          </div>
+          <MarkdownText text={text} />
         ) : (
           <CodeBlock className={styles.text}>{text}</CodeBlock>
         )
@@ -443,9 +454,7 @@ export function DocViewer({
         <section key={f.path} aria-label={f.path || doc.path} className={styles.docFile}>
           {f.path && <h4 className={styles.mono}>{f.path}</h4>}
           {/\.md$/i.test(f.path || doc.path) ? (
-            <div className={styles.text}>
-              <Markdown body={f.content} compact />
-            </div>
+            <MarkdownText text={f.content} />
           ) : (
             <CodeBlock className={styles.text}>{f.content}</CodeBlock>
           )}

@@ -28,6 +28,22 @@ const blobs: Record<string, { type: string; body: string | Buffer }> = {
   [sha("5")]: { type: "text/tab-separated-values", body: "url\tsha256\n" },
 };
 
+// A long doc with frontmatter, a wide code block and a closing line.
+const longDocPath = "research/long-report.md";
+const longDoc = [
+  "---",
+  'title: "Long report"',
+  "status: draft",
+  "---",
+  "# Long report",
+  ...Array.from({ length: 60 }, (_, i) => `Paragraph ${i + 1} of the long report.`),
+  "```",
+  `wide ${"x".repeat(400)}`,
+  ...Array.from({ length: 40 }, (_, i) => `line ${i + 1}`),
+  "```",
+  "The end of the long report.",
+].join("\n\n");
+
 type Store = {
   read: boolean;
   tokens: string[];
@@ -106,7 +122,7 @@ async function mockStore(page: Page, read: boolean) {
           path: url.searchParams.get("path"),
           version: "c".repeat(40),
           kind: "doc",
-          content: "# Quiet\n\nGroup with **space** first.",
+          content: url.searchParams.get("path") === longDocPath ? longDoc : "# Quiet\n\nGroup with **space** first.",
         });
     }
     const signedPath = p.match(/^\/b\/([0-9a-f]{64})(\/[^/]+)?$/);
@@ -320,7 +336,12 @@ test("store rows stay on one line and docs browse as folders", async ({ page }) 
   await expect(row).toBeVisible();
   const heights = await row
     .locator("td")
-    .evaluateAll((cells) => cells.map((c) => Math.round(c.getBoundingClientRect().height)));
+    .evaluateAll((cells) =>
+      cells
+        // A narrow list hides the Type column.
+        .filter((c) => c.getClientRects().length)
+        .map((c) => Math.round(c.getBoundingClientRect().height)),
+    );
   expect(new Set(heights).size).toBe(1);
   const stored = row.locator("td").nth(3);
   await expect(stored).not.toContainText("2026");
@@ -342,4 +363,56 @@ test("store rows stay on one line and docs browse as folders", async ({ page }) 
   // A deep link opens the folders above the selected doc.
   await page.goto("/?server=http://axe.test&view=store&kind=docs&doc=harvis/docs/reference/brand-guide.md");
   await expect(tree.getByRole("button", { name: "brand-guide.md" })).toBeVisible();
+});
+
+test("the doc page scrolls with the window to the doc's end", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
+  const end = page.getByText("The end of the long report.");
+  await expect(end).toBeAttached();
+  // The window scrolls, not a capped box inside the page.
+  const sizes = await page.evaluate(() => ({
+    sh: document.scrollingElement!.scrollHeight,
+    sw: document.scrollingElement!.scrollWidth,
+    w: innerWidth,
+    h: innerHeight,
+  }));
+  expect(sizes.sh).toBeGreaterThan(sizes.h * 2);
+  // The wide code block scrolls inside itself; the page never scrolls sideways.
+  expect(sizes.sw).toBeLessThanOrEqual(sizes.w);
+  const pre = page.locator("pre").filter({ hasText: "wide xxx" });
+  expect(await pre.evaluate((e) => e.scrollWidth > e.clientWidth)).toBe(true);
+  await page.evaluate(() => window.scrollTo(0, document.scrollingElement!.scrollHeight));
+  await expect(end).toBeInViewport();
+  // The version line stays; frontmatter is a facts block, not a paragraph.
+  await expect(page.getByText(/doc · version cccccccccccc/)).toBeVisible();
+  const facts = page.getByLabel("Frontmatter");
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect(facts).toContainText("Long report");
+  await expect(facts).toContainText("draft");
+  await expect(page.getByText("title:")).toHaveCount(0);
+});
+
+test("an open store item narrows the store column instead of covering it", async ({ page }) => {
+  await mockDesk(page);
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // A saved detail width wider than the room beside the store's list.
+  await page.goto("/?server=http://axe.test&view=store");
+  await page.evaluate(() => localStorage.setItem("axe-layout", JSON.stringify({ detail: 1000 })));
+  for (const item of [`blob=${sha("5")}`, `kind=docs&doc=${longDocPath}`]) {
+    await page.goto(`/?server=http://axe.test&view=store&${item}`);
+    await expect(page.getByRole("region", { name: "Store item" }).locator("[data-store-viewer]")).toBeVisible();
+    const list = page.getByRole("region", { name: "Task workspace" });
+    const box = (await list.boundingBox())!;
+    expect(await list.evaluate((e) => e.scrollWidth <= e.clientWidth)).toBe(true);
+    const parts = [
+      page.getByRole("region", { name: "Store stats" }).locator(":scope > *"),
+      page.getByRole("searchbox"),
+    ];
+    for (const part of parts)
+      for (const b of await part.evaluateAll((els) => els.map((e) => e.getBoundingClientRect().toJSON())))
+        expect(b.right).toBeLessThanOrEqual(box.x + box.width);
+  }
 });

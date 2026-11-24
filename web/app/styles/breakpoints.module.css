@@ -8,6 +8,7 @@
 @value bp-phone: (max-width: 760px);
 @value bp-wide: (min-width: 761px);
 @value bp-list-narrow: (max-width: 640px);
+@value bp-list-medium: (max-width: 960px);
 @value bp-stack: (max-width: 1599px);
 
 @value bp-artifacts-narrow: (max-width: 480px);

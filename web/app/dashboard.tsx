@@ -82,6 +82,14 @@ const when = (s: string) =>
     dateStyle: "medium",
     timeStyle: "short",
   });
+// The server's host for the footer ("axe.hlab"); the full URL is the tooltip.
+const host = (base: string) => {
+  try {
+    return new URL(base).host || base;
+  } catch {
+    return base;
+  }
+};
 const views = ["tasks", "routines", "bots", "goals", "store", "stats", "cost"];
 const labels = ["Tasks", "Routines", "Bots", "Goals", "Store", "Stats", "Cost"];
 const keys = ["t", "r", "b", "o", "e", "s", "c"];
@@ -607,6 +615,8 @@ export default function Dashboard() {
           ))}
         </nav>
         <footer className={styles.navFoot}>
+          {/* One status row (connection, then refresh and the theme icon
+              toggle), and one muted line for the server. */}
           <div className={styles.status}>
             <span
               className={styles.connection}
@@ -616,32 +626,37 @@ export default function Dashboard() {
             >
               <span className={styles.navLabel}>{connection}</span>
             </span>
-            <Button
-              variant="ghost"
-              icon
-              aria-label="Refresh now"
-              title="Refresh now"
-              onClick={() => reload.current()}
-            >
-              ↻
-            </Button>
-          </div>
-          <span className={styles.hideNarrow}>
-            server <span className={styles.mono}>{base}</span>
-          </span>
-          <span className={styles.hideNarrow}>Read-only</span>
-          <Button
-            variant="ghost"
-            className={styles.theme}
-            aria-pressed={light}
-            title="Switch between dark and light"
-            onClick={toggleTheme}
-          >
-            <span className={styles.navLabel}>Light theme</span>
-            <span aria-hidden className={styles.navGlyph}>
-              ◐
+            <span className={styles.footActions}>
+              <Button
+                variant="ghost"
+                icon
+                aria-label="Refresh now"
+                title="Refresh now"
+                onClick={() => reload.current()}
+              >
+                <svg aria-hidden viewBox="0 0 16 16" className={styles.footIcon}>
+                  <path d="M13 8a5 5 0 1 1-1.46-3.54" />
+                  <path d="M13 2.5V5h-2.5" />
+                </svg>
+              </Button>
+              <Button
+                variant="ghost"
+                icon
+                aria-label="Light theme"
+                aria-pressed={light}
+                title={light ? "Switch to dark theme" : "Switch to light theme"}
+                onClick={toggleTheme}
+              >
+                <svg aria-hidden viewBox="0 0 16 16" className={styles.footIcon}>
+                  <circle cx="8" cy="8" r="5.5" />
+                  <path d="M8 2.5a5.5 5.5 0 0 1 0 11z" className={styles.footIconFill} />
+                </svg>
+              </Button>
             </span>
-          </Button>
+          </div>
+          <span className={cx(styles.serverLine, styles.hideNarrow)} title={`server ${base}`}>
+            <span className={styles.mono}>{host(base)}</span> · Read-only
+          </span>
         </footer>
       </aside>
       {!collapsed && (
@@ -658,6 +673,7 @@ export default function Dashboard() {
           (paneItem || routineId) && styles.hasDetail,
           routineId && styles.hasRoutine,
           routineId && shown && styles.stacked,
+          view === "store" && styles.storeView,
         )}
         inert={overlay}
       >

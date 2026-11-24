@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { mockBots } from "./bots-fixture";
+import { botRuns, mockBots } from "./bots-fixture";
 import { choose } from "./fixtures";
 const base = "/?server=http://axe.test";
 for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
@@ -140,4 +140,39 @@ test("a bare bot link opens the Bots view and g b navigates there", async ({ pag
   await page.keyboard.press("b");
   await expect(page).toHaveURL(/view=bots/);
   await expect(page.getByRole("region", { name: "Bots", exact: true })).toBeVisible();
+});
+
+test("bot list columns stay put while a live run updates and fit narrow widths", async ({ page }) => {
+  await mockBots(page);
+  const columns = () =>
+    page
+      .getByRole("region", { name: "Bots", exact: true })
+      .locator("thead th")
+      .evaluateAll((ths) => ths.map((th) => Math.round(th.getBoundingClientRect().left)));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(base + "&view=bots");
+  await expect(page.locator("#bot-ops-bot")).toContainText("gh pr checks 12");
+  const before = await columns();
+  // A much longer activity line: same columns, one line with a tooltip.
+  const long = `Bash: gcloud logging read ${"resource.labels.service_name=x AND ".repeat(8)}`;
+  await page.route("http://axe.test/api/bot-runs?live=1*", (route) =>
+    route.fulfill({
+      json: [{ ...botRuns.find((r) => !r.ended_at)!, current_activity: long }],
+      headers: { "Access-Control-Allow-Origin": "*" },
+    }),
+  );
+  await page.reload();
+  const activity = page.locator("#bot-ops-bot").getByTitle(long);
+  await expect(activity).toBeVisible();
+  expect(await columns()).toEqual(before);
+  for (const width of [1024, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(activity).toBeVisible();
+    // No cell spills into its neighbour, and the page never scrolls sideways.
+    const spill = await page
+      .locator("#bot-ops-bot td")
+      .evaluateAll((tds) => tds.filter((td) => td.scrollWidth > td.clientWidth + 1).length);
+    expect(spill).toBe(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
 });

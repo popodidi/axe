@@ -37,10 +37,22 @@ export const typeOf = (h: History, id: number): TaskType =>
 export const stamp = (s: string | null) => (s ? Date.parse(s) : NaN);
 const DAY = 86400000;
 export type DateRange = { start: number; end: number; error?: string };
+/** The quick ranges every Period selector offers (`days=<n>`). */
+export const QUICK_DAYS = ["7", "14", "30", "90"];
+export const quickRangeOptions = QUICK_DAYS.map((d) => ({
+  value: d,
+  label: `Last ${d} days`,
+}));
+/** A quick range from the URL, or the 7-day default. */
+export const quickDays = (p: URLSearchParams) =>
+  QUICK_DAYS.includes(p.get("days") || "") ? p.get("days")! : "7";
+/** A custom range is in the URL (`days=custom`, `start`, `end`). */
+export const isCustomRange = (p: URLSearchParams) =>
+  p.has("start") || p.has("end") || p.get("days") === "custom";
 /** UTC calendar dates, start inclusive and end exclusive. Custom end date is inclusive. */
 export function dateRange(p: URLSearchParams, now: number): DateRange {
   const today = Math.floor(now / DAY) * DAY;
-  if (p.has("start") || p.has("end") || p.get("days") === "custom") {
+  if (isCustomRange(p)) {
     const parse = (key: string) => {
       const value = p.get(key) || "";
       const n = /^\d{4}-\d{2}-\d{2}$/.test(value)
@@ -67,9 +79,7 @@ export function dateRange(p: URLSearchParams, now: number): DateRange {
       };
     return { start, end: last + DAY };
   }
-  const days = ["7", "30", "90"].includes(p.get("days") || "")
-    ? Number(p.get("days"))
-    : 7;
+  const days = Number(quickDays(p));
   return { start: today - (days - 1) * DAY, end: today + DAY };
 }
 /** Candidates include old tasks: creation date is not completion date. */
