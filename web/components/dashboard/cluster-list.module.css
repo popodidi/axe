@@ -1,0 +1,17 @@
+.open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.title {
+  color: var(--text-primary);
+}
+
+.unknown {
+  color: var(--text-tertiary);
+}

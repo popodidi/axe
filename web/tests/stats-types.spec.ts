@@ -10,6 +10,12 @@ const reads = (page: Page) => {
   });
   return urls;
 };
+// Tasks behind a scatter's dots and clusters.
+const plotted = (page: Page, name: string) =>
+  page
+    .getByRole("figure", { name, exact: true })
+    .locator("[data-count]")
+    .evaluateAll((els) => els.reduce((n, e) => n + Number(e.getAttribute("data-count")), 0));
 const split = (page: Page) =>
   page.getByRole("definition").evaluateAll((els) =>
     els.map((e) => [e.previousElementSibling?.textContent, e.textContent]),
@@ -61,11 +67,8 @@ test("type filter scopes the whole report and reuses classification", async ({
   await expect(
     page.getByRole("region", { name: "Completed normal tasks", exact: true }),
   ).toBeVisible();
-  await expect(
-    page
-      .getByRole("figure", { name: "Runs and escalations", exact: true })
-      .getByRole("button"),
-  ).toHaveCount(19);
+  // Overlapping dots draw as counted clusters; every task is still plotted.
+  expect(await plotted(page, "Runs and escalations")).toBe(19);
   // The split stays visible and unchanged in a typed scope.
   expect((await split(page))[1]).toEqual(["Routine", "50"]);
 
@@ -116,17 +119,51 @@ test("group by task type and task detail keep the scope", async ({ page }) => {
   await expect(chart).toContainText("Routine: 50");
   await expect(chart).not.toContainText("Unknown type");
   await choose(page.getByLabel("Task type", { exact: true }), "routine");
+  // The 50 routine tasks all sit at (0, 0): one cluster labelled 50, not 50
+  // overlapping dots.
   const dots = page
     .getByRole("figure", { name: "Runs and escalations", exact: true })
     .getByRole("button");
-  await expect(dots).toHaveCount(50);
-  // Dots overlap at (0, 0) in this fixture; open one from the keyboard.
+  await expect(dots).toHaveCount(1);
+  await expect(dots.first()).toHaveAttribute("data-count", "50");
+  await expect(dots.first().locator("text")).toHaveText("50");
+  await expect(dots.first()).toHaveAccessibleName(/^50 tasks: Runs 0, Escalations 0/);
+  // Opened from the keyboard: the side panel lists its tasks.
   await dots.first().focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByLabel("Task detail", { exact: true })).toBeVisible();
+  const list = page.getByLabel("Cluster tasks", { exact: true });
+  await expect(list).toBeVisible();
+  await expect(list.getByRole("heading")).toHaveText(
+    "Runs and escalations · Runs 0 · Escalations 0",
+  );
+  const rows = list.getByRole("table").locator("tbody tr");
+  await expect(rows).toHaveCount(50);
+  // A row opens its task in the panel, with a breadcrumb back to the list.
+  const first = list.locator("[data-open-task]").first();
+  const id = await first.getAttribute("data-open-task");
+  await first.focus();
+  await page.keyboard.press("Enter");
+  const detail = page.getByLabel("Task detail", { exact: true });
+  await expect(detail).toBeVisible();
+  await expect(detail.locator("h2").first()).toBeFocused();
+  const crumbs = detail.getByRole("navigation", { name: "Breadcrumb" });
+  await expect(crumbs).toHaveText(`Cluster (50)›#${id}`);
+  await expect(detail.getByRole("button", { name: /Back to cluster/ })).toBeVisible();
   await expect(page).toHaveURL(/type=routine/);
+  // Escape steps back to the list, focus on the row it came from; again closes.
   await page.keyboard.press("Escape");
-  await expect(page.getByLabel("Task detail", { exact: true })).toHaveCount(0);
+  await expect(detail).toHaveCount(0);
+  await expect(list).toBeVisible();
+  await expect(list.locator(`[data-open-task="${id}"]`)).toBeFocused();
+  // The breadcrumb also returns to the list.
+  await list.locator("tbody tr").nth(1).click();
+  await detail.getByRole("navigation", { name: "Breadcrumb" }).getByRole("button").click();
+  await expect(detail).toHaveCount(0);
+  await expect(list).toBeVisible();
+  await list.getByRole("button", { name: /Close/ }).focus();
+  await page.keyboard.press("Escape");
+  await expect(list).toHaveCount(0);
+  await expect(dots.first()).toBeFocused();
   await expect(page.getByLabel("Task type", { exact: true })).toHaveAttribute(
     "data-value",
     "routine",

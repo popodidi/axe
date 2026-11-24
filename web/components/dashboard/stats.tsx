@@ -36,7 +36,7 @@ import {
   Th,
   choices,
 } from "../ui";
-import { BarChart, Scatter, TrendChart } from "./stats-charts";
+import { BarChart, Scatter, TrendChart, type ScatterSelection } from "./stats-charts";
 import styles from "./stats.module.css";
 const DAY = 86400000;
 const date = (n: number) => new Date(n).toISOString().slice(0, 10);
@@ -127,13 +127,14 @@ export function Stats({
   base,
   params: raw,
   onRange,
-  onOpenTask,
+  onOpenCluster,
 }: {
   tasks: Task[];
   base: string;
   params: URLSearchParams;
   onRange: (patch: Record<string, string | null>) => void;
-  onOpenTask: (id: number) => void;
+  /** A scatter dot or cluster: list its tasks in the side panel. */
+  onOpenCluster: (selection: ScatterSelection) => void;
 }) {
   // The report has no search box, so a stale task search never filters it.
   const params = new URLSearchParams(raw);
@@ -494,8 +495,7 @@ export function Stats({
                   groups={groups.map((g) => g.label)}
                   xLabel="Runs"
                   yLabel="Escalations"
-                  jitter
-                  onOpen={onOpenTask}
+                  onOpen={onOpenCluster}
                   points={s.rows
                     .filter((r) => r.runCount !== null)
                     .map((r) => ({
@@ -518,7 +518,7 @@ export function Stats({
                   log
                   format={compact}
                   diagonal="runtime = elapsed"
-                  onOpen={onOpenTask}
+                  onOpen={onOpenCluster}
                   points={s.rows
                     .filter((r) => r.runtime !== null && r.elapsed !== null)
                     .map((r) => ({

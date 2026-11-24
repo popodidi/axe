@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { clusterPoints, clusterRadius, majority } from "../../lib/scatter-cluster";
 import type { TrendPoint } from "../../lib/stats";
 import { cx } from "../ui";
 import styles from "./stats-charts.module.css";
@@ -161,7 +162,14 @@ export type Point = {
   x: number;
   y: number;
 };
-/** Scatter plot: one dot per task; a dot opens its task. */
+/** A dot or cluster's tasks, for the side panel. */
+export type ScatterSelection = { ids: number[]; label: string };
+/**
+ * Scatter plot: one dot per task. Dots that would overlap (centres closer than
+ * a dot's diameter) draw as one larger circle sized by, and labelled with, its
+ * count, colored by its most common group. A dot or cluster opens its task
+ * list.
+ */
 export function Scatter({
   title,
   subtitle,
@@ -171,7 +179,6 @@ export function Scatter({
   yLabel,
   log = false,
   format = String,
-  jitter = false,
   diagonal,
   note,
   onOpen,
@@ -184,10 +191,9 @@ export function Scatter({
   yLabel: string;
   log?: boolean;
   format?: (n: number) => string;
-  jitter?: boolean;
   diagonal?: string;
   note?: string;
-  onOpen: (id: number) => void;
+  onOpen: (selection: ScatterSelection) => void;
 }) {
   const W = 420,
     H = 260,
@@ -213,23 +219,31 @@ export function Scatter({
       : Array.from({ length: Math.floor(hi) + 1 }, (_, i) => i).filter(
           (i, _, all) => all.length <= 8 || i % Math.ceil(all.length / 6) === 0,
         );
-  // Tasks sharing one integer cell spread on a small spiral (in pixels).
-  const seen = new Map<string, number>();
-  const placed = points.map((p) => {
-    const cell = jitter ? `${p.x}:${p.y}` : "";
-    const k = jitter ? (seen.get(cell) ?? 0) : 0;
-    if (jitter) seen.set(cell, k + 1);
-    const r = k ? 5 * Math.sqrt(k) : 0;
-    return {
-      p,
-      cx: sx(t(p.x)) + r * Math.cos(k * 2.4),
-      cy: sy(t(p.y)) + r * Math.sin(k * 2.4),
-    };
+  // Clusters form in rendered (viewBox) units, so they follow the axes.
+  const clusters = clusterPoints(
+    points.map((p) => ({ x: sx(t(p.x)), y: sy(t(p.y)), item: p })),
+    10,
+  )
+    .map((c) => ({ ...c, r: clusterRadius(c.items.length) }))
+    // Larger circles first, so smaller ones stay on top and clickable.
+    .sort((a, b) => b.items.length - a.items.length);
+  const span = (vals: number[]) => {
+    const lo = Math.min(...vals),
+      hi = Math.max(...vals);
+    return lo === hi ? format(lo) : `${format(lo)} to ${format(hi)}`;
+  };
+  const describe = (items: Point[]) =>
+    items.length === 1
+      ? `#${items[0].id} ${items[0].label}: ${xLabel} ${format(items[0].x)}, ${yLabel} ${format(items[0].y)}`
+      : `${items.length} tasks: ${xLabel} ${span(items.map((p) => p.x))}, ${yLabel} ${span(items.map((p) => p.y))}`;
+  const selection = (items: Point[]): ScatterSelection => ({
+    ids: items.map((p) => p.id),
+    label: `${title} · ${xLabel} ${span(items.map((p) => p.x))} · ${yLabel} ${span(items.map((p) => p.y))}`,
   });
-  const key = (e: KeyboardEvent, id: number) => {
+  const key = (e: KeyboardEvent, items: Point[]) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      onOpen(id);
+      onOpen(selection(items));
     }
   };
   const mid = (T + H - B) / 2;
@@ -289,22 +303,45 @@ export function Scatter({
         >
           {yLabel}
         </text>
-        {placed.map(({ p, cx: x, cy: y }) => (
-          <circle
-            key={p.id}
-            cx={x}
-            cy={y}
-            r="5"
-            tabIndex={0}
-            role="button"
-            aria-label={`#${p.id} ${p.label}: ${xLabel} ${format(p.x)}, ${yLabel} ${format(p.y)}`}
-            className={cx(styles.dot, series(p.group))}
-            onClick={() => onOpen(p.id)}
-            onKeyDown={(e) => key(e, p.id)}
-          >
-            <title>{`#${p.id} ${p.label} · ${xLabel}: ${format(p.x)} · ${yLabel}: ${format(p.y)}`}</title>
-          </circle>
-        ))}
+        {clusters.map(({ items, x, y, r }) => {
+          const n = items.length;
+          const groupCounts = groups.length > 1 && n > 1
+            ? groups
+                .map((g, i) => [g, items.filter((p) => p.group === i).length] as const)
+                .filter(([, c]) => c)
+                .map(([g, c]) => `${g}: ${c}`)
+                .join(", ")
+            : "";
+          const label = describe(items) + (groupCounts ? ` (${groupCounts})` : "");
+          return (
+            <g
+              key={items[0].id}
+              tabIndex={0}
+              role="button"
+              aria-label={label}
+              data-cluster={items.map((p) => p.id).join(",")}
+              data-count={n}
+              className={cx(styles.dot, series(majority(items.map((p) => p.group))))}
+              onClick={() => onOpen(selection(items))}
+              onKeyDown={(e) => key(e, items)}
+            >
+              <title>{label}</title>
+              <circle cx={x} cy={y} r={r} />
+              {n > 1 && (
+                <text
+                  x={x}
+                  y={y}
+                  className={styles.clusterCount}
+                  fontSize={n > 99 ? 8 : 9}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                >
+                  {n}
+                </text>
+              )}
+            </g>
+          );
+        })}
       </svg>
       {note && <p className={styles.note}>{note}</p>}
     </figure>

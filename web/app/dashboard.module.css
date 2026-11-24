@@ -378,6 +378,13 @@
   margin-left: auto;
 }
 
+/* Task opened from a Stats cluster: "Cluster (n) › #id". */
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-half);
+}
+
 .detailTitle {
   font-size: var(--text-h2);
   line-height: var(--lh-h2);

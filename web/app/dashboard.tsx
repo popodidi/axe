@@ -48,6 +48,8 @@ import {
 } from "../components/dashboard/routines";
 import { Cost } from "../components/dashboard/cost";
 import { Stats } from "../components/dashboard/stats";
+import { ClusterList } from "../components/dashboard/cluster-list";
+import { clusterIds } from "../lib/scatter-cluster";
 import { BotDetail, BotList, useBots } from "../components/dashboard/bots";
 import {
   GoalDetailPage,
@@ -154,7 +156,7 @@ export default function Dashboard() {
       const u = new URL(location.href);
       snapshotPaneScroll(u);
       if (u.href !== location.href) history.replaceState(history.state, "", u);
-      if (["task", "tab", "blob", "doc"].some((k) => k in patch))
+      if (["task", "tab", "blob", "doc", "cluster"].some((k) => k in patch))
         u.searchParams.delete("detailY");
       if (
         ["view", "project", "state", "goalstate", "status", "q", "sort", "page", "bot", "goal"].some(
@@ -269,9 +271,13 @@ export default function Dashboard() {
   const rows = filtered.slice((page - 1) * 25, page * 25);
   const focus = Number(p.get("focus"));
   // The detail pane shows a task (`task:<id>`) or, on the Store view, a store
-  // item (`blob:<sha256>`, `doc:<path>`); a task opened over an item wins.
+  // item (`blob:<sha256>`, `doc:<path>`), or on Stats the tasks of a scatter
+  // dot or cluster (`cluster:<ids>`); a task opened over an item wins.
   const storeItem = view === "store" ? storeItemKey(p) : null;
-  const paneItem = selected ? `task:${selected}` : storeItem;
+  const cluster = view === "stats" ? p.get("cluster") : null;
+  const paneItem = selected
+    ? `task:${selected}`
+    : storeItem || (cluster ? `cluster:${cluster}` : null);
   // The newest open/close/reselect wins; a closing pane keeps the last item
   // mounted (inert) until its transition ends, then unmounts.
   const [last, setLast] = useState(paneItem);
@@ -292,7 +298,12 @@ export default function Dashboard() {
   }
   const shownItem = paneItem || exiting;
   const shown = shownItem?.startsWith("task:") ? shownItem.slice(5) : null;
-  const shownStore = shownItem && !shown ? shownItem : null;
+  const shownCluster = shownItem?.startsWith("cluster:")
+    ? clusterIds(shownItem.slice(8))
+    : null;
+  const shownStore = shownItem && !shown && !shownCluster ? shownItem : null;
+  // A task opened from a cluster list keeps the list one step back.
+  const clusterCount = clusterIds(cluster).length;
   const store = useStoreData(base, view === "store");
   useEffect(() => {
     if (phase !== "enter") return;
@@ -325,7 +336,7 @@ export default function Dashboard() {
   const detailScroll = usePaneScroll(
     query,
     "detailY",
-    selected ? detail?.task.id === Number(selected) : !!storeItem,
+    selected ? detail?.task.id === Number(selected) : !!storeItem || !!cluster,
   );
   // Focus returns to the invoking row before the pane becomes inert; when the
   // row is hidden (phone) or gone, it moves after the list reappears.
@@ -369,6 +380,16 @@ export default function Dashboard() {
         .querySelector<HTMLElement>(`[data-store-item="${CSS.escape(item)}"]`)
         ?.focus();
     update({ blob: null, doc: null });
+  }, [update]);
+  // Closing a cluster list returns focus to its dot or cluster.
+  const closeCluster = useCallback(() => {
+    const ids = new URLSearchParams(location.search).get("cluster");
+    if (!ids) return;
+    if (document.getElementById("cluster-detail")?.contains(document.activeElement))
+      document
+        .querySelector<HTMLElement>(`[data-cluster="${CSS.escape(ids)}"]`)
+        ?.focus();
+    update({ cluster: null, clabel: null });
   }, [update]);
   // Routines: the routine pane, with a task pane stacked on its right.
   const routineId = view === "routines" ? p.get("routine") : null;
@@ -452,7 +473,7 @@ export default function Dashboard() {
           e: "store",
         };
         if (v[e.key]) {
-          update({ view: v[e.key], task: null, focus: null, page: null, bot: null, goal: null });
+          update({ view: v[e.key], task: null, focus: null, page: null, bot: null, goal: null, cluster: null, clabel: null });
           prefix.current = 0;
           return;
         }
@@ -467,6 +488,7 @@ export default function Dashboard() {
         const q = new URLSearchParams(location.search);
         if (q.has("task")) closeTask();
         else if (q.get("view") === "store" && storeItemKey(q)) closeStoreItem();
+        else if (q.get("view") === "stats" && q.has("cluster")) closeCluster();
         else if (q.get("view") === "routines" && q.has("routine"))
           closeRoutine();
         else if (q.has("bot")) closeBot();
@@ -499,7 +521,7 @@ export default function Dashboard() {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [rows, focus, view, update, closeTask, closeRoutine, closeBot, closeGoal, closeStoreItem]);
+  }, [rows, focus, view, update, closeTask, closeRoutine, closeBot, closeGoal, closeStoreItem, closeCluster]);
   // Polite announcement; failures are also shown, and the button stays "Copy".
   const [copied, setCopied] = useState({ text: "", failed: false });
   const announce = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -599,7 +621,7 @@ export default function Dashboard() {
               title={`${labels[i]} (g ${keys[i]})`}
               aria-current={view === v ? "page" : undefined}
               onClick={() =>
-                update({ view: v, task: null, page: null, focus: null, bot: null, goal: null })
+                update({ view: v, task: null, page: null, focus: null, bot: null, goal: null, cluster: null, clabel: null })
               }
             >
               <span className={styles.navLabel}>{labels[i]}</span>
@@ -837,7 +859,14 @@ export default function Dashboard() {
                 base={base}
                 params={p}
                 onRange={(patch) => update(patch)}
-                onOpenTask={openTask}
+                onOpenCluster={({ ids, label }) =>
+                  update({
+                    cluster: ids.join(","),
+                    clabel: label,
+                    task: null,
+                    tab: null,
+                  })
+                }
               />
             ) : (
               <Panel aria-label="Tasks">
@@ -972,7 +1001,50 @@ export default function Dashboard() {
             />
           )}
           {shownItem && (
-            <DetailResizer controls={shown ? "task-detail" : "store-detail"} />
+            <DetailResizer
+              controls={
+                shown ? "task-detail" : shownCluster ? "cluster-detail" : "store-detail"
+              }
+            />
+          )}
+          {shownCluster && (
+            <section
+              {...detailScroll}
+              id="cluster-detail"
+              className={styles.detailPane}
+              data-phase={phase || undefined}
+              inert={phase === "closing" || overlay}
+              aria-label="Cluster tasks"
+            >
+              <div className={styles.detailInner}>
+                <header className={styles.detailHeader}>
+                  <div className={styles.detailTop}>
+                    <span className={styles.detailId}>
+                      Cluster · {shownCluster.length}{" "}
+                      {shownCluster.length === 1 ? "task" : "tasks"}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      className={styles.back}
+                      onClick={closeCluster}
+                    >
+                      Close <Kbd>Esc</Kbd>
+                    </Button>
+                  </div>
+                  <h2 tabIndex={-1} className={styles.detailTitle}>
+                    {p.get("clabel") || "Selected tasks"}
+                  </h2>
+                </header>
+                <ClusterList
+                  ids={shownCluster}
+                  tasks={data?.tasks || []}
+                  onOpen={(id, keyboard) => {
+                    if (keyboard) focusDetail.current = id;
+                    update({ task: String(id), tab: null });
+                  }}
+                />
+              </div>
+            </section>
           )}
           {shownStore && (
             <section
@@ -1019,14 +1091,33 @@ export default function Dashboard() {
               <div className={styles.detailInner}>
               <header className={styles.detailHeader}>
                 <div className={styles.detailTop}>
-                  <span className={styles.detailId}>Task #{shown}</span>
+                  {cluster && !routineId ? (
+                    <nav aria-label="Breadcrumb" className={styles.crumbs}>
+                      <Button variant="link" className={styles.detailId} onClick={closeTask}>
+                        Cluster ({clusterCount})
+                      </Button>
+                      <span aria-hidden="true" className={styles.detailId}>
+                        ›
+                      </span>
+                      <span aria-current="page" className={styles.detailId}>
+                        #{shown}
+                      </span>
+                    </nav>
+                  ) : (
+                    <span className={styles.detailId}>Task #{shown}</span>
+                  )}
                   {activeDetail && <StatusPill task={activeDetail.task} />}
                   <Button
                     variant="ghost"
                     className={styles.back}
                     onClick={closeTask}
                   >
-                    {routineId ? "Back to routine" : "Back"} <Kbd>Esc</Kbd>
+                    {routineId
+                      ? "Back to routine"
+                      : cluster
+                        ? "Back to cluster"
+                        : "Back"}{" "}
+                    <Kbd>Esc</Kbd>
                   </Button>
                 </div>
                 {activeDetail && (

@@ -128,19 +128,31 @@
   stroke-width: 1;
 }
 
+/* A dot or cluster: a group holding its circle and, for clusters, a count. */
 .dot {
+  cursor: pointer;
+  outline: none;
+}
+
+.dot circle {
   fill-opacity: 0.8;
   stroke: var(--card-bg);
   stroke-width: 1.5;
-  cursor: pointer;
   transition: fill-opacity var(--transition-hover);
 }
 
-.dot:hover,
-.dot:focus-visible {
+.dot:hover circle,
+.dot:focus-visible circle {
   fill-opacity: 1;
   stroke: var(--text-primary);
-  outline: none;
+}
+
+.clusterCount {
+  fill: var(--card-bg);
+  font-family: var(--font-body);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-semibold);
+  pointer-events: none;
 }
 
 .s0 {
