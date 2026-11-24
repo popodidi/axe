@@ -119,7 +119,7 @@ fn dispatch_once_runs_agents_and_blocks_silent_exits() {
     assert_eq!(state_ev.actor, "agent");
     assert!(state_ev.session.is_some());
     let note = ev[4].body.as_deref().unwrap();
-    assert!(note.ends_with("/ws/a"), "{note}");
+    assert!(note.ends_with(&format!("/ws/.runs/task-{good}")), "{note}");
     let start: serde_json::Value = serde_json::from_str(ev[2].body.as_deref().unwrap()).unwrap();
     assert_eq!(start["agent"], "good");
     assert_eq!(start["rule"], "project=a");
@@ -165,12 +165,19 @@ fn dispatch_once_runs_agents_and_blocks_silent_exits() {
     let end: serde_json::Value = serde_json::from_str(end.body.as_deref().unwrap()).unwrap();
     assert_eq!(end["session_id"], "th-1");
 
+    // A project with no directory runs in its run workspace all the same.
     let t = db::get_task(&conn, missing).unwrap();
-    assert_eq!(t.state, "escalated");
-    let last = db::events(&conn, missing).unwrap().pop().unwrap();
-    let body = last.body.unwrap();
-    assert!(body.starts_with("blocked: project directory"), "{body}");
-    assert!(body.contains("does not exist\nresolver: ops:"), "{body}");
+    assert_eq!(t.state, "done");
+    let note = db::events(&conn, missing)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "note")
+        .and_then(|e| e.body)
+        .unwrap();
+    assert!(
+        note.ends_with(&format!("/ws/.runs/task-{missing}")),
+        "{note}"
+    );
 }
 
 #[test]

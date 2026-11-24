@@ -1,12 +1,8 @@
-//! Dispatcher-owned task worktrees.
-//!
-//! A task without its own `repos` runs every session in
-//! `<workspace_root>/.worktrees/<project>/task-<id>--work`, a Git worktree of
-//! the project's canonical clone on `<branch_prefix>task-<id>--work`
-//! (`[worktrees] branch_prefix`, default `axe/`). A task with `repos` runs in a
-//! run workspace instead (`run_workspace.rs`), which uses [`repo_readiness`]
-//! and [`allocate_at`] for each repo. Cleanup of a done task's directory is
-//! left to housekeeping or the operator.
+//! Git plumbing for the repo worktrees of run workspaces (`run_workspace.rs`):
+//! a repo's canonical clone ([`repo_readiness`], cloned first when missing,
+//! [`ensure_clone_from`]), one worktree of it per run folder
+//! ([`allocate_from`]) and the fast-forward of a bot's worktrees before a run
+//! ([`refresh`]). Cleanup of a done task's folder is left to housekeeping.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,29 +17,12 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// A first clone can be a large repository.
 const CLONE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// A project whose canonical clone can host task worktrees.
+/// A repo whose canonical clone can host worktrees.
 #[derive(Debug, Clone)]
 pub struct Ready {
     pub canonical: PathBuf,
-    pub root: PathBuf,
     /// `refs/remotes/origin/<default>`, from `origin/HEAD`.
     pub base_ref: String,
-    /// Prefix of new task branches (`[worktrees] branch_prefix`).
-    pub branch_prefix: String,
-}
-
-/// Checks that `project` has a canonical clone with a known default branch.
-/// The error names the gap, for the escalation note.
-pub fn readiness(cfg: &Config, project: &str) -> Result<Ready, String> {
-    let workspace = cfg.workspace_root();
-    let canonical = workspace.join(project);
-    let gap = |detail: String| format!("project {project} has no task worktree base: {detail}");
-    check(
-        cfg,
-        canonical,
-        workspace.join(".worktrees").join(project),
-        gap,
-    )
 }
 
 /// Where a missing canonical clone of a repo is cloned from
@@ -91,9 +70,9 @@ pub fn clone_url(
     }
 }
 
-/// [`readiness`] for repo `name` of a run workspace: its canonical clone is
-/// `[repos.<name>] path` (default `<workspace_root>/<name>`). `root` is unused
-/// by [`allocate_at`]. Only the local config's url counts here; see
+/// Checks that repo `name` has a canonical clone with a known default branch:
+/// `[repos.<name>] path` (default `<workspace_root>/<name>`). The error names
+/// the gap. Only the local config's url counts here; see
 /// [`repo_readiness_with`].
 pub fn repo_readiness(cfg: &Config, name: &str) -> Result<Ready, String> {
     repo_readiness_with(cfg, name, &clone_url(cfg, name, &|_| Ok(None)))
@@ -124,7 +103,7 @@ pub fn repo_readiness_with(cfg: &Config, name: &str, url: &CloneUrl) -> Result<R
             }
         }
     }
-    check(cfg, canonical.clone(), canonical, gap)
+    check(canonical, gap)
 }
 
 /// [`ensure_clone_from`] with `[repos.<name>] url` only.
@@ -244,12 +223,7 @@ fn form_credential_helper(cfg: &Config, url: &str) -> Option<String> {
         .then(|| format!("store --file={}", path.display()))
 }
 
-fn check(
-    cfg: &Config,
-    canonical: PathBuf,
-    root: PathBuf,
-    gap: impl Fn(String) -> String,
-) -> Result<Ready, String> {
+fn check(canonical: PathBuf, gap: impl Fn(String) -> String) -> Result<Ready, String> {
     if !canonical.is_dir() {
         return Err(gap(format!("{} does not exist", canonical.display())));
     }
@@ -277,10 +251,8 @@ fn check(
             ))
         })?;
     Ok(Ready {
-        root,
         canonical,
         base_ref,
-        branch_prefix: cfg.worktrees.clone().unwrap_or_default().branch_prefix,
     })
 }
 
@@ -364,37 +336,13 @@ fn git_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
     Ok(stdout.trim().to_string())
 }
 
-/// Creates or reuses the task's workspace worktree. An existing checkout is
-/// never reset, checked out or cleaned; anything at the path that is not a
-/// worktree of the canonical clone stops the session.
-pub fn allocate(ready: &Ready, task: i64) -> Result<PathBuf> {
-    allocate_dir(ready, &format!("task-{task}--work"))
-}
-
-/// [`allocate`] for any directory name under the project's worktree root, on
-/// branch `<branch_prefix><dir>`. Bots use a persistent `bot-<name>`.
-pub fn allocate_dir(ready: &Ready, dir: &str) -> Result<PathBuf> {
-    ensure!(
-        !dir.is_empty() && !dir.contains('/') && !dir.starts_with('.'),
-        "invalid worktree directory name {dir:?}"
-    );
-    allocate_at(
-        ready,
-        &ready.root.join(dir),
-        &format!("{}{dir}", ready.branch_prefix),
-    )
-}
-
 /// Creates or reuses a worktree of `ready.canonical` at `path` on `branch`,
-/// created from the default branch when missing. Same reuse rules as
-/// [`allocate`].
-pub fn allocate_at(ready: &Ready, path: &Path, branch: &str) -> Result<PathBuf> {
-    allocate_from(ready, path, branch, false)
-}
-
-/// [`allocate_at`]; with `from_origin`, a branch missing locally but pushed
-/// to `origin` is created from (and tracks) `origin/<branch>` instead of the
-/// default branch: a local workspace picks up the work a run pushed.
+/// created from the default branch when missing. An existing checkout is
+/// never reset, checked out or cleaned; anything at the path that is not a
+/// worktree of the canonical clone stops the session. With `from_origin`, a
+/// branch missing locally but pushed to `origin` is created from (and tracks)
+/// `origin/<branch>` instead of the default branch: a local workspace picks up
+/// the work a run pushed.
 pub fn allocate_from(
     ready: &Ready,
     path: &Path,

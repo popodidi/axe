@@ -1,4 +1,4 @@
-//! Run workspaces: the folder a task with its own `repos` runs in.
+//! Run workspaces: the folder every task and bot run works in.
 //!
 //! ```text
 //! <run_root>/task-<id>/      cwd and $AXE_WORKTREE
@@ -14,14 +14,14 @@
 //!
 //! Every repo worktree is on the same branch, `<branch_prefix>task-<id>--work`.
 //! A task's worktrees are created once and never reset; `AGENTS.md`, `skills/`
-//! and `docs/` are generated again at the start of every session. A task with an
-//! empty repo list gets the folder without `repos/`. Tasks without `repos`
-//! keep the project worktree (`worktree.rs`).
+//! and `docs/` are generated again at the start of every session. A task with
+//! no repos (an empty or absent list) gets the folder without `repos/`;
+//! nothing needs a project checkout.
 //!
-//! A bot with a repo list gets the same layout at `<run_root>/bot-<name>`
-//! ([`build_bot`]), on branch `<branch_prefix>bot-<name>--work`, with the
-//! skills attached to the bot's scopes; a bot without one keeps its project
-//! worktree. A bot's worktrees outlive many runs, so before each run every one
+//! A bot gets the same layout at `<run_root>/bot-<name>` ([`build_bot`]), on
+//! branch `<branch_prefix>bot-<name>--work`, with the skills attached to the
+//! bot's scopes, and also without `repos/` when it has none. A bot's
+//! worktrees outlive many runs, so before each run every one
 //! is fast-forwarded to its base branch's origin commit when that is safe
 //! ([`worktree::refresh`]: clean, no local commits) and left unchanged, with
 //! the reason, when it is not.
@@ -51,8 +51,8 @@ use crate::worktree;
 /// Most docs listed per repo in `docs/index.md`.
 const DOCS_MAX: usize = 200;
 
-/// Builds or refreshes the run workspace of `task`, which must have `repos`,
-/// with the docs and skills attached to its scopes from `store` (none when
+/// Builds or refreshes the run workspace of `task` (no repos when it has
+/// none), with the docs and skills attached to its scopes from `store` (none when
 /// `None` or when the store cannot be read). Also returns the repos whose
 /// canonical clone was cloned first ([`worktree::ensure_clone`]). `skills`,
 /// when set, is the only skills the folder gets (a routine's profile).
@@ -62,10 +62,7 @@ pub fn build(
     store: Option<&dyn context::Source>,
     skills: Option<&[String]>,
 ) -> Result<(PathBuf, Vec<String>)> {
-    let repos = task
-        .repos
-        .as_deref()
-        .context("task has no repos; it runs in its project worktree")?;
+    let repos = task.repos.as_deref().unwrap_or_default();
     let dir = cfg.run_root().join(format!("task-{}", task.id));
     let out = build_task(cfg, task, repos, store, &dir, Mode::Run, skills)?;
     Ok((dir, out.cloned))
@@ -154,7 +151,7 @@ pub fn build_task(
     })
 }
 
-/// The run folder of bot `name` with `repos` (non-empty): `<run_root>/bot-<home>`,
+/// The run folder of bot `name` with `repos` (maybe none): `<run_root>/bot-<home>`,
 /// laid out like a task's, each repo on branch `<branch_prefix>bot-<home>--work`.
 /// `home` is the bot's first name (`Bot::home`), so a rename keeps the folder,
 /// its worktrees and the agent session that lives there.

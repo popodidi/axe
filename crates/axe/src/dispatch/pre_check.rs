@@ -64,7 +64,7 @@ impl Dispatcher {
         claim: &str,
         cmd: &str,
     ) -> Result<()> {
-        let (task_worktree, cwd, _) = self.run_dir(task, pick)?;
+        let (cwd, _) = self.run_dir(task, pick)?;
         let log_dir = self.cfg.log_dir();
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("create log dir {}", log_dir.display()))?;
@@ -90,9 +90,7 @@ impl Dispatcher {
         if let Some(url) = &self.server_url {
             env.push(("AXE_SERVER", url.clone()));
         }
-        if let Some(path) = &task_worktree {
-            env.push(("AXE_WORKTREE", path.display().to_string()));
-        }
+        env.push(("AXE_WORKTREE", cwd.display().to_string()));
         let secrets = crate::sealed::secrets_dir(
             &self.cfg.run_root(),
             &crate::sealed::Target::Task { task: task.id },

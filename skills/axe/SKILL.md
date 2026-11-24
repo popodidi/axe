@@ -68,7 +68,7 @@ axe task wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge
 | Situation | Command |
 |---|---|
 | Queue a spec | `axe task add --project <p> --title "<imperative>" --detail-file <spec>` (`--blocked-by <ids>` for prerequisites, `--agent <name>` to pick an agent) |
-| Owner, repos, labels | `axe task add`/`axe task set` with `--owner <bot:name\|person>` (`none` clears), `--repo <r>` (repeat; `--no-repos` for none), `--label <l>` (`--unlabel` on set); `axe task list --label <l> --owner <o>` |
+| Owner, repos, labels | `axe task add`/`axe task set` with `--owner <bot:name\|person>` (`none` clears), `--repo <r>` (repeat; omitted or `--no-repos`: none), `--label <l>` (`--unlabel` on set); `axe task list --label <l> --owner <o>` |
 | Read a task | `axe task show <id>`, `axe task log <id>` (`--full` for whole event bodies) |
 | Done | `axe task set <id> --state done --note "<what holds now>"` |
 | Needs a human | `axe task escalate <id> --blocked ... --resolver ... --resume ... --class decision\|capability\|coordination\|runtime` |
@@ -162,6 +162,6 @@ including `axe dispatch`, is a client of it.
 | Config | `$AXE_CONFIG` (default `~/.config/axe/config.toml`) |
 
 Dispatcher task sessions have `AXE_ACTOR=agent`, `AXE_SESSION`, `AXE_TASK`,
-`AXE_SERVER` and, with task worktrees, `AXE_WORKTREE` set. Bot sessions have
+`AXE_SERVER` and `AXE_WORKTREE` (the task's run workspace) set. Bot sessions have
 `AXE_ACTOR=bot:<name>`, `AXE_BOT`, `AXE_BOT_RUN`, `AXE_SESSION` and
 `AXE_WORKTREE`, and no `AXE_TASK`.

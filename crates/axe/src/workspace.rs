@@ -300,12 +300,6 @@ fn rebuild(c: &Client, cfg: &Config, target: &Target, dir: &Path) -> Result<()> 
         Target::Task(id) => {
             let t: crate::db::Task = c.get(&format!("/api/tasks/{id}"), &[])?;
             check_task(&t)?;
-            if t.repos.is_none() {
-                eprintln!(
-                    "axe: task {id} has no repos, so its runs use the project worktree; \
-                     this folder has its context and no repos/"
-                );
-            }
             let repos = t.repos.clone().unwrap_or_default();
             run_workspace::build_task(cfg, &t, &repos, Some(c), dir, Mode::Local, None)?
         }

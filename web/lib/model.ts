@@ -44,7 +44,7 @@ export type Run = {
   last_activity_at: string | null;
   log_path: string;
   session_id: string | null;
-  /** Session directory when it is not the task worktree (bot runs). */
+  /** Session directory when it is not the task's run workspace (bot runs). */
   cwd?: string;
 };
 export const states = ["pending", "waiting", "in_progress", "blocked", "escalated", "done"];
@@ -199,11 +199,12 @@ export const taskCommands = (
   log: command(t.project, ["axe", "task", "log", String(t.id)], template),
   spec: command(t.project, ["axe", "task", "show", String(t.id)], template),
 });
-// Dispatcher sessions run in the task worktree (crates/axe/src/worktree.rs),
-// and Claude Code looks sessions up by cwd, so resume from that directory.
+// Dispatcher sessions run in the task's run workspace
+// (crates/axe/src/run_workspace.rs), and Claude Code looks sessions up by cwd,
+// so resume from that directory.
 export function taskWorktree(r: Pick<Run, "project" | "task_id" | "cwd">) {
   if (r.cwd) return r.cwd;
-  return `~/workspace/.worktrees/${shellQuote(r.project)}/task-${r.task_id}--work`;
+  return `~/workspace/.runs/task-${r.task_id}`;
 }
 export const runCommands = (r: Run, template = commandTemplate()) => ({
   watch: command(r.project, ["tail", "-f", r.log_path], template),

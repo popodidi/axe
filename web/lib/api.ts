@@ -27,7 +27,7 @@ waiting_on: Array<number>, deps: Deps,
 owner: string | null, 
 /**
  * Repos the task works in, each a worktree in its run workspace. `None`
- * means the project's own checkout (tasks from before repos existed).
+ * (tasks from before repos existed) is the same as none.
  */
 repos: Array<string> | null, 
 /**
@@ -59,8 +59,8 @@ export type Bot = { id: number, name: string, project: string, agent: string, id
 heartbeat_seconds: number, nudge_after_seconds: number, state: string, session_agent: string | null, session_id: string | null, resume_count: number, failures: number, created_at: string, updated_at: string, 
 /**
  * Repos the bot works in: each run gets a run folder with one worktree
- * per repo (`run_workspace.rs`). `None` (also an empty list): the
- * project worktree.
+ * per repo (`run_workspace.rs`). `None` (also an empty list): a run
+ * folder with no repos.
  */
 repos: Array<string> | null, 
 /**
@@ -90,7 +90,7 @@ last_run_end: string | null,
 attention: boolean, 
 /**
  * Derived: the name the bot's folders on the dispatcher host are keyed
- * by (run folder, project worktree, logs, sealed form values): its first
+ * by (run folder, logs, sealed form values): its first
  * name, so a rename keeps them and the agent session that lives in them.
  * `None` from servers that predate renames: the name.
  */

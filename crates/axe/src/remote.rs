@@ -324,12 +324,9 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             }
             json!(result)
         }
-        "hold" => json!(db::hold_in(
-            &tx,
-            &actor,
-            field(b, "project")?,
-            field(b, "note")?,
-        )?),
+        // Older dispatchers held a project with no checkout before claiming;
+        // every run now has a run workspace, so nothing is held.
+        "hold" => json!(db::Claim::None),
         "rule_import" => {
             let rules: Vec<crate::rule::NewRule> = serde_json::from_value(b["rules"].clone())?;
             crate::rule::import(&tx, &actor, &rules, field(b, "source")?)?

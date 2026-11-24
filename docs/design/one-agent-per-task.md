@@ -21,7 +21,7 @@ returns to `pending`.
 
 - axe has no `owner` or persona: no `handoff`, no `--owner`, no persona-keyed
   admission (one task pool), one session per task (schema v9). Dispatcher
-  sessions start as plain sessions in the task worktree with a one-line prompt;
+  sessions start as plain sessions in the task's run workspace with a one-line prompt;
   no system prompt or persona files.
 - The task protocol lives in the deployment's agent instructions (for example
   a shared `AGENTS.md`) and the `axe` skill. Project rules stay in each

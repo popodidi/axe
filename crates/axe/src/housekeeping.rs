@@ -1,9 +1,9 @@
 //! Housekeeping: remove what the dispatcher's tasks leave behind once a task
 //! has been `done` long enough.
 //!
-//! Candidates are task worktrees under `<workspace_root>/.worktrees/<project>/`
-//! (`task-<id>--<purpose>`, and `<repo>/task-<id>--<purpose>` for dependency
-//! worktrees), task run folders `<run_root>/task-<id>` (`run_workspace.rs`;
+//! Candidates are task worktrees older dispatchers (and agents) left under
+//! `<workspace_root>/.worktrees/<project>/` (`task-<id>--<purpose>`, and
+//! `<repo>/task-<id>--<purpose>` for dependency worktrees), task run folders `<run_root>/task-<id>` (`run_workspace.rs`;
 //! each `repos/<name>` is a worktree, `bot-<name>` folders are never touched)
 //! and the configured `[housekeeping] task_paths` (`.../task-{id}-target` and
 //! the like, rebuildable output only). A worktree is removed only when nothing

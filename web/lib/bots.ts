@@ -115,11 +115,14 @@ export const botTabs = ["profile", "wakes", "runs", "events", "stats"];
 export function botStatus(b: Pick<BotSummary, "state" | "attention">) {
   return b.attention ? "Needs attention" : b.state === "paused" ? "Paused" : "Active";
 }
-/** The persistent bot worktree (crates/axe/src/dispatch/bots.rs `bot-<name>`). */
-export const botWorktree = (b: Pick<BotSummary, "project" | "name">) =>
-  `~/workspace/.worktrees/${shellQuote(b.project)}/bot-${b.name}`;
+/** The bot's persistent run folder (crates/axe/src/run_workspace.rs `bot-<home>`). */
+export const botWorktree = (b: Pick<BotSummary, "name"> & { home?: string | null }) =>
+  `~/workspace/.runs/${shellQuote(`bot-${b.home ?? b.name}`)}`;
 /** A bot run in the task-run shape, so `RunList` renders it unchanged. */
-export function asRun(r: BotRun, b: Pick<BotSummary, "project" | "name">): Run {
+export function asRun(
+  r: BotRun,
+  b: Pick<BotSummary, "project" | "name"> & { home?: string | null },
+): Run {
   return {
     id: r.id,
     task_id: 0,

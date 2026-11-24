@@ -38,14 +38,18 @@ esac
 "#;
 
 fn write_config(dir: &Path, pool: usize) -> PathBuf {
+    // Project `a` has no directory, let alone a Git checkout: every run works
+    // in its run folder under `ws/.runs`.
     let ws = dir.join("ws");
-    std::fs::create_dir_all(ws.join("a")).unwrap();
+    std::fs::create_dir_all(&ws).unwrap();
     let toml_str = |s: &str| serde_json::to_string(s).unwrap();
     let cfg = format!(
         r#"
 workspace_root = "{ws}"
 log_dir = "{logs}"
 poll_seconds = 1
+
+[worktrees]
 
 [pool]
 total = {pool}
@@ -1818,7 +1822,7 @@ fn bot_repo_list_is_set_shown_logged_and_cleared() {
     rig.create(json!({}));
     assert!(rig.bot()["repos"].is_null());
     let show = rig.srv.ok(&["bot", "show", "b"]);
-    assert!(show.contains("\nrepos: - (project worktree)\n"), "{show}");
+    assert!(show.contains("\nrepos: -\n"), "{show}");
     rig.srv.ok(&[
         "bot",
         "edit",
@@ -1861,7 +1865,7 @@ fn bot_repo_list_is_set_shown_logged_and_cleared() {
 }
 
 #[test]
-fn bot_with_repos_runs_in_a_run_folder_and_an_empty_list_keeps_the_project_folder() {
+fn bot_with_repos_runs_in_a_run_folder_and_keeps_it_when_the_list_is_cleared() {
     let rig = Rig::new(1);
     let base = rig._dir.path().canonicalize().unwrap();
     for name in ["one", "two"] {
@@ -1991,18 +1995,66 @@ fn bot_with_repos_runs_in_a_run_folder_and_an_empty_list_keeps_the_project_folde
     );
     assert!(!base.join("ws/.runs/bot-nb").exists());
 
-    // Cleared: back to the project folder, as before repos existed.
+    // Cleared: the same run folder, its AGENTS.md now lists no repos; the
+    // worktrees already there are left alone.
     rig.srv
         .ok(&["bot", "edit", "nb", "--no-repos", "--why", "clear"]);
     rig.srv
         .ok(&["bot", "wake", "nb", "--now", "--note", "third"]);
     let out = rig.dispatcher(true, "exit0").wait();
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(
-        rig.file("pwd-4").trim(),
-        base.join("ws/a").display().to_string()
+    assert_eq!(rig.file("pwd-4").trim(), run.display().to_string());
+    assert!(rig
+        .file("env-4")
+        .lines()
+        .any(|l| l == format!("AXE_WORKTREE={}", run.display())));
+    assert!(run.join("repos/one/scratch.txt").is_file());
+    let agents = std::fs::read_to_string(run.join("AGENTS.md")).unwrap();
+    assert!(!agents.contains("- Repos: one"), "{agents}");
+}
+
+#[test]
+fn bot_and_task_without_repos_run_in_run_folders_with_no_project_checkout() {
+    let rig = Rig::new(2);
+    let base = rig._dir.path().canonicalize().unwrap();
+    assert!(!base.join("ws/a").exists());
+    rig.create(json!({}));
+    assert!(rig.bot()["repos"].is_null());
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let run = base.join("ws/.runs/bot-b");
+    assert_eq!(rig.file("pwd-1").trim(), run.display().to_string());
+    assert!(rig
+        .file("env-1")
+        .lines()
+        .any(|l| l == format!("AXE_WORKTREE={}", run.display())));
+    assert!(run.join("AGENTS.md").is_file());
+    assert!(!run.join("repos").exists());
+    assert_eq!(rig.runs()[0]["exit_code"], 0, "{:?}", rig.runs());
+
+    // A task in the same project, added without --repo: its own run folder.
+    rig.srv.ok(&[
+        "task",
+        "add",
+        "--project",
+        "a",
+        "--title",
+        "t",
+        "--detail",
+        "x",
+    ]);
+    let out = rig.dispatcher(true, "exit0").wait();
+    assert!(out.status.success(), "{out:?}");
+    let t = rig.srv.get("/api/tasks/1");
+    assert_eq!(t["state"], "done", "{t}");
+    let log = rig.srv.ok(&["task", "log", "1"]);
+    let task_run = base.join("ws/.runs/task-1");
+    assert!(
+        log.contains(&format!("built in {}", task_run.display())),
+        "{log}"
     );
-    assert!(!rig.file("env-4").contains("AXE_WORKTREE="));
+    assert!(task_run.join("AGENTS.md").is_file());
+    assert!(!log.contains("worktree base"), "{log}");
 }
 
 #[test]

@@ -1496,8 +1496,7 @@ struct AddBody {
     /// Goal name to link the task to.
     goal: Option<String>,
     owner: Option<String>,
-    /// Omitted or null: the project checkout; a list (maybe empty): a run
-    /// workspace with these repos.
+    /// The run workspace's repos; omitted, null or empty: none.
     repos: Option<Vec<String>>,
     #[serde(default)]
     labels: Vec<String>,

@@ -15,9 +15,9 @@ use axe::remote::Store;
 use common::gate::{defaults, Rig, GIB};
 use common::{Server, TOKEN};
 
-/// Runs until `ws/go` exists, so tests control when sessions end.
+/// Runs (in `ws/.runs/<run>`) until `ws/go` exists, so tests control when sessions end.
 const WAIT_AGENT: &str = r#"[agents.run]
-cmd = ["sh", "-c", "while [ ! -e ../go ]; do sleep 0.1; done"]"#;
+cmd = ["sh", "-c", "while [ ! -e ../../go ]; do sleep 0.1; done"]"#;
 
 struct Env {
     dir: tempfile::TempDir,
@@ -605,8 +605,8 @@ fn resume_env() -> (Env, Config, i64) {
     let (env, cfg) = env(
         1,
         r#"[agents.run]
-cmd = ["sh", "-c", "while [ ! -e ../go ]; do sleep 0.1; done"]
-resume_cmd = ["sh", "-c", "while [ ! -e ../fail ]; do sleep 0.1; done; exit 9"]
+cmd = ["sh", "-c", "while [ ! -e ../../go ]; do sleep 0.1; done"]
+resume_cmd = ["sh", "-c", "while [ ! -e ../../fail ]; do sleep 0.1; done; exit 9"]
 session = "preset"
 "#,
     );
@@ -797,9 +797,9 @@ fn deferred_fallback_slot_is_held_and_released_on_resolution_or_shutdown() {
 
 /// A task agent and a bot agent that both run until `ws/go` exists.
 const BOT_AGENTS: &str = r#"[agents.run]
-cmd = ["sh", "-c", "while [ ! -e ../go ]; do sleep 0.1; done"]
+cmd = ["sh", "-c", "while [ ! -e ../../go ]; do sleep 0.1; done"]
 [agents.botrun]
-cmd = ["sh", "-c", "while [ ! -e ../go ]; do sleep 0.1; done"]
+cmd = ["sh", "-c", "while [ ! -e ../../go ]; do sleep 0.1; done"]
 bot_args = ["--bot"]"#;
 
 fn add_bot(env: &Env, name: &str) {

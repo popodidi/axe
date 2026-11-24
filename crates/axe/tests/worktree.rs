@@ -1,5 +1,7 @@
-//! Dispatcher-owned task worktrees: readiness before claim, allocation, reuse
-//! and the session cwd/env.
+//! Where a task without repos runs: its run workspace, with no project
+//! checkout needed; a directory an older dispatcher left in the project's
+//! worktree root is resumed in place. Also the clone URL of a run
+//! workspace's repos.
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -15,10 +17,6 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
         .output()
         .unwrap();
     assert!(out.status.success(), "git {args:?}: {out:?}");
@@ -27,8 +25,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 struct Fixture {
     dir: tempfile::TempDir,
-    canonical: PathBuf,
-    root: PathBuf,
+    ws: PathBuf,
     config: PathBuf,
 }
 
@@ -37,33 +34,9 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().canonicalize().unwrap();
         let ws = base.join("ws");
-        let canonical = ws.join(PROJECT);
-        let origin = base.join("origin.git");
-        std::fs::create_dir_all(&canonical).unwrap();
-        git(
-            &base,
-            &[
-                "init",
-                "-q",
-                "--bare",
-                "-b",
-                "main",
-                origin.to_str().unwrap(),
-            ],
-        );
-        git(&canonical, &["init", "-q", "-b", "main"]);
-        std::fs::write(canonical.join("AGENTS.md"), "x\n").unwrap();
-        git(&canonical, &["add", "."]);
-        git(&canonical, &["commit", "-qm", "base"]);
-        git(
-            &canonical,
-            &["remote", "add", "origin", origin.to_str().unwrap()],
-        );
-        git(&canonical, &["push", "-q", "origin", "main"]);
-        git(&canonical, &["fetch", "-q", "origin"]);
-        git(&canonical, &["remote", "set-head", "origin", "main"]);
-        // The first run records its environment, commits, leaves a local file and
-        // yields back to pending; a later run records and finishes.
+        std::fs::create_dir_all(&ws).unwrap();
+        // The first run records its environment, leaves a file and yields back
+        // to pending; a later run records and finishes.
         let script = base.join("agent.sh");
         std::fs::write(
             &script,
@@ -72,10 +45,6 @@ first="$RECORD/$AXE_TASK-1"
 if [ -e "$first" ]; then out="$RECORD/$AXE_TASK-2"; else out="$first"; fi
 { echo "actor=$AXE_ACTOR"; echo "pwd=$PWD"; echo "worktree=$AXE_WORKTREE"; } > "$out"
 if [ "$out" = "$first" ]; then
-  echo change > "$AXE_WORKTREE/change"
-  git -C "$AXE_WORKTREE" add change
-  git -C "$AXE_WORKTREE" -c user.name=t -c user.email=t@example.invalid commit -qm change
-  echo "head=$(git -C "$AXE_WORKTREE" rev-parse HEAD)" >> "$out"
   echo uncommitted > "$AXE_WORKTREE/local"
   "$AXE_BIN" set "$AXE_TASK" --state pending
 else
@@ -106,12 +75,7 @@ session = "none"
             ),
         )
         .unwrap();
-        Fixture {
-            dir,
-            canonical,
-            root: ws.join(".worktrees").join(PROJECT),
-            config,
-        }
+        Fixture { dir, ws, config }
     }
 
     fn base(&self) -> PathBuf {
@@ -151,140 +115,77 @@ session = "none"
         db::events(&db::open(&self.base().join("t.db")).unwrap(), id).unwrap()
     }
 
-    /// What run `n` (1 or 2+) of task `id` recorded.
+    /// What run `n` (1 or 2) of task `id` recorded.
     fn record(&self, id: i64, n: u32) -> String {
         std::fs::read_to_string(self.base().join(format!("record/{id}-{n}"))).unwrap()
     }
 
-    fn last_note(&self, id: i64) -> String {
-        self.events(id)
-            .iter()
-            .rev()
-            .find(|e| e.kind == "note")
-            .and_then(|e| e.body.clone())
-            .unwrap()
-    }
-
-    fn checkout(&self, id: i64) -> PathBuf {
-        self.root.join(format!("task-{id}--work"))
-    }
-}
-
-#[test]
-fn sessions_run_in_one_reused_task_worktree() {
-    let f = Fixture::new();
-    let id = f.add();
-    // An empty directory left by an interrupted allocation is completed in place.
-    std::fs::create_dir_all(f.checkout(id)).unwrap();
-    f.dispatch_once();
-    let path = f.checkout(id);
-    assert_eq!(f.task(id).state, "pending", "{:?}", f.events(id));
-    let built = f.record(id, 1);
-    assert!(built.starts_with("actor=agent\n"), "{built}");
-    assert!(
-        built.contains(&format!("pwd={}\n", path.display())),
-        "{built}"
-    );
-    assert!(
-        built.contains(&format!("worktree={}\n", path.display())),
-        "{built}"
-    );
-    let head = built.lines().find_map(|l| l.strip_prefix("head=")).unwrap();
-    assert_eq!(
-        git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        format!("axe/task-{id}--work")
-    );
-    // The next run (and any retry) reuses the same checkout unchanged.
-    f.dispatch_once();
-    assert_eq!(f.task(id).state, "done", "{:?}", f.events(id));
-    let verified = f.record(id, 2);
-    assert!(
-        verified.contains(&format!("pwd={}\n", path.display())),
-        "{verified}"
-    );
-    assert_eq!(git(&path, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(&path, &["status", "--porcelain"]), "?? local");
-}
-
-#[test]
-fn reopened_task_resumes_its_branch_after_cleanup() {
-    let f = Fixture::new();
-    let id = f.add();
-    for _ in 0..3 {
-        if f.task(id).state == "done" {
-            break;
+    /// Runs task `id` twice: it yields after the first run, finishes after
+    /// the second. Both runs must have worked in `dir`.
+    fn runs_twice_in(&self, id: i64, dir: &Path) {
+        self.dispatch_once();
+        assert_eq!(self.task(id).state, "pending", "{:?}", self.events(id));
+        self.dispatch_once();
+        assert_eq!(self.task(id).state, "done", "{:?}", self.events(id));
+        for n in [1, 2] {
+            let rec = self.record(id, n);
+            assert!(rec.starts_with("actor=agent\n"), "{rec}");
+            assert!(rec.contains(&format!("pwd={}\n", dir.display())), "{rec}");
+            assert!(
+                rec.contains(&format!("worktree={}\n", dir.display())),
+                "{rec}"
+            );
         }
-        f.dispatch_once();
+        // The second run found the first one's file untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("local")).unwrap(),
+            "uncommitted\n"
+        );
     }
-    assert_eq!(f.task(id).state, "done", "{:?}", f.events(id));
-    let head = git(&f.checkout(id), &["rev-parse", "HEAD"]);
-    // Housekeeper deletes the directory; the branch stays.
-    std::fs::remove_dir_all(f.checkout(id)).unwrap();
-    git(&f.canonical, &["worktree", "prune"]);
-    let mut conn = db::open(&f.base().join("t.db")).unwrap();
-    db::set_task(
-        &mut conn,
-        &Actor::new("human"),
-        id,
-        &db::Changes {
-            state: Some("pending".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    drop(conn);
-    f.dispatch_once();
-    assert_eq!(f.task(id).state, "done", "{:?}", f.events(id));
-    assert_eq!(git(&f.checkout(id), &["rev-parse", "HEAD"]), head);
 }
 
 #[test]
-fn missing_default_branch_escalates_without_claim_or_run() {
+fn task_without_repos_runs_in_its_run_workspace_with_no_project_checkout() {
     let f = Fixture::new();
-    git(&f.canonical, &["remote", "set-head", "origin", "--delete"]);
     let id = f.add();
-    f.dispatch_once();
-    let t = f.task(id);
-    assert_eq!((t.state.as_str(), t.runs), ("escalated", 0));
-    assert!(!f
-        .events(id)
-        .iter()
-        .any(|e| e.kind == "claimed" || e.kind == "run_start"));
-    let note = f.last_note(id);
-    assert!(
-        note.starts_with(&format!(
-            "blocked: project {PROJECT} has no task worktree base: "
-        )),
-        "{note}"
-    );
-    assert!(note.contains("refs/remotes/origin/HEAD"), "{note}");
-    assert!(note.contains("remote set-head origin main`"), "{note}");
-    assert!(
-        note.contains(&format!("resume: axe task set {id} --state pending")),
-        "{note}"
-    );
-    assert!(!f.checkout(id).exists());
+    f.runs_twice_in(id, &f.ws.join(format!(".runs/task-{id}")));
+    assert!(!f.ws.join(PROJECT).exists());
+    assert!(!f.ws.join(".worktrees").exists());
+    assert!(!f.events(id).iter().any(|e| e
+        .body
+        .as_deref()
+        .unwrap_or("")
+        .contains("worktree base")));
 }
 
 #[test]
-fn foreign_directory_is_never_adopted_or_cleaned() {
+fn a_project_checkout_without_origin_head_is_not_needed() {
+    // The project's own clone has no origin at all; nothing reads it.
+    let f = Fixture::new();
+    let canonical = f.ws.join(PROJECT);
+    std::fs::create_dir_all(&canonical).unwrap();
+    git(&canonical, &["init", "-q", "-b", "main"]);
+    let id = f.add();
+    f.runs_twice_in(id, &f.ws.join(format!(".runs/task-{id}")));
+    assert!(!f.ws.join(".worktrees").exists());
+    assert!(!canonical.join("local").exists());
+}
+
+#[test]
+fn a_task_left_in_an_old_project_worktree_resumes_there() {
+    // An older dispatcher ran this repo-less task in the project's worktree
+    // root; its work there is not stranded. Nothing is created or reset.
     let f = Fixture::new();
     let id = f.add();
-    let path = f.checkout(id);
-    std::fs::create_dir_all(&path).unwrap();
-    std::fs::write(path.join("partial"), "keep").unwrap();
-    f.dispatch_once();
-    assert_eq!(f.task(id).state, "escalated");
-    assert!(
-        f.last_note(id).contains("not a worktree of"),
-        "{}",
-        f.last_note(id)
-    );
+    let old = f.ws.join(format!(".worktrees/{PROJECT}/task-{id}--work"));
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("earlier"), "keep").unwrap();
+    f.runs_twice_in(id, &old);
     assert_eq!(
-        std::fs::read_to_string(path.join("partial")).unwrap(),
+        std::fs::read_to_string(old.join("earlier")).unwrap(),
         "keep"
     );
-    assert!(!f.base().join(format!("record/{id}-1")).exists());
+    assert!(!f.ws.join(format!(".runs/task-{id}")).exists());
 }
 
 #[test]

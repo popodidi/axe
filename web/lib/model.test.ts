@@ -103,12 +103,12 @@ describe("hv commands", () => {
       spec: "axe task show 38",
     });
   });
-  it("attach resumes in the task worktree, only after the run ended", () => {
+  it("attach resumes in the task's run workspace, only after the run ended", () => {
     expect(runCommands(run("claude")).attach).toBe(
-      "sh -c 'cd ~/workspace/.worktrees/atlas/task-38--work && exec claude --resume 48205d0b-549b-41f5-8e11'",
+      "sh -c 'cd ~/workspace/.runs/task-38 && exec claude --resume 48205d0b-549b-41f5-8e11'",
     );
     expect(runCommands(run("codex")).attach).toBe(
-      "sh -c 'cd ~/workspace/.worktrees/atlas/task-38--work && exec codex resume 48205d0b-549b-41f5-8e11'",
+      "sh -c 'cd ~/workspace/.runs/task-38 && exec codex resume 48205d0b-549b-41f5-8e11'",
     );
     expect(runCommands(run("claude", false)).attach).toBeNull();
     expect(runCommands(run("other")).attach).toBeNull();

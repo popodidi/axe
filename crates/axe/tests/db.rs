@@ -712,7 +712,7 @@ fn migrates_v16_task_fields_and_keeps_them_after_downgrade() {
     for col in ["owner", "repos", "labels"] {
         assert!(columns(&c, "tasks").contains(&col.to_string()), "{col}");
     }
-    // An old task has no owner or labels and keeps its project checkout.
+    // An old task has no owner, repos or labels.
     let t = db::get_task(&c, id).unwrap();
     assert_eq!((t.owner, t.repos, t.labels), (None, None, vec![]));
     db::set_task(
@@ -761,7 +761,7 @@ fn migrates_v17_bot_repos_and_keeps_them_after_downgrade() {
     let mut c = db::open(&path).unwrap();
     assert_eq!(user_version(&c), 21);
     assert!(columns(&c, "bots").contains(&"repos".to_string()));
-    // An existing bot has no repo list: it keeps its project worktree.
+    // An existing bot has no repo list: a run folder with no repos.
     assert_eq!(axe::bot::get(&c, "b").unwrap().repos, None);
     let edit = axe::bot::Edit {
         repos: Some(vec!["a".into(), "b".into()]),
