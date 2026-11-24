@@ -1,0 +1,66 @@
+/* One file on the doc page (doc-file.tsx). Code, tables and frames use the
+   body column's full width; plain text keeps its own lines. */
+.plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Code with line numbers: a counter in a muted gutter that is never
+   selected or copied with the code. */
+.code code {
+  display: grid;
+  counter-reset: line;
+}
+.line {
+  display: block;
+  min-height: var(--lh-label);
+  padding-left: calc(var(--space-5) + var(--space-1));
+  position: relative;
+  white-space: pre;
+}
+.line::before {
+  counter-increment: line;
+  content: counter(line);
+  position: absolute;
+  left: 0;
+  width: var(--space-5);
+  text-align: right;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.table td,
+.table th {
+  white-space: nowrap;
+}
+
+.html {
+  display: grid;
+  gap: var(--space-1);
+}
+.toggle {
+  justify-self: start;
+}
+.frame {
+  display: block;
+  width: 100%;
+  height: calc(100vh - var(--space-8));
+  min-height: calc(var(--space-8) * 3);
+  border: var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.note {
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  color: var(--text-secondary);
+}
