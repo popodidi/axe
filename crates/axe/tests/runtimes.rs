@@ -395,6 +395,67 @@ fn failure_classes_mark_the_runtime_and_card_once() {
 }
 
 #[test]
+fn a_runtime_that_was_never_logged_in_needs_login_and_refunds_the_run() {
+    // A task run: refunded and held, the runtime needs a login, one card.
+    let rig = Rig::new(&[("claude-1", CLAUDE, "")]);
+    std::fs::write(
+        rig.out().join("fail"),
+        fixture("claude-not-logged-in.jsonl"),
+    )
+    .unwrap();
+    let id = rig.add();
+    let stderr = rig.dispatch();
+    let s = rig.state("claude-1");
+    assert_eq!(
+        (&s["state"], &s["alerted"], &s["last_failure"]["class"]),
+        (
+            &json!("needs_login"),
+            &json!("needs_login"),
+            &json!("auth_invalid")
+        ),
+        "{s}"
+    );
+    assert_eq!(
+        stderr
+            .matches("runtime claude-1 turned needs_login: card")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    let t = rig.task(id);
+    assert_eq!((t.state.as_str(), t.runs), ("pending", 0), "{t:?}");
+
+    // A bot run: an API error, not a failure; the bot stays active.
+    let rig = Rig::new(&[("claude-1", CLAUDE, "")]);
+    std::fs::write(
+        rig.out().join("fail"),
+        fixture("claude-not-logged-in.jsonl"),
+    )
+    .unwrap();
+    let f = rig.out().join("bot.json");
+    let bot =
+        json!({"name":"b","project":"p","agent":"claude","identity":"I","conduct":"C","notes":""});
+    std::fs::write(&f, bot.to_string()).unwrap();
+    rig.srv
+        .ok(&["bot", "create", "--file", f.to_str().unwrap()]);
+    let stderr = rig.dispatch();
+    assert_eq!(rig.calls(), ["bot:b fresh default default"]);
+    let runs = rig.srv.get("/api/bot-runs?bot=b");
+    assert_eq!(runs[0]["stop_reason"], "api_error", "{runs}");
+    let b = rig.srv.get("/api/bots/b");
+    assert_eq!(
+        (&b["state"], &b["failures"]),
+        (&json!("active"), &json!(0)),
+        "{b}"
+    );
+    assert_eq!(rig.state("claude-1")["state"], "needs_login");
+    assert!(
+        stderr.contains("runtime claude-1 turned needs_login: card"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn a_login_probe_that_passes_makes_the_runtime_ok_again() {
     let rig = Rig::new(&[(
         "claude-1",

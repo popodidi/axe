@@ -1,7 +1,7 @@
 //! Failure classes from agent logs (`failure.rs`). Fixtures in
 //! `fixtures/failures/` are redacted real dispatcher logs where one exists
-//! (Claude Code connection failure, 401 retry, missing session; Codex "at
-//! capacity"); the others keep a real log's shape with the error message the
+//! (Claude Code connection failure, 401 retry, missing session, not logged in;
+//! Codex "at capacity"); the others keep a real log's shape with the error message the
 //! CLI defines for that case (Claude Code result `api_error` kinds and
 //! `rate_limit_event`; Codex `CodexErr` messages).
 use std::path::Path;
@@ -30,6 +30,52 @@ fn claude_expired_login_is_auth_but_a_recovered_retry_is_not() {
     let f = fixture("claude-auth-expired.jsonl").unwrap();
     assert_eq!((f.class, f.status), (AUTH_INVALID, Some(401)));
     assert_eq!(class("claude-auth-recovered.jsonl"), None);
+}
+
+#[test]
+fn claude_not_logged_in_is_auth() {
+    // Real `claude -p` stream-json with no login: the result has no `api_error`
+    // kind or status; the assistant message before it is typed
+    // `authentication_failed`.
+    let f = fixture("claude-not-logged-in.jsonl").unwrap();
+    assert_eq!((f.class, f.status), (AUTH_INVALID, None));
+    assert_eq!(f.message, "Not logged in \u{b7} Please run /login");
+}
+
+#[test]
+fn an_auth_failed_message_counts_only_for_the_result_it_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("log");
+    let message =
+        r#"{"type":"assistant","message":{"content":[]},"error":"authentication_failed"}"#;
+    let result = |is_error: bool, reason: &str| {
+        format!(
+            r#"{{"type":"result","is_error":{is_error},"terminal_reason":"{reason}","api_error_status":null,"result":"x"}}"#
+        )
+    };
+    let check = |lines: &[&str]| {
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        classify(&p).map(|f| f.class)
+    };
+    let (failed, done) = (result(true, "api_error"), result(false, "completed"));
+    assert_eq!(check(&[message, &failed]), Some(AUTH_INVALID));
+    assert_eq!(check(&[message, &done]), None, "recovered");
+    let ok = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+    assert_eq!(
+        check(&[message, ok, &failed]),
+        None,
+        "a later message passed"
+    );
+    assert_eq!(
+        check(&[message, &done, &failed]),
+        None,
+        "an earlier result's message"
+    );
+    assert_eq!(
+        check(&[message, &result(true, "max_turns")]),
+        None,
+        "not an API error"
+    );
 }
 
 #[test]
