@@ -4,11 +4,15 @@ run-name: release ${{ github.ref_name }}${{ !startsWith(github.ref, 'refs/tags/v
 # A `vX.Y.Z[-pre]` tag publishes, from one Docker build on the self-hosted CI VM:
 # - image ghcr.io/popodidi/axe:<tag> (its digest is in the release notes)
 # - axe-<tag>-linux-x86_64.tar.gz: the image's `axe` binary (dashboard embedded)
+# - axe-<tag>-macos-aarch64.tar.gz: a macOS arm64 `axe` (default features),
+#   built by the `macos` job on a GitHub-hosted runner
 # - axe-skills-<tag>.tar.gz: skills/axe
 # - a .sha256 file per asset and SHA256SUMS
 # The `gate` job first runs ci.yml in full on GitHub-hosted runners (feature
-# variants, embed-ui, web); nothing is published unless it passes and the
-# tagged commit is on main.
+# variants, embed-ui, web); nothing is built or published unless it passes,
+# and nothing is published unless the tagged commit is on main. Each binary
+# embeds skills/axe (`axe skill install`); `axe upgrade` downloads the binary
+# tarball for its platform and checks it against `<asset>.sha256`.
 # Publishing to crates.io is not done here (no repository secrets); the job
 # only runs `cargo publish --dry-run`. A tag is never reused: a failed release
 # is retried with a new tag.
@@ -42,8 +46,42 @@ jobs:
     with:
       full: true
 
-  release:
+  # The macOS arm64 binary. Packaged and published by the release job with the
+  # other assets. Default features: the dashboard is embedded in the Linux
+  # image only.
+  macos:
     needs: gate
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        env:
+          AXE_GIT_COMMIT: ${{ github.sha }}
+        run: cargo build --release --locked -p axe-os
+      - name: Check the binary
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "axe-os"))')
+          file target/release/axe | grep -q arm64
+          test "$(target/release/axe --version)" = "axe $version (${GITHUB_SHA:0:12})"
+          # The embedded skill installs and matches skills/axe.
+          home=$(mktemp -d)
+          HOME="$home" target/release/axe skill install --no-link
+          diff -r -x .axe-skill.json skills/axe "$home/.agents/skills/axe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axe-macos-aarch64
+          path: target/release/axe
+          if-no-files-found: error
+          retention-days: 3
+
+  release:
+    needs: [gate, macos]
     runs-on: [self-hosted, hlab-ci]
     timeout-minutes: 120
     permissions:
@@ -111,22 +149,35 @@ jobs:
           set -euo pipefail
           [ "$PUBLISH" != true ] || docker pull "$IMAGE_REF"
           scripts/smoke_image.sh "$IMAGE_REF" "$GITHUB_SHA" "$VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: axe-macos-aarch64
+          path: ${{ runner.temp }}/macos
       - name: Package assets
         run: |
           set -euo pipefail
           dist="$RUNNER_TEMP/dist" stage="$RUNNER_TEMP/stage"
-          rm -rf "$dist" "$stage" && mkdir -p "$dist" "$stage/bin"
+          rm -rf "$dist" "$stage" && mkdir -p "$dist" "$stage/bin" "$stage/macos"
           cid=$(docker create "$IMAGE_REF")
           docker cp "$cid:/usr/local/bin/axe" "$stage/bin/axe"
           docker rm "$cid" >/dev/null
           test "$("$stage/bin/axe" --version)" = "axe $VERSION (${GITHUB_SHA:0:12})"
+          # The embedded skill installs and matches skills/axe.
+          home=$(mktemp -d)
+          HOME="$home" "$stage/bin/axe" skill install --no-link
+          diff -r -x .axe-skill.json skills/axe "$home/.agents/skills/axe"
+          rm -rf "$home"
           cp LICENSE-MIT LICENSE-APACHE README.md "$stage/bin/"
-          bin="axe-$TAG-linux-x86_64.tar.gz" skills="axe-skills-$TAG.tar.gz"
+          # The macos job's binary (an artifact loses the mode bits).
+          install -m 755 "$RUNNER_TEMP/macos/axe" "$stage/macos/axe"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$stage/macos/"
+          bin="axe-$TAG-linux-x86_64.tar.gz" mac="axe-$TAG-macos-aarch64.tar.gz" skills="axe-skills-$TAG.tar.gz"
           tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$bin" -C "$stage/bin" axe LICENSE-MIT LICENSE-APACHE README.md
+          tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$mac" -C "$stage/macos" axe LICENSE-MIT LICENSE-APACHE README.md
           tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$dist/$skills" -C skills axe
           cd "$dist"
-          for f in "$bin" "$skills"; do sha256sum "$f" > "$f.sha256"; done
-          sha256sum "$bin" "$skills" > SHA256SUMS
+          for f in "$bin" "$mac" "$skills"; do sha256sum "$f" > "$f.sha256"; done
+          sha256sum "$bin" "$mac" "$skills" > SHA256SUMS
           sha256sum -c SHA256SUMS
           {
             echo "axe $VERSION, commit $GITHUB_SHA."
@@ -143,7 +194,7 @@ jobs:
             cat SHA256SUMS
             echo '```'
             echo
-            echo "The binary is Linux x86_64 (glibc 2.36+). Other platforms install from source:"
+            echo "The binaries are Linux x86_64 (glibc 2.36+) and macOS arm64; \`axe upgrade\` installs the one for its platform. Other platforms install from source:"
             echo
             echo '```'
             echo "cargo install --locked --git https://github.com/$GITHUB_REPOSITORY --tag $TAG axe-os"
@@ -172,4 +223,4 @@ jobs:
       # The self-hosted PR VM is persistent: free this job's outputs (see ci.yml).
       - name: Free the runner's disk
         if: always()
-        run: rm -rf target "$RUNNER_TEMP/dist" "$RUNNER_TEMP/stage" && df -B1 /
+        run: rm -rf target "$RUNNER_TEMP/dist" "$RUNNER_TEMP/stage" "$RUNNER_TEMP/macos" && df -B1 /

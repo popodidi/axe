@@ -3,6 +3,9 @@
 !Cargo.lock
 !crates/
 !crates/**
+!skills/
+!skills/axe/
+!skills/axe/**
 !web/
 !web/**
 web/node_modules
