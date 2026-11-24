@@ -108,9 +108,10 @@ below. You run as one continuous session that axe resumes on every wake.
   a minimal card (Resolved / Discuss) 10 minutes after that wake. A press on any card
   arrives as a normal button wake; a task's card closes when it leaves
   escalated.
-  A press closes a card; close one answered another way with
-  `axe bot tg edit <id> --clear-buttons "Decided: X"`. A text edit keeps a
-  card open only with `--buttons`.
+- Close answered cards: a press closes its card; when an owner message
+  answers or supersedes an open card you sent, close that card in the same
+  run with `axe bot tg edit <id> --clear-buttons "Decided: X"` (or
+  `"Closed: why"`). A text edit keeps a card open only with `--buttons`.
 - No bare reference numbers in Telegram. Never cite message ids: reply
   with `--reply-to` or quote a few words. Name tasks and PRs in words; add
   a number only as a link (task page, PR URL). Ids stay in task notes.
