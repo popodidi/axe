@@ -55,7 +55,7 @@ regenerate it from the repository root with
 | Run log viewer and conversation replay | `components/dashboard/run-log.tsx`, `lib/run-log.ts`, `lib/transcript.ts` |
 | Stats, bot stats, cost and goal calculations | `lib/stats.ts`, `lib/bot-stats.ts`, `lib/cost.ts`, `lib/goals.ts` |
 | Store view, store previews and the read session | `components/dashboard/store.tsx`, `store-viewer.tsx`, `lib/store.ts` |
-| A doc's full page (`/doc?path=`) | `app/doc/page.tsx` |
+| A doc's full page (`/doc?path=`): metadata and contents rails | `app/doc/page.tsx`, `components/dashboard/doc-page.tsx`, `lib/doc-toc.ts` |
 | Theme and tokens | `app/styles/`, `lib/theme-script.ts` |
 
 The URL is the state: every view, selection and filter is a query parameter
