@@ -19,7 +19,8 @@
 //! Optional reclaim rules for what that misses:
 //! - `[housekeeping.build_output]`: git-ignored build output (`target`,
 //!   `node_modules`, ...) in the worktrees of idle done, blocked or escalated
-//!   tasks; source and commits stay.
+//!   tasks, including the `repos/<name>` worktrees of a retained run folder;
+//!   source and commits stay.
 //! - `[housekeeping.tmp]`: task-named scratch in a temp directory once the task
 //!   is done (or held and idle, above a size floor), and under pressure other
 //!   stale scratch.
@@ -1429,11 +1430,13 @@ impl Keeper {
         }
     }
 
-    /// A decision line for each task run folder under the run root.
+    /// A decision line for each task run folder under the run root; with
+    /// `build_output`, a retained folder's repo worktrees go through Rule C.
     fn sweep_runs(
         &self,
         runs: &Path,
         retention: u64,
+        build_output: Option<&BuildOutput>,
         stop: &AtomicBool,
         out: &mut Vec<Value>,
     ) -> bool {
@@ -1464,6 +1467,34 @@ impl Keeper {
                 decision,
                 &reason,
             ));
+            if let (Some(bo), "retain") = (build_output, decision) {
+                ok &= self.sweep_run_build_output(bo, &c, stop, out);
+            }
+        }
+        ok
+    }
+
+    /// Rule C for each repo worktree of a retained run folder.
+    fn sweep_run_build_output(
+        &self,
+        bo: &BuildOutput,
+        c: &Candidate,
+        stop: &AtomicBool,
+        out: &mut Vec<Value>,
+    ) -> bool {
+        let Ok(task) = self.task_row(c.task, false) else {
+            return true;
+        };
+        let mut ok = true;
+        for repo in run_repos(&c.path).unwrap_or_default() {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let wt = Candidate {
+                path: repo,
+                task: c.task,
+            };
+            ok &= self.sweep_build_output(bo, &task.project, &wt, stop, out);
         }
         ok
     }
@@ -1692,7 +1723,13 @@ impl Keeper {
         if stop.load(Ordering::SeqCst) {
             return out;
         }
-        out.ok &= self.sweep_runs(&rules.runs, retention, stop, &mut out.lines);
+        out.ok &= self.sweep_runs(
+            &rules.runs,
+            retention,
+            rules.build_output.as_ref(),
+            stop,
+            &mut out.lines,
+        );
         let mut dirs: Vec<&Path> = rules.task_paths.iter().map(|p| p.dir.as_path()).collect();
         dirs.sort();
         dirs.dedup();

@@ -1506,3 +1506,62 @@ fn done_task_run_folders_go_after_retention() {
     assert!(src_list.contains("bot-task-20/"));
     assert!(runs.join("scratch").is_dir());
 }
+
+/// Rule C reaches the repo worktrees of run folders housekeeping retains.
+#[test]
+fn retained_run_folders_lose_ignored_build_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let workspace = tmp.join("workspace");
+    let src = workspace.join("src");
+    repo(&src);
+    let runs = workspace.join(".runs");
+    let folder = |id: u64| runs.join(format!("task-{id}"));
+    for id in [40, 41, 42] {
+        run_folder(&folder(id), &[(&src, "src")]);
+        write_mib(
+            &folder(id).join("repos/src/web/node_modules/pkg/index.js"),
+            1,
+        );
+    }
+    // 40 blocked and idle, 41 done but kept by its own file, 42 in progress.
+    fs::write(folder(41).join("notes.md"), "mine").unwrap();
+    let mut routes = HashMap::new();
+    held_task(
+        &mut routes,
+        40,
+        "blocked",
+        "blocked",
+        &ago(Duration::hours(2)),
+    );
+    held_task(&mut routes, 41, "done", "done", OLD);
+    held_task(&mut routes, 42, "in_progress", "in_progress", OLD);
+    let url = serve(routes, 200).url;
+    let cfg = config(&workspace, "[housekeeping.build_output]\n");
+    let nm = |id: u64| folder(id).join("repos/src/web/node_modules");
+
+    let tick = keeper(&cfg, &url, false, &tmp).tick(None, &AtomicBool::new(false));
+    let dry = kind_lines(&tick.lines, "build_output");
+    assert!(tick.ok, "{dry:?}");
+    assert_eq!(dry[&nm(40)].1, "would_delete", "{dry:?}");
+    assert!(nm(40).exists());
+
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &AtomicBool::new(false));
+    assert!(tick.ok, "{:?}", tick.lines);
+    let lines = kind_lines(&tick.lines, "build_output");
+    for (id, reason) in [(40, "blocked, idle"), (41, "done, idle")] {
+        let (task, decision, why) = &lines[&nm(id)];
+        assert_eq!((task, decision.as_str()), (&json!(id), "deleted"), "{why}");
+        assert!(why.starts_with(reason), "{why}");
+        assert!(!nm(id).exists());
+        assert!(folder(id).join("repos/src/tracked.txt").exists());
+    }
+    assert!(folder(41).join("notes.md").exists());
+    let runs_lines = kind_lines(&tick.lines, "run_folder");
+    assert_eq!(runs_lines[&folder(41)].1, "retain");
+    assert!(
+        !lines.keys().any(|p| p.starts_with(folder(42))),
+        "{lines:?}"
+    );
+    assert!(nm(42).exists());
+}
