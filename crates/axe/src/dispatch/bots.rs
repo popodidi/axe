@@ -16,7 +16,6 @@ use crate::agent_proc::{self, kill_child, kill_tree, render};
 use crate::bot::{self, Claimed};
 use crate::config::SessionMode;
 use crate::rule;
-use crate::worktree;
 
 pub(super) struct BotRun {
     run_id: i64,
@@ -191,48 +190,25 @@ impl Dispatcher {
             &crate::context::bot_scopes(&b.name, &b.project),
             &[],
         );
-        // A bot with a repo list runs in its run folder, like a task with repos,
-        // with its attached skills written in full. Its worktrees are refreshed
-        // first: the claim guarantees no other run of this bot is live.
-        let mut refreshed = Vec::new();
-        let mut repos_cloned = Vec::new();
-        let worktree = match &self.cfg.worktrees {
-            _ if b.repos.as_ref().is_some_and(|r| !r.is_empty()) => {
-                let (dir, r, cloned) = crate::run_workspace::build_bot(
-                    &self.cfg,
-                    &b.name,
-                    b.home(),
-                    b.repos.as_deref().unwrap(),
-                    &attached,
-                    &self.store.client,
-                )?;
-                for r in &r {
-                    if let crate::worktree::Refresh::Skipped { reason } = &r.refresh {
-                        eprintln!(
-                            "axe dispatcher: bot {}: repos/{} not refreshed: {reason}",
-                            b.name, r.repo
-                        );
-                    }
-                }
-                refreshed = r;
-                repos_cloned = cloned;
-                Some(dir)
+        // A bot runs in its run folder, like a task, with a worktree of each
+        // of its repos (none when it has none) and its attached skills written
+        // in full. Its worktrees are refreshed first: the claim guarantees no
+        // other run of this bot is live.
+        let (cwd, refreshed, repos_cloned) = crate::run_workspace::build_bot(
+            &self.cfg,
+            &b.name,
+            b.home(),
+            b.repos.as_deref().unwrap_or_default(),
+            &attached,
+            &self.store.client,
+        )?;
+        for r in &refreshed {
+            if let crate::worktree::Refresh::Skipped { reason } = &r.refresh {
+                eprintln!(
+                    "axe dispatcher: bot {}: repos/{} not refreshed: {reason}",
+                    b.name, r.repo
+                );
             }
-            Some(_) => {
-                let ready =
-                    worktree::readiness(&self.cfg, &b.project).map_err(anyhow::Error::msg)?;
-                Some(worktree::allocate_dir(
-                    &ready,
-                    &format!("bot-{}", b.home()),
-                )?)
-            }
-            None => None,
-        };
-        let cwd = worktree
-            .clone()
-            .unwrap_or_else(|| self.cfg.workspace_root().join(&b.project));
-        if !cwd.is_dir() {
-            anyhow::bail!("project directory {} does not exist", cwd.display());
         }
         let dir = self.cfg.log_dir().join("bots").join(b.home());
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -310,9 +286,7 @@ impl Dispatcher {
         if let Some(url) = &self.server_url {
             env.push(("AXE_SERVER", url.clone()));
         }
-        if let Some(path) = &worktree {
-            env.push(("AXE_WORKTREE", path.display().to_string()));
-        }
+        env.push(("AXE_WORKTREE", cwd.display().to_string()));
         let (login, unset) = rt.env();
         env.extend(login);
         // Sealed form values for this bot: the folder, and the env ones.
@@ -337,7 +311,7 @@ impl Dispatcher {
         let event = json!({"run":c.run,"mode":mode,"agent":rt.name,"session_id":session_id,
             "log":log_path,"prompt_file":prompt_path,"system_prompt_file":system_file,
             "settings_file":settings_file,"cmd":agent_proc::logged_cmd(&argv, &prompt_path),
-            "worktree":worktree,"repos_refresh":refreshed,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>(),
+            "worktree":cwd,"repos_refresh":refreshed,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>(),
             "rule":pick.map(|p| p.rule.clone()),"use":with.map(|u| u.to_string())});
         self.store.request::<serde_json::Value>(
             "bot_started",

@@ -134,7 +134,7 @@ fn live_dispatcher_refills_a_freed_slot_with_the_oldest_ready_task() {
 [agents.run]
 cmd = ["sh", "-c", "sleep 60"]
 [agents.quick]
-cmd = ["sh", "-c", "while [ ! -e ../go ]; do sleep 0.1; done"]
+cmd = ["sh", "-c", "while [ ! -e ../../go ]; do sleep 0.1; done"]
 "#,
         r#"
 [[rule]]

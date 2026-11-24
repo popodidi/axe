@@ -239,11 +239,11 @@ describe("bot model", () => {
     expect(botStatus({ state: "paused", attention: false })).toBe("Paused");
     expect(botStatus({ state: "active", attention: false })).toBe("Active");
   });
-  it("maps bot runs to RunList runs that resume in the bot worktree", () => {
+  it("maps bot runs to RunList runs that resume in the bot's run folder", () => {
     const r = asRun(run(9, t(0), t(0, 1), { session_id: "abc" }), { project: "tundra-desk", name: "chief" });
     expect(r.task_id).toBe(0);
     expect(runCommands(r).attach).toBe(
-      "sh -c 'cd ~/workspace/.worktrees/tundra-desk/bot-chief && exec claude --resume abc'",
+      "sh -c 'cd ~/workspace/.runs/bot-chief && exec claude --resume abc'",
     );
     expect(runCommands(r).watch).toBe("tail -f /logs/bot-9.log");
     expect(asRun(run(2, t(0), t(0, 1), { stop_reason: "stop" }), { project: "p", name: "b" }).current_activity).toBe("Ended: stop");

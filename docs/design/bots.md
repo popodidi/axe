@@ -74,7 +74,7 @@ config may be updated to NEW at leisure. `[housekeeping.alert] bot` in the
 dispatcher config is not resolved and must be edited by hand.
 
 On the dispatcher host a bot's folders (run folder `bot-<home>`, its
-worktrees and branch, project worktree, logs, sealed form values) are keyed
+worktrees and branch, logs, sealed form values) are keyed
 by `home`, the bot's first name, so a rename keeps them. That matters for the
 session: Claude Code stores sessions per working directory, so moving the
 folder would lose the session the rename is meant to keep.

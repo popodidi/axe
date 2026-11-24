@@ -18,7 +18,6 @@ use crate::config::{Config, Prompts, SessionMode, Strategy};
 use crate::db::{self, Changes, Claim, Task};
 use crate::rule::{self, Use};
 use crate::runtime::{self, Registry};
-use crate::worktree;
 
 mod bots;
 mod pre_check;
@@ -241,10 +240,9 @@ pub fn format_show(t: &Task) -> String {
     );
     s.push_str(&format!("\nagent: {}", t.agent.as_deref().unwrap_or("-")));
     s.push_str(&format!("\nowner: {}", t.owner.as_deref().unwrap_or("-")));
-    let repos = match &t.repos {
-        None => format!("- (project checkout {})", t.project),
-        Some(r) if r.is_empty() => "none".into(),
-        Some(r) => r.join(", "),
+    let repos = match t.repos.as_deref() {
+        Some(r) if !r.is_empty() => r.join(", "),
+        _ => "none".into(),
     };
     s.push_str(&format!("\nrepos: {repos}"));
     if !t.labels.is_empty() {
@@ -974,19 +972,6 @@ impl Dispatcher {
     /// left to claim.
     fn admit_one(&mut self, project: &str) -> Result<bool> {
         let res = self.cfg.resolve(project);
-        // A project without a worktree base escalates its next task before any
-        // claim, so no run budget is spent discovering the gap. A task with its
-        // own repos is not held (`Claim::None`) and is claimed below.
-        if self.cfg.worktrees.is_some() {
-            if let Err(gap) = worktree::readiness(&self.cfg, project) {
-                let held = self
-                    .store
-                    .request::<Claim>("hold", json!({"project":project,"note":gap}))?;
-                if !matches!(held, Claim::None) {
-                    return Ok(true);
-                }
-            }
-        }
         let claim_id = format!("dispatch:{}", uuid::Uuid::new_v4());
         let task = match self.store.request::<Claim>(
             "claim",
@@ -1115,33 +1100,20 @@ impl Dispatcher {
         Ok(true)
     }
 
-    /// The folder a run of `task` works in: its run workspace (with the
-    /// pick's routine skill profile), its project worktree, or the project
-    /// directory. Also the repos cloned first.
-    fn run_dir(&self, task: &Task, pick: &Pick) -> Result<(Option<PathBuf>, PathBuf, Vec<String>)> {
-        let mut repos_cloned = Vec::new();
-        let task_worktree = match &self.cfg.worktrees {
-            _ if task.repos.is_some() => {
-                let skills = pick.profile.as_ref().and_then(|p| p.skills.as_deref());
-                let (dir, cloned) =
-                    crate::run_workspace::build(&self.cfg, task, Some(&self.store.client), skills)?;
-                repos_cloned = cloned;
-                Some(dir)
+    /// The folder a run of `task` works in, `$AXE_WORKTREE` and its cwd: its
+    /// run workspace (with the pick's routine skill profile), with a worktree
+    /// of each of its repos, none when it has none. Also the repos cloned
+    /// first. A task created before run workspaces, with no repos and a
+    /// directory left at the old [`legacy_task_dir`], resumes there unchanged
+    /// so its session and work are not stranded; nothing creates one any more.
+    fn run_dir(&self, task: &Task, pick: &Pick) -> Result<(PathBuf, Vec<String>)> {
+        if task.repos.is_none() {
+            if let Some(dir) = legacy_task_dir(&self.cfg, task) {
+                return Ok((dir, Vec::new()));
             }
-            Some(_) => {
-                let ready =
-                    worktree::readiness(&self.cfg, &task.project).map_err(anyhow::Error::msg)?;
-                Some(worktree::allocate(&ready, task.id)?)
-            }
-            None => None,
-        };
-        let cwd = task_worktree
-            .clone()
-            .unwrap_or_else(|| self.cfg.workspace_root().join(&task.project));
-        if !cwd.is_dir() {
-            anyhow::bail!("project directory {} does not exist", cwd.display());
         }
-        Ok((task_worktree, cwd, repos_cloned))
+        let skills = pick.profile.as_ref().and_then(|p| p.skills.as_deref());
+        crate::run_workspace::build(&self.cfg, task, Some(&self.store.client), skills)
     }
 
     /// The profile of the routine that created `task`; none for other
@@ -1191,7 +1163,7 @@ impl Dispatcher {
             .with_context(|| format!("unknown agent {}", rt.agent))?
             .clone();
         let session_mode = agent.session_mode()?;
-        let (task_worktree, cwd, repos_cloned) = self.run_dir(task, pick)?;
+        let (cwd, repos_cloned) = self.run_dir(task, pick)?;
         let log_dir = self.cfg.log_dir();
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("create log dir {}", log_dir.display()))?;
@@ -1285,9 +1257,7 @@ impl Dispatcher {
         if let Some(url) = &self.server_url {
             env.push(("AXE_SERVER", url.clone()));
         }
-        if let Some(path) = &task_worktree {
-            env.push(("AXE_WORKTREE", path.display().to_string()));
-        }
+        env.push(("AXE_WORKTREE", cwd.display().to_string()));
         // The runtime's login: its directory variable, or none for the default.
         let (login, unset) = rt.env();
         env.extend(login);
@@ -1310,7 +1280,7 @@ impl Dispatcher {
             session_id: id.clone(),
             resume_count,
         });
-        let mut body = json!({"mode":mode,"agent":agent_name,"rule":pick.rule,"session_id":session_id,"log":log_path,"prompt_file":prompt_path,"cmd":logged_cmd,"worktree":task_worktree,"repos_cloned":repos_cloned});
+        let mut body = json!({"mode":mode,"agent":agent_name,"rule":pick.rule,"session_id":session_id,"log":log_path,"prompt_file":prompt_path,"cmd":logged_cmd,"worktree":cwd,"repos_cloned":repos_cloned});
         if let Some(u) = with {
             body["use"] = json!(u.to_string());
         }
@@ -1577,6 +1547,18 @@ impl Drop for Dispatcher {
             kill_child(&mut run.child);
         }
     }
+}
+
+/// Where a task without repos ran before run workspaces:
+/// `<workspace_root>/.worktrees/<project>/task-<id>--work`, when a directory is
+/// still there.
+fn legacy_task_dir(cfg: &Config, task: &Task) -> Option<PathBuf> {
+    let dir = cfg
+        .workspace_root()
+        .join(".worktrees")
+        .join(&task.project)
+        .join(format!("task-{}--work", task.id));
+    dir.is_dir().then_some(dir)
 }
 
 #[cfg(test)]

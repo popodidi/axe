@@ -314,11 +314,11 @@ pub(crate) enum TaskCmd {
         /// Who follows the task up: a bot (bot:<name>) or a person
         #[arg(long)]
         owner: Option<String>,
-        /// Repos to work in (repeat or comma-separate): the session runs in a
-        /// run workspace with one worktree per repo. Omitted: the project checkout
+        /// Repos to work in (repeat or comma-separate): the run workspace gets
+        /// one worktree per repo. Omitted: a run workspace with no repos
         #[arg(long, value_delimiter = ',', conflicts_with = "no_repos")]
         repo: Vec<String>,
-        /// A run workspace with no repos
+        /// A run workspace with no repos (the same as omitting --repo)
         #[arg(long)]
         no_repos: bool,
         /// Free-form labels (repeat or comma-separate)
@@ -1847,7 +1847,7 @@ enum RoutineCmd {
     /// project, cron, timezone (default UTC), title, detail, and optionally
     /// agent, workload, owner, repos and labels. owner, repos and labels set
     /// each created task as `axe task add --owner/--repo/--label` do: repos omitted
-    /// runs in the project checkout, [] in a run workspace with no repos. Cost
+    /// or [] is a run workspace with no repos. Cost
     /// controls: pre_check (a shell command run before the first agent run;
     /// exit 0 marks the task done with no agent), model and effort (over the
     /// selection rule's), skills (the only skills in the run folder)
@@ -1921,7 +1921,7 @@ enum BotCmd {
         /// run folder with one worktree per repo
         #[arg(long, value_delimiter = ',', conflicts_with = "no_repos")]
         repo: Vec<String>,
-        /// Clear the repo list: runs use the project worktree again
+        /// Clear the repo list: runs get a run folder with no repos
         #[arg(long)]
         no_repos: bool,
         /// Turn the bot's retro card on or off (the owner's attention budget:
@@ -3408,7 +3408,7 @@ fn format_bot(b: &crate::bot::Bot) -> String {
         b.project,
         match b.repos.as_deref() {
             Some(r) if !r.is_empty() => r.join(","),
-            _ => "- (project worktree)".into(),
+            _ => "-".into(),
         },
         b.agent,
         b.failures,
@@ -3998,12 +3998,6 @@ fn run_cmd(cli: &Cli) -> Result<()> {
             if *json {
                 print_json(&res)?;
             } else {
-                if t.repos.is_none() {
-                    println!(
-                        "note: task {id} has no repos, so it runs in its project worktree \
-                         without this context; set --repo or --no-repos to give it a run workspace"
-                    );
-                }
                 print!("{}", crate::context::explain(&res));
             }
         }

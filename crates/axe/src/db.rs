@@ -100,8 +100,7 @@ FROM runs;
 DROP TABLE runs; ALTER TABLE runs_new RENAME TO runs;
 ";
 
-/// v18: a bot's repo list, `bots.repos` (a JSON array; NULL means the bot runs
-/// in its project worktree, as before v18). Additive and idempotent like
+/// v18: a bot's repo list, `bots.repos` (a JSON array; NULL means no repos). Additive and idempotent like
 /// [`migrate_task_fields`].
 fn migrate_bot_repos(tx: &Transaction) -> Result<()> {
     let has: bool = tx.query_row(
@@ -423,7 +422,7 @@ pub struct Task {
     #[serde(default)]
     pub owner: Option<String>,
     /// Repos the task works in, each a worktree in its run workspace. `None`
-    /// means the project's own checkout (tasks from before repos existed).
+    /// (tasks from before repos existed) is the same as none.
     #[serde(default)]
     pub repos: Option<Vec<String>>,
     /// Free-form labels. Filters also match the project as a label.
@@ -1572,36 +1571,6 @@ fn oldest_ready(tx: &Transaction, project: Option<&str>) -> Result<Option<(i64, 
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
-}
-
-/// Escalates the task `claim_in` would pick next in `project`, without claiming
-/// it or spending run budget: its project cannot host a run yet.
-///
-/// A task with its own `repos` does not use the project checkout, so it is not
-/// held: `Claim::None` tells the caller to claim it as usual.
-pub fn hold_in(tx: &Transaction, actor: &Actor, project: &str, blocker: &str) -> Result<Claim> {
-    let Some((id, _)) = oldest_ready(tx, Some(project))? else {
-        return Ok(Claim::None);
-    };
-    let own_repos: bool = tx.query_row(
-        "SELECT repos IS NOT NULL FROM tasks WHERE id = ?1",
-        [id],
-        |r| r.get(0),
-    )?;
-    if own_repos {
-        return Ok(Claim::None);
-    }
-    let c = Changes {
-        state: Some("escalated".into()),
-        note: Some(block_note(
-            blocker,
-            "ops: give the project a canonical Git clone under workspace_root with origin/HEAD set",
-            &format!("axe task set {id} --state pending"),
-        )),
-        ..Default::default()
-    };
-    apply_changes(tx, actor, id, &c, None)?;
-    Ok(Claim::Blocked(id))
 }
 
 /// Returns the next round-robin index for `rule` and advances the cursor.

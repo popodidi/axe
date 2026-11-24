@@ -150,8 +150,8 @@ pub struct Config {
     /// Resource admission; omitted means new sessions are not gated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Resources>,
-    /// Dispatcher-owned task worktrees; omitted means sessions start in the
-    /// canonical workspace as before (see `worktree.rs`).
+    /// `[worktrees]`: the branch prefix and folder of run workspaces
+    /// (`run_workspace.rs`); omitted means the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktrees: Option<Worktrees>,
     /// `[repos.<name>]`: where each repo a task can name has its canonical
@@ -721,17 +721,16 @@ fn default_telegram_poll() -> u64 {
     30
 }
 
-/// Each session runs in `<workspace_root>/.worktrees/<project>/task-<id>--work`,
-/// created or reused by the dispatcher. Unknown keys from older configs are
-/// ignored.
+/// Every run works in a run workspace, `<run_root>/task-<id>` or
+/// `<run_root>/bot-<name>` (`run_workspace.rs`). Unknown keys from older
+/// configs are ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Worktrees {
-    /// Prefix of the branch a new task worktree checks out
-    /// (`<prefix>task-<id>--work`).
+    /// Prefix of the branch each repo worktree of a run workspace checks out
+    /// (`<prefix>task-<id>--work`, `<prefix>bot-<name>--work`).
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
-    /// Where run workspaces of tasks with their own repos go
-    /// (`<run_root>/task-<id>`); omitted means `<workspace_root>/.runs`.
+    /// Where run workspaces go; omitted means `<workspace_root>/.runs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_root: Option<String>,
 }

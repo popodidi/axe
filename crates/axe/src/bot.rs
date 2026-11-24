@@ -168,8 +168,8 @@ pub struct Bot {
     pub created_at: String,
     pub updated_at: String,
     /// Repos the bot works in: each run gets a run folder with one worktree
-    /// per repo (`run_workspace.rs`). `None` (also an empty list): the
-    /// project worktree.
+    /// per repo (`run_workspace.rs`). `None` (also an empty list): a run
+    /// folder with no repos.
     #[serde(default)]
     pub repos: Option<Vec<String>>,
     /// The bot's retro card settings (`bots.retro`): the stored ones, else
@@ -193,7 +193,7 @@ pub struct Bot {
     #[serde(default)]
     pub attention: bool,
     /// Derived: the name the bot's folders on the dispatcher host are keyed
-    /// by (run folder, project worktree, logs, sealed form values): its first
+    /// by (run folder, logs, sealed form values): its first
     /// name, so a rename keeps them and the agent session that lives in them.
     /// `None` from servers that predate renames: the name.
     #[serde(default)]
@@ -576,7 +576,7 @@ pub struct Edit {
     /// Retired: see [`refuse_heartbeat`].
     pub heartbeat: Option<String>,
     pub nudge_after: Option<String>,
-    /// Replaces the repo list; an empty list clears it (the project worktree).
+    /// Replaces the repo list; an empty list clears it (no repos).
     #[serde(default)]
     pub repos: Option<Vec<String>>,
     /// Moves the bot to another project. Existing subscriptions keep the

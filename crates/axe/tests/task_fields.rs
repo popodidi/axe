@@ -69,7 +69,7 @@ fn owner_repos_and_labels_round_trip_through_cli_and_api() {
         "{text}"
     );
 
-    // A task without the fields keeps its project checkout.
+    // A task without the fields: a run workspace with no repos.
     let b = srv.ok(&["add", "--project", "p", "--title", "b"]);
     let t = show(&srv, &b);
     assert_eq!(
@@ -77,9 +77,7 @@ fn owner_repos_and_labels_round_trip_through_cli_and_api() {
         (Value::Null, Value::Null)
     );
     assert_eq!(t["labels"], json!([]));
-    assert!(srv
-        .ok(&["show", b.trim()])
-        .contains("repos: - (project checkout p)"));
+    assert!(srv.ok(&["show", b.trim()]).contains("\nrepos: none\n"));
 
     srv.ok(&[
         "set",
@@ -542,38 +540,29 @@ fn zero_repo_task_gets_a_bare_run_dir() {
 }
 
 #[test]
-fn project_only_task_runs_unchanged_beside_a_repo_task() {
-    // `bare` has no clone: its project-only task escalates before any claim as
-    // before, while its task with repos is claimed and runs.
+fn task_without_repos_runs_in_a_run_workspace_with_or_without_a_project_clone() {
+    // `proj` has a clone and `bare` has nothing: neither is used. Every task
+    // runs in its own run workspace; one without --repo gets no repos.
     let f = Fixture::new(&["proj", "one"]);
     let (srv, ids) = f.run(&[
         &["--project", "proj"],
         &["--project", "bare", "--repo", "one"],
         &["--project", "bare"],
     ]);
-    let wt = f
-        .base()
-        .join(format!("ws/.worktrees/proj/task-{}--work", ids[0]));
-    assert_eq!(show(&srv, &ids[0])["state"], "done");
-    let rec = f.record(&ids[0]);
-    assert!(rec.contains(&format!("pwd={}\n", wt.display())), "{rec}");
-    assert!(
-        rec.contains(&format!("worktree={}\n", wt.display())),
-        "{rec}"
-    );
-    assert!(!f.run_dir(&ids[0]).exists());
-    assert_eq!(
-        show(&srv, &ids[1])["state"],
-        "done",
-        "{}",
-        srv.ok(&["log", &ids[1]])
-    );
+    for id in &ids {
+        assert_eq!(show(&srv, id)["state"], "done", "{}", srv.ok(&["log", id]));
+        let run = f.run_dir(id);
+        let rec = f.record(id);
+        assert!(rec.contains(&format!("pwd={}\n", run.display())), "{rec}");
+        assert!(
+            rec.contains(&format!("worktree={}\n", run.display())),
+            "{rec}"
+        );
+    }
+    assert!(!f.run_dir(&ids[0]).join("repos").exists());
     assert!(f.run_dir(&ids[1]).join("repos/one").is_dir());
-    let held = show(&srv, &ids[2]);
-    assert_eq!(
-        (held["state"].as_str(), held["runs"].as_i64()),
-        (Some("escalated"), Some(0))
-    );
+    assert!(!f.run_dir(&ids[2]).join("repos").exists());
+    assert!(!f.base().join("ws/.worktrees").exists());
 }
 
 #[test]
