@@ -1266,7 +1266,7 @@ fn hook_context_is_capped() {
     };
     let inbox = bot::Inbox {
         wakes: vec![w],
-        nudge: None,
+        ..Default::default()
     };
     let out: Value = serde_json::from_str(&bot::hook_output("stop", &inbox).unwrap()).unwrap();
     let reason = out["reason"].as_str().unwrap();
@@ -2667,5 +2667,89 @@ fn bot_retro_is_set_shown_validated_and_logged_and_a_bot_needs_an_owner_ref() {
     assert!(
         log.contains("-> off (every 14d from wed 09:30Z, 25 asks)"),
         "{log}"
+    );
+}
+
+#[test]
+fn owner_message_wakes_list_the_open_cards() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+    let human = Actor::new("human");
+    bot::create(&mut conn, &human, &new_bot("b"), T0).unwrap();
+    let out = |id: i64, text: &str, flags: Value| NewMessage {
+        direction: "out".into(),
+        flags,
+        ..message(id, "text", text)
+    };
+    // No open card: an owner-message wake lists none.
+    bot::record_message(&mut conn, "b", &message(1, "text", "hi"), T0).unwrap();
+    let c = claim(&mut conn, "b", T0 + 10).unwrap();
+    assert!(c.open_cards.is_empty());
+    assert!(!bot::render_prompt(&c, true).contains("open cards"));
+    finish(&conn, c.run, 0, T0 + 11);
+    let (card, _) = bot::record_message(
+        &mut conn,
+        "b",
+        &out(
+            2,
+            "Deploy now?\nDetails",
+            json!({"buttons":[[["Yes","yes"]]]}),
+        ),
+        T0 + 20,
+    )
+    .unwrap();
+    bot::record_message(
+        &mut conn,
+        "b",
+        &out(
+            3,
+            "Closed one",
+            json!({"buttons":[[["Yes","yes"]]],"answered":"yes"}),
+        ),
+        T0 + 21,
+    )
+    .unwrap();
+    bot::record_message(&mut conn, "b", &out(4, "plain reply", json!({})), T0 + 22).unwrap();
+    // A scheduled wake alone lists none.
+    bot::add_wake(&mut conn, &human, "b", T0 + 30, "check CI", None, T0 + 30).unwrap();
+    let c = claim(&mut conn, "b", T0 + 30).unwrap();
+    assert!(c.open_cards.is_empty());
+    finish(&conn, c.run, 0, T0 + 31);
+    // An owner message lists the one open card, with its id and sent time.
+    bot::record_message(&mut conn, "b", &message(5, "text", "yes deploy"), T0 + 40).unwrap();
+    let c = claim(&mut conn, "b", T0 + 50).unwrap();
+    assert_eq!(
+        c.open_cards,
+        vec![bot::OpenCard {
+            id: card,
+            text: "Deploy now?".into(),
+            at: bot::ts(T0 + 20),
+        }]
+    );
+    let prompt = bot::render_prompt(&c, true);
+    assert!(prompt.contains("Your open cards"), "{prompt}");
+    assert!(
+        prompt.contains(&format!("\n- #{card} sent {} ", &bot::ts(T0 + 20)[..10]))
+            && prompt.contains(": Deploy now?"),
+        "{prompt}"
+    );
+    // So does an owner message delivered by a hook during the run.
+    bot::record_message(&mut conn, "b", &message(6, "text", "and the docs"), T0 + 60).unwrap();
+    let inbox = bot::inbox(
+        &mut conn,
+        &human,
+        "b",
+        Some(c.run),
+        true,
+        Some("stop"),
+        Some(false),
+        T0 + 100,
+    )
+    .unwrap();
+    assert_eq!(inbox.open_cards.len(), 1);
+    let hook = bot::hook_output("stop", &inbox).unwrap();
+    assert!(
+        hook.contains("Your open cards") && hook.contains(&format!("#{card} sent")),
+        "{hook}"
     );
 }

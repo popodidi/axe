@@ -310,6 +310,19 @@ fn open_cards(conn: &Connection, bot: i64) -> Result<Vec<Line>> {
     Ok(out)
 }
 
+/// The bot's open cards for an owner-message wake, oldest first
+/// (`bot::render_prompt`, `bot::hook_output`).
+pub fn open_card_list(conn: &Connection, bot: i64) -> Result<Vec<bot::OpenCard>> {
+    Ok(open_cards(conn, bot)?
+        .into_iter()
+        .map(|l| bot::OpenCard {
+            id: l.id,
+            text: l.title,
+            at: bot::ts(l.since),
+        })
+        .collect())
+}
+
 /// What waits on the owner for bot `name`: escalated tasks without an open
 /// card first (oldest first), then open cards (oldest first). A card for an
 /// escalated task stands for it.
