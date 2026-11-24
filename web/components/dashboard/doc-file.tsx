@@ -161,14 +161,21 @@ function DelimitedTable({
 }
 
 function Binary({ path, content }: { path: string; content: string }) {
-  const href = useMemo(
-    () => URL.createObjectURL(new Blob([content], { type: "application/octet-stream" })),
-    [content],
-  );
   return (
     <p className={styles.note}>
       Binary content, no inline preview.{" "}
-      <a href={href} download={path.slice(path.lastIndexOf("/") + 1) || "doc"}>
+      <a
+        href="#"
+        download={path.slice(path.lastIndexOf("/") + 1) || "doc"}
+        // The file is made on click and released once the download starts.
+        onClick={(e) => {
+          const url = URL.createObjectURL(
+            new Blob([content], { type: "application/octet-stream" }),
+          );
+          e.currentTarget.href = url;
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+        }}
+      >
         Download
       </a>
     </p>

@@ -14,7 +14,7 @@
 .line {
   display: block;
   min-height: var(--lh-label);
-  padding-left: calc(var(--space-5) + var(--space-1));
+  padding-left: calc(var(--space-4) + var(--space-2));
   position: relative;
   white-space: pre;
 }
@@ -23,7 +23,7 @@
   content: counter(line);
   position: absolute;
   left: 0;
-  width: var(--space-5);
+  width: var(--space-4);
   text-align: right;
   color: var(--text-tertiary);
   user-select: none;
