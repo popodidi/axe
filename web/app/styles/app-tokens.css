@@ -58,6 +58,9 @@
   --detail-width: 48%;
   --detail-min-width: calc(var(--space-8) * 3);
   --list-min-width: calc(var(--space-8) * 2 - var(--space-2));
+  /* The Store keeps 480px beside an open item, so its cards, search and
+     doc labels stay whole. */
+  --store-list-min-width: calc(var(--space-8) * 4);
   /* Routine pane: 392px by default, resizable 320-560px (--routine-size holds
      a saved width); a task pane may stack to its right. */
   --routine-width: calc(var(--space-8) * 3 + var(--space-4));

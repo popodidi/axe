@@ -658,6 +658,7 @@ export default function Dashboard() {
           (paneItem || routineId) && styles.hasDetail,
           routineId && styles.hasRoutine,
           routineId && shown && styles.stacked,
+          view === "store" && styles.storeView,
         )}
         inert={overlay}
       >

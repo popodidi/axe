@@ -234,6 +234,12 @@
   margin-right: auto;
 }
 
+/* The Store's list keeps a wider minimum beside an open item: the pane
+   narrows the list and the list reflows, never hides under the pane. */
+.storeView {
+  --list-min-width: var(--store-list-min-width);
+}
+
 /* Detail sits on the canvas; the resizer hairline marks the boundary. */
 .detailPane {
   --cell-padding: var(--cell-padding-compact);

@@ -133,6 +133,9 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.text > .facts {
+  margin-bottom: var(--space-1);
+}
 .facts .taskLinks {
   flex-wrap: wrap;
 }

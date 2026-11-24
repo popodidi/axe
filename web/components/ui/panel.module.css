@@ -4,6 +4,8 @@
    canvas. No shadow and no colored edges; color stays in data and states. */
 .panel {
   display: grid;
+  /* One track no wider than the card: content wraps or scrolls inside it. */
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--section-head-gap);
   min-width: 0;
