@@ -403,7 +403,10 @@ pub fn outcome_text(f: &Form) -> String {
                 None => format!("Sealed form delivered: {}.", f.spec.target.describe()),
             }
         }
-        SUBMITTED => "Sealed form received; the dispatcher is offline, so it is delivered when it reconnects.".into(),
+        SUBMITTED => "Sealed form received and held until the dispatcher reconnects. \
+             If no \"Sealed form delivered\" confirmation arrives within a few minutes, \
+             send it again."
+            .into(),
         OPEN => format!(
             "Sealed form reply refused: {}. The form is still open.",
             f.error.as_deref().unwrap_or("unknown error")
@@ -456,8 +459,17 @@ mod tests {
         );
         assert!(forms.job(&f.spec.form).is_some());
         // No dispatcher: kept for a retry.
-        forms.finish(&f.spec.form, &Delivery::Unavailable("offline".into()), 2);
+        let held = forms
+            .finish(&f.spec.form, &Delivery::Unavailable("offline".into()), 2)
+            .unwrap();
         assert!(forms.job(&f.spec.form).is_some());
+        // Held in memory only: the notice promises no delivery.
+        let text = outcome_text(&held);
+        assert!(
+            text.contains("held until the dispatcher reconnects"),
+            "{text}"
+        );
+        assert!(text.contains("\"Sealed form delivered\""), "{text}");
         // A bad reply reopens the form and drops the ciphertext.
         forms.finish(
             &f.spec.form,
