@@ -21,7 +21,7 @@ import { Alert, Button, CodeBlock, cx, Input, Skeleton } from "../ui";
 import styles from "./store.module.css";
 
 // A full local timestamp, or a dash.
-function fullDate(s?: string | number) {
+export function fullDate(s?: string | number) {
   if (s === undefined || s === "") return "—";
   const d = new Date(s);
   return Number.isFinite(d.getTime())
@@ -30,7 +30,7 @@ function fullDate(s?: string | number) {
 }
 
 // The item's metadata as label/value rows.
-function Facts({ label, rows }: { label: string; rows: [string, ReactNode][] }) {
+export function Facts({ label, rows }: { label: string; rows: [string, ReactNode][] }) {
   return (
     <dl className={styles.facts} aria-label={label}>
       {rows.map(([k, v]) => (
@@ -356,7 +356,7 @@ function BlobPreview({
   );
 }
 
-type DocBody = {
+export type DocBody = {
   path: string;
   version: string;
   kind: "doc" | "folder";
@@ -366,7 +366,7 @@ type DocBody = {
 
 // What the store pane knows about a doc from the listing.
 export type DocInfo = { size: number; updatedAt: string; scopes: string[] };
-type DocVersion = { version: string; at: string };
+export type DocVersion = { version: string; at: string };
 
 // The doc's full page (app/doc): this dashboard, pointed at the same server.
 export function docPageHref(base: string, path: string) {

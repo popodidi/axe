@@ -36,7 +36,11 @@ const longDoc = [
   "status: draft",
   "---",
   "# Long report",
-  ...Array.from({ length: 60 }, (_, i) => `Paragraph ${i + 1} of the long report.`),
+  // An intro and five sections of ten paragraphs, for the contents rail.
+  ...Array.from({ length: 60 }, (_, i) => [
+    ...(i && i % 10 === 0 ? [`## Section ${i / 10}`] : []),
+    `Paragraph ${i + 1} of the long report.`,
+  ]).flat(),
   "```",
   `wide ${"x".repeat(400)}`,
   ...Array.from({ length: 40 }, (_, i) => `line ${i + 1}`),
@@ -415,4 +419,84 @@ test("an open store item narrows the store column instead of covering it", async
       for (const b of await part.evaluateAll((els) => els.map((e) => e.getBoundingClientRect().toJSON())))
         expect(b.right).toBeLessThanOrEqual(box.x + box.width);
   }
+});
+
+test("the doc page shows its metadata and contents beside the body", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // The store's metadata for a listed doc.
+  await page.goto("/doc?server=http://axe.test&path=harvis/docs/reference/brand-guide.md");
+  const details = page.getByLabel("Doc details");
+  await expect(details).toContainText("120 B");
+  await expect(details).toContainText("label:harvis");
+  await expect(details).toContainText("2 · first");
+
+  await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
+  const meta = page.getByRole("complementary", { name: "Doc metadata" });
+  const body = page.locator("article");
+  const toc = page.getByRole("navigation", { name: "Contents" });
+  await expect(toc.getByRole("link")).toHaveCount(6);
+  // The rail shows; the narrow layout's fold does not.
+  await expect(page.locator("summary", { hasText: "Contents" })).toBeHidden();
+  // Metadata left, body center, contents right, on one row.
+  const [m, b, t] = await Promise.all([meta.boundingBox(), body.boundingBox(), toc.boundingBox()]);
+  expect(m!.x + m!.width).toBeLessThan(b!.x);
+  expect(b!.x + b!.width).toBeLessThan(t!.x);
+  expect(Math.abs(m!.y - b!.y)).toBeLessThan(4);
+  // The body is wider than the old single column (840px).
+  expect(b!.width).toBeGreaterThan(860);
+  // The first section is current at the top.
+  await expect(toc.getByRole("link", { name: "Long report" })).toHaveAttribute("aria-current", "location");
+  // Scrolling marks the section in view; the rails stay put.
+  await page.getByRole("heading", { name: "Section 3" }).evaluate((e) =>
+    window.scrollTo(0, e.getBoundingClientRect().top + scrollY - 40),
+  );
+  await expect(toc.getByRole("link", { name: "Section 3" })).toHaveAttribute("aria-current", "location");
+  await expect(toc.locator("[aria-current]")).toHaveCount(1);
+  for (const rail of [meta, toc]) {
+    await expect(rail).toBeInViewport();
+    expect((await rail.boundingBox())!.y).toBeLessThan(120);
+  }
+  // A click jumps to the section and puts it in the URL.
+  await toc.getByRole("link", { name: "Section 5" }).click();
+  await expect(page).toHaveURL(/#section-5$/);
+  const heading = page.getByRole("heading", { name: "Section 5" });
+  await expect(heading).toBeInViewport();
+  expect((await heading.boundingBox())!.y).toBeLessThan(120);
+  await expect(toc.getByRole("link", { name: "Section 5" })).toHaveAttribute("aria-current", "location");
+  // A shared link opens at its section once the doc loads.
+  await page.goto(`/doc?server=http://axe.test&path=${longDocPath}#section-4`);
+  await expect(page.getByRole("heading", { name: "Section 4" })).toBeInViewport();
+  await expect(toc.getByRole("link", { name: "Section 4" })).toHaveAttribute("aria-current", "location");
+});
+
+test("a narrow doc page stacks the metadata and folds the contents", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
+  const meta = page.getByRole("complementary", { name: "Doc metadata" });
+  const body = page.locator("article");
+  await expect(meta.getByLabel("Frontmatter")).toContainText("Long report");
+  const [m, b] = await Promise.all([meta.boundingBox(), body.boundingBox()]);
+  expect(m!.y + m!.height).toBeLessThanOrEqual(b!.y);
+  const sizes = await page.evaluate(() => ({ sw: document.scrollingElement!.scrollWidth, w: innerWidth }));
+  expect(sizes.sw).toBeLessThanOrEqual(sizes.w);
+  // One contents list, folded until opened.
+  const toc = page.getByRole("navigation", { name: "Contents" });
+  await expect(toc).toHaveCount(0);
+  await page.locator("summary", { hasText: "Contents" }).click();
+  await expect(toc).toBeVisible();
+  await toc.getByRole("link", { name: "Section 2" }).click();
+  await expect(page).toHaveURL(/#section-2$/);
+  await expect(page.getByRole("heading", { name: "Section 2" })).toBeInViewport();
+});
+
+test("a doc that is not markdown has no contents", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/doc?server=http://axe.test&path=notes/plain.txt");
+  await expect(page.getByText("# Quiet")).toBeVisible();
+  await expect(page.getByText("doc · version cccccccccccc")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Contents" })).toHaveCount(0);
+  await expect(page.getByText("Contents", { exact: true })).toHaveCount(0);
 });

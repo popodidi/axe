@@ -1,0 +1,168 @@
+@value bp-doc-rails from "../../app/styles/breakpoints.module.css";
+
+/* The doc page (app/doc). Narrow: one column, metadata above the body and
+   the contents folded. Wide: metadata rail 240px, body up to 1080px,
+   contents rail 224px, the rails sticky while the window scrolls. */
+.page {
+  padding: var(--pane-padding);
+}
+.layout {
+  --doc-meta-width: calc(var(--space-8) * 2);
+  --doc-toc-width: calc(var(--space-8) * 2 - var(--space-2));
+  --doc-body-max: calc(var(--space-8) * 9);
+  --doc-rail-top: var(--space-snug);
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  max-width: calc(var(--space-8) * 8);
+  margin: 0 auto;
+}
+.meta {
+  display: grid;
+  gap: var(--space-1);
+  align-content: start;
+  min-width: 0;
+}
+.head {
+  display: grid;
+  gap: var(--space-quarter);
+}
+.path {
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+.version {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-secondary);
+}
+.mono {
+  font-family: var(--font-mono);
+}
+/* One minmax(0, 1fr) track, so a wide code block or table scrolls inside
+   itself instead of widening the page. */
+.body,
+.file {
+  grid-template-columns: minmax(0, 1fr);
+}
+.body {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  min-width: 0;
+}
+.body :is(h1, h2, h3)[id] {
+  scroll-margin-top: var(--space-3);
+}
+.file {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.fileName {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  font-weight: var(--weight-medium);
+}
+
+/* Contents: one line per h1-h3, indented by level; the current section in
+   the primary color, semibold, with a bar on its left edge. */
+.toc {
+  display: grid;
+  gap: var(--space-quarter);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+}
+.toc li[data-level="1"] {
+  padding-left: var(--space-snug);
+}
+.toc li[data-level="2"] {
+  padding-left: var(--space-3);
+}
+.toc a {
+  display: block;
+  padding: var(--space-quarter) var(--space-1);
+  border-left: var(--space-quarter) solid transparent;
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+  transition: color var(--transition-hover);
+}
+.toc a:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+.toc a.active {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+  border-left-color: var(--text-primary);
+}
+.railLabel {
+  display: block;
+  margin-bottom: var(--space-half);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  color: var(--text-tertiary);
+}
+.tocRail {
+  display: none;
+}
+.tocFold summary {
+  font-size: var(--text-label);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.tocFold[open] summary {
+  margin-bottom: var(--space-half);
+}
+
+@media bp-doc-rails {
+  .layout {
+    grid-template-columns:
+      var(--doc-meta-width)
+      minmax(0, var(--doc-body-max))
+      var(--doc-toc-width);
+    justify-content: center;
+    align-items: start;
+    column-gap: var(--space-4);
+    max-width: none;
+  }
+  .meta,
+  .tocRail {
+    position: sticky;
+    top: var(--doc-rail-top);
+    max-height: calc(100vh - var(--doc-rail-top) * 2);
+    overflow-y: auto;
+  }
+  .meta {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  /* In the rail the facts sit on the page, not on an inset well. */
+  .meta dl {
+    padding: 0;
+    background: none;
+  }
+  .body {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .tocRail {
+    display: block;
+    grid-column: 3;
+    grid-row: 1;
+  }
+  .tocFold {
+    display: none;
+  }
+}

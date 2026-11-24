@@ -141,12 +141,6 @@
 .facts .taskLinks {
   flex-wrap: wrap;
 }
-/* The doc page (app/doc): one readable column. */
-.page {
-  max-width: calc(var(--space-8) * 7);
-  margin: 0 auto;
-  padding: var(--pane-padding);
-}
 .docFile {
   display: grid;
   gap: var(--space-half);
