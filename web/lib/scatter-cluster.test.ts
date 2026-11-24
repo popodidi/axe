@@ -37,8 +37,8 @@ describe("clusterPoints", () => {
 describe("helpers", () => {
   it("sizes by count with a cap", () => {
     expect(clusterRadius(1)).toBe(5);
-    expect(clusterRadius(2)).toBe(8);
-    expect(clusterRadius(10000)).toBe(16);
+    expect(clusterRadius(2)).toBe(9);
+    expect(clusterRadius(10000)).toBe(18);
   });
   it("picks the majority group", () => {
     expect(majority([2, 1, 2])).toBe(2);

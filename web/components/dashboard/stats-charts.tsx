@@ -332,7 +332,7 @@ export function Scatter({
                   x={x}
                   y={y}
                   className={styles.clusterCount}
-                  fontSize={n > 99 ? 8 : 9}
+                  fontSize={n > 99 ? 9 : 10}
                   textAnchor="middle"
                   dominantBaseline="central"
                 >

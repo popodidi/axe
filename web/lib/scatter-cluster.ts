@@ -33,7 +33,7 @@ export function clusterPoints<T>(points: Placed<T>[], reach: number): Cluster<T>
 }
 /** Dot radius: 5 for one task, growing with the square root of the count. */
 export const clusterRadius = (n: number) =>
-  n <= 1 ? 5 : Math.min(16, 6 + 2 * Math.sqrt(n - 1));
+  n <= 1 ? 5 : Math.min(18, 7 + 2 * Math.sqrt(n - 1));
 /** The most common group in a cluster (ties: the lowest index). */
 export function majority(groups: number[]): number {
   const counts = new Map<number, number>();
