@@ -36,9 +36,11 @@ const longDoc = [
   "status: draft",
   "---",
   "# Long report",
-  // An intro and five sections of ten paragraphs, for the contents rail.
+  // An intro and five sections of ten paragraphs, for the contents rail;
+  // section 2 has a subsection.
   ...Array.from({ length: 60 }, (_, i) => [
     ...(i && i % 10 === 0 ? [`## Section ${i / 10}`] : []),
+    ...(i === 25 ? ["### Section 2 detail"] : []),
     `Paragraph ${i + 1} of the long report.`,
   ]).flat(),
   "```",
@@ -548,7 +550,7 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   const meta = page.getByRole("complementary", { name: "Doc metadata" });
   const body = page.locator("article");
   const toc = page.getByRole("navigation", { name: "Contents" });
-  await expect(toc.getByRole("link")).toHaveCount(6);
+  await expect(toc.getByRole("link")).toHaveCount(7);
   // The title outranks the sections and the sections the text; a section
   // sits closer to its text than to the text before it.
   const size = (l: Locator) => l.evaluate((e) => parseFloat(getComputedStyle(e).fontSize));
@@ -565,10 +567,10 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   expect(text.width).toBeLessThan(code.width);
   // The rail shows; the narrow layout's fold does not.
   await expect(page.locator("summary", { hasText: "Contents" })).toBeHidden();
-  // Metadata left, body center, contents right, on one row.
+  // Contents left, body center, metadata right, on one row.
   const [m, b, t] = await Promise.all([meta.boundingBox(), body.boundingBox(), toc.boundingBox()]);
-  expect(m!.x + m!.width).toBeLessThan(b!.x);
-  expect(b!.x + b!.width).toBeLessThan(t!.x);
+  expect(t!.x + t!.width).toBeLessThan(b!.x);
+  expect(b!.x + b!.width).toBeLessThan(m!.x);
   expect(Math.abs(m!.y - b!.y)).toBeLessThan(4);
   // The body is wider than the old single column (840px).
   expect(b!.width).toBeGreaterThan(860);
@@ -580,6 +582,44 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   );
   await expect(toc.getByRole("link", { name: "Section 3" })).toHaveAttribute("aria-current", "location");
   await expect(toc.locator("[aria-current]")).toHaveCount(1);
+  // The current entry's marker sits on its row, at one x for every level;
+  // the entry itself has no edge of its own.
+  const marker = () =>
+    toc.locator("ol").evaluate((ol) => {
+      const a = ol.querySelector<HTMLElement>("a[aria-current]")!;
+      const after = getComputedStyle(ol, "::after");
+      return {
+        x: ol.getBoundingClientRect().left + parseFloat(after.left),
+        top: parseFloat(ol.style.getPropertyValue("--toc-mark-top")),
+        row: a.offsetTop,
+        shown: ol.hasAttribute("data-marked"),
+        edge: parseFloat(getComputedStyle(a).borderLeftWidth),
+      };
+    });
+  const onH2 = await marker();
+  expect(onH2).toMatchObject({ top: onH2.row, shown: true, edge: 0 });
+  await page.getByRole("heading", { name: "Section 2 detail" }).evaluate((e) =>
+    window.scrollTo(0, e.getBoundingClientRect().top + scrollY - 40),
+  );
+  await expect(toc.getByRole("link", { name: "Section 2 detail" })).toHaveAttribute("aria-current", "location");
+  const onH3 = await marker();
+  expect(onH3).toMatchObject({ top: onH3.row, shown: true, edge: 0, x: onH2.x });
+  expect(onH3.row).toBeLessThan(onH2.row);
+  // The h3 indents its text past the h2's.
+  const pad = (name: string) =>
+    toc.getByRole("link", { name, exact: true }).evaluate((e) => parseFloat(getComputedStyle(e).paddingLeft));
+  expect(await pad("Section 2 detail")).toBeGreaterThan(await pad("Section 2"));
+  // One page scrollbar: the rails fit the window here and hide their thin
+  // scrollbar until hovered.
+  for (const rail of [meta, toc.locator("..")]) {
+    const r = await rail.evaluate((e) => ({
+      fits: e.scrollHeight <= e.clientHeight,
+      width: getComputedStyle(e).scrollbarWidth,
+      color: getComputedStyle(e).scrollbarColor,
+    }));
+    expect(r).toMatchObject({ fits: true, width: "thin" });
+    expect(r.color).toMatch(/rgba\(0, 0, 0, 0\)|transparent/);
+  }
   for (const rail of [meta, toc]) {
     await expect(rail).toBeInViewport();
     expect((await rail.boundingBox())!.y).toBeLessThan(120);
@@ -604,7 +644,10 @@ test("a narrow doc page stacks the metadata and folds the contents", async ({ pa
   const meta = page.getByRole("complementary", { name: "Doc metadata" });
   const body = page.locator("article");
   await expect(meta.getByLabel("Frontmatter")).toContainText("Long report");
-  const [m, b] = await Promise.all([meta.boundingBox(), body.boundingBox()]);
+  const fold = page.locator("summary", { hasText: "Contents" });
+  const [f, m, b] = await Promise.all([fold.boundingBox(), meta.boundingBox(), body.boundingBox()]);
+  // Contents first, then the metadata, then the body.
+  expect(f!.y + f!.height).toBeLessThanOrEqual(m!.y);
   expect(m!.y + m!.height).toBeLessThanOrEqual(b!.y);
   const sizes = await page.evaluate(() => ({ sw: document.scrollingElement!.scrollWidth, w: innerWidth }));
   expect(sizes.sw).toBeLessThanOrEqual(sizes.w);
@@ -613,9 +656,9 @@ test("a narrow doc page stacks the metadata and folds the contents", async ({ pa
   await expect(toc).toHaveCount(0);
   await page.locator("summary", { hasText: "Contents" }).click();
   await expect(toc).toBeVisible();
-  await toc.getByRole("link", { name: "Section 2" }).click();
+  await toc.getByRole("link", { name: "Section 2", exact: true }).click();
   await expect(page).toHaveURL(/#section-2$/);
-  await expect(page.getByRole("heading", { name: "Section 2" })).toBeInViewport();
+  await expect(page.getByRole("heading", { name: "Section 2", exact: true })).toBeInViewport();
 });
 
 test("a doc that is not markdown has no contents", async ({ page }) => {
