@@ -1,8 +1,8 @@
 @value bp-doc-rails from "../../app/styles/breakpoints.module.css";
 
-/* The doc page (app/doc). Narrow: one column, metadata above the body and
-   the contents folded. Wide: metadata rail 240px, body up to 1080px,
-   contents rail 224px, the rails sticky while the window scrolls. */
+/* The doc page (app/doc). Narrow: one column, the contents folded first,
+   then the metadata above the body. Wide: contents rail 224px, body up to
+   1080px, metadata rail 240px, the rails sticky while the window scrolls. */
 .page {
   padding: var(--pane-padding);
 }
@@ -116,10 +116,14 @@
   font-weight: var(--weight-medium);
 }
 
-/* Contents: one line per h1-h3, indented by level; the current section in
-   the primary color, semibold, on the selected fill with a bar on its
-   left edge. */
+/* Contents: one line per h1-h3. A hairline track runs down the list's left
+   edge and a marker slides along it to the current entry, so the hint keeps
+   one x position whatever the entry's level; the level indents the text
+   only. The current entry is primary and semibold. */
 .toc {
+  --toc-indent: var(--space-snug);
+
+  position: relative;
   display: grid;
   gap: var(--space-quarter);
   margin: 0;
@@ -128,21 +132,47 @@
   font-size: var(--text-label);
   line-height: var(--lh-label);
 }
-.toc li[data-level="1"] {
-  padding-left: var(--space-snug);
+.toc::before,
+.toc::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
 }
-.toc li[data-level="2"] {
-  padding-left: var(--space-3);
+.toc::before {
+  bottom: 0;
+  border-left: var(--border-subtle);
+}
+.toc::after {
+  width: var(--space-quarter);
+  height: var(--toc-mark-height, 0);
+  border-radius: var(--radius-xs);
+  background: var(--text-primary);
+  opacity: 0;
+  transform: translateY(var(--toc-mark-top, 0));
+  transition:
+    transform var(--transition-feedback),
+    height var(--transition-feedback),
+    opacity var(--transition-hover);
+}
+.toc[data-marked]::after {
+  opacity: 1;
 }
 .toc a {
   display: block;
-  padding: var(--space-quarter) var(--space-1);
-  border-left: var(--space-quarter) solid transparent;
+  padding: var(--space-quarter) var(--space-1) var(--space-quarter) var(--toc-indent);
   border-radius: var(--radius-xs);
   color: var(--text-secondary);
   text-decoration: none;
   overflow-wrap: anywhere;
   transition: color var(--transition-hover);
+}
+.toc a[data-level="1"] {
+  padding-left: calc(var(--toc-indent) + var(--space-snug));
+}
+.toc a[data-level="2"] {
+  padding-left: calc(var(--toc-indent) + var(--space-3));
 }
 .toc a:hover {
   color: var(--text-primary);
@@ -150,9 +180,7 @@
 }
 .toc a.active {
   color: var(--text-primary);
-  background: var(--surface-selected);
   font-weight: var(--weight-semibold);
-  border-left-color: var(--text-primary);
 }
 .railLabel {
   display: block;
@@ -179,22 +207,34 @@
 @media bp-doc-rails {
   .layout {
     grid-template-columns:
-      var(--doc-meta-width)
+      var(--doc-toc-width)
       minmax(0, var(--doc-body-max))
-      var(--doc-toc-width);
+      var(--doc-meta-width);
     justify-content: center;
     align-items: start;
     column-gap: var(--space-4);
     max-width: none;
   }
+
+  /* A rail taller than the window scrolls itself, with a thin scrollbar
+     that shows only while the pointer is over it; the page keeps the one
+     full-height scrollbar. */
   .meta,
   .tocRail {
     position: sticky;
     top: var(--doc-rail-top);
     max-height: calc(100vh - var(--doc-rail-top) * 2);
     overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
   }
-  .meta {
+  .meta:hover,
+  .tocRail:hover {
+    scrollbar-color: var(--border-control-color) transparent;
+  }
+  .tocRail {
+    display: block;
     grid-column: 1;
     grid-row: 1;
   }
@@ -202,8 +242,7 @@
     grid-column: 2;
     grid-row: 1;
   }
-  .tocRail {
-    display: block;
+  .meta {
     grid-column: 3;
     grid-row: 1;
   }

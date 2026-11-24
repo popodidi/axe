@@ -1,9 +1,10 @@
 "use client";
-// A doc's full page (app/doc): its metadata in a sticky left rail, a table
-// of contents for markdown in a sticky right rail, the body in a wide center
-// column. Narrower windows stack the metadata above the body and fold the
-// contents into a "Contents" disclosure. The page scrolls with the window.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+// A doc's full page (app/doc): a table of contents for markdown in a sticky
+// left rail, its metadata in a sticky right rail, the body in a wide center
+// column. Narrower windows fold the contents into a "Contents" disclosure
+// first, then stack the metadata above the body. The page scrolls with the
+// window; a rail scrolls itself only when it is taller than the window.
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "../../app/markdown";
 import { activeHeading, TOC_LEVELS } from "../../lib/doc-toc";
 import { docKind } from "../../lib/doc-render";
@@ -269,39 +270,76 @@ function DocLayout({
   const toc = headings.length > 0 && <TocList headings={headings} active={active} />;
   return (
     <div className={cx(styles.layout, toc && styles.withToc)}>
-      <aside className={styles.meta} aria-label="Doc metadata">
-        {meta}
-      </aside>
+      {toc && (
+        <div className={styles.tocRail}>
+          <span className={styles.railLabel} aria-hidden="true">
+            Contents
+          </span>
+          <TocList headings={headings} active={active} follow />
+        </div>
+      )}
       {toc && (
         <details className={styles.tocFold}>
           <summary>Contents</summary>
           {toc}
         </details>
       )}
+      <aside className={styles.meta} aria-label="Doc metadata">
+        {meta}
+      </aside>
       <article ref={body} className={styles.body}>
         {children}
       </article>
-      {toc && (
-        <div className={styles.tocRail}>
-          <span className={styles.railLabel} aria-hidden="true">
-            Contents
-          </span>
-          {toc}
-        </div>
-      )}
     </div>
   );
 }
 
-function TocList({ headings, active }: { headings: Heading[]; active: string }) {
+// The contents: one fixed track along the list's left edge with a marker
+// that slides to the current entry, so the hint never moves sideways; the
+// level indent applies to the text only. `follow` keeps the current entry in
+// view when the rail scrolls itself.
+function TocList({
+  headings,
+  active,
+  follow = false,
+}: {
+  headings: Heading[];
+  active: string;
+  follow?: boolean;
+}) {
+  const list = useRef<HTMLOListElement>(null);
   const top = Math.min(...headings.map((h) => h.level));
+  useLayoutEffect(() => {
+    const ol = list.current;
+    if (!ol) return;
+    const place = () => {
+      const a = ol.querySelector<HTMLElement>("a[aria-current]");
+      const shown = !!a && a.offsetHeight > 0;
+      ol.toggleAttribute("data-marked", shown);
+      if (!a || !shown) return;
+      ol.style.setProperty("--toc-mark-top", `${a.offsetTop}px`);
+      ol.style.setProperty("--toc-mark-height", `${a.offsetHeight}px`);
+      const rail = follow ? ol.closest<HTMLElement>(`.${styles.tocRail}`) : null;
+      if (rail && rail.scrollHeight > rail.clientHeight) {
+        const [r, l] = [rail.getBoundingClientRect(), a.getBoundingClientRect()];
+        if (l.top < r.top) rail.scrollTop -= r.top - l.top;
+        else if (l.bottom > r.bottom) rail.scrollTop += l.bottom - r.bottom;
+      }
+    };
+    place();
+    // The folded list has no size until it opens; a wrap can move entries.
+    const seen = new ResizeObserver(place);
+    seen.observe(ol);
+    return () => seen.disconnect();
+  }, [active, headings, follow]);
   return (
     <nav aria-label="Contents">
-      <ol className={styles.toc}>
+      <ol ref={list} className={styles.toc}>
         {headings.map((h) => (
-          <li key={h.id} data-level={h.level - top}>
+          <li key={h.id}>
             <a
               href={`#${encodeURIComponent(h.id)}`}
+              data-level={h.level - top}
               className={cx(h.id === active && styles.active)}
               aria-current={h.id === active ? "location" : undefined}
             >
