@@ -46,33 +46,104 @@ pub fn readiness(cfg: &Config, project: &str) -> Result<Ready, String> {
     )
 }
 
+/// Where a missing canonical clone of a repo is cloned from
+/// ([`clone_url`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloneUrl {
+    /// `[repos.<name>] url`, else the server's repo registry.
+    Url(String),
+    /// Neither has one, or the canonical clone exists and none was needed.
+    None,
+    /// No `[repos.<name>] url`, and the registry could not be read: why.
+    Unknown(String),
+}
+
+impl CloneUrl {
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            CloneUrl::Url(u) => Some(u),
+            _ => None,
+        }
+    }
+}
+
+/// The clone URL of repo `name`: `[repos.<name>] url` wins; else, only when
+/// the canonical clone is missing, `registry` (the server's repo registry,
+/// `repo.rs`) is asked. A registry URL is checked like a config one.
+pub fn clone_url(
+    cfg: &Config,
+    name: &str,
+    registry: &dyn Fn(&str) -> Result<Option<String>>,
+) -> CloneUrl {
+    if let Some(u) = cfg.repo_url(name) {
+        return CloneUrl::Url(u.to_string());
+    }
+    if std::fs::symlink_metadata(cfg.repo_path(name)).is_ok() {
+        return CloneUrl::None;
+    }
+    match registry(name) {
+        Ok(Some(u)) => match crate::config::validate_repo_url(&u) {
+            Ok(()) => CloneUrl::Url(u),
+            Err(e) => CloneUrl::Unknown(format!("the server's repo registry URL is refused: {e}")),
+        },
+        Ok(None) => CloneUrl::None,
+        Err(e) => CloneUrl::Unknown(format!("{e:#}")),
+    }
+}
+
 /// [`readiness`] for repo `name` of a run workspace: its canonical clone is
 /// `[repos.<name>] path` (default `<workspace_root>/<name>`). `root` is unused
-/// by [`allocate_at`].
+/// by [`allocate_at`]. Only the local config's url counts here; see
+/// [`repo_readiness_with`].
 pub fn repo_readiness(cfg: &Config, name: &str) -> Result<Ready, String> {
+    repo_readiness_with(cfg, name, &clone_url(cfg, name, &|_| Ok(None)))
+}
+
+/// [`repo_readiness`] with the repo's resolved [`clone_url`], so a missing
+/// clone's gap names why there is nothing to clone it from.
+pub fn repo_readiness_with(cfg: &Config, name: &str, url: &CloneUrl) -> Result<Ready, String> {
     let canonical = cfg.repo_path(name);
     let gap = |detail: String| format!("repo {name} has no worktree base: {detail}");
-    if !canonical.exists() && cfg.repo_url(name).is_none() {
-        return Err(gap(format!(
-            "{} does not exist and [repos.{name}] has no url to clone it from",
-            canonical.display()
-        )));
+    if !canonical.exists() {
+        match url {
+            CloneUrl::Url(_) => {}
+            CloneUrl::None => {
+                return Err(gap(format!(
+                    "{} does not exist and no clone URL is known: register one with \
+                     `axe repo add {name} <url>` (or set [repos.{name}] url in this \
+                     machine's config)",
+                    canonical.display()
+                )))
+            }
+            CloneUrl::Unknown(why) => {
+                return Err(gap(format!(
+                    "{} does not exist, [repos.{name}] has no url, and the server's repo \
+                     registry could not be read: {why}",
+                    canonical.display()
+                )))
+            }
+        }
     }
     check(cfg, canonical.clone(), canonical, gap)
 }
 
-/// Clones repo `name` from `[repos.<name>] url` into its canonical path
+/// [`ensure_clone_from`] with `[repos.<name>] url` only.
+pub fn ensure_clone(cfg: &Config, name: &str) -> Result<bool> {
+    ensure_clone_from(cfg, name, cfg.repo_url(name))
+}
+
+/// Clones repo `name` from `url` (its [`clone_url`]) into its canonical path
 /// (`[repos.<name>] path`) when nothing is there yet, with the host's own Git
 /// credentials; `true` when this call cloned it. An existing path, a clone or
 /// not, is never touched, and a repo without a `url` is left to
-/// [`repo_readiness`] to report. Callers naming the same missing repo at once
+/// [`repo_readiness_with`] to report. Callers naming the same missing repo at once
 /// clone it once: each takes an exclusive lock (under `log_dir`) and the ones
 /// that waited find the clone in place. The clone goes to a temporary sibling
 /// and is renamed into place, so an interrupted clone leaves no partial
 /// canonical clone.
-pub fn ensure_clone(cfg: &Config, name: &str) -> Result<bool> {
+pub fn ensure_clone_from(cfg: &Config, name: &str, url: Option<&str>) -> Result<bool> {
     use fs2::FileExt;
-    let Some(url) = cfg.repo_url(name) else {
+    let Some(url) = url else {
         return Ok(false);
     };
     let canonical = cfg.repo_path(name);

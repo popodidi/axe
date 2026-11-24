@@ -286,3 +286,72 @@ fn foreign_directory_is_never_adopted_or_cleaned() {
     );
     assert!(!f.base().join(format!("record/{id}-1")).exists());
 }
+
+#[test]
+fn clone_url_resolution_order_and_gaps() {
+    use axe::worktree::{clone_url, repo_readiness_with, CloneUrl};
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(base.join("ws/here")).unwrap();
+    let cfg = axe::config::Config::parse(&format!(
+        r#"
+workspace_root = "{ws}"
+log_dir = "{logs}"
+[agents.a]
+cmd = ["true"]
+[repos.local]
+url = "https://example.com/local.git"
+"#,
+        ws = base.join("ws").display(),
+        logs = base.join("logs").display(),
+    ))
+    .unwrap();
+    let asked = std::cell::Cell::new(0);
+    let server = |name: &str| -> anyhow::Result<Option<String>> {
+        asked.set(asked.get() + 1);
+        Ok(match name {
+            "local" | "remote" => Some(format!("https://server.example/{name}.git")),
+            "bad" => Some("https://u:p@server.example/bad.git".into()),
+            _ => None,
+        })
+    };
+    // Local url wins, without asking the server.
+    assert_eq!(
+        clone_url(&cfg, "local", &server),
+        CloneUrl::Url("https://example.com/local.git".into())
+    );
+    assert_eq!(asked.get(), 0);
+    // An existing canonical clone needs no URL and asks nothing.
+    assert_eq!(clone_url(&cfg, "here", &server), CloneUrl::None);
+    assert_eq!(asked.get(), 0);
+    // Else the server's.
+    assert_eq!(
+        clone_url(&cfg, "remote", &server),
+        CloneUrl::Url("https://server.example/remote.git".into())
+    );
+    assert_eq!(asked.get(), 1);
+    // A registry URL is checked like a config one.
+    assert!(matches!(
+        clone_url(&cfg, "bad", &server),
+        CloneUrl::Unknown(_)
+    ));
+    // Neither: the gap names `axe repo add`.
+    let none = clone_url(&cfg, "ghost", &server);
+    assert_eq!(none, CloneUrl::None);
+    let gap = repo_readiness_with(&cfg, "ghost", &none).unwrap_err();
+    assert!(
+        gap.starts_with("repo ghost has no worktree base: ")
+            && gap.contains("register one with `axe repo add ghost <url>`"),
+        "{gap}"
+    );
+    // An unreachable server: the gap names that cause.
+    let down = |_: &str| -> anyhow::Result<Option<String>> {
+        anyhow::bail!("cannot reach axe server at http://127.0.0.1:9: connection refused")
+    };
+    let unknown = clone_url(&cfg, "ghost", &down);
+    let gap = repo_readiness_with(&cfg, "ghost", &unknown).unwrap_err();
+    assert!(
+        gap.contains("the server's repo registry could not be read: cannot reach axe server"),
+        "{gap}"
+    );
+}

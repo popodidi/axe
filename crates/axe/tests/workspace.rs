@@ -435,3 +435,127 @@ fn a_folder_that_is_not_a_workspace_is_never_replaced() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("is not an axe workspace"));
     assert!(dir.join("docs/notes.md").is_file());
 }
+
+#[test]
+fn a_repo_registered_only_on_the_server_is_cloned_and_built() {
+    let l = Laptop::new();
+    // `three` exists only as an origin; the laptop config names no repos.
+    let origin = l.base.join("three.git");
+    let seed = l.base.join("seed-three");
+    git(
+        &l.base,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&seed, &["init", "-q", "-b", "main"]);
+    std::fs::write(seed.join("README.md"), "three\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-qm", "base"]);
+    git(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+    let id = l.task("three");
+
+    // Unregistered: the gap says how to register it.
+    let out = l.axe(&["workspace", &id]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("repo three has no worktree base")
+            && err.contains("`axe repo add three <url>`"),
+        "{err}"
+    );
+
+    l.ok(&["repo", "add", "three", origin.to_str().unwrap()]);
+    let ls = l.ok(&["repo", "ls"]);
+    assert_eq!(ls, format!("three\t{}\n", origin.display()));
+    let dir = l.base.join("dir-three");
+    l.ok(&["workspace", &id, "--dir", dir.to_str().unwrap()]);
+    let canonical = l.base.join("ws/three");
+    assert_eq!(
+        git(&canonical, &["remote", "get-url", "origin"]),
+        origin.display().to_string()
+    );
+    assert_eq!(
+        git(
+            &dir.join("repos/three"),
+            &["rev-parse", "--abbrev-ref", "HEAD"]
+        ),
+        format!("axe/task-{id}--work")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("repos/three/README.md")).unwrap(),
+        "three\n"
+    );
+}
+
+#[test]
+fn repo_registry_cli_and_api() {
+    let l = Laptop::new();
+    l.ok(&[
+        "repo",
+        "add",
+        "a",
+        "https://example.com/a.git",
+        "--default-branch",
+        "trunk",
+    ]);
+    let r: Value = serde_json::from_str(&l.ok(&["repo", "show", "a"])).unwrap();
+    assert_eq!(
+        (r["url"].as_str(), r["default_branch"].as_str()),
+        (Some("https://example.com/a.git"), Some("trunk"))
+    );
+    let all: Value = serde_json::from_str(&l.ok(&["repo", "ls", "--json"])).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    // The CLI refuses credentials before sending; so does the server.
+    let out = l.axe(&["repo", "add", "b", "https://u:p@example.com/b.git"]);
+    assert!(!out.status.success());
+    let url = |p: &str| format!("{}{p}", l.srv.url);
+    let put = |path: &str, auth: Option<&str>, body: Value| {
+        let mut req = ureq::put(&url(path));
+        if let Some(t) = auth {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        match req.send_json(body) {
+            Ok(r) => r.status(),
+            Err(ureq::Error::Status(code, _)) => code,
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let auth = Some(common::TOKEN);
+    for bad in ["https://u:p@example.com/b.git", "-uupload-pack=x", ""] {
+        assert_eq!(
+            put("/api/repos/b", auth, serde_json::json!({"url": bad})),
+            400,
+            "{bad}"
+        );
+    }
+    // Writes need the token.
+    assert_eq!(
+        put(
+            "/api/repos/b",
+            None,
+            serde_json::json!({"url": "https://example.com/b.git"})
+        ),
+        401
+    );
+    assert!(l.axe(&["repo", "show", "b"]).status.code() != Some(0));
+    l.ok(&["repo", "rm", "a"]);
+    assert_eq!(
+        l.ok(&["repo", "ls"]),
+        "no repos registered: add one with `axe repo add <name> <url>`\n"
+    );
+    assert!(!l.axe(&["repo", "rm", "a"]).status.success());
+    match ureq::get(&url("/api/repos/a"))
+        .set("Authorization", &format!("Bearer {}", common::TOKEN))
+        .call()
+    {
+        Err(ureq::Error::Status(404, _)) => {}
+        other => panic!("{other:?}"),
+    }
+}

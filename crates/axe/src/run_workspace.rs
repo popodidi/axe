@@ -26,9 +26,11 @@
 //! ([`worktree::refresh`]: clean, no local commits) and left unchanged, with
 //! the reason, when it is not.
 //!
-//! A repo whose canonical clone is missing but has `[repos.<name>] url` is
-//! cloned first ([`worktree::ensure_clone`]), for a task or a bot alike; the
-//! run's `run_start` event lists it in `repos_cloned`.
+//! A repo whose canonical clone is missing is cloned first
+//! ([`worktree::ensure_clone_from`]) from `[repos.<name>] url`, else from the
+//! URL the server's repo registry holds for it (`axe repo add`, `repo.rs`),
+//! for a task or a bot alike; the run's `run_start` event lists it in
+//! `repos_cloned`.
 //!
 //! `axe workspace` builds the same folder anywhere, through the same code in
 //! [`Mode::Local`] (`workspace.rs`): a missing task branch starts from its
@@ -106,7 +108,7 @@ pub fn build_task(
     mode: Mode,
 ) -> Result<Built> {
     let branch = format!("{}task-{}--work", branch_prefix(cfg), task.id);
-    let (built, cloned) = checkout(cfg, dir, repos, &branch, mode)?;
+    let (built, cloned) = checkout(cfg, dir, repos, &branch, mode, store)?;
     let skills = link_skills(dir, &built)?;
     let attached = match (store, mode) {
         (Some(src), Mode::Run) => {
@@ -183,7 +185,7 @@ pub fn build_bot_in(
     mode: Mode,
 ) -> Result<Built> {
     let branch = format!("{}bot-{home}--work", branch_prefix(cfg));
-    let (built, cloned) = checkout(cfg, dir, repos, &branch, mode)?;
+    let (built, cloned) = checkout(cfg, dir, repos, &branch, mode, Some(store))?;
     let mut refreshed = Vec::new();
     for (repo, path) in &built {
         let ready = worktree::repo_readiness(cfg, repo).map_err(anyhow::Error::msg)?;
@@ -358,14 +360,16 @@ fn branch_prefix(cfg: &Config) -> String {
 type Repos = Vec<(String, PathBuf)>;
 
 /// Creates `dir` and a worktree of each repo under `dir/repos/<name>` on
-/// `branch`, first cloning a missing canonical clone that has a `url`; also
-/// returns the repos it cloned.
+/// `branch`, first cloning a missing canonical clone from its
+/// [`worktree::clone_url`] (`[repos.<name>] url`, else the server's repo
+/// registry through `store`); also returns the repos it cloned.
 fn checkout(
     cfg: &Config,
     dir: &Path,
     repos: &[String],
     branch: &str,
     mode: Mode,
+    store: Option<&dyn context::Source>,
 ) -> Result<(Repos, Vec<String>)> {
     match std::fs::symlink_metadata(dir) {
         Ok(m) if !m.is_dir() => bail!("{} exists and is not a directory", dir.display()),
@@ -376,7 +380,8 @@ fn checkout(
     let mut cloned = Vec::new();
     for name in repos {
         crate::db::validate_name("repo", name)?;
-        if worktree::ensure_clone(cfg, name)? {
+        let url = worktree::clone_url(cfg, name, &|n| store.map_or(Ok(None), |s| s.repo_url(n)));
+        if worktree::ensure_clone_from(cfg, name, url.url())? {
             eprintln!(
                 "{}: cloned repo {name} into {}",
                 match mode {
@@ -387,7 +392,7 @@ fn checkout(
             );
             cloned.push(name.clone());
         }
-        let ready = worktree::repo_readiness(cfg, name).map_err(anyhow::Error::msg)?;
+        let ready = worktree::repo_readiness_with(cfg, name, &url).map_err(anyhow::Error::msg)?;
         let path = worktree::allocate_from(
             &ready,
             &dir.join("repos").join(name),
