@@ -585,8 +585,49 @@ fn missing_repo_escalates_the_claimed_task() {
     let log = srv.ok(&["log", &ids[0], "--full"]);
     assert!(log.contains("repo ghost has no worktree base"), "{log}");
     assert!(
-        log.contains("does not exist and [repos.ghost] has no url to clone it from"),
+        log.contains("does not exist and no clone URL is known: register one with `axe repo add ghost <url>`"),
         "{log}"
+    );
+}
+
+#[test]
+fn missing_clone_registered_on_the_server_is_cloned_by_the_dispatcher() {
+    let f = Fixture::new(&["proj"]);
+    let origin = bare_origin(&f.base(), "six");
+    let (srv, ids) = f.run_with(
+        |srv| {
+            srv.ok(&["repo", "add", "six", origin.to_str().unwrap()]);
+        },
+        &[&["--project", "proj", "--repo", "six"]],
+    );
+    assert_eq!(show(&srv, &ids[0])["state"], "done");
+    let canonical = f.base().join("ws/six");
+    assert_eq!(
+        git(&canonical, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+        "refs/remotes/origin/main"
+    );
+    assert!(f.run_dir(&ids[0]).join("repos/six/README.md").is_file());
+    let log = srv.ok(&["log", &ids[0], "--full"]);
+    assert!(log.contains(r#""repos_cloned":["six"]"#), "{log}");
+}
+
+#[test]
+fn local_url_wins_over_the_server_registry() {
+    let f = Fixture::new(&["proj"]);
+    let origin = bare_origin(&f.base(), "seven");
+    f.append_config(&format!("[repos.seven]\nurl = \"{}\"\n", origin.display()));
+    // A registry URL that cannot be cloned: using it would fail the run.
+    let nowhere = f.base().join("nowhere.git");
+    let (srv, ids) = f.run_with(
+        |srv| {
+            srv.ok(&["repo", "add", "seven", nowhere.to_str().unwrap()]);
+        },
+        &[&["--project", "proj", "--repo", "seven"]],
+    );
+    assert_eq!(show(&srv, &ids[0])["state"], "done");
+    assert_eq!(
+        git(&f.base().join("ws/seven"), &["remote", "get-url", "origin"]),
+        origin.display().to_string()
     );
 }
 

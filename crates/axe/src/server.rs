@@ -1696,6 +1696,16 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             let rule = crate::rule::remove(&mut st.conn(), &b.actor(), task_id(id)?)?;
             ok(200, &rule)
         }
+        ("GET", ["api", "repos"]) => ok(200, &crate::repo::list(&st.conn())?),
+        ("GET", ["api", "repos", name]) => match crate::repo::get(&st.conn(), name)? {
+            Some(r) => ok(200, &r),
+            None => Err(HttpError(404, format!("repo {name} not found")).into()),
+        },
+        ("PUT", ["api", "repos", name]) => {
+            let b: crate::repo::NewRepo = req.json()?;
+            ok(200, &crate::repo::put(&st.conn(), name, &b)?)
+        }
+        ("DELETE", ["api", "repos", name]) => ok(200, &crate::repo::remove(&st.conn(), name)?),
         ("GET", ["healthz"]) => ok(200, &json!({ "ok": true })),
         ("POST", ["api", "login-links"]) => {
             #[derive(Deserialize)]

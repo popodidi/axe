@@ -698,31 +698,39 @@ pub struct Repo {
     pub path: Option<String>,
     /// Where to clone it from when the canonical clone is missing on first
     /// use (`worktree::ensure_clone`), with the host's own Git credentials;
-    /// omitted means a missing clone is an error. Never embeds a password.
+    /// omitted means the server's repo registry (`axe repo add`, `repo.rs`)
+    /// is asked. Never embeds a password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
 impl Repo {
     fn validate(&self) -> Result<()> {
-        let Some(url) = self.url.as_deref() else {
-            return Ok(());
-        };
-        if url.trim().is_empty() || url.starts_with('-') {
-            bail!("url must be a Git remote URL");
+        match self.url.as_deref() {
+            Some(url) => validate_repo_url(url),
+            None => Ok(()),
         }
-        // `scheme://user:secret@host/...`: credentials stay in the host's
-        // Git credential store, never in config.
-        if let Some((_, rest)) = url.split_once("://") {
-            let authority = rest.split('/').next().unwrap_or_default();
-            if let Some((userinfo, _)) = authority.rsplit_once('@') {
-                if userinfo.contains(':') {
-                    bail!("url must not embed credentials; use the host's Git credentials");
-                }
+    }
+}
+
+/// A repo clone URL, from `[repos.<name>] url` or the server's repo registry
+/// (`repo.rs`): a Git remote that cannot be read as an option and embeds no
+/// credentials.
+pub fn validate_repo_url(url: &str) -> Result<()> {
+    if url.trim().is_empty() || url.starts_with('-') {
+        bail!("url must be a Git remote URL");
+    }
+    // `scheme://user:secret@host/...`: credentials stay in the host's
+    // Git credential store, never in config or on the server.
+    if let Some((_, rest)) = url.split_once("://") {
+        let authority = rest.split('/').next().unwrap_or_default();
+        if let Some((userinfo, _)) = authority.rsplit_once('@') {
+            if userinfo.contains(':') {
+                bail!("url must not embed credentials; use the host's Git credentials");
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 fn default_branch_prefix() -> String {

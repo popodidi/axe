@@ -55,6 +55,14 @@ enum Cmd {
         #[command(subcommand)]
         command: RuleCmd,
     },
+    /// The repo registry: the Git URL each repo name is cloned from
+    ///
+    /// `axe workspace` and the dispatcher clone a repo missing on their
+    /// machine from it; a local `[repos.<name>] url` wins
+    Repo {
+        #[command(subcommand)]
+        command: RepoCmd,
+    },
     /// Bots: persistent agents woken by messages, wakes and schedules
     ///
     /// NAME defaults to $AXE_BOT
@@ -1707,6 +1715,75 @@ fn format_rule(r: &crate::rule::Rule) -> String {
         r.matcher,
         uses.join(", ")
     )
+}
+
+#[derive(Subcommand, Clone)]
+enum RepoCmd {
+    /// Register a repo's clone URL, or replace it. The URL must not embed
+    /// credentials: clones use each host's own Git credentials
+    Add {
+        name: String,
+        url: String,
+        /// The repo's default branch, for reference (worktrees start from the
+        /// clone's origin/HEAD)
+        #[arg(long)]
+        default_branch: Option<String>,
+    },
+    /// Every registered repo
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One registered repo (JSON)
+    Show { name: String },
+    /// Remove a repo from the registry; existing clones are untouched
+    Rm { name: String },
+}
+
+fn run_repo(c: &Client, command: RepoCmd) -> Result<()> {
+    use crate::repo::{NewRepo, Repo};
+    match command {
+        RepoCmd::Add {
+            name,
+            url,
+            default_branch,
+        } => {
+            db::validate_name("repo", &name)?;
+            let new = NewRepo {
+                url,
+                default_branch,
+            };
+            new.validate()?;
+            let r: Repo = c.send("PUT", &format!("/api/repos/{name}"), json!(new))?;
+            println!("repo {} -> {}", r.name, r.url);
+        }
+        RepoCmd::Ls { json } => {
+            let repos: Vec<Repo> = c.get("/api/repos", &[])?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&repos)?);
+            } else if repos.is_empty() {
+                println!("no repos registered: add one with `axe repo add <name> <url>`");
+            } else {
+                for r in &repos {
+                    match &r.default_branch {
+                        Some(b) => println!("{}\t{}\t{b}", r.name, r.url),
+                        None => println!("{}\t{}", r.name, r.url),
+                    }
+                }
+            }
+        }
+        RepoCmd::Show { name } => {
+            db::validate_name("repo", &name)?;
+            let r: Repo = c.get(&format!("/api/repos/{name}"), &[])?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+        }
+        RepoCmd::Rm { name } => {
+            db::validate_name("repo", &name)?;
+            let r: Repo = c.send("DELETE", &format!("/api/repos/{name}"), json!({}))?;
+            println!("repo {} removed (was {})", r.name, r.url);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -3741,7 +3818,7 @@ const HELP_SECTIONS: &[(&str, &[&str])] = &[
         "Primitives",
         &["task", "bot", "goal", "routine", "rule", "ask", "form"],
     ),
-    ("Store", &["blob", "doc", "context", "workspace"]),
+    ("Store", &["blob", "doc", "context", "workspace", "repo"]),
     (
         "Ops and admin",
         &[
@@ -3853,6 +3930,7 @@ pub fn run() -> Result<()> {
         Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Ask { command } => run_ask(&client(), command)?,
         Cmd::Rule { command } => run_rule(&client(), command.clone())?,
+        Cmd::Repo { command } => run_repo(&client(), command.clone())?,
         Cmd::Form { command } => run_form(&client(), command.clone())?,
         Cmd::Web { command } => run_web(&client(), command.clone())?,
         Cmd::Routine { command } => {

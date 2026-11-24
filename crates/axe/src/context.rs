@@ -54,6 +54,12 @@ pub trait Source {
     }
     /// [`Source::get`] with the version it read (`axe workspace` records it).
     fn get_versioned(&self, path: &str) -> Result<(Fetched, String)>;
+    /// The clone URL the server's repo registry holds for repo `name`
+    /// (`repo.rs`); `None` when it has none. A source without a registry
+    /// has none.
+    fn repo_url(&self, _name: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// A doc's content, or a folder's files.
@@ -69,6 +75,19 @@ impl Source for Client {
     fn get_versioned(&self, path: &str) -> Result<(Fetched, String)> {
         let v: Value = self.get_private("/api/docs/file", &[("path", path)])?;
         versioned(v)
+    }
+    fn repo_url(&self, name: &str) -> Result<Option<String>> {
+        crate::db::validate_name("repo", name)?;
+        match self.get_private::<crate::repo::Repo>(&format!("/api/repos/{name}"), &[]) {
+            Ok(r) => Ok(Some(r.url)),
+            Err(e)
+                if e.downcast_ref::<crate::client::ClientError>()
+                    .is_some_and(|c| c.code == Some(404) && !c.ingress_unavailable) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
