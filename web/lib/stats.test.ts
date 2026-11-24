@@ -285,7 +285,7 @@ describe("completed task distributions", () => {
       "start=2026-11-01&end=2027-01-01",
     ])
       expect(dateRange(new URLSearchParams(q), at).error).toBeTruthy();
-    for (const days of [7, 30, 90]) {
+    for (const days of [7, 14, 30, 90]) {
       const r = dateRange(new URLSearchParams(`days=${days}`), at);
       expect(r.end - r.start).toBe(days * 86400000);
       expect(new Date(r.end).toISOString()).toBe("2026-11-03T00:00:00.000Z");

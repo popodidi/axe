@@ -1,4 +1,4 @@
-@value bp-phone, bp-list-narrow from "../../app/styles/breakpoints.module.css";
+@value bp-phone, bp-list-narrow, bp-list-medium from "../../app/styles/breakpoints.module.css";
 
 /* Bots: a list like Routines, and a full-width detail page with tabs. */
 .stack {
@@ -219,6 +219,46 @@
     minmax(min(100%, calc(var(--space-8) * 3)), 1fr)
   );
   gap: var(--space-2);
+}
+
+/* The bot list: fixed columns, so live run text never resizes them; Live
+   run takes the rest. Below its minimum the table scrolls inside itself. */
+.botTable {
+  table-layout: fixed;
+  min-width: calc(var(--space-8) * 3);
+}
+
+.colBot {
+  width: 22%;
+}
+
+.colStatus {
+  width: calc(var(--space-8) - var(--space-3));
+}
+
+.colWake {
+  width: calc(var(--space-8) + var(--space-5));
+}
+
+.colMessage {
+  width: calc(var(--space-8) + var(--space-6));
+}
+
+.colFailures {
+  width: var(--space-7);
+}
+
+.line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@container bp-list-medium {
+  .lowPriority {
+    display: none;
+  }
 }
 
 @container bp-list-narrow {

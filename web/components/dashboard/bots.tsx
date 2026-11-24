@@ -6,6 +6,7 @@ import {
   Button,
   Command,
   Commands,
+  cx,
   DiffBlock,
   EmptyState,
   Filter,
@@ -23,7 +24,7 @@ import {
 import { RunList } from "./run-card";
 import { BarChart, TrendChart } from "./stats-charts";
 import { command, formatDuration } from "../../lib/model";
-import { dateRange } from "../../lib/stats";
+import { dateRange, quickDays, quickRangeOptions } from "../../lib/stats";
 import { botStats } from "../../lib/bot-stats";
 import {
   BOT_READ_LIMIT,
@@ -47,6 +48,16 @@ import styles from "./bots.module.css";
 // Generic bot monitoring. Read-only
 // and metadata-only: wakes arrive redacted, activity carries no message text.
 const when = (s: string | null) => (s ? new Date(s).toLocaleString() : "—");
+// The list's one-line form ("Nov 24, 2:00 PM"); the full time is the tooltip.
+const shortWhen = (s: string | null) =>
+  s
+    ? new Date(s).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : "—";
 const date = (n: number) => new Date(n).toISOString().slice(0, 10);
 const compact = (ms: number) =>
   ms < 3600000
@@ -169,15 +180,22 @@ export function BotList({
           {botHold(admission) && (
             <Alert>New bot runs held at the resource floor: {botHold(admission)}</Alert>
           )}
-          <Table>
+          {/* Fixed column widths: live run updates never move the columns.
+              Cells keep one line (full text on hover); narrow lists drop
+              Last message, then Next wake, and scroll inside the table. */}
+          <Table className={styles.botTable}>
             <thead>
               <tr>
-                <Th>Bot</Th>
-                <Th>Status</Th>
+                <Th className={styles.colBot}>Bot</Th>
+                <Th className={styles.colStatus}>Status</Th>
                 <Th>Live run</Th>
-                <Th className={styles.optional}>Next wake</Th>
-                <Th className={styles.optional}>Last message</Th>
-                <Th numeric>Failures</Th>
+                <Th className={cx(styles.colWake, styles.optional)}>Next wake</Th>
+                <Th className={cx(styles.colMessage, styles.lowPriority)}>
+                  Last message
+                </Th>
+                <Th numeric className={styles.colFailures}>
+                  Failures
+                </Th>
               </tr>
             </thead>
             <tbody>
@@ -193,10 +211,17 @@ export function BotList({
                   >
                     <Td>
                       {/* Keyboard target; clicks bubble to the row. */}
-                      <button type="button" className={styles.rowButton}>
+                      <button
+                        type="button"
+                        className={styles.rowButton}
+                        title={b.name}
+                      >
                         {b.name}
                       </button>
-                      <div className={styles.sub}>
+                      <div
+                        className={cx(styles.sub, styles.line)}
+                        title={`${b.project} · ${b.agent}`}
+                      >
                         {b.project} · {b.agent}
                       </div>
                     </Td>
@@ -206,7 +231,7 @@ export function BotList({
                     <Td>
                       {b.live_run ? (
                         <>
-                          <span className={styles.mono}>
+                          <span className={cx(styles.mono, styles.line)}>
                             <LiveDot live /> Run #{b.live_run}
                           </span>
                           <span
@@ -221,12 +246,26 @@ export function BotList({
                       )}
                     </Td>
                     <Td className={styles.optional}>
-                      {when(b.next_wake)}
-                      <div className={styles.sub}>{b.queued} queued</div>
+                      <div className={styles.line} title={when(b.next_wake)}>
+                        {shortWhen(b.next_wake)}
+                      </div>
+                      <div className={cx(styles.sub, styles.line)}>
+                        {b.queued} queued
+                      </div>
                     </Td>
-                    <Td className={styles.optional}>
-                      <div className={styles.sub}>in {when(msgs?.in ?? null)}</div>
-                      <div className={styles.sub}>out {when(msgs?.out ?? null)}</div>
+                    <Td className={styles.lowPriority}>
+                      <div
+                        className={cx(styles.sub, styles.line)}
+                        title={`in ${when(msgs?.in ?? null)}`}
+                      >
+                        in {shortWhen(msgs?.in ?? null)}
+                      </div>
+                      <div
+                        className={cx(styles.sub, styles.line)}
+                        title={`out ${when(msgs?.out ?? null)}`}
+                      >
+                        out {shortWhen(msgs?.out ?? null)}
+                      </div>
                     </Td>
                     <Td numeric zero={!b.failures}>
                       {b.failures}
@@ -574,9 +613,7 @@ function BotStats({
   now: number;
   onChange: (patch: Record<string, string | null>) => void;
 }) {
-  const days = ["7", "30", "90"].includes(params.get("days") || "")
-    ? params.get("days")!
-    : "7";
+  const days = quickDays(params);
   // Recompute on data or range, not on the one-second clock.
   const today = Math.floor(now / 86400000);
   const s = useMemo(() => {
@@ -597,11 +634,7 @@ function BotStats({
           aria-label="Period"
           value={days}
           onChange={(v) => onChange({ days: v })}
-          options={[
-            { value: "7", label: "Last 7 days" },
-            { value: "30", label: "Last 30 days" },
-            { value: "90", label: "Last 90 days" },
-          ]}
+          options={quickRangeOptions}
         />
         <p className={styles.note}>
           UTC days through today · each read is the latest {BOT_READ_LIMIT}{" "}

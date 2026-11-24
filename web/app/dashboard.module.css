@@ -120,11 +120,13 @@
   display: flex;
 }
 
+/* Footer: a status row (dot + connection, refresh and theme icons) over one
+   muted server line, inset like the nav rows. */
 .navFoot {
   margin-top: auto;
   display: grid;
-  gap: var(--space-half);
-  padding: 0 var(--space-1);
+  gap: var(--space-quarter);
+  padding: 0 0 0 var(--space-1);
   font-size: var(--text-caption);
   line-height: var(--lh-caption);
   color: var(--text-tertiary);
@@ -139,7 +141,50 @@
 
 /* Healthy connectivity is neutral; reconnecting warns with text. */
 .connection {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-half);
+  min-width: 0;
   color: var(--warn);
+  white-space: nowrap;
+}
+
+.connection::before {
+  content: "";
+  flex-shrink: 0;
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.footActions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: var(--space-quarter);
+  color: var(--text-secondary);
+}
+
+.footIcon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.footIconFill {
+  fill: currentcolor;
+  stroke: none;
+}
+
+.serverLine {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .connection[data-live="true"] {
@@ -403,15 +448,6 @@
   color: var(--text-tertiary);
 }
 
-.theme {
-  justify-self: start;
-}
-
-.theme[aria-pressed="true"] {
-  background: var(--surface-selected);
-  color: var(--text-primary);
-}
-
 /* Copy feedback: success is the button's own "Copied" state and a polite
    announcement; a failure is also shown, on an opaque floating surface. */
 .toast {
@@ -467,14 +503,17 @@
     justify-items: center;
   }
 
-  :root[data-nav="collapsed"] .navList button,
-  :root[data-nav="collapsed"] .theme {
+  :root[data-nav="collapsed"] .navList button {
     justify-content: center;
     width: 100%;
   }
 
   :root[data-nav="collapsed"] .navGlyph {
     display: inline;
+  }
+
+  :root[data-nav="collapsed"] .footActions {
+    flex-direction: column;
   }
 
   :root[data-nav="collapsed"] .hint,
@@ -491,14 +530,6 @@
     flex-direction: column;
   }
 
-  :root[data-nav="collapsed"] .connection::before {
-    content: "";
-    display: block;
-    width: var(--dot-size);
-    height: var(--dot-size);
-    border-radius: 50%;
-    background: currentcolor;
-  }
 }
 
 @media bp-phone {

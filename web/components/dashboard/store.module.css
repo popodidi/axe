@@ -1,3 +1,5 @@
+@value bp-list-narrow from "../../app/styles/breakpoints.module.css";
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -177,6 +179,13 @@
 }
 .fit {
   width: 1%;
+}
+/* A narrow list (an item open beside it) drops Type, also in the item's
+   details, so Name keeps room. */
+@container bp-list-narrow {
+  .optional {
+    display: none;
+  }
 }
 .blobs td.type {
   max-width: calc(var(--space-8) + var(--space-2));

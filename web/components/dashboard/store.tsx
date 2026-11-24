@@ -22,6 +22,7 @@ import {
 import {
   Alert,
   Button,
+  cx,
   EmptyState,
   Panel,
   PanelHead,
@@ -219,7 +220,7 @@ export function Store({
           <thead>
             <tr>
               <Th>Name</Th>
-              <Th>Type</Th>
+              <Th className={styles.optional}>Type</Th>
               <Th numeric>Size</Th>
               <Th>Stored</Th>
               <Th>Tasks</Th>
@@ -244,7 +245,10 @@ export function Store({
                       <span className={styles.meta}> +{b.names!.length - 1}</span>
                     )}
                   </Td>
-                  <Td className={styles.type} title={b.content_type || undefined}>
+                  <Td
+                    className={cx(styles.type, styles.optional)}
+                    title={b.content_type || undefined}
+                  >
                     {type}
                   </Td>
                   <Td numeric>{formatBytes(b.size)}</Td>

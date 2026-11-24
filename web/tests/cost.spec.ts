@@ -169,6 +169,42 @@ test("changing the period makes one more request", async ({ page }) => {
   expect(new URL(page.url()).searchParams.get("days")).toBe("30");
 });
 
+test("offers 14 days and custom UTC dates kept in the URL", async ({ page }) => {
+  const requests = await mockCost(page);
+  await page.goto("/?server=http://axe.test&view=cost");
+  await expect(page.getByText("4 / 5")).toBeVisible();
+  await choose(page.getByLabel("Date range"), "14");
+  await expect.poll(() => requests.length).toBe(2);
+  expect(new URL(page.url()).searchParams.get("days")).toBe("14");
+  const span = (u: string) => {
+    const q = new URL(u).searchParams;
+    return (Date.parse(q.get("until")!) - Date.parse(q.get("since")!)) / 86400000;
+  };
+  expect(span(requests[1])).toBe(14);
+  // Custom dates start from the shown range, then follow the date fields.
+  await choose(page.getByLabel("Date range"), "custom");
+  const from = page.getByLabel("From date (UTC)");
+  await expect(from).toBeVisible();
+  await expect(page.getByLabel("To date (UTC, inclusive)")).toBeVisible();
+  await from.fill("2026-01-01");
+  await page.getByLabel("To date (UTC, inclusive)").fill("2026-01-10");
+  await expect
+    .poll(() => requests.at(-1))
+    .toContain("since=2026-01-01T00%3A00%3A00Z&until=2026-01-11T00%3A00%3A00Z");
+  const url = new URL(page.url()).searchParams;
+  expect([url.get("days"), url.get("start"), url.get("end")]).toEqual([
+    "custom",
+    "2026-01-01",
+    "2026-01-10",
+  ]);
+  // A shared link restores the range; an inverted one explains, no request.
+  const sent = requests.length;
+  await page.goto("/?server=http://axe.test&view=cost&days=custom&start=2026-01-10&end=2026-01-01");
+  await expect(page.getByText(/start on or before end/)).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(requests.length).toBe(sent);
+});
+
 test("each filter and breakdown is one request kept in the URL", async ({ page }) => {
   const requests = await mockCost(page);
   await page.goto("/?server=http://axe.test&view=cost");

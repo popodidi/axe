@@ -334,7 +334,12 @@ test("store rows stay on one line and docs browse as folders", async ({ page }) 
   const row = blobsTable.locator("tbody tr").first();
   const heights = await row
     .locator("td")
-    .evaluateAll((cells) => cells.map((c) => Math.round(c.getBoundingClientRect().height)));
+    .evaluateAll((cells) =>
+      cells
+        // A narrow list hides the Type column.
+        .filter((c) => c.getClientRects().length)
+        .map((c) => Math.round(c.getBoundingClientRect().height)),
+    );
   expect(new Set(heights).size).toBe(1);
   const stored = row.locator("td").nth(3);
   await expect(stored).not.toContainText("2026");

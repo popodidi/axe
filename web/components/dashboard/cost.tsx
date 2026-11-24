@@ -26,7 +26,13 @@ import {
   type CostStats,
   type StackedBars,
 } from "../../lib/cost";
-import { dateRange, trendBuckets } from "../../lib/stats";
+import {
+  dateRange,
+  isCustomRange,
+  quickDays,
+  quickRangeOptions,
+  trendBuckets,
+} from "../../lib/stats";
 import {
   Alert,
   EmptyState,
@@ -240,20 +246,32 @@ export function Cost({
   params: URLSearchParams;
   onRange: (patch: Record<string, string | null>) => void;
 }) {
-  const days = params.get("days") || "7";
+  // A quick range (`days`) or custom UTC dates (`days=custom&start&end`),
+  // the same URL format as Stats.
+  const custom = isCustomRange(params);
+  const rangeQuery = new URLSearchParams(
+    ["days", "start", "end"]
+      .filter((k) => params.has(k))
+      .map((k) => [k, params.get(k)!]),
+  ).toString();
   const [now] = useState(() => Date.now());
   const range = useMemo(
-    () => dateRange(new URLSearchParams({ days }), now),
-    [days, now],
+    () => dateRange(new URLSearchParams(rangeQuery), now),
+    [rangeQuery, now],
   );
+  const today = new Date(now).toISOString().slice(0, 10);
+  const isoDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
   const breakdown = breakdownOf(params);
   const active = costFilters.some((f) => params.get(f.param));
   // One request whatever the range or filters: the server aggregates and buckets.
-  const path = costPath(
-    range,
-    trendBuckets(range.start, range.end).weekly ? 7 : 1,
-    costScope(params),
-  );
+  // No request for invalid custom dates (an alert explains them instead).
+  const path = range.error
+    ? ""
+    : costPath(
+        range,
+        trendBuckets(range.start, range.end).weekly ? 7 : 1,
+        costScope(params),
+      );
   const [state, setState] = useState<{
     path: string;
     stats?: CostStats;
@@ -262,6 +280,7 @@ export function Cost({
     options?: Record<string, string[]>;
   } | null>(null);
   useEffect(() => {
+    if (!path) return;
     const abort = new AbortController();
     fetch(base + path, { signal: abort.signal })
       .then(async (r) => {
@@ -299,14 +318,47 @@ export function Cost({
           <Select
             label="Period"
             ariaLabel="Date range"
-            value={["7", "30", "90"].includes(days) ? days : "7"}
-            onChange={(v) => onRange({ days: v, start: null, end: null })}
+            value={custom ? "custom" : quickDays(params)}
+            onChange={(v) =>
+              onRange(
+                v === "custom"
+                  ? {
+                      days: "custom",
+                      start: range.error ? today : isoDate(range.start),
+                      end: range.error ? today : isoDate(range.end - 1),
+                    }
+                  : { days: v, start: null, end: null },
+              )
+            }
             options={[
-              { value: "7", label: "Last 7 days" },
-              { value: "30", label: "Last 30 days" },
-              { value: "90", label: "Last 90 days" },
+              ...quickRangeOptions,
+              { value: "custom", label: "Custom dates" },
             ]}
           />
+          {custom && (
+            <>
+              <label className={styles.dateField}>
+                From (UTC)
+                <input
+                  type="date"
+                  aria-label="From date (UTC)"
+                  max={today}
+                  value={params.get("start") || ""}
+                  onChange={(e) => onRange({ start: e.target.value })}
+                />
+              </label>
+              <label className={styles.dateField}>
+                To (UTC, inclusive)
+                <input
+                  type="date"
+                  aria-label="To date (UTC, inclusive)"
+                  max={today}
+                  value={params.get("end") || ""}
+                  onChange={(e) => onRange({ end: e.target.value })}
+                />
+              </label>
+            </>
+          )}
           {costFilters.map((f) => {
             const value = params.get(f.param) || "";
             // A value from a shared URL stays selectable if the period lacks it.
@@ -328,7 +380,9 @@ export function Cost({
           })}
         </div>
       </Panel>
-      {current?.error ? (
+      {range.error ? (
+        <Alert>{range.error}</Alert>
+      ) : current?.error ? (
         <Alert>Could not load cost data: {current.error}</Alert>
       ) : !stats ? (
         <Skeleton label="Loading cost…" lines={4} />

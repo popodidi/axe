@@ -18,6 +18,9 @@ import {
   type History,
   type Breakdown,
   type TaskMetric,
+  isCustomRange,
+  quickDays,
+  quickRangeOptions,
 } from "../../lib/stats";
 import {
   Alert,
@@ -183,8 +186,7 @@ export function Stats({
   }, [snapshot, base, key, query]);
   const history = result?.key === key ? result.history : null;
   const s = history && calculateStats(snapshot.tasks, history, params);
-  const custom =
-    params.has("start") || params.has("end") || params.get("days") === "custom";
+  const custom = isCustomRange(params);
   const projects = Array.from(new Set(tasks.map((t) => t.project))).sort();
   const groups: Breakdown[] = !s
     ? []
@@ -260,7 +262,7 @@ export function Stats({
           <Select
             label="Period"
             ariaLabel="Date range"
-            value={custom ? "custom" : params.get("days") || "7"}
+            value={custom ? "custom" : quickDays(params)}
             onChange={(v) =>
               onRange(
                 v === "custom"
@@ -273,9 +275,7 @@ export function Stats({
               )
             }
             options={[
-              { value: "7", label: "Last 7 days" },
-              { value: "30", label: "Last 30 days" },
-              { value: "90", label: "Last 90 days" },
+              ...quickRangeOptions,
               { value: "custom", label: "Custom dates" },
             ]}
           />
