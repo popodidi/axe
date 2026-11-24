@@ -67,22 +67,29 @@ export function DocPage({ base, path }: { base: string; path: string }) {
   // A single markdown doc's frontmatter moves to the metadata rail.
   const split = single && isMarkdown(doc.path) ? splitFrontmatter(files[0].content) : null;
   const markdown = files.some((f) => isMarkdown(f.path || doc.path));
+  // The rail's header: the file name, its folder above it.
+  const cut = doc.path.lastIndexOf("/") + 1;
+  const [dir, name] = [doc.path.slice(0, cut), doc.path.slice(cut)];
   return (
     <DocLayout
       markdown={markdown}
       bodyKey={doc.version}
       meta={
         <>
-          <div className={styles.head}>
-            <span className={styles.path}>{doc.path}</span>
+          <header className={styles.head}>
+            <span className={styles.path} title={doc.path}>
+              {dir && <span className={styles.dir}>{dir}</span>}
+              <span className={styles.name}>{name}</span>
+            </span>
             <span className={styles.version}>
               {doc.kind} · version <span className={styles.mono}>{doc.version.slice(0, 12)}</span>
             </span>
-          </div>
-          <Facts
+          </header>
+          <RailFacts
+            title="Details"
             label="Doc details"
             rows={[
-              ["Version", <span key="v" className={styles.mono}>{doc.version}</span>],
+              ["Version", <Clipped key="v" text={doc.version} mono />],
               [
                 "Versions",
                 versions === null
@@ -93,10 +100,23 @@ export function DocPage({ base, path }: { base: string; path: string }) {
               ],
               ["Size", store === null ? "…" : store.row ? formatBytes(store.row.size) : "—"],
               ["Updated", store === null ? "…" : fullDate(store.row?.updated_at)],
-              ["Scopes", store === null ? "…" : store.scopes.join(", ") || "None"],
+              [
+                "Scopes",
+                store === null
+                  ? "…"
+                  : store.scopes.length
+                    ? store.scopes.map((s) => <Clipped key={s} text={s} />)
+                    : "None",
+              ],
             ]}
           />
-          {split && split.meta.length > 0 && <Facts label="Frontmatter" rows={split.meta} />}
+          {split && split.meta.length > 0 && (
+            <RailFacts
+              title="Frontmatter"
+              label="Frontmatter"
+              rows={split.meta.map(([k, v]) => [k, /\s/.test(v) ? v : <Clipped key={k} text={v} />])}
+            />
+          )}
         </>
       }
     >
@@ -132,8 +152,44 @@ function MarkdownFile({
   return (
     <>
       {meta.length > 0 && <Facts label="Frontmatter" rows={meta} />}
-      <Markdown body={body} headingIds={prefix} />
+      <Markdown body={body} headingIds={prefix} document />
     </>
+  );
+}
+
+// A labelled key/value group in the metadata rail: muted keys in one column,
+// values aligned beside them.
+function RailFacts({
+  title,
+  label,
+  rows,
+}: {
+  title: string;
+  label: string;
+  rows: [string, ReactNode][];
+}) {
+  return (
+    <section className={styles.group}>
+      <h2 className={styles.railLabel}>{title}</h2>
+      <dl className={styles.facts} aria-label={label}>
+        {rows.map(([k, v]) => (
+          <div key={k} className={styles.fact}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+// One line of a long unbroken value (a hash, a scope, a URL): cut with an
+// ellipsis, whole in its tooltip and when selected and copied.
+function Clipped({ text, mono = false }: { text: string; mono?: boolean }) {
+  return (
+    <span className={cx(styles.clip, mono && styles.mono)} title={text}>
+      {text}
+    </span>
   );
 }
 
