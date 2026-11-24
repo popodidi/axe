@@ -133,3 +133,90 @@
 .compact :not(pre) > code {
   font-size: var(--text-caption);
 }
+
+/* A doc on its own page: text blocks keep a reading measure while code and
+   tables use the full column; headings step down in size and sit closer to
+   what follows than to what precedes; a lead-in paragraph stays with its
+   list and the paragraph after a list starts a new group. */
+.document {
+  --doc-measure: 76ch;
+}
+
+.document > :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, dl) {
+  max-width: var(--doc-measure);
+}
+
+.document h1 {
+  font-size: var(--text-h1);
+  line-height: var(--lh-h1);
+  letter-spacing: var(--tracking-heading);
+}
+
+.document h2 {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+  letter-spacing: var(--tracking-heading);
+}
+
+.document h3 {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+  color: var(--text-primary);
+}
+
+.document :is(h4, h5, h6) {
+  font-size: var(--text-body);
+  line-height: var(--lh-body);
+  color: var(--text-primary);
+}
+
+.document * + h1,
+.document * + h2 {
+  margin-top: var(--space-5);
+}
+
+.document * + h3 {
+  margin-top: var(--space-4);
+}
+
+.document * + :is(h4, h5, h6) {
+  margin-top: var(--space-3);
+}
+
+.document > :is(h2, h3, h4, h5, h6) + * {
+  margin-top: var(--space-1);
+}
+
+.document > h1 + * {
+  margin-top: var(--space-snug);
+}
+
+.document > h1 + h2 {
+  margin-top: var(--space-4);
+}
+
+.document > p + :is(ul, ol) {
+  margin-top: var(--space-1);
+}
+
+.document > :is(ul, ol) + p {
+  margin-top: var(--space-3);
+}
+
+.document li > p + * {
+  margin-top: var(--space-half);
+}
+
+/* A chip split over two lines keeps its padding on both. */
+.document :not(pre) > code {
+  padding: 1px var(--space-half);
+  box-decoration-break: clone;
+}
+
+.document hr {
+  margin-block: var(--space-4);
+}
+
+.document > h2 + h3 {
+  margin-top: var(--space-2);
+}

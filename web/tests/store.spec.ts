@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Route } from "@playwright/test";
+import { test, expect, type Locator, type Page, type Route } from "@playwright/test";
 import { mockDesk } from "./fixtures";
 
 // Synthetic store fixtures: signed links, a read session, blob refs and docs.
@@ -430,12 +430,30 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   await expect(details).toContainText("120 B");
   await expect(details).toContainText("label:harvis");
   await expect(details).toContainText("2 · first");
+  // A long value stays on one line, whole in its tooltip.
+  const hash = details.getByTitle("c".repeat(40));
+  await expect(hash).toHaveText("c".repeat(40));
+  expect(await hash.evaluate((e) => e.scrollWidth > e.clientWidth)).toBe(true);
 
   await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
   const meta = page.getByRole("complementary", { name: "Doc metadata" });
   const body = page.locator("article");
   const toc = page.getByRole("navigation", { name: "Contents" });
   await expect(toc.getByRole("link")).toHaveCount(6);
+  // The title outranks the sections and the sections the text; a section
+  // sits closer to its text than to the text before it.
+  const size = (l: Locator) => l.evaluate((e) => parseFloat(getComputedStyle(e).fontSize));
+  const box = async (l: Locator) => (await l.boundingBox())!;
+  const para = (n: number) => body.getByText(`Paragraph ${n} of the long report.`, { exact: true });
+  const h2 = body.getByRole("heading", { name: "Section 1" });
+  const h1Size = await size(body.getByRole("heading", { name: "Long report" }));
+  expect(h1Size).toBeGreaterThan(await size(h2));
+  expect(await size(h2)).toBeGreaterThan(await size(para(1)));
+  const [before, head, after] = await Promise.all([box(para(10)), box(h2), box(para(11))]);
+  expect(head.y - (before.y + before.height)).toBeGreaterThan(after.y - (head.y + head.height));
+  // Text keeps a reading measure; code uses the whole column.
+  const [text, code] = await Promise.all([box(para(1)), box(body.locator("pre"))]);
+  expect(text.width).toBeLessThan(code.width);
   // The rail shows; the narrow layout's fold does not.
   await expect(page.locator("summary", { hasText: "Contents" })).toBeHidden();
   // Metadata left, body center, contents right, on one row.

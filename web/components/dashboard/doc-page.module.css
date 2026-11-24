@@ -11,6 +11,7 @@
   --doc-toc-width: calc(var(--space-8) * 2 - var(--space-2));
   --doc-body-max: calc(var(--space-8) * 9);
   --doc-rail-top: var(--space-snug);
+  --doc-meta-key: var(--space-5);
 
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -20,22 +21,69 @@
 }
 .meta {
   display: grid;
-  gap: var(--space-1);
+  gap: var(--space-3);
   align-content: start;
   min-width: 0;
 }
 .head {
   display: grid;
-  gap: var(--space-quarter);
+  gap: var(--space-half);
 }
 .path {
-  font-weight: var(--weight-medium);
+  display: grid;
+  min-width: 0;
+}
+.dir {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+.name {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+  font-weight: var(--weight-semibold);
   overflow-wrap: anywhere;
 }
 .version {
   font-size: var(--text-caption);
   line-height: var(--lh-caption);
   color: var(--text-secondary);
+}
+
+/* A rail group: a small muted label over key/value rows, keys in one
+   column (at least 48px) so the values line up. Values wrap at words; long unbroken ones
+   are clipped (.clip) with the whole value in the tooltip. */
+.group {
+  display: grid;
+  min-width: 0;
+}
+.facts {
+  display: grid;
+  grid-template-columns: minmax(var(--doc-meta-key), max-content) minmax(0, 1fr);
+  gap: var(--space-half) var(--space-snug);
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.fact {
+  display: contents;
+}
+.facts dt {
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+.facts dd {
+  display: grid;
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+}
+.clip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mono {
   font-family: var(--font-mono);
@@ -69,7 +117,8 @@
 }
 
 /* Contents: one line per h1-h3, indented by level; the current section in
-   the primary color, semibold, with a bar on its left edge. */
+   the primary color, semibold, on the selected fill with a bar on its
+   left edge. */
 .toc {
   display: grid;
   gap: var(--space-quarter);
@@ -101,13 +150,15 @@
 }
 .toc a.active {
   color: var(--text-primary);
+  background: var(--surface-selected);
   font-weight: var(--weight-semibold);
   border-left-color: var(--text-primary);
 }
 .railLabel {
   display: block;
-  margin-bottom: var(--space-half);
+  margin: 0 0 var(--space-half);
   font-size: var(--text-caption);
+  letter-spacing: normal;
   line-height: var(--lh-caption);
   font-weight: var(--weight-medium);
   color: var(--text-tertiary);
@@ -146,12 +197,6 @@
   .meta {
     grid-column: 1;
     grid-row: 1;
-  }
-
-  /* In the rail the facts sit on the page, not on an inset well. */
-  .meta dl {
-    padding: 0;
-    background: none;
   }
   .body {
     grid-column: 2;

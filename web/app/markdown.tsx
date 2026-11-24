@@ -8,14 +8,17 @@ export default function Markdown({
   body,
   compact = false,
   headingIds,
+  document = false,
 }: {
   body: string;
   compact?: boolean;
   // Give h1-h3 anchor ids with this prefix (the doc page's contents).
   headingIds?: string;
+  // Set as a document on its own page (the doc page).
+  document?: boolean;
 }) {
   return (
-    <Prose compact={compact}>
+    <Prose compact={compact} document={document}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[
