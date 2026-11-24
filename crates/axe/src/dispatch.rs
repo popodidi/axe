@@ -21,6 +21,7 @@ use crate::runtime::{self, Registry};
 use crate::worktree;
 
 mod bots;
+mod pre_check;
 pub use bots::splice_bot_args;
 
 const TICK: Duration = Duration::from_secs(2);
@@ -41,6 +42,8 @@ struct Pick {
     agent: String,
     rule: String,
     with: Option<Use>,
+    /// The cost controls of the routine that created the task, if any.
+    profile: Option<crate::routine::Profile>,
 }
 
 /// Why no runtime was picked.
@@ -101,6 +104,11 @@ pub struct Dispatcher {
     /// Fresh-session fallbacks held by a paused gate. Each keeps its claim and
     /// slot (and spends no further run budget) until admission reopens.
     deferred: Vec<Deferred>,
+    /// Routine pre-checks running before a task's first agent run; each holds
+    /// its claim and a task slot (`dispatch/pre_check.rs`).
+    pre_checks: Vec<pre_check::PreCheck>,
+    /// The server refused `routine_profile` (an older server); logged once.
+    profiles_unsupported: bool,
     /// Gate sample count, (task, bot) slot use, hold and time of the last
     /// admission report to the server.
     reported: Option<(u64, (usize, usize), Value, Instant)>,
@@ -329,6 +337,8 @@ impl Dispatcher {
             gate,
             admission,
             deferred: Vec::new(),
+            pre_checks: Vec::new(),
+            profiles_unsupported: false,
             reported: None,
             hold_path: admission::hold_path(),
             hold_logged: None,
@@ -449,6 +459,7 @@ impl Dispatcher {
                         agent: name,
                         rule: key,
                         with: Some(u.clone()),
+                        profile: None,
                     })
                 }
                 Err(true) => unhealthy.push(u.harness.as_str()),
@@ -483,6 +494,7 @@ impl Dispatcher {
             agent,
             rule: why.to_string(),
             with: None,
+            profile: None,
         };
         if rt.healthy(now) {
             return Ok(pick(rt.name.clone()));
@@ -628,12 +640,12 @@ impl Dispatcher {
 
     /// Live agent sessions, task and bot runs.
     pub fn live(&self) -> usize {
-        self.runs.len() + self.bots.len()
+        self.runs.len() + self.pre_checks.len() + self.bots.len()
     }
 
     /// Live task runs; with deferred fallbacks they fill `[pool] total`.
     pub fn live_tasks(&self) -> usize {
-        self.runs.len()
+        self.runs.len() + self.pre_checks.len()
     }
 
     /// Live bot runs; they fill `[pool] bots`, never `[pool] total`.
@@ -654,7 +666,7 @@ impl Dispatcher {
                 .map(|b| b.iter().filter(|b| b["state"] == "active").count()),
         };
         json!({
-            "tasks": {"used": self.runs.len() + self.deferred.len(), "total": self.cfg.pool_total()},
+            "tasks": {"used": self.runs.len() + self.pre_checks.len() + self.deferred.len(), "total": self.cfg.pool_total()},
             "bots": {"used": self.bots.len(), "total": bots_total,
                 "configured": self.cfg.pool_bots()},
         })
@@ -841,7 +853,7 @@ impl Dispatcher {
                 bots_until: None,
             }
         });
-        if self.runs.is_empty() {
+        if self.runs.is_empty() && self.pre_checks.is_empty() {
             let until = *drain.bots_until.get_or_insert(now + DRAIN_BOT_GRACE);
             return Ok(self.bots.is_empty() || now >= until);
         }
@@ -855,6 +867,7 @@ impl Dispatcher {
     /// Aborts every task run the server does not hold as protected; the server
     /// returns each task to pending, in its session, with its budget intact.
     fn abort_unprotected(&mut self) -> Result<()> {
+        self.stop_pre_checks("aborted by rollout drain")?;
         let mut i = 0;
         while i < self.runs.len() {
             let run_id = self.runs[i].run_id;
@@ -903,7 +916,7 @@ impl Dispatcher {
                 self.block_claimed(task.id, &d.claim, format!("{e:#}"))?;
             }
         }
-        while self.runs.len() + self.deferred.len() < self.cfg.pool_total() {
+        while self.live_tasks() + self.deferred.len() < self.cfg.pool_total() {
             // Projects come ordered by their oldest ready task.
             let Some(project) = self
                 .store
@@ -987,13 +1000,16 @@ impl Dispatcher {
             .store
             .request::<Option<db::Session>>("session", json!({"task":task.id}))?;
         // A rollout's abort costs the session none of its resume budget.
-        let interrupted = self
+        let events = self
             .store
-            .request::<Vec<db::Event>>("events", json!({"task":task.id}))?
+            .request::<Vec<db::Event>>("events", json!({"task":task.id}))?;
+        let interrupted = events
             .iter()
             .rev()
             .find(|e| matches!(e.kind.as_str(), "run_start" | "run_interrupted"))
             .is_some_and(|e| e.kind == "run_interrupted");
+        let first_run = !events.iter().any(|e| e.kind == "run_start");
+        let profile = self.profile(task.id);
         let now = now_unix();
         // The runtime the stored session resumes on, or why it starts fresh.
         let mut fallback = None;
@@ -1038,11 +1054,13 @@ impl Dispatcher {
                             .find(|u| Some(&u.harness) == harness.as_ref())
                             .cloned()
                     }),
+                    profile: None,
                 },
                 false => Pick {
                     agent: name,
                     rule: res.rule_key.clone(),
                     with: None,
+                    profile: None,
                 },
             })
         } else if let Some(agent) = &task.agent {
@@ -1068,7 +1086,7 @@ impl Dispatcher {
             self.pick_from(matched.as_ref(), false)
         };
         let pick = match picked {
-            Ok(p) => p,
+            Ok(p) => Pick { profile, ..p },
             Err(NoPick::Unhealthy { until, note }) => {
                 self.release(task.id, &claim_id, until, note)?;
                 return Ok(true);
@@ -1082,10 +1100,66 @@ impl Dispatcher {
             self.store.request::<serde_json::Value>("note",json!({"task":task.id,"claim":claim_id,"note":format!("fresh session fallback: {reason}")}))?;
             resume = None;
         }
+        // A routine's pre-check runs before the task's first agent run only.
+        if let Some(cmd) = pick.profile.as_ref().and_then(|p| p.pre_check.clone()) {
+            if first_run && resume.is_none() {
+                if let Err(e) = self.start_pre_check(&task, &pick, &claim_id, &cmd) {
+                    self.block_claimed(task.id, &claim_id, format!("pre-check: {e:#}"))?;
+                }
+                return Ok(true);
+            }
+        }
         if let Err(e) = self.spawn(&task, &pick, &claim_id, resume.as_ref(), interrupted) {
             self.block_claimed(task.id, &claim_id, format!("{e:#}"))?;
         }
         Ok(true)
+    }
+
+    /// The folder a run of `task` works in: its run workspace (with the
+    /// pick's routine skill profile), its project worktree, or the project
+    /// directory. Also the repos cloned first.
+    fn run_dir(&self, task: &Task, pick: &Pick) -> Result<(Option<PathBuf>, PathBuf, Vec<String>)> {
+        let mut repos_cloned = Vec::new();
+        let task_worktree = match &self.cfg.worktrees {
+            _ if task.repos.is_some() => {
+                let skills = pick.profile.as_ref().and_then(|p| p.skills.as_deref());
+                let (dir, cloned) =
+                    crate::run_workspace::build(&self.cfg, task, Some(&self.store.client), skills)?;
+                repos_cloned = cloned;
+                Some(dir)
+            }
+            Some(_) => {
+                let ready =
+                    worktree::readiness(&self.cfg, &task.project).map_err(anyhow::Error::msg)?;
+                Some(worktree::allocate(&ready, task.id)?)
+            }
+            None => None,
+        };
+        let cwd = task_worktree
+            .clone()
+            .unwrap_or_else(|| self.cfg.workspace_root().join(&task.project));
+        if !cwd.is_dir() {
+            anyhow::bail!("project directory {} does not exist", cwd.display());
+        }
+        Ok((task_worktree, cwd, repos_cloned))
+    }
+
+    /// The profile of the routine that created `task`; none for other
+    /// tasks, or when the server is older than routine profiles.
+    fn profile(&mut self, task: i64) -> Option<crate::routine::Profile> {
+        match self
+            .store
+            .request::<Option<crate::routine::Profile>>("routine_profile", json!({"task":task}))
+        {
+            Ok(p) => p,
+            Err(e) => {
+                if !self.profiles_unsupported {
+                    eprintln!("axe dispatcher: routine profiles unavailable ({e:#}); tasks run without them");
+                    self.profiles_unsupported = true;
+                }
+                None
+            }
+        }
     }
 
     fn block_claimed(&mut self, task_id: i64, claim: &str, note: String) -> Result<()> {
@@ -1117,27 +1191,7 @@ impl Dispatcher {
             .with_context(|| format!("unknown agent {}", rt.agent))?
             .clone();
         let session_mode = agent.session_mode()?;
-        let mut repos_cloned = Vec::new();
-        let task_worktree = match &self.cfg.worktrees {
-            _ if task.repos.is_some() => {
-                let (dir, cloned) =
-                    crate::run_workspace::build(&self.cfg, task, Some(&self.store.client))?;
-                repos_cloned = cloned;
-                Some(dir)
-            }
-            Some(_) => {
-                let ready =
-                    worktree::readiness(&self.cfg, &task.project).map_err(anyhow::Error::msg)?;
-                Some(worktree::allocate(&ready, task.id)?)
-            }
-            None => None,
-        };
-        let cwd = task_worktree
-            .clone()
-            .unwrap_or_else(|| self.cfg.workspace_root().join(&task.project));
-        if !cwd.is_dir() {
-            anyhow::bail!("project directory {} does not exist", cwd.display());
-        }
+        let (task_worktree, cwd, repos_cloned) = self.run_dir(task, pick)?;
         let log_dir = self.cfg.log_dir();
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("create log dir {}", log_dir.display()))?;
@@ -1191,7 +1245,12 @@ impl Dispatcher {
         } else {
             &agent.cmd
         };
-        let with = pick.with.as_ref().filter(|u| u.harness == rt.harness);
+        let with = with_profile(
+            pick.with.as_ref().filter(|u| u.harness == rt.harness),
+            pick.profile.as_ref(),
+            &rt.harness,
+        );
+        let with = with.as_ref();
         let template = match with {
             Some(u) => splice_bot_args(template, &u.args()),
             None => template.clone(),
@@ -1255,6 +1314,9 @@ impl Dispatcher {
         if let Some(u) = with {
             body["use"] = json!(u.to_string());
         }
+        if let Some(p) = &pick.profile {
+            body["routine"] = json!(p);
+        }
         if self.runtimes.managed {
             body["runtime"] = json!(rt.name);
             body["harness"] = json!(rt.harness);
@@ -1302,6 +1364,7 @@ impl Dispatcher {
     }
 
     fn reap(&mut self) -> Result<()> {
+        self.reap_pre_checks()?;
         let mut i = 0;
         let aborts = std::mem::take(&mut *self.store.aborts.lock().unwrap());
         while i < self.runs.len() {
@@ -1381,7 +1444,10 @@ impl Dispatcher {
             let pick = match &task.agent {
                 Some(a) if pinned(a).as_ref() != Some(&run.pick.agent) => {
                     match self.pin_pick(a, "task agent", false) {
-                        Ok(p) => p,
+                        Ok(p) => Pick {
+                            profile: run.pick.profile.clone(),
+                            ..p
+                        },
                         Err(e) => {
                             self.block_claimed(task.id, &run.claim, e.note())?;
                             return Ok(());
@@ -1419,6 +1485,7 @@ impl Dispatcher {
 
     fn stop_all(&mut self) -> Result<()> {
         self.stop_bots()?;
+        self.stop_pre_checks("dispatcher stopped")?;
         let mut runs = std::mem::take(&mut self.runs);
         for run in &mut runs {
             kill_child(&mut run.child);
@@ -1445,6 +1512,33 @@ impl Dispatcher {
         }
         Ok(())
     }
+}
+
+/// The `use` entry a run starts with: the rule's (or none), its model and
+/// effort replaced by the routine profile's where it sets them. A profile
+/// applies only to a harness axe knows how to pass them to.
+fn with_profile(
+    with: Option<&Use>,
+    profile: Option<&crate::routine::Profile>,
+    harness: &str,
+) -> Option<Use> {
+    let Some(p) = profile.filter(|p| p.model.is_some() || p.effort.is_some()) else {
+        return with.cloned();
+    };
+    if !rule::HARNESSES.contains(&harness) {
+        return with.cloned();
+    }
+    Some(Use {
+        harness: harness.to_string(),
+        model: p
+            .model
+            .clone()
+            .or_else(|| with.and_then(|u| u.model.clone())),
+        effort: p
+            .effort
+            .clone()
+            .or_else(|| with.and_then(|u| u.effort.clone())),
+    })
 }
 
 fn refresh_activity(store: &Store, run: &mut Run) -> Result<()> {
@@ -1482,5 +1576,50 @@ impl Drop for Dispatcher {
         for run in &mut self.bots {
             kill_child(&mut run.child);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routine::Profile;
+
+    fn u(s: &str) -> Use {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn profile_model_and_effort_replace_the_rules_per_field() {
+        let p = |m: Option<&str>, e: Option<&str>| Profile {
+            routine: 1,
+            model: m.map(String::from),
+            effort: e.map(String::from),
+            ..Profile::default()
+        };
+        let rule = u("claude-code:opus:high");
+        // No profile, or one without model or effort: the rule's entry.
+        assert_eq!(
+            with_profile(Some(&rule), None, "claude-code"),
+            Some(rule.clone())
+        );
+        assert_eq!(
+            with_profile(Some(&rule), Some(&p(None, None)), "claude-code"),
+            Some(rule.clone())
+        );
+        assert_eq!(
+            with_profile(Some(&rule), Some(&p(None, Some("low"))), "claude-code"),
+            Some(u("claude-code:opus:low"))
+        );
+        assert_eq!(
+            with_profile(Some(&rule), Some(&p(Some("sonnet"), None)), "claude-code"),
+            Some(u("claude-code:sonnet:high"))
+        );
+        // A pinned agent has no rule entry: the profile alone.
+        assert_eq!(
+            with_profile(None, Some(&p(Some("gpt-5"), Some("low"))), "codex"),
+            Some(u("codex:gpt-5:low"))
+        );
+        // A harness axe cannot pass them to: unchanged.
+        assert_eq!(with_profile(None, Some(&p(Some("m"), None)), ""), None);
     }
 }

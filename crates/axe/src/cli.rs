@@ -1847,7 +1847,10 @@ enum RoutineCmd {
     /// project, cron, timezone (default UTC), title, detail, and optionally
     /// agent, workload, owner, repos and labels. owner, repos and labels set
     /// each created task as `axe task add --owner/--repo/--label` do: repos omitted
-    /// runs in the project checkout, [] in a run workspace with no repos
+    /// runs in the project checkout, [] in a run workspace with no repos. Cost
+    /// controls: pre_check (a shell command run before the first agent run;
+    /// exit 0 marks the task done with no agent), model and effort (over the
+    /// selection rule's), skills (the only skills in the run folder)
     Save {
         #[arg(long)]
         id: Option<i64>,

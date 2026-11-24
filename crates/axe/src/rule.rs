@@ -152,7 +152,7 @@ pub struct Use {
 }
 
 /// A model or effort value: passed as one argument, never through a shell.
-fn check_param(kind: &str, v: &str) -> Result<()> {
+pub(crate) fn check_param(kind: &str, v: &str) -> Result<()> {
     let ok = !v.is_empty()
         && v.len() <= 64
         && v.chars()

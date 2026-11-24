@@ -419,6 +419,17 @@ pub fn frontmatter(text: &str, key: &str) -> Option<String> {
     })
 }
 
+/// Leaves out every included skill `only` does not name (a routine's skill
+/// profile), with the reason.
+pub fn only_skills(res: &mut Resolution, only: &[String]) {
+    for i in &mut res.items {
+        if i.kind == Kind::Skill && i.included && !only.contains(&i.name) {
+            i.included = false;
+            i.reason = "not in the routine's skill profile".into();
+        }
+    }
+}
+
 /// Writes each included attached skill as `skills_dir/<name>/`: every file of
 /// the skill folder from `source` (`SKILL.md`, scripts, references, tests),
 /// a file starting with `#!` made executable. A skill that cannot be read

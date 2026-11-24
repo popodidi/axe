@@ -292,7 +292,10 @@ code gains no branches for them.
   five-field cron in an IANA timezone. After downtime only the latest missed
   occurrence is created; manual triggers take a retry key. A template can set
   the created task's owner, repos and labels like `axe task add` (`routine::Template`).
-  Each task keeps a snapshot of the template it came from.
+  Each task keeps a snapshot of the template it came from. Cost controls on the
+  template (`pre_check`, `model`, `effort`, `skills`) are read from that
+  snapshot by the dispatcher (`dispatch/pre_check.rs`,
+  [skills/axe/references/routines.md](skills/axe/references/routines.md)).
 - **Bots** (`axe bot`, `bot.rs`, `dispatch/bots.rs`) are persistent
   identities with one agent session resumed on every wake. Wakes come from the
   bot itself, named cron schedules (`schedule.rs`), task-event subscriptions

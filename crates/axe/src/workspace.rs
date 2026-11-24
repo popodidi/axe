@@ -307,7 +307,7 @@ fn rebuild(c: &Client, cfg: &Config, target: &Target, dir: &Path) -> Result<()> 
                 );
             }
             let repos = t.repos.clone().unwrap_or_default();
-            run_workspace::build_task(cfg, &t, &repos, Some(c), dir, Mode::Local)?
+            run_workspace::build_task(cfg, &t, &repos, Some(c), dir, Mode::Local, None)?
         }
         Target::Bot(name) => {
             let b: crate::bot::Bot = c.get(&format!("/api/bots/{name}"), &[])?;
