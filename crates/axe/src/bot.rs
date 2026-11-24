@@ -1119,6 +1119,52 @@ pub struct Claimed {
     /// Context tokens at the end of the resumed session's latest known run.
     #[serde(default)]
     pub context_tokens: Option<i64>,
+    /// The bot's open cards, listed when a wake carries an owner message.
+    #[serde(default)]
+    pub open_cards: Vec<OpenCard>,
+}
+
+/// An open card (a bot message whose buttons are still live), listed with
+/// owner-message wakes so the bot can close the ones the owner answered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenCard {
+    /// Local message id (`axe bot tg edit <id>`).
+    pub id: i64,
+    /// First line, shortened.
+    pub text: String,
+    /// When it was sent.
+    pub at: String,
+}
+
+/// The bot's open cards when any of `wakes` carries an owner message, else none.
+fn open_cards_for(conn: &Connection, bot: i64, wakes: &[Wake]) -> Result<Vec<OpenCard>> {
+    if wakes.iter().any(|w| w.message.is_some()) {
+        crate::board::open_card_list(conn, bot)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Prompt lines for `cards`; empty when none are open.
+fn open_cards_text(cards: &[OpenCard]) -> String {
+    let mut s = String::new();
+    if cards.is_empty() {
+        return s;
+    }
+    s.push_str(
+        "\nYour open cards (close each one an owner message answered or superseded: \
+         `axe bot tg edit <id> --clear-buttons \"Decided: X\"`):",
+    );
+    for c in cards {
+        let day = c.at.get(..10).unwrap_or("");
+        s.push_str(&format!(
+            "\n- #{} sent {day} {}: {}",
+            c.id,
+            clock(&c.at),
+            c.text
+        ));
+    }
+    s
 }
 
 /// Claims a ready bot: inserts its run, delivers its due wakes, and returns the
@@ -1199,6 +1245,7 @@ pub fn claim(
         Some(s) => session_context(tx, bot_id, &s.session_id)?,
         None => None,
     };
+    let open_cards = open_cards_for(tx, bot_id, &wakes)?;
     let b = get(tx, name)?;
     Ok(Some(Claimed {
         run,
@@ -1208,6 +1255,7 @@ pub fn claim(
         session,
         during_previous,
         context_tokens,
+        open_cards,
     }))
 }
 
@@ -1525,6 +1573,9 @@ pub struct Inbox {
     pub wakes: Vec<Wake>,
     /// Long-run nudge text for the PostToolUse hook.
     pub nudge: Option<String>,
+    /// The bot's open cards, listed when a taken wake carries an owner message.
+    #[serde(default)]
+    pub open_cards: Vec<OpenCard>,
 }
 
 /// Lists undelivered wakes, or with `take` atomically marks the due ones as
@@ -1545,7 +1596,10 @@ pub fn inbox(
     let b = get(&tx, name)?;
     if !take {
         let wakes = wakes_where(&tx, "w.bot_id=?1 AND w.run_id IS NULL", [b.id])?;
-        return Ok(Inbox { wakes, nudge: None });
+        return Ok(Inbox {
+            wakes,
+            ..Inbox::default()
+        });
     }
     let run = run.context("--take needs the live run ($AXE_BOT_RUN)")?;
     if b.live_run != Some(run) {
@@ -1610,8 +1664,13 @@ pub fn inbox(
                 .to_string(),
         )?;
     }
+    let open_cards = open_cards_for(&tx, b.id, &wakes)?;
     tx.commit()?;
-    Ok(Inbox { wakes, nudge })
+    Ok(Inbox {
+        wakes,
+        nudge,
+        open_cards,
+    })
 }
 
 /// One wake as a prompt line (without the leading `- `).
@@ -1694,6 +1753,7 @@ pub fn render_prompt(c: &Claimed, resumed: bool) -> String {
     if c.wakes.is_empty() {
         s.push_str("\n- (none)");
     }
+    s.push_str(&open_cards_text(&c.open_cards));
     if !resumed {
         s.push_str(
             "\nFresh session: read `axe bot notes`, `axe bot log --limit 50`, \
@@ -1761,6 +1821,7 @@ pub fn hook_output(hook: &str, inbox: &Inbox) -> Option<String> {
         for w in &inbox.wakes {
             text.push_str(&format!("\n- {}", wake_line(w)));
         }
+        text.push_str(&open_cards_text(&inbox.open_cards));
     }
     let cap = |mut t: String| {
         const MORE: &str = "\n… truncated; run `axe bot tg history` for the full messages.";
