@@ -54,18 +54,20 @@ const DOCS_MAX: usize = 200;
 /// Builds or refreshes the run workspace of `task`, which must have `repos`,
 /// with the docs and skills attached to its scopes from `store` (none when
 /// `None` or when the store cannot be read). Also returns the repos whose
-/// canonical clone was cloned first ([`worktree::ensure_clone`]).
+/// canonical clone was cloned first ([`worktree::ensure_clone`]). `skills`,
+/// when set, is the only skills the folder gets (a routine's profile).
 pub fn build(
     cfg: &Config,
     task: &Task,
     store: Option<&dyn context::Source>,
+    skills: Option<&[String]>,
 ) -> Result<(PathBuf, Vec<String>)> {
     let repos = task
         .repos
         .as_deref()
         .context("task has no repos; it runs in its project worktree")?;
     let dir = cfg.run_root().join(format!("task-{}", task.id));
-    let out = build_task(cfg, task, repos, store, &dir, Mode::Run)?;
+    let out = build_task(cfg, task, repos, store, &dir, Mode::Run, skills)?;
     Ok((dir, out.cloned))
 }
 
@@ -98,7 +100,9 @@ pub struct Built {
 
 /// The task layout in `dir`; [`build`] in [`Mode::Run`], `axe workspace`
 /// in [`Mode::Local`] (store errors fail the build instead of leaving the
-/// context out).
+/// context out). `only`, when set, keeps just the skills it names, of the
+/// repos' own and the attached ones; the rest are left out of `skills/` and
+/// `AGENTS.md`.
 pub fn build_task(
     cfg: &Config,
     task: &Task,
@@ -106,11 +110,12 @@ pub fn build_task(
     store: Option<&dyn context::Source>,
     dir: &Path,
     mode: Mode,
+    only: Option<&[String]>,
 ) -> Result<Built> {
     let branch = format!("{}task-{}--work", branch_prefix(cfg), task.id);
     let (built, cloned) = checkout(cfg, dir, repos, &branch, mode, store)?;
-    let skills = link_skills(dir, &built)?;
-    let attached = match (store, mode) {
+    let skills = link_skills(dir, &built, only)?;
+    let mut attached = match (store, mode) {
         (Some(src), Mode::Run) => {
             context::resolve_or_empty(src, &context::task_scopes(task), &own(&skills))
         }
@@ -119,6 +124,9 @@ pub fn build_task(
         }
         (None, _) => context::Resolution::default(),
     };
+    if let Some(only) = only {
+        context::only_skills(&mut attached, only);
+    }
     let mut stored = Vec::new();
     if let Some(src) = store {
         match mode {
@@ -194,7 +202,7 @@ pub fn build_bot_in(
             refresh: worktree::refresh(&ready, path),
         });
     }
-    let skills = link_skills(dir, &built)?;
+    let skills = link_skills(dir, &built, None)?;
     let skills_only = context::Resolution {
         scopes: attached.scopes.clone(),
         items: attached
@@ -441,11 +449,19 @@ struct Skill {
 }
 
 /// Links every `repos/<r>/.agents/skills/<name>` with a `SKILL.md` as
-/// `skills/<name>`; the first repo in the task's order wins a name.
-fn link_skills(dir: &Path, repos: &[(String, PathBuf)]) -> Result<Vec<Skill>> {
+/// `skills/<name>`; the first repo in the task's order wins a name. With
+/// `only`, just the skills it names.
+fn link_skills(
+    dir: &Path,
+    repos: &[(String, PathBuf)],
+    only: Option<&[String]>,
+) -> Result<Vec<Skill>> {
     let skills_dir = dir.join("skills");
     replace_dir(&skills_dir)?;
-    let skills = repo_skills(repos);
+    let mut skills = repo_skills(repos);
+    if let Some(only) = only {
+        skills.retain(|s| only.contains(&s.name));
+    }
     for s in &skills {
         std::os::unix::fs::symlink(
             Path::new("../repos")

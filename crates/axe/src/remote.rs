@@ -341,6 +341,8 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             };
             json!(crate::rule::select(&crate::rule::list(&tx)?, &subject))
         }
+        // The cost controls of the routine that created the task (`routine.rs`).
+        "routine_profile" => json!(crate::routine::profile(&tx, task()?)?),
         // Dispatchers before stored rules (`rule.rs`) pick round-robin agents
         // here; kept while such a dispatcher may still talk to this server.
         "round_robin" => {
@@ -390,6 +392,20 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                 )?;
             }
             json!(released)
+        }
+        // A routine's pre-check exited 0: the task is done with no agent run.
+        "pre_check_done" => {
+            check_claim()?;
+            let changes = Changes {
+                state: Some("done".into()),
+                note: Some(field(b, "note")?.into()),
+                ..Default::default()
+            };
+            let done = db::apply_changes(&tx, &actor, task()?, &changes, Some(claim()?))?;
+            if done {
+                crate::routine::pre_check_skipped(&tx, &actor, task()?)?;
+            }
+            json!(done)
         }
         "block" => {
             check_claim()?;
@@ -695,7 +711,14 @@ fn now_unix() -> i64 {
 fn read_only(op: &str) -> bool {
     matches!(
         op,
-        "pending" | "events" | "task" | "session" | "bot_ready" | "bot_control" | "rule_select"
+        "pending"
+            | "events"
+            | "task"
+            | "session"
+            | "bot_ready"
+            | "bot_control"
+            | "rule_select"
+            | "routine_profile"
     )
 }
 

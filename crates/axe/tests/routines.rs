@@ -17,6 +17,10 @@ fn template() -> Template {
         owner: None,
         repos: None,
         labels: vec![],
+        pre_check: None,
+        model: None,
+        effort: None,
+        skills: None,
     }
 }
 fn at(s: &str) -> i64 {
@@ -291,4 +295,86 @@ fn template_sets_owner_repos_and_labels() {
     }))
     .unwrap();
     assert_eq!(parsed.repos, Some(vec!["axe".to_string()]));
+}
+
+#[test]
+fn profile_fields_are_validated_and_read_from_the_occurrence_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = db::open(&dir.path().join("db")).unwrap();
+    let a = Actor::new("test");
+    for bad in [
+        Template {
+            pre_check: Some("  ".into()),
+            ..template()
+        },
+        Template {
+            pre_check: Some("x".repeat(routine::PRE_CHECK_MAX + 1)),
+            ..template()
+        },
+        Template {
+            model: Some("two words".into()),
+            ..template()
+        },
+        Template {
+            effort: Some("$(x)".into()),
+            ..template()
+        },
+        Template {
+            skills: Some(vec!["bad name".into()]),
+            ..template()
+        },
+    ] {
+        assert!(routine::save(&mut c, &a, None, &bad, 0).is_err());
+    }
+    // No profile field: no profile.
+    let plain = routine::save(&mut c, &a, None, &template(), 0).unwrap();
+    let task = routine::trigger(&mut c, &a, plain, "k").unwrap();
+    assert_eq!(routine::profile(&c, task).unwrap(), None);
+    let t = Template {
+        pre_check: Some("exit 0".into()),
+        model: Some("claude-sonnet-5-5".into()),
+        effort: Some("low".into()),
+        skills: Some(vec!["axe".into()]),
+        ..template()
+    };
+    let id = routine::save(&mut c, &a, None, &t, 0).unwrap();
+    let task = routine::trigger(&mut c, &a, id, "k").unwrap();
+    let want = routine::Profile {
+        routine: id,
+        pre_check: Some("exit 0".into()),
+        model: Some("claude-sonnet-5-5".into()),
+        effort: Some("low".into()),
+        skills: Some(vec!["axe".into()]),
+    };
+    assert_eq!(routine::profile(&c, task).unwrap(), Some(want.clone()));
+    // An edit after the occurrence does not change that task's profile.
+    let edited = Template {
+        model: Some("other".into()),
+        ..t.clone()
+    };
+    routine::save(&mut c, &a, Some(id), &edited, 0).unwrap();
+    assert_eq!(routine::profile(&c, task).unwrap(), Some(want));
+    // A task no routine created has none.
+    let other = db::add_task(
+        &mut c,
+        &a,
+        &db::NewTask {
+            agent: None,
+            project: "p",
+            title: "t",
+            detail: "d",
+            state: "pending",
+        },
+    )
+    .unwrap();
+    assert_eq!(routine::profile(&c, other).unwrap(), None);
+    // The JSON shape: unset fields are not stored.
+    let raw = serde_json::to_value(template()).unwrap();
+    assert!(raw.get("pre_check").is_none() && raw.get("skills").is_none());
+    let parsed: Template = serde_json::from_value(json!({
+        "name": "n", "project": "p", "cron": "* * * * *", "title": "t", "detail": "d",
+        "pre_check": "true", "model": "m", "effort": "high", "skills": []
+    }))
+    .unwrap();
+    assert_eq!(parsed.skills, Some(vec![]));
 }

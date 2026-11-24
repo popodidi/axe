@@ -85,6 +85,39 @@ pub struct Template {
     pub repos: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Per-routine cost controls, read by the dispatcher from the occurrence
+    /// snapshot ([`profile`]); unset fields change nothing. A shell command
+    /// (`sh -c`) run in the run folder before the task's first agent run: exit
+    /// 0 marks the task done with no agent, anything else starts the agent as
+    /// usual; its output is a task note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_check: Option<String>,
+    /// The model the agent runs with, over the selection rule's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The reasoning effort the agent runs with, over the selection rule's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The only skills (by name) the run folder gets, of the repos' own and
+    /// the attached ones. Omitted: all; `[]`: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+}
+/// Most bytes in a routine's `pre_check` command.
+pub const PRE_CHECK_MAX: usize = 4096;
+/// What a routine sets on the runs of the tasks it creates ([`Template`]'s
+/// fields of the same names).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Profile {
+    pub routine: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_check: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
 }
 fn utc() -> String {
     "UTC".into()
@@ -114,6 +147,20 @@ impl Template {
             db::names("repo", r)?;
         }
         db::names("label", &self.labels)?;
+        if let Some(c) = &self.pre_check {
+            if c.trim().is_empty() || c.len() > PRE_CHECK_MAX {
+                bail!("pre_check must be a non-empty command of at most {PRE_CHECK_MAX} bytes");
+            }
+        }
+        if let Some(m) = &self.model {
+            crate::rule::check_param("model", m)?;
+        }
+        if let Some(e) = &self.effort {
+            crate::rule::check_param("effort", e)?;
+        }
+        if let Some(s) = &self.skills {
+            db::names("skill", s)?;
+        }
         self.next(now)
     }
 }
@@ -378,6 +425,51 @@ pub fn history(conn: &Connection, id: i64, before: i64) -> Result<Vec<Value>> {
 }
 pub fn backlink(conn: &Connection, task: i64) -> Result<Option<Value>> {
     Ok(conn.query_row("SELECT routine_id,identity,scheduled_at,snapshot FROM routine_occurrences WHERE task_id=?1",[task],|r|Ok(json!({"routine_id":r.get::<_,i64>(0)?,"identity":r.get::<_,String>(1)?,"scheduled_at":r.get::<_,Option<i64>>(2)?,"snapshot":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap_or(Value::Null)}))).optional()?)
+}
+/// Records on the routine that created `task` that its pre-check skipped
+/// the agent (a `pre-check-skipped` event).
+pub(crate) fn pre_check_skipped(conn: &Connection, actor: &Actor, task: i64) -> Result<()> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT routine_id FROM routine_occurrences WHERE task_id=?1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = id {
+        audit(
+            conn,
+            id,
+            actor,
+            "pre-check-skipped",
+            &json!({ "task_id": task }).to_string(),
+        )?;
+    }
+    Ok(())
+}
+/// The profile of the routine occurrence that created `task`, when its
+/// snapshot sets any profile field.
+pub fn profile(conn: &Connection, task: i64) -> Result<Option<Profile>> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT routine_id, snapshot FROM routine_occurrences WHERE task_id=?1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, raw)) = row else {
+        return Ok(None);
+    };
+    let t: Template = serde_json::from_str(&raw).context("routine snapshot")?;
+    let set =
+        t.pre_check.is_some() || t.model.is_some() || t.effort.is_some() || t.skills.is_some();
+    Ok(set.then_some(Profile {
+        routine: id,
+        pre_check: t.pre_check,
+        model: t.model,
+        effort: t.effort,
+        skills: t.skills,
+    }))
 }
 pub fn events(conn: &Connection, id: i64, before: i64) -> Result<Vec<Value>> {
     get(conn, id)?;

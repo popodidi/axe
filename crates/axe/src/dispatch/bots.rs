@@ -145,6 +145,7 @@ impl Dispatcher {
                 with: rule
                     .as_ref()
                     .and_then(|r| r.uses.iter().find(|u| u.harness == rt.harness).cloned()),
+                profile: None,
             }));
         }
         if let Some(r) = &rule {
