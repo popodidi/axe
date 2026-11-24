@@ -81,7 +81,8 @@ for (const width of [1440, 390])
       await expect(
         page.getByRole("figure", { name: "Escalations per task", exact: true }),
       ).toContainText("0: All tasks: 2");
-      // Scatter: one dot per task with known runs; a dot opens its task.
+      // Scatter: one dot per task with known runs (none overlap here); a dot
+      // opens its task list.
       const dots = page
         .getByRole("figure", { name: "Runs and escalations", exact: true })
         .getByRole("button");
@@ -151,9 +152,19 @@ for (const width of [1440, 390])
           () => document.documentElement.scrollWidth <= innerWidth,
         ),
       ).toBe(true);
-      // A dot opens its task in the detail pane; Escape closes it.
+      // A dot opens its task list in the side panel; a row opens the task
+      // with a way back; Escape steps back, then closes.
       await dots.first().click();
-      await expect(page.getByLabel("Task detail", { exact: true })).toBeVisible();
+      const list = page.getByLabel("Cluster tasks", { exact: true });
+      await expect(list).toBeVisible();
+      await expect(list.locator("tbody tr")).toHaveCount(1);
+      await list.locator("tbody tr").first().click();
+      const detail = page.getByLabel("Task detail", { exact: true });
+      await expect(detail).toBeVisible();
+      await expect(detail.getByRole("navigation", { name: "Breadcrumb" })).toContainText("Cluster (1)");
       await page.keyboard.press("Escape");
-      await expect(page.getByLabel("Task detail", { exact: true })).toHaveCount(0);
+      await expect(detail).toHaveCount(0);
+      await expect(list).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(list).toHaveCount(0);
     });
