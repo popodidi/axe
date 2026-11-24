@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "../../app/markdown";
 import { activeHeading, TOC_LEVELS } from "../../lib/doc-toc";
+import { docKind } from "../../lib/doc-render";
 import {
   docScopes,
   formatBytes,
@@ -15,11 +16,15 @@ import {
   type DocAttachment,
   type StoreDoc,
 } from "../../lib/store";
-import { Alert, CodeBlock, cx, Skeleton } from "../ui";
+import { Alert, cx, Skeleton } from "../ui";
+import { DocFile } from "./doc-file";
 import { Facts, fullDate, StoreUnlock, type DocBody, type DocVersion } from "./store-viewer";
 import styles from "./doc-page.module.css";
 
-const isMarkdown = (path: string) => /\.md$/i.test(path);
+// Only markdown (lib/doc-render.ts) gets the contents rail and frontmatter
+// in the metadata rail.
+const isMarkdown = (path: string, content: string, contentType?: string) =>
+  docKind(path, content, contentType) === "markdown";
 
 type Heading = { id: string; level: number; text: string };
 
@@ -65,8 +70,13 @@ export function DocPage({ base, path }: { base: string; path: string }) {
   const single = doc.kind !== "folder";
   const files = single ? [{ path: "", content: doc.content || "" }] : doc.files || [];
   // A single markdown doc's frontmatter moves to the metadata rail.
-  const split = single && isMarkdown(doc.path) ? splitFrontmatter(files[0].content) : null;
-  const markdown = files.some((f) => isMarkdown(f.path || doc.path));
+  const split =
+    single && isMarkdown(doc.path, files[0].content, doc.content_type)
+      ? splitFrontmatter(files[0].content)
+      : null;
+  const markdown = files.some((f) =>
+    isMarkdown(f.path || doc.path, f.content, single ? doc.content_type : undefined),
+  );
   // The rail's header: the file name, its folder above it.
   const cut = doc.path.lastIndexOf("/") + 1;
   const [dir, name] = [doc.path.slice(0, cut), doc.path.slice(cut)];
@@ -114,7 +124,10 @@ export function DocPage({ base, path }: { base: string; path: string }) {
             <RailFacts
               title="Frontmatter"
               label="Frontmatter"
-              rows={split.meta.map(([k, v]) => [k, /\s/.test(v) ? v : <Clipped key={k} text={v} />])}
+              rows={split.meta.map(([k, v]) => [
+                k,
+                /\s/.test(v) ? v : <Clipped key={k} text={v} />,
+              ])}
             />
           )}
         </>
@@ -123,15 +136,18 @@ export function DocPage({ base, path }: { base: string; path: string }) {
       {files.map((f, i) => (
         <section key={f.path} aria-label={f.path || doc.path} className={styles.file}>
           {f.path && <h2 className={styles.fileName}>{f.path}</h2>}
-          {isMarkdown(f.path || doc.path) ? (
-            <MarkdownFile
-              text={split ? split.body : f.content}
-              frontmatter={!split}
-              prefix={single ? "" : `f${i}-`}
-            />
-          ) : (
-            <CodeBlock>{f.content}</CodeBlock>
-          )}
+          <DocFile
+            path={f.path || doc.path}
+            content={f.content}
+            contentType={single ? doc.content_type : undefined}
+            markdown={(text) => (
+              <MarkdownFile
+                text={split ? split.body : text}
+                frontmatter={!split}
+                prefix={single ? "" : `f${i}-`}
+              />
+            )}
+          />
         </section>
       ))}
     </DocLayout>

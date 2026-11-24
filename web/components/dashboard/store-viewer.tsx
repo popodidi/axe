@@ -362,6 +362,8 @@ export type DocBody = {
   kind: "doc" | "folder";
   content?: string;
   files?: { path: string; content: string }[];
+  // The store's content type for a single doc, when it records one.
+  content_type?: string;
 };
 
 // What the store pane knows about a doc from the listing.
