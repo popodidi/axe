@@ -18,16 +18,17 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request cancels its superseded run, so the single CI
-# runner slot only works on the latest head. A release gate run is never
-# cancelled. The `ci-` prefix keeps this group apart from the calling
-# release.yml run's own group (github.workflow is the caller's name there).
+# A new push to a pull request cancels its superseded run, so only the latest
+# head is checked. A release gate run is never cancelled. The `ci-` prefix
+# keeps this group apart from the calling release.yml run's own group
+# (github.workflow is the caller's name there).
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Build parallelism (CARGO_BUILD_JOBS, MAKEFLAGS) comes from the self-hosted CI
-# runner's environment, sized to its guest VM.
+# Both jobs run on GitHub-hosted runners (free for this public repository), so
+# axe pull requests do not share the hlab CI VM with other repositories.
+# release.yml's own release job stays on the hlab VM.
 env:
   CARGO_TERM_COLOR: never
 
@@ -35,7 +36,7 @@ jobs:
   rust:
     # Same-repository branches only: fork pull requests get no CI.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, hlab-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -50,9 +51,12 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      # Build cache on the runner's persistent cache disk (size-capped).
-      - name: Build cache
-        run: scripts/ci_sccache.sh setup
+      # Dependency build cache in the GitHub Actions cache. A pull request
+      # restores its own earlier run's cache (or main's); only pull request
+      # runs save, since a tag or dry-run branch cache is never read again.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'pull_request' }}
       - name: Format
         run: cargo fmt --check
       - name: Clippy
@@ -77,23 +81,11 @@ jobs:
       - name: Build and test (embed-ui)
         if: inputs.full
         run: cargo build --locked --features embed-ui && cargo test --locked --features embed-ui --test embed_ui
-      - name: Build cache stats
-        if: always()
-        run: scripts/ci_sccache.sh stats
-
-      # The self-hosted PR VM is persistent and each runner slot keeps one work
-      # directory for both jobs, so build outputs would stay on the guest's
-      # 30 GiB root until the next checkout in that slot. Remove every job's
-      # outputs after each job (also on failure, cancellation or a refused
-      # start) so later jobs keep the job-start hook's 15 GiB free-space floor.
-      - name: Free the runner's disk
-        if: always()
-        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 / && { df -B1 /var/cache/hlab-ci/deps || true; }
 
   web:
     # Same-repository branches only: fork pull requests get no CI.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, hlab-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -117,12 +109,3 @@ jobs:
       - name: Browser tests
         if: inputs.full || steps.scope.outputs.ui == 'true'
         run: cd web && npx playwright install chromium && npm run test:browser -- --workers=1
-
-      # The self-hosted PR VM is persistent and each runner slot keeps one work
-      # directory for both jobs, so build outputs would stay on the guest's
-      # 30 GiB root until the next checkout in that slot. Remove every job's
-      # outputs after each job (also on failure, cancellation or a refused
-      # start) so later jobs keep the job-start hook's 15 GiB free-space floor.
-      - name: Free the runner's disk
-        if: always()
-        run: rm -rf target web/node_modules web/.next web/out web/.playwright web/test-results web/playwright-report && df -B1 / && { df -B1 /var/cache/hlab-ci/deps || true; }

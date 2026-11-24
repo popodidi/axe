@@ -6,8 +6,9 @@ run-name: release ${{ github.ref_name }}${{ !startsWith(github.ref, 'refs/tags/v
 # - axe-<tag>-linux-x86_64.tar.gz: the image's `axe` binary (dashboard embedded)
 # - axe-skills-<tag>.tar.gz: skills/axe
 # - a .sha256 file per asset and SHA256SUMS
-# The `gate` job first runs ci.yml in full (feature variants, embed-ui, web);
-# nothing is published unless it passes and the tagged commit is on main.
+# The `gate` job first runs ci.yml in full on GitHub-hosted runners (feature
+# variants, embed-ui, web); nothing is published unless it passes and the
+# tagged commit is on main.
 # Publishing to crates.io is not done here (no repository secrets); the job
 # only runs `cargo publish --dry-run`. A tag is never reused: a failed release
 # is retried with a new tag.
