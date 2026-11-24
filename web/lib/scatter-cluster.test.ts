@@ -49,3 +49,33 @@ describe("helpers", () => {
     expect(clusterIds(null)).toEqual([]);
   });
 });
+describe("no overlap", () => {
+  it("merges clusters whose drawn circles would overlap", () => {
+    // A big cluster at 0 and a single dot 14 away: 5 + 18 > 14, so one circle.
+    const pts = [
+      ...Array.from({ length: 200 }, (_, i) => ({ x: 0, y: 0, item: i })),
+      { x: 14, y: 0, item: 999 },
+    ];
+    const c = clusterPoints(pts, 10);
+    expect(c).toHaveLength(1);
+    expect(c[0].items).toHaveLength(201);
+  });
+  it("leaves dense random data with no overlapping circles", () => {
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const pts = Array.from({ length: 1600 }, (_, i) => ({
+      x: 50 + rnd() * 120 * rnd(),
+      y: 200 - rnd() * 150 * rnd(),
+      item: i,
+    }));
+    const c = clusterPoints(pts, 10);
+    expect(c.reduce((n, k) => n + k.items.length, 0)).toBe(1600);
+    for (let i = 0; i < c.length; i++)
+      for (let j = i + 1; j < c.length; j++)
+        expect(
+          Math.hypot(c[i].x - c[j].x, c[i].y - c[j].y),
+        ).toBeGreaterThanOrEqual(
+          clusterRadius(c[i].items.length) + clusterRadius(c[j].items.length) - 1e-9,
+        );
+  });
+});
