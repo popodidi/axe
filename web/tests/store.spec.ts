@@ -316,6 +316,8 @@ test("store rows stay on one line and docs browse as folders", async ({ page }) 
   // With the pane open, every cell keeps one line: the short date, the full
   // timestamp on hover.
   const row = blobsTable.locator("tbody tr").first();
+  // evaluateAll does not wait: let the blob rows render first.
+  await expect(row).toBeVisible();
   const heights = await row
     .locator("td")
     .evaluateAll((cells) => cells.map((c) => Math.round(c.getBoundingClientRect().height)));
