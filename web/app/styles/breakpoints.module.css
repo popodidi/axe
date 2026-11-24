@@ -12,3 +12,6 @@
 @value bp-stack: (max-width: 1599px);
 
 @value bp-artifacts-narrow: (max-width: 480px);
+
+/* The doc page (app/doc) shows its metadata and contents rails from here. */
+@value bp-doc-rails: (min-width: 1280px);

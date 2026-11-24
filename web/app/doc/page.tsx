@@ -1,14 +1,15 @@
 "use client";
 // A doc on its own page (the store pane's "Open full"): `/doc?path=<path>`,
 // with `&server=` for a standalone build pointed at another axe server. The
-// doc shows whole (`fill`) and scrolls with the window.
+// doc shows whole, with metadata and contents rails, and scrolls with the
+// window (components/dashboard/doc-page.tsx).
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { DocViewer } from "../../components/dashboard/store-viewer";
-import styles from "../../components/dashboard/store.module.css";
+import { DocPage } from "../../components/dashboard/doc-page";
+import styles from "../../components/dashboard/doc-page.module.css";
 import { Alert, Skeleton } from "../../components/ui";
 
-function DocPage() {
+function DocRoute() {
   const p = useSearchParams();
   const path = p.get("path") || "";
   const base = (
@@ -16,11 +17,7 @@ function DocPage() {
   ).replace(/\/+$/, "");
   return (
     <main className={styles.page} data-doc-page>
-      {path ? (
-        <DocViewer base={base} path={path} fill />
-      ) : (
-        <Alert>No doc path given.</Alert>
-      )}
+      {path ? <DocPage base={base} path={path} /> : <Alert>No doc path given.</Alert>}
     </main>
   );
 }
@@ -28,7 +25,7 @@ function DocPage() {
 export default function Page() {
   return (
     <Suspense fallback={<Skeleton label="Loading doc…" lines={6} />}>
-      <DocPage />
+      <DocRoute />
     </Suspense>
   );
 }
