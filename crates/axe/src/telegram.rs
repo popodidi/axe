@@ -26,6 +26,7 @@ use crate::bot::{self, NewMessage};
 use crate::config;
 use crate::db::{Actor, Forbidden};
 use crate::goal_board;
+use crate::owner_views;
 
 use crate::channel::bot_id;
 pub use crate::channel::{
@@ -65,8 +66,14 @@ const UPDATE_ATTEMPTS: u32 = 3;
 /// `/` menu shows ([`Gateway::publish_commands`]). `BotCommand`: the command
 /// is 1-32 lowercase letters, digits and underscores; the description 1-256
 /// characters.
-pub const OWNER_COMMANDS: [(&str, &str); 7] = [
+pub const OWNER_COMMANDS: [(&str, &str); 10] = [
     ("status", "Bot state, live run and next wake"),
+    ("tasks", "This bot's open tasks"),
+    (
+        "task",
+        "One task: state, outcome and latest notes (/task N)",
+    ),
+    ("cost", "This bot's spend over the last 7 days"),
     ("wake", "Queue a wake, with an optional note"),
     ("stop", "Stop the live run; queued wakes are kept"),
     ("pause", "Pause: no new wakes, stop the live run"),
@@ -1822,8 +1829,9 @@ impl Gateway {
         Ok(())
     }
 
-    /// `/status`, `/stop`, `/pause`, `/resume`, `/reset`, `/wake [note]`:
-    /// handled here, never waking the bot. The reply is recorded.
+    /// `/status`, `/tasks`, `/task N`, `/cost`, `/stop`, `/pause`, `/resume`,
+    /// `/reset`, `/wake [note]`: handled here, never waking the bot, so they
+    /// work with no agent runtime logged in. The reply is recorded.
     #[allow(clippy::too_many_arguments)]
     fn owner_command(
         &self,
@@ -1841,10 +1849,16 @@ impl Gateway {
             return Ok(());
         }
         let actor = owner_actor();
+        // The read-only views (`owner_views`) reply in HTML, for their links.
+        let html = matches!(cmd, "tasks" | "task" | "cost");
         let reply = {
             let mut conn = store.conn();
+            let web = b.web.as_deref();
             let r = match cmd {
                 "status" => status(&conn, &b.name()),
+                "tasks" => owner_views::tasks(&conn, &b.name(), web),
+                "task" => owner_views::task(&conn, arg, web),
+                "cost" => owner_views::cost(&conn, &b.name(), web, now()),
                 "runtimes" => Ok(crate::runtime::render(&store.runtimes())),
                 "stop" => bot::change(&mut conn, &actor, &b.name(), "stop")
                     .map(|_| "stopping the live run; queued wakes are kept".to_string()),
@@ -1861,7 +1875,14 @@ impl Gateway {
                         .map(|(w, _)| format!("wake {w} queued"))
                 }
             };
-            r.unwrap_or_else(|e| format!("/{cmd}: {e:#}"))
+            r.unwrap_or_else(|e| {
+                let e = format!("/{cmd}: {e:#}");
+                if html {
+                    html_escape(&e)
+                } else {
+                    e
+                }
+            })
         };
         store.changed();
         let thread = m["message_thread_id"].as_i64();
@@ -1869,6 +1890,10 @@ impl Gateway {
             json!({"chat_id":chat,"text":reply,"reply_parameters":{"message_id":tg_id}});
         if let Some(t) = thread {
             params["message_thread_id"] = json!(t);
+        }
+        if html {
+            params["parse_mode"] = json!("HTML");
+            params["link_preview_options"] = json!({"is_disabled": true});
         }
         // The command already committed: a failed reply must not make the
         // update redeliver and repeat it.
@@ -1882,7 +1907,11 @@ impl Gateway {
                     &reply,
                     None,
                     json!([]),
-                    json!({"system": true}),
+                    if html {
+                        json!({"system": true, "html": true})
+                    } else {
+                        json!({"system": true})
+                    },
                 ) {
                     eprintln!("telegram: bot {}: record /{cmd} reply: {e:#}", b.name());
                 }

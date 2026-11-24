@@ -4350,6 +4350,69 @@ fn a_renamed_bot_keeps_its_telegram_bot_across_a_restart() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("renamed to chief"));
 }
 
+/// `/tasks`, `/task N` and `/cost` reply in HTML with links to the web
+/// pages, in the gateway like `/status` (no agent session needed), and
+/// neither wake the bot nor change anything.
+#[test]
+fn read_only_views_reply_without_waking_the_bot() {
+    let rig = Rig::new();
+    let id: i64 = rig
+        .srv()
+        .ok(&["add", "--project", "p", "--title", "Ship <it>"])
+        .trim()
+        .trim_start_matches('#')
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let before: i64 = rig
+        .db()
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    let cmds = [
+        "/tasks".to_string(),
+        format!("/task {id}"),
+        "/task".to_string(),
+        "/cost@cos_bot".to_string(),
+    ];
+    for (i, c) in cmds.iter().enumerate() {
+        rig.stub
+            .push(text_msg(500 + i as i64, 600 + i as i64, OWNER, OWNER, c));
+    }
+    rig.stub.wait_confirmed(503);
+    wait_for("4 replies", 20, || rig.sent_to(OWNER).len() >= 4);
+    let sent = rig.sent_to(OWNER);
+    let text = |i: usize| sent[i]["text"].as_str().unwrap().to_string();
+    let link = format!("<a href=\"{WEB}/?task={id}\">#{id}</a>");
+    assert_eq!(
+        text(0),
+        format!("bot cos: 1 open task\n{link} queued · p · Ship &lt;it&gt;")
+    );
+    assert!(
+        text(1).starts_with(&format!("{link} <b>Ship &lt;it&gt;</b>\nqueued · p")),
+        "{}",
+        text(1)
+    );
+    assert_eq!(text(2), "usage: /task N (a task id)");
+    assert!(
+        text(3).starts_with("bot cos cost, last 7 days: $0.00\nno runs\n<a href="),
+        "{}",
+        text(3)
+    );
+    for (i, p) in sent.iter().enumerate() {
+        assert_eq!(p["parse_mode"], "HTML", "{p}");
+        assert_eq!(p["reply_parameters"]["message_id"], 600 + i as i64);
+    }
+    assert!(rig.inbound().is_empty(), "{:?}", rig.inbound());
+    assert!(rig.message_wakes().is_empty());
+    let after: i64 = rig
+        .db()
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, after, "read-only commands write no task events");
+}
+
 #[test]
 fn command_menu_lists_the_routed_commands_for_the_owner_only() {
     let rig = Rig::new();
@@ -4388,7 +4451,9 @@ fn command_menu_lists_the_routed_commands_for_the_owner_only() {
         .iter()
         .map(|(c, _)| *c)
         .collect();
-    assert!(names.contains(&"runtimes"), "{names:?}");
+    for c in ["runtimes", "tasks", "task", "cost"] {
+        assert!(names.contains(&c), "{c} in {names:?}");
+    }
 
     // Every menu entry is routed: each gets a reply and none is stored as a
     // message or wakes the bot.
