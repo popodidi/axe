@@ -182,6 +182,61 @@ pub struct Config {
     /// `[forms]`: sealed forms (`sealed.rs`, `form.rs`).
     #[serde(default)]
     pub forms: Forms,
+    /// `[cli]`: the local CLI's skill refresh and release check (`skill.rs`,
+    /// `upgrade.rs`).
+    #[serde(default)]
+    pub cli: CliSection,
+}
+
+/// `[cli]`: how the local `axe` keeps itself and its skill current. Both
+/// default on; each also has an env switch (`AXE_SKILL_REFRESH`,
+/// `AXE_UPDATE_CHECK`, `0` or `false` turns it off).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliSection {
+    /// Rewrite an `axe skill install` copy that is older than this binary.
+    #[serde(default = "yes")]
+    pub skill_refresh: bool,
+    /// Check the latest GitHub release about once a day and print a hint.
+    #[serde(default = "yes")]
+    pub update_check: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for CliSection {
+    fn default() -> Self {
+        CliSection {
+            skill_refresh: true,
+            update_check: true,
+        }
+    }
+}
+
+/// Whether a `[cli]` switch is on: `$env` when set (`0`, `false`, `off` or
+/// `no` is off), else `[cli] <key>` in the config file, else on. Reads the
+/// file leniently: a missing or invalid config leaves the default.
+pub fn cli_switch(env: &str, key: &str) -> bool {
+    if let Some(v) = std::env::var_os(env).filter(|v| !v.is_empty()) {
+        let v = v.to_string_lossy().trim().to_ascii_lowercase();
+        return !matches!(v.as_str(), "0" | "false" | "off" | "no");
+    }
+    let Ok(path) = default_path() else {
+        return true;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(value) = text.parse::<toml::Table>() else {
+        return true;
+    };
+    value
+        .get("cli")
+        .and_then(|c| c.get(key))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
 }
 
 /// The static sealed form page every form link opens.

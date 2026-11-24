@@ -15,6 +15,8 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_TERM_COLOR=never
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# Embedded in the binary (`axe skill install`, crates/axe/build.rs).
+COPY skills/axe ./skills/axe
 COPY --from=web /src/web/out ./web/out
 # The commit `axe --version` reports (build.rs); the context has no `.git`.
 ARG GIT_COMMIT

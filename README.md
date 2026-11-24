@@ -26,9 +26,9 @@ for bots; `embed-ui` serves the dashboard from `web/` at `/` (build `web/`
 first, see [web/README.md](web/README.md)); `ts` generates the dashboard's
 TypeScript API types.
 
-Releases (`.github/workflows/release.yml`) publish a server image, a Linux
-binary tarball and the `skills/axe` tarball from a `vX.Y.Z` tag, with sha256
-sums; verify with `gh release download <tag> -R popodidi/axe && sha256sum -c
+Releases (`.github/workflows/release.yml`) publish a server image, Linux
+x86_64 and macOS arm64 binary tarballs and the `skills/axe` tarball from a
+`vX.Y.Z` tag, with sha256 sums; verify with `gh release download <tag> -R popodidi/axe && sha256sum -c
 SHA256SUMS`, or without a GitHub login `curl -LO
 https://github.com/popodidi/axe/releases/download/<tag>/<asset>`. Other
 platforms install from source with `--tag <tag>`.
@@ -38,6 +38,35 @@ commands or flags named here (`axe <command> --help` is authoritative for the
 binary you run). `axe --version` names the commit after the version (`axe
 0.4.0 (56305982f192)`) when the build knew it (`crates/axe/build.rs`), so a
 `main` build is distinct from the release it follows.
+
+### Keeping axe and its skill current
+
+Every binary embeds the agent skill in `skills/axe` (`crates/axe/build.rs`).
+`axe skill install` writes it to `~/.agents/skills/axe` (`--dir` elsewhere),
+links `~/.claude/skills/axe` to it when `~/.claude` exists and that path is
+free, and stamps the copy (`.axe-skill.json`: the binary's version and a hash
+of the files). Re-run it to refresh the skill without upgrading the binary;
+`axe skill status` compares the copy with the binary. Any other command
+rewrites a stamped, unedited copy at the default path that differs from the
+binary, with one line on stderr. A copy that is unstamped or edited since it
+was stamped is never replaced automatically: it gets a hint at most once a
+day, and `axe skill install --force` replaces it.
+
+`axe upgrade` replaces the running binary with the latest release
+(`--version vX.Y.Z` for another), checking the tarball against the release's
+sha256, then runs the new binary's `axe skill install`. `axe upgrade --check`
+only reports. A platform without a release binary gets the `cargo install
+--tag` command (`--cargo` runs it). On a terminal, commands check the latest
+release about once a day (cached under the user cache dir, `~/.cache/axe` on
+Linux) and print a hint when it is newer; never in an agent session
+(`$AXE_TASK` or `$AXE_BOT` set), and a network error only skips the hint.
+`skill.rs` and `upgrade.rs` hold the rules. To switch either off:
+
+```toml
+[cli]
+skill_refresh = false   # or AXE_SKILL_REFRESH=0
+update_check = false    # or AXE_UPDATE_CHECK=0
+```
 
 ## Quickstart
 
@@ -73,7 +102,9 @@ for a multi-repo run folder, `axe bot wake <name> --now --note ...`, then
 `axe dispatch`. The bot protocol is built in; bundles only add opinions.
 Telegram is optional. The `axe doc put` commands below read
 `skills/` and `bundles/` from a clone of this repository; `cargo install`
-leaves none, and the release skills tarball has `skills/axe` only.
+leaves none, and the release skills tarball has `skills/axe` only. For a
+local agent, `axe skill install` writes the binary's own copy of
+`skills/axe` (see [Keeping axe and its skill current](#keeping-axe-and-its-skill-current)).
 
 ## Not a workflow engine
 
@@ -430,7 +461,8 @@ at the repo's git root; from `repos/<r>`, run
 One TOML file, `$AXE_CONFIG` (default `~/.config/axe/config.toml`; built-in
 defaults when missing), read once at startup by both `axe server` and
 `axe dispatch`. The server uses `[server]`, `[telegram]`, `[metrics]`,
-`[blobs]`, `[docs]` and the agent names; the dispatcher uses the rest, so keep agent
+`[blobs]`, `[docs]` and the agent names; every local command reads `[cli]`;
+the dispatcher uses the rest, so keep agent
 names aligned when they run on different machines. Unknown keys fail validation.
 `crates/axe/src/config.rs` defines every table, default and check;
 `axe config` validates and prints the resolved file, including the built-in

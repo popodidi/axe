@@ -214,6 +214,57 @@ enum Cmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// The agent skill built into this binary: install it, show its state
+    ///
+    /// Other commands refresh a copy `axe skill install` wrote when this
+    /// binary is newer; `[cli] skill_refresh = false` or
+    /// `AXE_SKILL_REFRESH=0` turns that off
+    Skill {
+        #[command(subcommand)]
+        command: SkillCmd,
+    },
+    /// Replace this binary with the latest release, then refresh the skill
+    ///
+    /// Verifies the release's sha256 and swaps the binary in one rename. A
+    /// platform without a release binary gets the `cargo install` command.
+    /// Commands hint at a newer release once a day on a terminal;
+    /// `[cli] update_check = false` or `AXE_UPDATE_CHECK=0` turns that off
+    Upgrade {
+        /// A release tag, such as v0.6.0 (default: the latest release)
+        #[arg(long, value_name = "TAG")]
+        version: Option<String>,
+        /// Only report whether an upgrade is available
+        #[arg(long)]
+        check: bool,
+        /// Without a release binary for this platform, run the `cargo install`
+        #[arg(long)]
+        cargo: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Write the skill to ~/.agents/skills/axe and link ~/.claude/skills/axe
+    ///
+    /// Re-run to refresh it. Writes a stamp (`.axe-skill.json`) so later
+    /// commands can refresh it; an unstamped or edited copy needs --force.
+    /// The link is made when ~/.claude exists and the link path is free
+    Install {
+        /// Install here instead of ~/.agents/skills/axe
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Replace a copy axe did not install, or one edited since
+        #[arg(long)]
+        force: bool,
+        /// Do not link ~/.claude/skills/axe
+        #[arg(long)]
+        no_link: bool,
+    },
+    /// Show the installed skill's state against this binary
+    Status {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3833,6 +3884,8 @@ const HELP_SECTIONS: &[(&str, &[&str])] = &[
             "web",
             "usage",
             "stats",
+            "skill",
+            "upgrade",
         ],
     ),
 ];
@@ -3877,6 +3930,49 @@ pub(crate) fn command() -> clap::Command {
 
 pub fn run() -> Result<()> {
     let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
+    match &cli.cmd {
+        Cmd::Skill { command } => return run_skill(command),
+        Cmd::Upgrade {
+            version,
+            check,
+            cargo,
+        } => {
+            return crate::upgrade::upgrade(&crate::upgrade::Options {
+                version: version.clone(),
+                check: *check,
+                cargo: *cargo,
+            })
+        }
+        _ => {}
+    }
+    crate::skill::auto_refresh();
+    // Long-running commands never reach the hint.
+    let check = match cli.cmd {
+        Cmd::Server { .. } | Cmd::Dispatch { .. } => crate::upgrade::Check::Off,
+        _ => crate::upgrade::Check::start(),
+    };
+    let result = run_cmd(&cli);
+    check.finish();
+    result
+}
+
+fn run_skill(command: &SkillCmd) -> Result<()> {
+    match command {
+        SkillCmd::Install {
+            dir,
+            force,
+            no_link,
+        } => {
+            for line in crate::skill::install(dir.as_deref(), *force, *no_link)? {
+                println!("{line}");
+            }
+        }
+        SkillCmd::Status { dir } => println!("{}", crate::skill::status(dir.as_deref())?),
+    }
+    Ok(())
+}
+
+fn run_cmd(cli: &Cli) -> Result<()> {
     let client = || Client::from_env(cli.actor.clone()).retrying(crate::client::retry_budget());
 
     match &cli.cmd {
@@ -4163,6 +4259,7 @@ pub fn run() -> Result<()> {
             }
         }
         Cmd::Usage { command } => run_usage(&client(), command)?,
+        Cmd::Skill { .. } | Cmd::Upgrade { .. } => unreachable!("handled in run"),
         Cmd::Stats {
             project,
             since,

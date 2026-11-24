@@ -26,9 +26,11 @@ pub mod run_workspace;
 pub mod schedule;
 pub mod sealed;
 pub mod server;
+pub mod skill;
 pub mod subscription;
 #[cfg(feature = "telegram")]
 pub mod telegram;
+pub mod upgrade;
 pub mod usage;
 #[cfg(feature = "embed-ui")]
 pub mod web;
