@@ -213,16 +213,26 @@ command: string,
  * Where it runs: absolute, or relative to the bot's run folder (the
  * default).
  */
-cwd?: string, env?: { [key in string]: string }, restart: string, };
+cwd?: string, env?: { [key in string]: string }, 
+/**
+ * `never` for a scheduled service.
+ */
+restart: string, 
+/**
+ * Set: a scheduled service, run at these times instead of kept running.
+ */
+schedule?: ServiceSchedule, };
 
 export type ServiceStatus = { 
 /**
  * `starting`, `running`, `backoff` (waiting to restart), `stopping`,
- * `stopped` or `exited` (done, not restarted by its policy).
+ * `stopped` or `exited` (done, not restarted by its policy); a scheduled
+ * service is `scheduled` between runs.
  */
 state: string, pid?: number, 
 /**
- * When the current (or last) process started.
+ * When the current (or last) process started: a scheduled service's
+ * last run.
  */
 started_at?: string, 
 /**
@@ -235,7 +245,8 @@ restarts: number,
  */
 failures: number, 
 /**
- * How the last process ended: `exit N` or `signal N`.
+ * How the last process ended: `exit N` or `signal N`, or for a
+ * scheduled run past its timeout `timeout after Ns (signal N)`.
  */
 last_exit?: string, 
 /**
@@ -251,6 +262,14 @@ crash_loop_since?: string,
  */
 error?: string, 
 /**
+ * A scheduled service: when its last run ended.
+ */
+finished_at?: string, 
+/**
+ * A scheduled service: when it runs next.
+ */
+next_run_at?: string, 
+/**
  * The log file on the node's machine.
  */
 log?: string, 
@@ -258,5 +277,16 @@ log?: string,
  * The node that reported it, and when.
  */
 dispatcher?: string, reported_at?: string, };
+
+export type ServiceSchedule = { cron: string, timezone: string, 
+/**
+ * A run still going this long is stopped (SIGTERM, then SIGKILL after
+ * the node's stop grace) and counts as failed.
+ */
+timeout_seconds: number, 
+/**
+ * One run at node start when a run time passed while it was down.
+ */
+catch_up: boolean, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;

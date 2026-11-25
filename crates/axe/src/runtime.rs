@@ -1,4 +1,4 @@
-//! Runtimes: a harness plus exactly one login, held by the dispatcher.
+//! Runtimes: a harness plus exactly one login, held by the node.
 //!
 //! With `[runtimes] dir` set, each `<dir>/<name>/runtime.toml` is one runtime:
 //! its harness, the `[agents.*]` command template that drives it and the login

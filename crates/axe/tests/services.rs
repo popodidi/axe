@@ -326,7 +326,7 @@ fn migrates_v21_to_the_services_table_and_keeps_it_after_downgrade() {
     let v: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 22);
+    assert_eq!(v, 23);
     let new: axe::service::NewService =
         serde_json::from_value(json!({"command":"sleep 1"})).unwrap();
     axe::service::put(&mut c, &db::Actor::new("t"), "b", "s", &new).unwrap();
@@ -334,6 +334,160 @@ fn migrates_v21_to_the_services_table_and_keeps_it_after_downgrade() {
     drop(c);
     let c = db::open(&path).unwrap();
     assert_eq!(axe::service::list(&c, None).unwrap().len(), 1);
+}
+
+#[test]
+fn migrates_v22_to_the_schedule_column_and_keeps_it_after_downgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v22.db");
+    let mut c = db::open(&path).unwrap();
+    axe::bot::create(
+        &mut c,
+        &db::Actor::new("test"),
+        &serde_json::from_value(json!({"name":"b","project":"a","agent":"claude"})).unwrap(),
+        1_800_000_000,
+    )
+    .unwrap();
+    let long: axe::service::NewService =
+        serde_json::from_value(json!({"command":"sleep 1"})).unwrap();
+    axe::service::put(&mut c, &db::Actor::new("t"), "b", "long", &long).unwrap();
+    c.execute_batch("ALTER TABLE services DROP COLUMN schedule; PRAGMA user_version=22;")
+        .unwrap();
+    drop(c);
+    let mut c = db::open(&path).unwrap();
+    let v: i64 = c
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 23);
+    assert_eq!(
+        axe::service::get(&c, "b", "long").unwrap().spec.schedule,
+        None
+    );
+    // A scheduled service is stored `restart never`, whatever it was sent with.
+    let new: axe::service::NewService = serde_json::from_value(
+        json!({"command":"true","schedule":{"cron":"*/5 * * * *","timezone":"Asia/Taipei"}}),
+    )
+    .unwrap();
+    let s = axe::service::put(&mut c, &db::Actor::new("t"), "b", "cron", &new).unwrap();
+    assert_eq!((s.kind(), s.spec.restart.as_str()), ("scheduled", "never"));
+    c.pragma_update(None, "user_version", 22).unwrap();
+    drop(c);
+    let c = db::open(&path).unwrap();
+    let s = axe::service::get(&c, "b", "cron").unwrap();
+    let sch = s.spec.schedule.unwrap();
+    assert_eq!(
+        (
+            sch.cron.as_str(),
+            sch.timezone.as_str(),
+            sch.timeout_seconds,
+            sch.catch_up
+        ),
+        ("*/5 * * * *", "Asia/Taipei", 3600, true)
+    );
+}
+
+#[test]
+fn a_scheduled_service_catches_up_once_reports_its_run_and_a_node_restart_replays_nothing() {
+    let r = Rig::new("");
+    let runs = r.path("runs");
+    let cmd = format!(
+        "echo run >> {}; echo ran-$AXE_SERVICE; exit 3",
+        runs.display()
+    );
+    // --restart is for long-running services only.
+    assert!(!r
+        .srv
+        .run(&[
+            "service",
+            "add",
+            "s",
+            "--bot",
+            "b",
+            "--command",
+            &cmd,
+            "--cron",
+            "* * * * *",
+            "--restart",
+            "always",
+        ])
+        .status
+        .success());
+    // Yearly: no run time comes during the test, so a run is the catch-up.
+    r.srv.ok(&[
+        "service",
+        "add",
+        "s",
+        "--bot",
+        "b",
+        "--command",
+        &cmd,
+        "--cron",
+        "0 0 1 1 *",
+        "--timeout",
+        "30s",
+    ]);
+    let v = r.service();
+    assert_eq!(v["restart"], "never");
+    assert_eq!(
+        v["schedule"],
+        json!({"cron":"0 0 1 1 *","timezone":"UTC","timeout_seconds":30,"catch_up":true})
+    );
+    // Declared long ago, never run: the node missed a run time.
+    let c = rusqlite::Connection::open(&r.srv.db).unwrap();
+    c.busy_timeout(Duration::from_secs(5)).unwrap();
+    c.execute("UPDATE services SET updated_at='2024-06-01T00:00:00Z'", [])
+        .unwrap();
+    drop(c);
+    let mut d = r.dispatcher();
+    wait_for("catch-up run", 20, || lines(&runs).len() == 1);
+    wait_for("reported run", 10, || {
+        r.state() == "scheduled" && r.service()["status"]["finished_at"].is_string()
+    });
+    let st = r.service()["status"].clone();
+    assert_eq!(st["last_exit"], "exit 3");
+    assert!(
+        st["next_run_at"]
+            .as_str()
+            .unwrap()
+            .ends_with("-01-01T00:00:00Z"),
+        "{st}"
+    );
+    let logs = r.srv.ok(&["service", "logs", "s", "--bot", "b", "-n", "5"]);
+    assert!(
+        logs.contains("ran-s") && logs.contains("exit 3 ---"),
+        "{logs}"
+    );
+    let show = r.srv.ok(&["bot", "show", "b"]);
+    assert!(
+        show.contains("s (scheduled 0 0 1 1 * UTC): scheduled, last run ")
+            && show.contains("ago: exit 3, next run in "),
+        "{show}"
+    );
+    let list = r.srv.ok(&["service", "list", "--bot", "b"]);
+    assert!(list.contains("[cron 0 0 1 1 * UTC, timeout 30s]"), "{list}");
+    // The failed run reaches the owning bot (subscribed to failures).
+    let failed = || {
+        let w: Vec<Value> = serde_json::from_value(r.srv.get("/api/bots/b/wakes")).unwrap();
+        w.iter().any(|w| {
+            w["body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("service failed: b/s: exit 3")
+        })
+    };
+    wait_for("failure event", 20, failed);
+    // A node restart: the run is recorded, so nothing is replayed.
+    signal(&d, libc::SIGTERM);
+    assert!(d.0.wait().unwrap().success());
+    let before = r.service()["status"]["reported_at"].clone();
+    let mut d = r.dispatcher();
+    wait_for("report after restart", 20, || {
+        r.service()["status"]["reported_at"] != before && r.state() == "scheduled"
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(lines(&runs).len(), 1, "no replay");
+    signal(&d, libc::SIGTERM);
+    assert!(d.0.wait().unwrap().success());
 }
 
 #[test]

@@ -91,7 +91,7 @@ impl Form {
 
 /// The node's side of a delivery, as the relay reports it.
 pub enum Delivery {
-    /// `{"delivered": ...}` from the dispatcher.
+    /// `{"delivered": ...}` from the node.
     Done(Value),
     /// The node refused the reply (`{"error": ...}`).
     Refused(String),
@@ -233,7 +233,7 @@ impl Forms {
         Some(f.clone())
     }
 
-    /// Submitted forms still waiting for a dispatcher.
+    /// Submitted forms still waiting for a node.
     pub fn undelivered(&self) -> Vec<String> {
         self.lock()
             .values()

@@ -1,5 +1,5 @@
 //! Task fields (owner, repos, labels) through the CLI and API, and the run
-//! workspace a task with repos gets from the dispatcher.
+//! workspace a task with repos gets from the node.
 mod common;
 
 use std::path::{Path, PathBuf};

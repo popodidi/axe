@@ -726,7 +726,7 @@ impl Dispatcher {
 
     /// Publishes the admission status to the server after each new resource
     /// sample, and at least every `REPORT_EVERY`, so `axe admission` and
-    /// `axe task show` describe this dispatcher. Best effort: a failed report only
+    /// `axe task show` describe this node. Best effort: a failed report only
     /// lets the server's copy go stale, which it then reports as unknown.
     fn report_admission(&mut self) {
         let samples = self.gate.as_ref().map_or(0, |g| g.samples());
@@ -1652,6 +1652,8 @@ impl Dispatcher {
                 }
             }
         }
+        self.services
+            .hold_runs(self.store.draining.load(Ordering::SeqCst));
         let notices = self.services.tick(now);
         self.service_notices.extend(notices);
         self.send_service_notices();

@@ -2,7 +2,7 @@
 // `/api/bot-runs/:id/meta`) reply and the facts derived from it, plus the
 // time and size formats the trace and the panel share.
 
-/** A file recorded beside the run's log on the dispatcher. */
+/** A file recorded beside the run's log on the node. */
 export type RunFile = {
   text?: string;
   truncated?: boolean;

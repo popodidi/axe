@@ -1105,7 +1105,7 @@ pub struct Session {
     pub resume_count: i64,
 }
 
-/// What a claim hands the dispatcher. A replayed claim returns the same payload.
+/// What a claim hands the node. A replayed claim returns the same payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claimed {
     pub run: i64,

@@ -49,6 +49,7 @@ fn rig() -> (tempfile::TempDir, Connection) {
         cwd: None,
         env: BTreeMap::new(),
         restart: "on-failure".into(),
+        schedule: None,
     };
     service::put(&mut c, &who(), "b", "s", &svc).unwrap();
     (dir, c)

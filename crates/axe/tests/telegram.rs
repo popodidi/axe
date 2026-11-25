@@ -1489,6 +1489,7 @@ fn owner_commands_are_handled_without_waking_the_bot() {
             cwd: None,
             env: Default::default(),
             restart: "always".into(),
+            schedule: None,
         };
         axe::service::put(&mut conn, &axe::db::Actor::new("t"), "cos", "feed", &new).unwrap();
     }

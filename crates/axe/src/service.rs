@@ -10,6 +10,14 @@
 //! between two reports is also a set of service events ([`events`]) for the
 //! bots subscribed to them (`subscription.rs`); a new service subscribes its
 //! owning bot to its failures.
+//!
+//! A service with a [`Schedule`] is a scheduled service (the crontab of the
+//! node, next to the long-running ones that are its systemd): the node runs
+//! it at each cron time, one run at a time, kills a run past its timeout and
+//! reports the last run's exit, end and the next run. Runs missed while the
+//! node was down are not replayed: when the node starts and a run time passed
+//! since the last run, it runs once at once (the catch-up, unless the
+//! schedule turns it off), then follows the schedule.
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Result};
@@ -20,7 +28,7 @@ use serde_json::{json, Value};
 use crate::bot;
 use crate::db::{self, Actor};
 
-/// v22: additive, so a database lowered to `user_version` 21 still opens with
+/// v22 (v23 adds `schedule`, [`migrate`]): additive, so a database lowered to `user_version` 21 still opens with
 /// that binary and upgrades again in place. `status` is the JSON object the
 /// dispatcher last reported ([`Status`]).
 pub const SCHEMA: &str = "
@@ -33,6 +41,22 @@ CREATE TABLE IF NOT EXISTS services (
  UNIQUE (bot_id, name)
 );";
 
+/// v23: `services.schedule`, the [`Schedule`] as JSON, NULL for a
+/// long-running service. Additive and idempotent, so a database lowered to
+/// `user_version` 22 still opens with that binary (which runs no schedule:
+/// a scheduled service is stored `restart never`, so it would run once).
+pub fn migrate(tx: &rusqlite::Transaction) -> Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('services') WHERE name='schedule')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        tx.execute_batch("ALTER TABLE services ADD COLUMN schedule TEXT")?;
+    }
+    Ok(())
+}
+
 /// Restart policies: after any exit, after a failure (non-zero exit or a
 /// signal), or never.
 pub const RESTARTS: [&str; 3] = ["always", "on-failure", "never"];
@@ -42,6 +66,57 @@ pub const VALUE_MAX: usize = 4096;
 pub const ENV_MAX: usize = 64;
 /// Most services one bot declares.
 pub const PER_BOT_MAX: usize = 16;
+/// A scheduled run's timeout when the schedule sets none, and the longest.
+pub const TIMEOUT_DEFAULT: u64 = 3600;
+pub const TIMEOUT_MAX: u64 = 86_400;
+
+/// When a scheduled service runs: a standard five-field cron in an IANA time
+/// zone (as routines), with a timeout per run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "ServiceSchedule"))]
+#[serde(deny_unknown_fields)]
+pub struct Schedule {
+    pub cron: String,
+    #[serde(default = "utc")]
+    pub timezone: String,
+    /// A run still going this long is stopped (SIGTERM, then SIGKILL after
+    /// the node's stop grace) and counts as failed.
+    #[serde(default = "timeout_default")]
+    pub timeout_seconds: u64,
+    /// One run at node start when a run time passed while it was down.
+    #[serde(default = "yes")]
+    pub catch_up: bool,
+}
+
+fn utc() -> String {
+    "UTC".into()
+}
+fn timeout_default() -> u64 {
+    TIMEOUT_DEFAULT
+}
+fn yes() -> bool {
+    true
+}
+
+impl Schedule {
+    pub fn validate(&self) -> Result<()> {
+        crate::routine::parse_cron(&self.cron, &self.timezone)?;
+        if !(1..=TIMEOUT_MAX).contains(&self.timeout_seconds) {
+            bail!("timeout must be 1..={TIMEOUT_MAX} seconds");
+        }
+        Ok(())
+    }
+
+    /// The first run time after epoch `now`.
+    pub fn next_after(&self, now: i64) -> Result<i64> {
+        crate::routine::next_after(&self.cron, &self.timezone, now)
+    }
+
+    /// The last run time at or before epoch `now`.
+    pub fn latest_at(&self, now: i64) -> Result<i64> {
+        crate::routine::latest_at(&self.cron, &self.timezone, now)
+    }
+}
 
 /// What a declaration sets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,8 +133,13 @@ pub struct NewService {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<BTreeMap<String, String>>", optional))]
     pub env: BTreeMap<String, String>,
+    /// `never` for a scheduled service.
     #[serde(default = "on_failure")]
     pub restart: String,
+    /// Set: a scheduled service, run at these times instead of kept running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub schedule: Option<Schedule>,
 }
 
 fn on_failure() -> String {
@@ -106,6 +186,12 @@ impl NewService {
                 bail!("env {k}: the value must be at most {VALUE_MAX} bytes without NUL");
             }
         }
+        if let Some(s) = &self.schedule {
+            s.validate()?;
+            if self.restart != "never" {
+                bail!("a scheduled service has no restart policy (restart never)");
+            }
+        }
         Ok(())
     }
 }
@@ -115,12 +201,14 @@ impl NewService {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "ServiceStatus"))]
 pub struct Status {
     /// `starting`, `running`, `backoff` (waiting to restart), `stopping`,
-    /// `stopped` or `exited` (done, not restarted by its policy).
+    /// `stopped` or `exited` (done, not restarted by its policy); a scheduled
+    /// service is `scheduled` between runs.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub pid: Option<u32>,
-    /// When the current (or last) process started.
+    /// When the current (or last) process started: a scheduled service's
+    /// last run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub started_at: Option<String>,
@@ -131,7 +219,8 @@ pub struct Status {
     /// it did not ask for, and starts that failed.
     #[serde(default)]
     pub failures: u64,
-    /// How the last process ended: `exit N` or `signal N`.
+    /// How the last process ended: `exit N` or `signal N`, or for a
+    /// scheduled run past its timeout `timeout after Ns (signal N)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub last_exit: Option<String>,
@@ -147,6 +236,14 @@ pub struct Status {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub error: Option<String>,
+    /// A scheduled service: when its last run ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub finished_at: Option<String>,
+    /// A scheduled service: when it runs next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub next_run_at: Option<String>,
     /// The log file on the node's machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -184,11 +281,14 @@ impl Service {
         format!("{}/{}", self.bot, self.name)
     }
 
-    /// `long-running`; scheduled (cron) services are the other kind, once
-    /// they exist. The web Services page (`web/lib/services.ts`) reads it
-    /// the same way.
+    /// `long-running`, or `scheduled` with a schedule. The web Services
+    /// page (`web/lib/services.ts`) reads it the same way.
     pub fn kind(&self) -> &'static str {
-        "long-running"
+        if self.spec.schedule.is_some() {
+            "scheduled"
+        } else {
+            "long-running"
+        }
     }
 
     /// The state a person reads: `crash-looping` while in a crash loop,
@@ -218,9 +318,33 @@ impl Service {
                 .map(|t| crate::board::age(now - t))
         };
         let state = self.display_state();
-        let mut parts = vec![format!("{} ({}): {state}", self.name, self.kind())];
+        let kind = match &self.spec.schedule {
+            Some(s) => format!("scheduled {} {}", s.cron, s.timezone),
+            None => self.kind().to_string(),
+        };
+        let mut parts = vec![format!("{} ({kind}): {state}", self.name)];
         if !self.enabled && state != "stopped" {
             parts.push("turned off".into());
+        }
+        if self.spec.schedule.is_some() {
+            if let Some(at) = ago(&st.started_at) {
+                let run = if state == "running" {
+                    format!("running {at}")
+                } else {
+                    format!(
+                        "last run {at} ago: {}",
+                        st.last_exit.as_deref().unwrap_or("no exit")
+                    )
+                };
+                parts.push(run);
+            }
+            if let Some(at) = st.next_run_at.as_deref().and_then(bot::epoch_of) {
+                if self.enabled {
+                    parts.push(format!("next run in {}", crate::board::age(at - now)));
+                }
+            }
+            self.flags(now, &mut parts);
+            return parts.join(", ");
         }
         if state == "running" {
             if let Some(up) = ago(&st.started_at) {
@@ -239,6 +363,13 @@ impl Service {
         if let Some(e) = &st.last_exit {
             parts.push(format!("last {e}"));
         }
+        self.flags(now, &mut parts);
+        parts.join(", ")
+    }
+
+    /// The error and a stale report, ending [`Self::summary`].
+    fn flags(&self, now: i64, parts: &mut Vec<String>) {
+        let st = &self.status;
         if let Some(e) = &st.error {
             parts.push(format!("error: {e}"));
         }
@@ -251,7 +382,6 @@ impl Service {
                 ));
             }
         }
-        parts.join(", ")
     }
 }
 
@@ -262,7 +392,7 @@ pub const STALE_SECONDS: i64 = 60;
 /// `home` as [`bot::Bot::home`]: the name before the bot's first rename, else its name.
 const SELECT: &str = "SELECT b.name, (SELECT json_extract(e.body,'$.from') FROM bot_events e
  WHERE e.bot_id=b.id AND e.kind='rename' ORDER BY e.id LIMIT 1), s.name, s.command, s.cwd, s.env, s.restart,
- s.enabled, s.status, s.created_at, s.updated_at FROM services s JOIN bots b ON b.id=s.bot_id";
+ s.enabled, s.status, s.created_at, s.updated_at, s.schedule FROM services s JOIN bots b ON b.id=s.bot_id";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Service> {
     let json_col = |i: usize, raw: String| -> rusqlite::Result<Value> {
@@ -274,6 +404,10 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Service> {
     let home: Option<String> = r.get(1)?;
     let env = json_col(5, r.get(5)?)?;
     let status = json_col(8, r.get(8)?)?;
+    let schedule = match r.get::<_, Option<String>>(11)? {
+        Some(raw) => serde_json::from_value(json_col(11, raw)?).ok(),
+        None => None,
+    };
     Ok(Service {
         home: home.unwrap_or_else(|| bot.clone()),
         bot,
@@ -283,6 +417,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Service> {
             cwd: r.get(4)?,
             env: serde_json::from_value(env).unwrap_or_default(),
             restart: r.get(6)?,
+            schedule,
         },
         enabled: r.get(7)?,
         status: serde_json::from_value(status).unwrap_or_default(),
@@ -338,11 +473,20 @@ pub fn put(
     new: &NewService,
 ) -> Result<Service> {
     db::validate_name("service", name)?;
+    let mut new = new.clone();
+    if new.schedule.is_some() {
+        new.restart = "never".into();
+    }
     new.validate()?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = bot::get(&tx, bot)?;
     let now = db::now();
     let env = serde_json::to_string(&new.env)?;
+    let schedule = new
+        .schedule
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let old = find(&tx, b.id, name)?;
     if old.is_none() {
         let count: i64 = tx.query_row(
@@ -355,11 +499,12 @@ pub fn put(
         }
     }
     tx.execute(
-        "INSERT INTO services (bot_id, name, command, cwd, env, restart, enabled, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,1,?7,?7)
+        "INSERT INTO services (bot_id, name, command, cwd, env, restart, enabled, created_at, updated_at, schedule)
+         VALUES (?1,?2,?3,?4,?5,?6,1,?7,?7,?8)
          ON CONFLICT(bot_id, name) DO UPDATE SET command=excluded.command, cwd=excluded.cwd,
-           env=excluded.env, restart=excluded.restart, updated_at=excluded.updated_at",
-        params![b.id, name, new.command, new.cwd, env, new.restart, now],
+           env=excluded.env, restart=excluded.restart, updated_at=excluded.updated_at,
+           schedule=excluded.schedule",
+        params![b.id, name, new.command, new.cwd, env, new.restart, now, schedule],
     )?;
     if old.is_none() {
         let id: i64 = tx.query_row(
@@ -376,7 +521,8 @@ pub fn put(
         actor,
         "service",
         &json!({"service":name,"action":action,"command":new.command,"cwd":new.cwd,
-            "env":new.env.keys().collect::<Vec<_>>(),"restart":new.restart})
+            "env":new.env.keys().collect::<Vec<_>>(),"restart":new.restart,
+            "schedule":new.schedule})
         .to_string(),
     )?;
     let s = find(&tx, b.id, name)?.expect("service just written");
@@ -507,8 +653,8 @@ pub fn report(
 /// The service events between two reported statuses, oldest kind first, each
 /// with a detail: `failed` (counted by `failures`, which restarts at 0 with
 /// the node), `crash_loop`, `run_finished` (it ended and is not
-/// restarted), `stopped` and `started` (a new process, seen by its start
-/// time).
+/// restarted, or a scheduled run ended: a new `finished_at`), `stopped` and
+/// `started` (a new process, seen by its start time).
 pub fn events(old: &Status, new: &Status) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     let failures = if new.failures >= old.failures {
@@ -536,7 +682,8 @@ pub fn events(old: &Status, new: &Status) -> Vec<(&'static str, String)> {
         ));
     }
     let new_run = new.started_at != old.started_at;
-    if new.state == "exited" && (old.state != "exited" || new_run) {
+    let scheduled_end = new.finished_at.is_some() && new.finished_at != old.finished_at;
+    if (new.state == "exited" && (old.state != "exited" || new_run)) || scheduled_end {
         out.push((
             "run_finished",
             new.last_exit.clone().unwrap_or_else(|| "exited".into()),
@@ -652,6 +799,7 @@ mod tests {
                 cwd: None,
                 env: BTreeMap::new(),
                 restart: "on-failure".into(),
+                schedule: None,
             },
             enabled,
             status,
@@ -716,6 +864,97 @@ mod tests {
         assert_eq!(
             svc(true, s).summary(NOW),
             "feed (long-running): running, up 1h, 0 restarts, no report from vm for 10m"
+        );
+    }
+
+    fn sched(cron: &str) -> Option<Schedule> {
+        Some(Schedule {
+            cron: cron.into(),
+            timezone: "Asia/Taipei".into(),
+            timeout_seconds: 60,
+            catch_up: true,
+        })
+    }
+
+    #[test]
+    fn a_scheduled_service_reads_its_last_run_exit_and_next_run() {
+        let mut s = st("scheduled");
+        s.started_at = Some(bot::ts(NOW - 180));
+        s.finished_at = Some(bot::ts(NOW - 170));
+        s.last_exit = Some("exit 0".into());
+        s.next_run_at = Some(bot::ts(NOW + 120));
+        let mut v = svc(true, s);
+        v.spec.schedule = sched("*/5 * * * *");
+        v.spec.restart = "never".into();
+        assert_eq!(v.kind(), "scheduled");
+        assert_eq!(
+            v.summary(NOW),
+            "feed (scheduled */5 * * * * Asia/Taipei): scheduled, last run 3m ago: exit 0, next run in 2m"
+        );
+        v.status.state = "running".into();
+        v.status.started_at = Some(bot::ts(NOW - 5));
+        assert!(v
+            .summary(NOW)
+            .contains(": running, running 5s, next run in 2m"));
+        v.enabled = false;
+        v.status.state = "stopped".into();
+        assert_eq!(
+            v.summary(NOW),
+            "feed (scheduled */5 * * * * Asia/Taipei): stopped, last run 5s ago: exit 0"
+        );
+    }
+
+    #[test]
+    fn a_schedule_is_validated_and_needs_restart_never() {
+        let mut n = NewService {
+            command: "true".into(),
+            cwd: None,
+            env: BTreeMap::new(),
+            restart: "never".into(),
+            schedule: sched("0 9 * * 1-5"),
+        };
+        n.validate().unwrap();
+        n.restart = "always".into();
+        assert!(n
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("restart never"));
+        n.restart = "never".into();
+        n.schedule = sched("@daily");
+        assert!(n.validate().is_err());
+        n.schedule = sched("0 9 * * *");
+        n.schedule.as_mut().unwrap().timezone = "Mars/Base".into();
+        assert!(n.validate().is_err());
+        n.schedule = sched("0 9 * * *");
+        n.schedule.as_mut().unwrap().timeout_seconds = 0;
+        assert!(n.validate().is_err());
+        // Defaults: UTC, an hour, catch-up on.
+        let d: Schedule = serde_json::from_value(json!({"cron":"* * * * *"})).unwrap();
+        assert_eq!(
+            (d.timezone.as_str(), d.timeout_seconds, d.catch_up),
+            ("UTC", TIMEOUT_DEFAULT, true)
+        );
+    }
+
+    #[test]
+    fn a_scheduled_run_that_ended_is_a_run_finished_event_and_a_failure_a_failed_one() {
+        let mut old = st("scheduled");
+        old.started_at = Some(bot::ts(NOW - 60));
+        old.finished_at = Some(bot::ts(NOW - 59));
+        let mut new = old.clone();
+        assert!(events(&old, &new).is_empty(), "the same run");
+        new.started_at = Some(bot::ts(NOW - 2));
+        new.finished_at = Some(bot::ts(NOW - 1));
+        new.last_exit = Some("timeout after 60s (signal 15)".into());
+        new.failures = 1;
+        let e = events(&old, &new);
+        assert_eq!(
+            e,
+            [
+                ("failed", "timeout after 60s (signal 15)".to_string()),
+                ("run_finished", "timeout after 60s (signal 15)".to_string())
+            ]
         );
     }
 }

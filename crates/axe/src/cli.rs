@@ -1854,7 +1854,15 @@ fn run_repo(c: &Client, command: RepoCmd) -> Result<()> {
 enum ServiceCmd {
     /// Declare a service, or replace its definition (a running one restarts
     /// with it). A new service starts at once. Env values are stored on the
-    /// server in plain text: keep secrets in sealed forms ($AXE_SECRETS_DIR)
+    /// server in plain text: keep secrets in sealed forms ($AXE_SECRETS_DIR).
+    ///
+    /// With --cron it is a scheduled service instead: the node runs it at
+    /// each cron time (one run at a time; a run time while the last run is
+    /// still going is skipped), stops a run past --timeout (SIGTERM, then
+    /// SIGKILL) and counts it failed, as a non-zero exit. Runs missed while
+    /// the node was down are not replayed: one catch-up run when the node
+    /// starts, unless --no-catch-up. A changed definition applies after the
+    /// current run
     Add {
         name: String,
         /// The shell command (`sh -c`); it should run in the foreground
@@ -1867,9 +1875,22 @@ enum ServiceCmd {
         /// An environment variable, KEY=VALUE (repeat)
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
-        #[arg(long, default_value = "on-failure",
+        /// Long-running only [default: on-failure]
+        #[arg(long, conflicts_with = "cron",
             value_parser = PossibleValuesParser::new(crate::service::RESTARTS))]
-        restart: String,
+        restart: Option<String>,
+        /// Run on this schedule: five numeric cron fields, e.g. "*/5 * * * *"
+        #[arg(long)]
+        cron: Option<String>,
+        /// The cron's IANA time zone
+        #[arg(long, requires = "cron", default_value = "UTC")]
+        timezone: String,
+        /// Longest run, e.g. 90s, 10m, 1h [default: 1h]
+        #[arg(long, requires = "cron", value_parser = parse_service_timeout)]
+        timeout: Option<u64>,
+        /// No catch-up run at node start for a run time missed while down
+        #[arg(long, requires = "cron")]
+        no_catch_up: bool,
         #[arg(long, env = "AXE_BOT")]
         bot: String,
     },
@@ -1914,6 +1935,18 @@ enum ServiceCmd {
     },
 }
 
+/// A scheduled run's timeout (`90s`, `10m`, `2h`, as `bot::parse_duration`).
+fn parse_service_timeout(s: &str) -> std::result::Result<u64, String> {
+    let secs = crate::bot::parse_duration(s).map_err(|e| format!("{e:#}"))?;
+    match u64::try_from(secs) {
+        Ok(n) if (1..=crate::service::TIMEOUT_MAX).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "must be 1s..{}h",
+            crate::service::TIMEOUT_MAX / 3600
+        )),
+    }
+}
+
 fn format_service(s: &crate::service::Service) -> String {
     let st = &s.status;
     let state = match (s.enabled, st.state.as_str()) {
@@ -1943,10 +1976,26 @@ fn format_service(s: &crate::service::Service) -> String {
     if let Some(at) = &st.crash_loop_since {
         line.push_str(&format!(" CRASH LOOP since {at}"));
     }
+    if let Some(at) = &st.finished_at {
+        line.push_str(&format!(" ended {at}"));
+    }
+    if let Some(at) = st.next_run_at.as_ref().filter(|_| s.enabled) {
+        line.push_str(&format!(" next run {at}"));
+    }
     if let Some(e) = &st.error {
         line.push_str(&format!(" error: {e}"));
     }
-    line.push_str(&format!("\t{} [{}]", s.spec.command, s.spec.restart));
+    let how = match &s.spec.schedule {
+        Some(c) => format!(
+            "cron {} {}, timeout {}s{}",
+            c.cron,
+            c.timezone,
+            c.timeout_seconds,
+            if c.catch_up { "" } else { ", no catch-up" }
+        ),
+        None => s.spec.restart.clone(),
+    };
+    line.push_str(&format!("\t{} [{how}]", s.spec.command));
     line
 }
 
@@ -1963,8 +2012,22 @@ fn run_service(c: &Client, command: ServiceCmd) -> Result<()> {
             cwd,
             env,
             restart,
+            cron,
+            timezone,
+            timeout,
+            no_catch_up,
             bot,
         } => {
+            let schedule = cron.map(|cron| crate::service::Schedule {
+                cron,
+                timezone,
+                timeout_seconds: timeout.unwrap_or(crate::service::TIMEOUT_DEFAULT),
+                catch_up: !no_catch_up,
+            });
+            let restart = match (&schedule, restart) {
+                (Some(_), _) => "never".to_string(),
+                (None, r) => r.unwrap_or_else(|| "on-failure".into()),
+            };
             let mut vars = std::collections::BTreeMap::new();
             for kv in env {
                 let Some((k, v)) = kv.split_once('=') else {
@@ -1977,6 +2040,7 @@ fn run_service(c: &Client, command: ServiceCmd) -> Result<()> {
                 cwd,
                 env: vars,
                 restart,
+                schedule,
             };
             new.validate()?;
             let s: Service = c.send("PUT", &path(&bot, &name)?, json!({"service": new}))?;

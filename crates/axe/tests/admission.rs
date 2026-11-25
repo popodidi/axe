@@ -587,7 +587,7 @@ fn server_report_is_unknown_when_missing_or_expired_and_ages_into_stale() {
         (true.into(), 7.into())
     );
     assert_eq!(fresh["report_age_seconds"], 2);
-    // Readings older than stale_seconds pause, as on the dispatcher.
+    // Readings older than stale_seconds pause, as on the node.
     let stale = admission::reported(Some(&(enabled.clone(), at(26))));
     assert_eq!(stale["admitting"], false);
     assert!(

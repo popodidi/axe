@@ -1,4 +1,4 @@
-//! Runtimes (`runtime.rs`): a registry of harness + login on the dispatcher.
+//! Runtimes (`runtime.rs`): a registry of harness + login on the node.
 //! The least-used healthy runtime runs a task, a stored session resumes on its
 //! own runtime (sessions from before runtimes resolve to the runtime adopting
 //! the default login), an unhealthy runtime is skipped for the next `use`

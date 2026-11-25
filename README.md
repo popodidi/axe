@@ -331,9 +331,18 @@ code gains no branches for them.
   (SIGUSR1) first wakes each owning bot ("Services stop in N s") and keeps the
   services running for `stop_warn_seconds`. No systemd unit or container per
   service: they live and die with the node. `[services]` in
-  `config.rs` lists every knob and default. Bot `/status`, `axe bot show`
-  and the dashboard's Services page (per node, with recent logs) show each
-  service's kind, state (crash-looping included), restarts and uptime
+  `config.rs` lists every knob and default. A **scheduled service** (`--cron
+  "<5 fields>" [--timezone TZ] [--timeout 10m] [--no-catch-up]`, stored in
+  `services.schedule`) is the node's crontab: the node runs it at each
+  cron time, one run at a time (a run time during a run is skipped), stops a
+  run past its timeout (SIGTERM, then SIGKILL) and reports its last exit,
+  end and next run; a timeout or a non-zero exit is a `failed` service
+  event. Run times missed while the node was down are not replayed: at most
+  one catch-up run when it starts (`dispatch/services.rs`). Routines stay
+  server-side and create tasks. Bot `/status`, `axe bot show` and the
+  dashboard's Services page (per node, with recent logs) show each
+  service's kind, state (crash-looping included), restarts and uptime, or
+  for a scheduled one its last run, exit and next run
   (`Service::summary`, `web/lib/services.ts`).
 - **Goals** (`axe goal`, `goal.rs`, `goal_board.rs`) are durable outcomes
   bots share, with weekly budgets and an append-only trajectory. Design:
