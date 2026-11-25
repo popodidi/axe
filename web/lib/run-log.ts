@@ -3,6 +3,8 @@ export type LogLine = {
   end: number;
   text: string;
   fragment: boolean;
+  /** When the dispatcher saw the line (unix ms); absent for older logs. */
+  at?: number;
 };
 export type LogPage = {
   generation: string;

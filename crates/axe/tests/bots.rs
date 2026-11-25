@@ -265,6 +265,24 @@ fn create_then_first_run_gets_system_prompt_and_only_wakes() {
     assert_eq!(wakes[0]["run_id"], 1);
     let log = rig.srv.ok(&["bot", "log", "b"]);
     assert!(log.contains("created") && log.contains("run_start") && log.contains("run_end"));
+
+    // The run page's metadata: this run's own copy of the system prompt
+    // beside its log, and the run's events and wakes from the server.
+    let log_path = PathBuf::from(runs[0]["log_path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(log_path.with_extension("system.md")).unwrap(),
+        system
+    );
+    let meta = rig.srv.get("/api/bot-runs/1/meta");
+    assert_eq!(meta["run"]["id"], 1);
+    assert_eq!(meta["bot"]["name"], "b");
+    assert!(meta["bot"].get("identity").is_none());
+    assert_eq!(meta["start"]["run"], 1);
+    assert_eq!(meta["start"]["mode"], "fresh");
+    assert_eq!(meta["end"]["exit_code"], 0);
+    assert_eq!(meta["wakes"]["wake"], 1);
+    // The dispatcher ran once and left: its files are unavailable, not an error.
+    assert!(meta["files"]["unavailable"].is_string(), "{meta}");
 }
 
 #[test]
