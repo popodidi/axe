@@ -166,10 +166,12 @@ Owner commands (`/status`, `/runtimes`, ...) are handled by the server and
 never wake the bot. Each bot's `/` menu lists them (`setMyCommands` at server
 start, from the same table the router uses: `OWNER_COMMANDS` in
 `telegram.rs`), scoped to the owner's private chat and to the owner in
-allowlisted groups. `/tasks`, `/task N` and `/cost` are a read-only slice of
-the dashboard for when the owner has no web access (`owner_views.rs`): the
-bot's open tasks, one task's Outcome and latest notes, and the bot's spend
-over the Cost view's last 7 days, each one message linking to the web page.
+allowlisted groups. `/tasks`, `/task N`, `/cost`, `/goals`, `/services` and
+`/routines` are a read-only slice of the dashboard for when the owner has no
+web access (`owner_views.rs`): the bot's open tasks, one task's Outcome and
+latest notes, the bot's spend over the Cost view's last 7 days, its goals as
+their pins show them, its services, and the routines it owns, each one
+message linking to the web page. `/status` also lists the bot's schedules.
 
 The owner's inbox is the bot chat's pinned list, rendered by the server
 (`board.rs`, `goal_board.rs`): one pinned card per open decision and one

@@ -69,7 +69,7 @@ const UPDATE_ATTEMPTS: u32 = 3;
 /// `/` menu shows ([`Gateway::publish_commands`]). `BotCommand`: the command
 /// is 1-32 lowercase letters, digits and underscores; the description 1-256
 /// characters.
-pub const OWNER_COMMANDS: [(&str, &str); 10] = [
+pub const OWNER_COMMANDS: [(&str, &str); 13] = [
     ("status", "Bot state, live run and next wake"),
     ("tasks", "This bot's open tasks"),
     (
@@ -77,6 +77,9 @@ pub const OWNER_COMMANDS: [(&str, &str); 10] = [
         "One task: state, outcome and latest notes (/task N)",
     ),
     ("cost", "This bot's spend over the last 7 days"),
+    ("goals", "This bot's goals and budgets"),
+    ("services", "This bot's services and their state"),
+    ("routines", "Routines this bot owns, next fire"),
     ("wake", "Queue a wake, with an optional note"),
     ("stop", "Stop the live run; queued wakes are kept"),
     ("pause", "Pause: no new wakes, stop the live run"),
@@ -1889,8 +1892,9 @@ impl Gateway {
         Ok(())
     }
 
-    /// `/status`, `/tasks`, `/task N`, `/cost`, `/stop`, `/pause`, `/resume`,
-    /// `/reset`, `/wake [note]`: handled here, never waking the bot, so they
+    /// `/status`, `/tasks`, `/task N`, `/cost`, `/goals`, `/services`,
+    /// `/routines`, `/stop`, `/pause`, `/resume`, `/reset`, `/wake [note]`:
+    /// handled here, never waking the bot, so they
     /// work with no agent runtime logged in. The reply is recorded.
     #[allow(clippy::too_many_arguments)]
     fn owner_command(
@@ -1910,15 +1914,21 @@ impl Gateway {
         }
         let actor = owner_actor();
         // The read-only views (`owner_views`) reply in HTML, for their links.
-        let html = matches!(cmd, "tasks" | "task" | "cost");
+        let html = matches!(
+            cmd,
+            "tasks" | "task" | "cost" | "goals" | "services" | "routines"
+        );
         let reply = {
             let mut conn = store.conn();
             let web = b.web.as_deref();
             let r = match cmd {
-                "status" => status(&conn, &b.name()),
+                "status" => owner_views::status(&conn, &b.name(), now()),
                 "tasks" => owner_views::tasks(&conn, &b.name(), web),
                 "task" => owner_views::task(&conn, arg, web),
                 "cost" => owner_views::cost(&conn, &b.name(), web, now()),
+                "goals" => owner_views::goals(&conn, &b.name(), web),
+                "services" => owner_views::services(&conn, &b.name(), web, now()),
+                "routines" => owner_views::routines(&conn, &b.name(), web, now()),
                 "runtimes" => Ok(crate::runtime::render(&store.runtimes())),
                 "stop" => bot::change(&mut conn, &actor, &b.name(), "stop")
                     .map(|_| "stopping the live run; queued wakes are kept".to_string()),
@@ -3009,44 +3019,6 @@ fn command_scopes(owner: i64, chats: &[i64]) -> Vec<Value> {
             _ => None,
         })
         .collect()
-}
-
-fn status(conn: &Connection, name: &str) -> Result<String> {
-    let b = bot::get(conn, name)?;
-    let mut s = format!("bot {} ({}): {}", b.name, b.project, b.state);
-    if b.attention {
-        s.push_str(&format!(
-            " — needs attention after {} failed runs",
-            b.failures
-        ));
-    }
-    match b.live_run {
-        Some(r) => {
-            let run = bot::get_run(conn, r)?;
-            s.push_str(&format!(
-                "\nlive run {r} since {}: {}",
-                run.started_at,
-                run.current_activity.as_deref().unwrap_or("starting")
-            ));
-        }
-        None => s.push_str("\nno live run"),
-    }
-    s.push_str(&format!(
-        "\nnext wake: {}\nqueued wakes: {}\nlast run ended: {}",
-        b.next_wake.as_deref().unwrap_or("-"),
-        b.queued,
-        b.last_run_end.as_deref().unwrap_or("-")
-    ));
-    let services = crate::service::list(conn, Some(&b.name))?;
-    if !services.is_empty() {
-        let now = crate::remote::epoch();
-        s.push_str("\nservices:");
-        for svc in &services {
-            s.push_str(&format!("\n- {}", svc.summary(now)));
-        }
-        s.push_str(&format!("\nlogs: axe service logs <name> --bot {}", b.name));
-    }
-    Ok(s)
 }
 
 /// Records a sent message (the `Message` the Bot API returned).

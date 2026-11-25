@@ -1,6 +1,7 @@
-//! The read-only owner commands `/tasks`, `/task N` and `/cost`
-//! (`owner_views`): which tasks a bot lists and in what order, the empty and
-//! truncated replies, one task's view, and the 7-day cost of one bot.
+//! The read-only owner commands `/tasks`, `/task N`, `/cost`, `/goals`,
+//! `/services`, `/routines` and `/status` (`owner_views`): which tasks a bot
+//! lists and in what order, the empty and truncated replies, one task's view,
+//! the 7-day cost of one bot, its goals, services, routines and schedules.
 use axe::bot::{self, ts, NewBot};
 use axe::db::{self, Actor, Changes, NewTask};
 use axe::owner_views::{self, COST_DAYS};
@@ -355,4 +356,232 @@ fn cost_bars_align_amounts_and_stay_empty_without_spend() {
         out.starts_with("<b>bot a cost, last 7 days: $15.00 over 3 runs</b>\n"),
         "{out}"
     );
+}
+
+/// 2026-01-05 00:00:00 UTC (a Monday).
+const MON: i64 = 1_767_571_200;
+
+#[test]
+fn goals_lists_the_bots_open_goals_with_budget_bars() {
+    let (_d, mut c) = setup();
+    assert_eq!(
+        owner_views::goals(&c, "a", Some(WEB)).unwrap(),
+        "bot a: no open goals. Propose one: <code>axe goal propose</code>\n\
+         <a href=\"http://axe.example/?view=goals\">Open goals</a>"
+    );
+    assert_eq!(
+        owner_views::goals(&c, "a", None).unwrap(),
+        "bot a: no open goals. Propose one: <code>axe goal propose</code>"
+    );
+    let g = |name: &str, cost: Option<f64>| axe::goal::NewGoal {
+        name: name.into(),
+        project: "p".into(),
+        intent: "Grow <signups>. More text.".into(),
+        budget_cost_week: cost,
+        budget_attention_week: Some(5),
+        ..Default::default()
+    };
+    let me = Actor::new("bot:a");
+    axe::goal::propose(&mut c, &me, &g("grow", Some(50.0)), None, now()).unwrap();
+    axe::goal::propose(&mut c, &me, &g("done-one", None), None, now()).unwrap();
+    axe::goal::change(&mut c, &human(), "done-one", "drop", "no", None).unwrap();
+    // Another bot's goal is not listed.
+    axe::goal::propose(
+        &mut c,
+        &Actor::new("bot:b"),
+        &g("theirs", None),
+        None,
+        now(),
+    )
+    .unwrap();
+    axe::goal::record(
+        &mut c,
+        &me,
+        "grow",
+        "observation",
+        None,
+        "at risk: signups flat",
+    )
+    .unwrap();
+
+    let out = owner_views::goals(&c, "a", Some(WEB)).unwrap();
+    assert!(
+        out.starts_with("<b>bot a: 1 goal</b>\n\n<b>grow</b> · <i>at risk</i>"),
+        "{out}"
+    );
+    assert!(out.contains("\nsignups flat\n"), "{out}");
+    assert!(
+        out.contains("\n<code>Cost ░░░░░░░░░░   0%  $0.00/$50 wk</code>"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\n<code>Attn ░░░░░░░░░░   0%  0/5 wk</code>"),
+        "{out}"
+    );
+    assert!(
+        out.contains("<a href=\"http://axe.example/?goal=grow\">Open goal</a>"),
+        "{out}"
+    );
+    assert!(
+        out.ends_with("\n\n<a href=\"http://axe.example/?view=goals\">Open goals</a>"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("theirs") && !out.contains("done-one"),
+        "{out}"
+    );
+    assert!(owner_views::goals(&c, "nope", None).is_err());
+}
+
+fn service(c: &mut Connection, bot: &str, name: &str, schedule: Option<&str>, status: &str) {
+    let new = axe::service::NewService {
+        command: "true".into(),
+        cwd: None,
+        env: Default::default(),
+        restart: if schedule.is_some() {
+            "never"
+        } else {
+            "always"
+        }
+        .into(),
+        schedule: schedule.map(|cron| axe::service::Schedule {
+            cron: cron.into(),
+            timezone: "Asia/Taipei".into(),
+            timeout_seconds: 60,
+            catch_up: true,
+        }),
+    };
+    axe::service::put(c, &human(), bot, name, &new).unwrap();
+    c.execute(
+        "UPDATE services SET status=?1 WHERE name=?2",
+        params![status, name],
+    )
+    .unwrap();
+}
+
+#[test]
+fn services_lists_state_policy_and_last_exit() {
+    let (_d, mut c) = setup();
+    let now = MON;
+    assert_eq!(
+        owner_views::services(&c, "a", Some(WEB), now).unwrap(),
+        "bot a: no services. Declare one: <code>axe service add</code>\n\
+         <a href=\"http://axe.example/?view=services&amp;q=a\">Open services</a>"
+    );
+    service(
+        &mut c,
+        "a",
+        "feed",
+        None,
+        &format!(
+            r#"{{"state":"running","started_at":"{}","restarts":2,"failures":0,"last_exit":"exit 1"}}"#,
+            ts(now - 7200)
+        ),
+    );
+    service(
+        &mut c,
+        "a",
+        "sync",
+        Some("0 9 * * *"),
+        &format!(
+            r#"{{"state":"scheduled","started_at":"{}","restarts":0,"failures":0,"last_exit":"exit 0","next_run_at":"{}"}}"#,
+            ts(now - 3600),
+            ts(now + 1800)
+        ),
+    );
+    service(&mut c, "b", "other", None, "{}");
+    let out = owner_views::services(&c, "a", Some(WEB), now).unwrap();
+    assert_eq!(
+        out,
+        "<b>bot a: 2 services</b>\n\
+         <b>feed</b> · running · restart always · up 2h · last exit 1\n\
+         <b>sync</b> · scheduled · <code>0 9 * * *</code> Asia/Taipei · last run 1h ago: exit 0 · next in 30m\n\
+         <a href=\"http://axe.example/?view=services&amp;q=a\">Open services</a>"
+    );
+    // Declared, never reported, no public URL.
+    let out = owner_views::services(&c, "b", None, now).unwrap();
+    assert_eq!(
+        out,
+        "<b>bot b: 1 service</b>\n<b>other</b> · pending · restart always · no exit yet"
+    );
+}
+
+fn routine(c: &mut Connection, name: &str, owner: &str, now: i64) -> i64 {
+    let t: axe::routine::Template = serde_json::from_value(serde_json::json!({
+        "name": name, "project": "p", "cron": "0 9 * * *", "timezone": "Asia/Taipei",
+        "title": "t", "detail": "d", "owner": owner,
+    }))
+    .unwrap();
+    axe::routine::save(c, &human(), None, &t, now).unwrap()
+}
+
+#[test]
+fn routines_lists_the_bots_routines_with_next_fire() {
+    let (_d, mut c) = setup();
+    let now = MON; // 08:00 in Taipei
+    assert_eq!(
+        owner_views::routines(&c, "a", None, now).unwrap(),
+        "bot a: no routines. Create one: <code>axe routine save</code> with \"owner\": \"bot:a\""
+    );
+    routine(&mut c, "morning", "bot:a", now);
+    let paused = routine(&mut c, "digest", "bot:a", now);
+    axe::routine::change(&mut c, &human(), paused, "pause", now).unwrap();
+    let gone = routine(&mut c, "old", "bot:a", now);
+    axe::routine::change(&mut c, &human(), gone, "archive", now).unwrap();
+    routine(&mut c, "theirs", "bot:b", now);
+    let out = owner_views::routines(&c, "a", Some(WEB), now).unwrap();
+    assert_eq!(
+        out,
+        "<b>bot a: 2 routines</b>\n\
+         <b>digest</b> · <code>0 9 * * *</code> Asia/Taipei · paused\n\
+         <b>morning</b> · <code>0 9 * * *</code> Asia/Taipei · next Jan 5 09:00 (in 1h)\n\
+         <a href=\"http://axe.example/?view=routines\">Open routines</a>"
+    );
+}
+
+#[test]
+fn status_lists_schedules_with_next_fire_or_paused() {
+    let (_d, mut c) = setup();
+    let now = MON;
+    let out = owner_views::status(&c, "a", now).unwrap();
+    assert!(out.starts_with("bot a (p): active\nno live run\n"), "{out}");
+    assert!(!out.contains("schedules:"), "{out}");
+    let new = |name: &str, cron: &str, tz: &str| axe::schedule::NewSchedule {
+        name: name.into(),
+        cron: cron.into(),
+        timezone: tz.into(),
+        objective: "look".into(),
+    };
+    axe::schedule::add(
+        &mut c,
+        &human(),
+        "a",
+        &new("review", "0 9 * * 1,4", "Asia/Taipei"),
+        "w",
+        now,
+    )
+    .unwrap();
+    axe::schedule::add(
+        &mut c,
+        &human(),
+        "a",
+        &new("nightly", "30 2 * * *", "UTC"),
+        "w",
+        now,
+    )
+    .unwrap();
+    axe::schedule::change(&mut c, &human(), "a", "nightly", "pause", "w", now).unwrap();
+    let out = owner_views::status(&c, "a", now).unwrap();
+    assert!(
+        out.ends_with(
+            "\nschedules:\n\
+             - nightly: 30 2 * * * UTC, paused\n\
+             - review: 0 9 * * 1,4 Asia/Taipei, next Jan 5 09:00 (in 1h)"
+        ),
+        "{out}"
+    );
+    assert!(owner_views::status(&c, "b", now)
+        .unwrap()
+        .find("schedules:")
+        .is_none());
 }
