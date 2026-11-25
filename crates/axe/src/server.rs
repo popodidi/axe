@@ -1240,8 +1240,9 @@ fn blob_api(
 /// `GET /b/<sha>[/<name>]?exp=..&sig=..`: a signed link, readable without the
 /// token until it expires. The blob renders inline in a sandbox, so HTML
 /// cannot act on this server's origin. On a separate blob site
-/// (`[blobs] link_url`) the sandbox also lets inline scripts run, with no
-/// network access and an opaque origin; any page may read the bytes (CORS),
+/// (`[blobs] link_url`) the sandbox also lets scripts run, with an opaque
+/// origin, https subresources but no requests of their own (see
+/// [`LINK_SITE_CSP`]); any page may read the bytes (CORS),
 /// as anyone holding the link can.
 fn blob_link_get(
     st: &State,
@@ -1321,9 +1322,13 @@ fn blob_link_get(
 }
 
 /// The blob site's policy: scripts run in an opaque-origin sandbox (no
-/// `allow-same-origin`), and the page may load nothing over the network.
+/// `allow-same-origin`). The page may load scripts, styles, fonts and images
+/// over https (CDNs, web fonts), but may not make requests of its own
+/// (fetch, XHR, WebSocket, form posts).
 const LINK_SITE_CSP: &str = "sandbox allow-scripts; default-src 'none'; \
-     script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:";
+     script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; \
+     font-src https: data:; img-src https: data:; connect-src 'none'; \
+     form-action 'none'";
 
 /// Request problems carry an [`HttpError`]; any other blob error is the
 /// store's (disk, S3), so a 500.
