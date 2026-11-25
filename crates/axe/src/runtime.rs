@@ -95,6 +95,11 @@ pub struct Health {
     /// The state the owner was last sent a card for; cleared back at `ok`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerted: Option<String>,
+    /// Unix seconds when the latest passing login probe started: runs spawned
+    /// before it may hold an older credential, so their login failures do not
+    /// mark the runtime ([`Registry::mark`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_at: Option<i64>,
 }
 
 impl Default for Health {
@@ -105,6 +110,7 @@ impl Default for Health {
             last_failure: None,
             quota: None,
             alerted: None,
+            login_at: None,
         }
     }
 }
@@ -144,6 +150,10 @@ impl Alert {
         json!({"runtime":self.runtime,"harness":self.harness,"state":self.state,
                "class":self.class,"message":self.message,"until":self.until})
     }
+}
+
+fn unix_now() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 /// Variables a runtime sets and removes in its CLI's environment.
@@ -459,7 +469,8 @@ pub struct Registry {
     pub runtimes: Vec<Runtime>,
     /// Loaded from `[runtimes] dir`: health is tracked and acted on.
     pub managed: bool,
-    probes: BTreeMap<String, (Child, Instant)>,
+    /// Running probes: the child, when it started, and its Unix start.
+    probes: BTreeMap<String, (Child, Instant, i64)>,
     probed: BTreeMap<String, Instant>,
     /// Probes that check a login just made: their outcome is a card.
     checks: std::collections::BTreeSet<String>,
@@ -581,11 +592,28 @@ impl Registry {
     /// needs a new one, an unavailable provider degrades it for `backoff`
     /// seconds. Returns the card to send when the runtime newly turned
     /// limited or needs_login.
-    pub fn mark(&mut self, name: &str, f: &Failure, backoff: i64, now: i64) -> Option<Alert> {
+    ///
+    /// `started_at` is when the run read its credential (Unix seconds): an
+    /// invalid login from a run started before the latest confirmed login
+    /// ([`Health::login_at`]) is that older credential's, so it is ignored.
+    pub fn mark(
+        &mut self,
+        name: &str,
+        f: &Failure,
+        backoff: i64,
+        now: i64,
+        started_at: i64,
+    ) -> Option<Alert> {
         if !self.managed {
             return None;
         }
         let rt = self.get_mut(name)?;
+        if f.class == AUTH_INVALID && rt.health.login_at.is_some_and(|l| started_at < l) {
+            eprintln!(
+                "axe node: runtime {name}: ignoring {AUTH_INVALID} from a run started before the latest confirmed login"
+            );
+            return None;
+        }
         let message: String = f.message.chars().take(MAX_MESSAGE).collect();
         rt.health.last_failure = Some(LastFailure {
             class: f.class.into(),
@@ -680,7 +708,7 @@ impl Registry {
             eprintln!("axe node: runtime {name}: logged in; no login check (disabled or no probe)");
             return;
         }
-        if let Some((mut child, _)) = self.probes.remove(name) {
+        if let Some((mut child, _, _)) = self.probes.remove(name) {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -697,6 +725,7 @@ impl Registry {
         let (set, remove) = rt.env();
         let out = rt.probe_log();
         self.probed.insert(name.to_string(), Instant::now());
+        let started_at = unix_now();
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).stdin(Stdio::null());
         match out.as_ref().map(std::fs::File::create) {
@@ -717,12 +746,12 @@ impl Registry {
         match cmd.spawn() {
             Ok(child) => {
                 self.probes
-                    .insert(name.to_string(), (child, Instant::now()));
+                    .insert(name.to_string(), (child, Instant::now(), started_at));
             }
             Err(e) => {
                 eprintln!("axe node: runtime {name}: probe {argv:?}: {e}");
                 let status = format!("the login check did not start: {e}");
-                if let Some(a) = self.finished(name, false, &status) {
+                if let Some(a) = self.finished(name, false, &status, started_at) {
                     self.ready.push(a);
                 }
             }
@@ -736,9 +765,11 @@ impl Registry {
     /// the cards of finished [`Registry::check_now`] checks.
     pub fn probe(&mut self) -> Vec<Alert> {
         let mut done = Vec::new();
-        for (name, (child, started)) in &mut self.probes {
+        for (name, (child, started, at)) in &mut self.probes {
             match child.try_wait() {
-                Ok(Some(status)) => done.push((name.clone(), status.success(), status.to_string())),
+                Ok(Some(status)) => {
+                    done.push((name.clone(), status.success(), status.to_string(), *at))
+                }
                 Ok(None) if started.elapsed() < PROBE_TIMEOUT => {}
                 _ => {
                     let _ = child.kill();
@@ -747,14 +778,15 @@ impl Registry {
                         name.clone(),
                         false,
                         format!("timed out after {}s", PROBE_TIMEOUT.as_secs()),
+                        *at,
                     ));
                 }
             }
         }
         let mut alerts = std::mem::take(&mut self.ready);
-        for (name, ok, status) in done {
+        for (name, ok, status, at) in done {
             self.probes.remove(&name);
-            alerts.extend(self.finished(&name, ok, &status));
+            alerts.extend(self.finished(&name, ok, &status, at));
         }
         if !self.managed {
             return alerts;
@@ -777,11 +809,20 @@ impl Registry {
         alerts
     }
 
-    /// A probe of `name` ended: a pass makes a runtime that needs a login ok
-    /// again. Returns the card when it was a [`Registry::check_now`] check.
-    fn finished(&mut self, name: &str, ok: bool, status: &str) -> Option<Alert> {
+    /// A probe of `name` started at `started_at` ended: a pass confirms the
+    /// login as of then and makes a runtime that needs a login ok again.
+    /// Returns the card when it was a [`Registry::check_now`] check.
+    fn finished(&mut self, name: &str, ok: bool, status: &str, started_at: i64) -> Option<Alert> {
         let check = self.checks.remove(name);
         let rt = self.get_mut(name)?;
+        if ok && rt.health.login_at.is_none_or(|l| l < started_at) {
+            rt.health.login_at = Some(started_at);
+            if rt.health.state != NEEDS_LOGIN {
+                if let Err(e) = rt.save() {
+                    eprintln!("axe node: runtime {name}: {e:#}");
+                }
+            }
+        }
         if ok && rt.health.state == NEEDS_LOGIN {
             eprintln!("axe node: runtime {name}: login probe passed; ok again");
             rt.health.state = OK.into();
@@ -1289,5 +1330,74 @@ exit 2
         assert!(alert_text(&alerts[0].to_json()).contains("stays ok"));
         // The periodic probe of an ok runtime never runs, nor makes a card.
         assert!(reg.probe().is_empty() && reg.probes.is_empty());
+    }
+    #[test]
+    fn a_login_failure_from_a_run_older_than_the_confirmed_login_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, _) = registry(tmp.path());
+        let dir = tmp.path().join("runtimes/claude-1");
+        std::fs::write(
+            dir.join("runtime.toml"),
+            "harness = \"claude-code\"\nprobe = [\"sh\", \"-c\", \
+             \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = good ]\"]\n",
+        )
+        .unwrap();
+        let mut reg = Registry::load(&cfg).unwrap();
+        let expired = Failure {
+            class: AUTH_INVALID,
+            status: None,
+            message: "this login reached its time limit".into(),
+            retry_at: None,
+        };
+
+        // A run started on the old login fails: needs a login.
+        let t0 = unix_now() - 600;
+        assert!(reg.mark("claude-1", &expired, 60, t0 + 10, t0).is_some());
+        assert_eq!(reg.get("claude-1").unwrap().health.state, NEEDS_LOGIN);
+
+        // The new login is stored and its check passes: ok, login confirmed.
+        let before_login = unix_now() - 1;
+        let rt = reg.get("claude-1").unwrap().clone();
+        rt.login(&cfg, "token", "good").unwrap();
+        reg.check_now("claude-1");
+        collect(&mut reg, |_, a| !a.is_empty());
+        let health = &reg.get("claude-1").unwrap().health;
+        assert_eq!(health.state, OK);
+        let login_at = health
+            .login_at
+            .expect("the passing check confirms the login");
+        assert!(login_at > before_login);
+        let saved: Health =
+            serde_json::from_slice(&std::fs::read(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(saved.login_at, Some(login_at));
+
+        // A run spawned before the login ends later with the old credential's
+        // failure: the runtime stays ok, no card, no recorded failure.
+        let alert = reg.mark("claude-1", &expired, 60, login_at + 180, before_login);
+        assert!(alert.is_none(), "{alert:?}");
+        let health = &reg.get("claude-1").unwrap().health;
+        assert_eq!(health.state, OK);
+        assert_eq!(
+            health.last_failure.as_ref().map(|f| f.at),
+            Some(t0 + 10),
+            "the stale failure is not recorded"
+        );
+        // Other classes from an older run still count (the quota is the account's).
+        let quota = Failure {
+            class: QUOTA_EXHAUSTED,
+            status: Some(429),
+            message: "limit".into(),
+            retry_at: None,
+        };
+        assert!(reg
+            .mark("claude-1", &quota, 60, login_at + 190, before_login)
+            .is_some());
+        reg.tick(login_at + 190 + LIMITED_DEFAULT_SECONDS);
+
+        // A run started on the new login that fails still marks the runtime.
+        assert!(reg
+            .mark("claude-1", &expired, 60, login_at + 200, login_at)
+            .is_some());
+        assert_eq!(reg.get("claude-1").unwrap().health.state, NEEDS_LOGIN);
     }
 }

@@ -27,6 +27,8 @@ pub(super) struct BotRun {
     pub(super) child: Child,
     activity: Option<String>,
     log_len: u64,
+    /// Unix seconds when the run read its runtime's login.
+    started_at: i64,
 }
 
 /// Splices `bot_args` in before the first argument that holds `{prompt}`, or
@@ -287,6 +289,7 @@ impl Dispatcher {
             env.push(("AXE_SERVER", url.clone()));
         }
         env.push(("AXE_WORKTREE", cwd.display().to_string()));
+        let started_at = super::now_unix();
         let (login, unset) = rt.env();
         env.extend(login);
         // Sealed form values for this bot: the folder, and the env ones.
@@ -340,6 +343,7 @@ impl Dispatcher {
             child,
             activity: None,
             log_len: 0,
+            started_at,
         });
         Ok(())
     }
@@ -422,7 +426,7 @@ impl Dispatcher {
         let outage = (reason == "exit" && code != Some(0))
             .then(|| crate::failure::classify(&run.log_path))
             .flatten();
-        self.note_runtime(&run.agent, outage.as_ref(), &run.log_path);
+        self.note_runtime(&run.agent, outage.as_ref(), &run.log_path, run.started_at);
         let (reason, note) = match &outage {
             Some(f) => ("api_error", Some(format!("model API error {}", f.note()))),
             None => (reason, note),
