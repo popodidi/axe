@@ -7,14 +7,14 @@ the `prompt.md` of every bundle attached to its scopes (`owner:bot:<name>`, its
 project's label, `global`) after the bot protocol and before its identity and
 conduct, ordered by the `order:` front matter.
 
-The bot protocol itself (runs and wakes, memory, subscriptions, goals,
+The bot protocol itself (runs and wakes, memory, responsiveness, subscriptions, goals,
 authority, the Telegram commands and cards) is core: every bot carries it
 (`crates/axe/src/bot_protocol.md`). Bundles hold opinions on top of it, so a
 bot with no bundles still works fully.
 
 | Bundle | What it holds |
 |---|---|
-| `responsive` | Defaults for owner attention: acknowledge first, offload by size, batch event messages |
+| `responsive` | Defaults for owner attention: offload by size, batch event messages |
 
 Load and attach one, for example to every bot:
 

@@ -505,7 +505,7 @@ fn attaching_and_detaching_a_bundle_changes_the_next_runs_system_prompt() {
     assert!(system.starts_with("# axe bot protocol\n"), "{system}");
     assert!(
         system.contains("## Authority\n")
-            && system.contains("\n\n## Responsiveness\n")
+            && system.contains("\n\n## Owner attention\n")
             && system.contains("\n\n# Identity (bot b, project a)\n\nIDENTITY-TEXT\n"),
         "{system}"
     );
@@ -525,7 +525,7 @@ fn attaching_and_detaching_a_bundle_changes_the_next_runs_system_prompt() {
     assert!(system.starts_with("# axe bot protocol\n"), "{system}");
     assert!(
         system.contains("## Talking to the owner (Telegram)\n")
-            && !system.contains("## Responsiveness")
+            && !system.contains("## Owner attention")
             && system.contains("\n\n# Identity (bot b, project a)\n"),
         "{system}"
     );
