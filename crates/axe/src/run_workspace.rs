@@ -631,7 +631,7 @@ fn agents_md(
     s.push_str(&index_md(
         repos,
         skills,
-        attached,
+        &context::skills_lines(attached, "skills/"),
         "This task has no repos.\n",
     ));
     if !attached.is_empty() {
@@ -692,7 +692,15 @@ fn bot_agents_md(
                 .join(", ")
         );
     }
-    s.push_str(&index_md(repos, skills, attached, ""));
+    // The bot's system prompt lists the attached skills (`Attached
+    // knowledge`, `context::prompt_section`); list them only there.
+    let attached_skills = if attached.attached(context::Kind::Skill).next().is_some() {
+        "- Attached skills: written in full under `skills/`; the bot's system prompt \
+         (Attached knowledge) lists them.\n"
+    } else {
+        ""
+    };
+    s.push_str(&index_md(repos, skills, attached_skills, ""));
     s
 }
 
@@ -700,7 +708,7 @@ fn bot_agents_md(
 fn index_md(
     repos: &[(String, PathBuf)],
     skills: &[Skill],
-    attached: &context::Resolution,
+    attached_skills: &str,
     no_repos: &str,
 ) -> String {
     let mut s = String::from("## Repos\n\n");
@@ -715,7 +723,6 @@ fn index_md(
         s.push('\n');
     }
     s.push_str("\n## Skills\n\n");
-    let attached_skills = context::skills_lines(attached, "skills/");
     if skills.is_empty() && attached_skills.is_empty() {
         s.push_str("None.\n");
     }
@@ -732,7 +739,7 @@ fn index_md(
             }
         );
     }
-    s.push_str(&attached_skills);
+    s.push_str(attached_skills);
     s.push_str("\n## Docs\n\nSee `docs/index.md`.\n");
     s
 }

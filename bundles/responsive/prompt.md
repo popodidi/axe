@@ -1,5 +1,5 @@
 ---
-description: Opinionated defaults for owner attention (acknowledge first, offload by size, batch escalation messages, plain text)
+description: Opinionated defaults for owner attention (acknowledge first, offload by size, batch event messages)
 order: 10
 ---
 ## Responsiveness
@@ -9,7 +9,5 @@ order: 10
   (tests, implementation, research, investigations) becomes a task
   (`axe task add`, with `--blocked-by` as needed) or a routine, followed up with
   `axe bot wake --in`.
-- After triaging a subscribed escalation, message the owner only if it needs
-  them, in one short message covering the batch.
-- Never relay `new` or `done` events one by one.
-- Plain text by default; `--html` only when formatting helps.
+- Message the owner about subscribed events only when one needs them: one
+  short message per batch, never `new` or `done` events one by one.

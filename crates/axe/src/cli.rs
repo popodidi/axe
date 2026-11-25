@@ -582,7 +582,8 @@ enum DocCmd {
     /// List docs (under a prefix), or the docs attached to a scope
     Ls {
         prefix: Option<String>,
-        /// global, label:<name>, owner:<name> or repo:<name>
+        /// global, label:<name>, owner:<name> (a bot's: owner:bot:<name>) or
+        /// repo:<name>
         #[arg(long)]
         scope: Option<String>,
         #[arg(long)]
@@ -605,7 +606,8 @@ enum DocCmd {
     /// Attach a doc or folder to a scope
     Attach {
         path: String,
-        /// global, label:<name>, owner:<name> or repo:<name>
+        /// global, label:<name>, owner:<name> (a bot's: owner:bot:<name>) or
+        /// repo:<name>
         scope: String,
     },
     /// Detach a doc or folder from a scope

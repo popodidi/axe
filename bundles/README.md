@@ -14,7 +14,7 @@ bot with no bundles still works fully.
 
 | Bundle | What it holds |
 |---|---|
-| `responsive` | Defaults for owner attention: acknowledge first, offload by size, batch escalation messages, plain text |
+| `responsive` | Defaults for owner attention: acknowledge first, offload by size, batch event messages |
 
 Load and attach one, for example to every bot:
 
