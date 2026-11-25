@@ -370,6 +370,150 @@ fn read_session_cookie_reads_but_never_writes() {
     assert!(end.header("set-cookie").unwrap().contains("Max-Age=0"));
 }
 
+/// A raw GET to the test server with any `Host` (and cookie, bearer):
+/// (status, lowercased headers, body).
+fn raw_get(
+    srv: &Server,
+    host: &str,
+    target: &str,
+    extra: &str,
+) -> (u16, std::collections::HashMap<String, String>, String) {
+    raw(
+        srv,
+        &format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n{extra}\r\n"),
+    )
+}
+
+fn raw(srv: &Server, head: &str) -> (u16, std::collections::HashMap<String, String>, String) {
+    use std::io::{Read, Write};
+    let addr = srv.url.strip_prefix("http://").unwrap();
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.write_all(head.as_bytes()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let (head, body) = out.split_once("\r\n\r\n").unwrap();
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .unwrap()
+        .split(' ')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let headers = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
+    (status, headers, body.to_string())
+}
+
+/// `[blobs] link_url`: links are issued for and served on a separate blob
+/// site, where HTML may run inline scripts in a no-network sandbox; the
+/// server's own host redirects old links there, and the blob site answers
+/// nothing but links, so it never accepts or sets the session cookie.
+#[test]
+fn blob_site_serves_links_with_scripts_redirects_and_takes_no_cookie() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[blobs]\npublic_url = \"http://axe.test/\"\nlink_url = \"http://blobs.test/\"\n",
+    )
+    .unwrap();
+    let srv = Server::start_with(dir.path(), &config, Some(TOKEN), &[], &[]);
+    let page = "<p id=o>no</p><script>o.textContent='js ran'</script>";
+    let f = dir.path().join("page.html");
+    std::fs::write(&f, page).unwrap();
+    let sha = srv
+        .ok(&["blob", "put", f.to_str().unwrap()])
+        .trim()
+        .to_string();
+
+    // Links name the blob site.
+    let link = json(&srv.ok(&["blob", "link", &sha, "--name", "page.html", "--json"]));
+    let url = link["url"].as_str().unwrap();
+    let target = url
+        .strip_prefix("http://blobs.test")
+        .unwrap_or_else(|| panic!("{url}"));
+    assert_eq!(target, link["path"].as_str().unwrap());
+    assert!(target.starts_with(&format!("/b/{sha}/page.html?exp=")));
+
+    // Served on the blob site: scripts, no network, no sniffing, no cookie.
+    for host in ["blobs.test", "BLOBS.test:80"] {
+        let (status, h, body) = raw_get(&srv, host, target, "");
+        assert_eq!(status, 200, "{host}");
+        assert_eq!(body, page);
+        assert_eq!(
+            h["content-security-policy"],
+            "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; \
+             style-src 'unsafe-inline'; img-src data:"
+        );
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert_eq!(h["access-control-allow-origin"], "*");
+        assert!(h["content-type"].starts_with("text/html"));
+        assert!(!h.contains_key("set-cookie"));
+    }
+    let bad = target.replace("sig=", "sig=0");
+    assert_eq!(raw_get(&srv, "blobs.test", &bad, "").0, 403);
+
+    // The server's host (by name or address) redirects to the blob site.
+    for host in ["axe.test", srv.url.strip_prefix("http://").unwrap()] {
+        let (status, h, _) = raw_get(&srv, host, target, "");
+        assert_eq!(status, 302, "{host}");
+        assert_eq!(h["location"], format!("http://blobs.test{target}"));
+    }
+    // The API stays on the server's host.
+    assert_eq!(fetch(&format!("{}/api/blobs", srv.url)).0, 401);
+
+    // A read session from the server's host...
+    let (status, h, _) = raw(
+        &srv,
+        &format!(
+            "POST /api/session HTTP/1.1\r\nHost: axe.test\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 0\r\n\r\n"
+        ),
+    );
+    assert_eq!(status, 200);
+    let cookie = h["set-cookie"].split(';').next().unwrap().to_string();
+    assert!(!h["set-cookie"].contains("Domain"), "host-only cookie");
+    assert_eq!(
+        raw_get(
+            &srv,
+            "axe.test",
+            "/api/blobs",
+            &format!("Cookie: {cookie}\r\n")
+        )
+        .0,
+        200
+    );
+    // ...is not accepted on the blob site, which serves no API, sign-in or
+    // session, even with the token.
+    let bearer = format!("Authorization: Bearer {TOKEN}\r\n");
+    let with_cookie = format!("Cookie: {cookie}\r\n");
+    for (path, extra) in [
+        ("/api/blobs", with_cookie.as_str()),
+        (&*format!("/api/blobs/{sha}"), with_cookie.as_str()),
+        ("/api/session", with_cookie.as_str()),
+        ("/api/tasks", bearer.as_str()),
+        ("/api/blobs", bearer.as_str()),
+        ("/login", ""),
+        ("/", with_cookie.as_str()),
+        ("/healthz", ""),
+    ] {
+        let (status, h, _) = raw_get(&srv, "blobs.test", path, extra);
+        assert_eq!(status, 404, "{path}");
+        assert!(!h.contains_key("set-cookie"), "{path}");
+    }
+    let (status, h, _) = raw(
+        &srv,
+        &format!(
+            "POST /api/session HTTP/1.1\r\nHost: blobs.test\r\n{bearer}Content-Length: 0\r\n\r\n"
+        ),
+    );
+    assert_eq!(status, 404);
+    assert!(!h.contains_key("set-cookie"));
+}
+
 /// `?refs=1` names blobs and their tasks from signed links and link-map docs;
 /// `resolve` maps a recorded URL to its blob.
 #[test]
