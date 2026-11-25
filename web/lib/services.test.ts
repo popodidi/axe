@@ -13,7 +13,7 @@ const svc = (over: Partial<Service> = {}, status: Partial<Service["status"]> = {
   created_at: ts(NOW - 100),
   updated_at: ts(NOW - 100),
   ...over,
-  status: { state: "", restarts: 0, ...status },
+  status: { state: "", restarts: 0, failures: 0, ...status },
 });
 
 describe("services", () => {
