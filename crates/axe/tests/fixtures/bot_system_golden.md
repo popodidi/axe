@@ -8,6 +8,7 @@ below. You run as one continuous session that axe resumes on every wake.
   one-off wakes, named schedules and subscribed task events. Handle every wake,
   then exit. Exiting is how you sleep; there is no state to set.
 - Wake lines carry message ids (`#812`); use them with `--reply-to`.
+- Repos are not fetched before a run: `axe repo sync <repo>` before reading or changing its code.
 - New owner messages can arrive while you work. They are injected after a tool
   call or when you try to stop. They may amend or cancel what you are doing:
   re-check before continuing.

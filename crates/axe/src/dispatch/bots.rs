@@ -191,9 +191,9 @@ impl Dispatcher {
         );
         // A bot runs in its run folder, like a task, with a worktree of each
         // of its repos (none when it has none) and its attached skills written
-        // in full. Its worktrees are refreshed first: the claim guarantees no
-        // other run of this bot is live.
-        let (cwd, refreshed, repos_cloned) = crate::run_workspace::build_bot(
+        // in full. Its worktrees are not fetched: the bot syncs a repo when
+        // it needs it (`axe repo sync`), so a reply does not wait on Git.
+        let (cwd, repos_cloned) = crate::run_workspace::build_bot(
             &self.cfg,
             &b.name,
             b.home(),
@@ -201,14 +201,6 @@ impl Dispatcher {
             &attached,
             &self.store.client,
         )?;
-        for r in &refreshed {
-            if let crate::worktree::Refresh::Skipped { reason } = &r.refresh {
-                eprintln!(
-                    "axe node: bot {}: repos/{} not refreshed: {reason}",
-                    b.name, r.repo
-                );
-            }
-        }
         let dir = self.cfg.log_dir().join("bots").join(b.home());
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let system_file = dir.join("system.md");
@@ -314,7 +306,7 @@ impl Dispatcher {
         let event = json!({"run":c.run,"mode":mode,"agent":rt.name,"session_id":session_id,
             "log":log_path,"prompt_file":prompt_path,"system_prompt_file":system_file,
             "settings_file":settings_file,"cmd":agent_proc::logged_cmd(&argv, &prompt_path),
-            "worktree":cwd,"repos_refresh":refreshed,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>(),
+            "worktree":cwd,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>(),
             "rule":pick.map(|p| p.rule.clone()),"use":with.map(|u| u.to_string())});
         self.store.request::<serde_json::Value>(
             "bot_started",

@@ -1,8 +1,11 @@
 //! Git plumbing for the repo worktrees of run workspaces (`run_workspace.rs`):
 //! a repo's canonical clone ([`repo_readiness`], cloned first when missing,
 //! [`ensure_clone_from`]), one worktree of it per run folder
-//! ([`allocate_from`]) and the fast-forward of a bot's worktrees before a run
-//! ([`refresh`]). Cleanup of a done task's folder is left to housekeeping.
+//! ([`allocate_from`]) and the safe fast-forward of a worktree to its base
+//! branch: [`sync`] (`axe repo sync`, from the worktree alone) and
+//! [`refresh`] (`axe workspace`), each recording when the worktree was last
+//! brought up to date ([`synced_at`]). Cleanup of a done task's folder is left
+//! to housekeeping.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -412,10 +415,22 @@ pub fn allocate_from(
             &["worktree", "add", "-b", branch, path_str, &ready.base_ref],
         )?;
     }
+    // Just fetched: a worktree that starts at its base is synced now.
+    if let (Ok(head), Ok(base)) = (
+        git(&path, &["rev-parse", "HEAD"]),
+        git(
+            &path,
+            &["rev-parse", &format!("{}^{{commit}}", ready.base_ref)],
+        ),
+    ) {
+        if head == base {
+            let _ = stamp(&path);
+        }
+    }
     Ok(path)
 }
 
-/// What [`refresh`] did to a persistent worktree.
+/// What [`refresh`] or [`sync`] did to a persistent worktree.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Refresh {
@@ -433,7 +448,9 @@ pub enum Refresh {
 /// Otherwise it changes nothing and says why. Never resets, discards or
 /// forces anything; the caller guarantees no run is using the worktree.
 pub fn refresh(ready: &Ready, path: &Path) -> Refresh {
-    match try_refresh(ready, path) {
+    let r = git_timeout(&ready.canonical, &["fetch", "origin"], FETCH_TIMEOUT)
+        .and_then(|_| fast_forward(path, &ready.base_ref));
+    match r {
         Ok(r) => r,
         Err(e) => Refresh::Skipped {
             reason: format!("{e:#}"),
@@ -441,9 +458,23 @@ pub fn refresh(ready: &Ready, path: &Path) -> Refresh {
     }
 }
 
-fn try_refresh(ready: &Ready, path: &Path) -> Result<Refresh> {
-    git_timeout(&ready.canonical, &["fetch", "origin"], FETCH_TIMEOUT)?;
-    let base = &ready.base_ref;
+/// [`refresh`] from the worktree at `path` alone (`axe repo sync`): fetches
+/// `origin` and fast-forwards to its `origin/HEAD` branch under the same
+/// safety rules. A fetch or Git error is an error; an unsafe worktree is
+/// [`Refresh::Skipped`] with its origin refs fetched.
+pub fn sync(path: &Path) -> Result<Refresh> {
+    let base = git(path, &["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .ok()
+        .filter(|r| r.starts_with("refs/remotes/origin/"))
+        .with_context(|| format!("{} has no refs/remotes/origin/HEAD", path.display()))?;
+    git_timeout(path, &["fetch", "origin"], FETCH_TIMEOUT)?;
+    fast_forward(path, &base)
+}
+
+/// Fast-forwards `path` to the already fetched `base` when it is clean and
+/// has no local commits; records the time ([`synced_at`]) when the worktree
+/// ends at `base`.
+fn fast_forward(path: &Path, base: &str) -> Result<Refresh> {
     let short = base.strip_prefix("refs/remotes/").unwrap_or(base);
     let dirty = git(path, &["status", "--porcelain"])?;
     if !dirty.is_empty() {
@@ -462,11 +493,41 @@ fn try_refresh(ready: &Ready, path: &Path) -> Result<Refresh> {
     }
     let head = git(path, &["rev-parse", "HEAD"])?;
     let to = git(path, &["rev-parse", &format!("{base}^{{commit}}")])?;
-    if head == to {
-        return Ok(Refresh::Current { head });
-    }
-    git(path, &["merge", "--ff-only", "--quiet", base])?;
-    Ok(Refresh::Updated { from: head, to })
+    let out = if head == to {
+        Refresh::Current { head }
+    } else {
+        git(path, &["merge", "--ff-only", "--quiet", base])?;
+        Refresh::Updated { from: head, to }
+    };
+    stamp(path)?;
+    Ok(out)
+}
+
+/// Where a worktree's last sync time is kept: its own Git directory
+/// (`<canonical>/.git/worktrees/<name>`), so it leaves the checkout clean and
+/// goes with `git worktree remove`.
+fn stamp_path(path: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(git(path, &["rev-parse", "--absolute-git-dir"])?).join("axe-synced"))
+}
+
+fn stamp(path: &Path) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let at = stamp_path(path)?;
+    std::fs::write(&at, format!("{now}\n")).with_context(|| format!("write {}", at.display()))
+}
+
+/// When the worktree at `path` was last brought up to its base (Unix
+/// seconds): by [`sync`], [`refresh`] or its creation. `None` when never
+/// recorded.
+pub fn synced_at(path: &Path) -> Option<i64> {
+    std::fs::read_to_string(stamp_path(path).ok()?)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]

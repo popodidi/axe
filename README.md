@@ -283,10 +283,15 @@ there while that folder exists; nothing creates one any more. A bot runs in
 (`axe bot edit <name> --repo <r>`, `--no-repos` clears it), on branch
 `bot-<name>--work`. `axe bot edit <name> --project <p>`
 moves a bot to another project (its subscriptions keep the projects they
-name), and `axe goal edit <name> --project <p>` moves a goal. Before each bot run the node
-fetches and fast-forwards each of its repo worktrees to the base branch's
-origin commit when it is clean and has no local commits; otherwise it leaves it
-unchanged and records why in the run's `run_start` event (`repos_refresh`). Housekeeping removes a task's run
+name), and `axe goal edit <name> --project <p>` moves a goal. A bot run
+fetches nothing before it starts (a new worktree is fetched once, when it is
+created); the run folder's `AGENTS.md` shows how long ago each repo was synced
+(`repos/axe: synced 2h ago`), and the bot protocol has the bot run `axe repo
+sync <repo>` before reading or changing a repo's code. That fetches and
+fast-forwards `$AXE_WORKTREE/repos/<repo>` to the base branch's origin commit
+when it is clean and has no local commits, and records the time in the
+worktree's Git directory; otherwise it changes nothing and fails with why.
+`axe workspace <bot>` still refreshes each worktree that way. Housekeeping removes a task's run
 folder after the task is done for the retention: each repo worktree is
 removed with `git worktree remove` and pruned, and only when the folder holds
 nothing but what axe generates (`housekeeping.rs`; `axe housekeeping
