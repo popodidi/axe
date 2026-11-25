@@ -43,6 +43,22 @@ pub struct Store {
     key: Vec<u8>,
     pub max_bytes: u64,
     pub public_url: Option<String>,
+    /// `[blobs] link_url` without its trailing slash, and its lowercased
+    /// `host[:port]`, which requests for the blob site carry in `Host`.
+    pub link_site: Option<(String, String)>,
+}
+
+/// `[blobs] link_url` as (base URL, lowercased `host[:port]`).
+fn link_site(url: &str) -> Result<(String, String)> {
+    let base = url.trim_end_matches('/');
+    let authority = base
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"))
+        .filter(|a| !a.is_empty() && !a.contains(['/', '?', '#', '@']))
+        .with_context(|| {
+            format!("[blobs] link_url {url:?} must be http(s)://host[:port] with no path")
+        })?;
+    Ok((base.to_string(), authority.to_ascii_lowercase()))
 }
 
 enum Backend {
@@ -82,7 +98,30 @@ impl Store {
             key,
             max_bytes: cfg.max_mib.unwrap_or(DEFAULT_MAX_MIB) * 1024 * 1024,
             public_url: cfg.public_url.clone(),
+            link_site: cfg.link_url.as_deref().map(link_site).transpose()?,
         })
+    }
+
+    /// Base URL signed links use: the blob site, else `public_url`.
+    pub fn link_base(&self) -> Option<&str> {
+        self.link_site
+            .as_ref()
+            .map(|(url, _)| url.as_str())
+            .or_else(|| self.public_url.as_deref().map(|u| u.trim_end_matches('/')))
+    }
+
+    /// Whether a request's `Host` header names the blob site.
+    pub fn is_link_host(&self, host: Option<&str>) -> bool {
+        let (Some((url, authority)), Some(host)) = (&self.link_site, host) else {
+            return false;
+        };
+        let host = host.to_ascii_lowercase();
+        let default_port = if url.starts_with("https://") {
+            ":443"
+        } else {
+            ":80"
+        };
+        host == *authority || host.strip_suffix(default_port) == Some(authority.as_str())
     }
 
     /// Copies exactly `len` bytes from `body` into the spool while hashing
@@ -949,6 +988,50 @@ mod tests {
         // A second open reuses the key, so links survive a restart.
         let again = Store::open(&Blobs::default(), &dir.path().join("axe.db")).unwrap();
         assert_eq!(again.link_path(&sha, Some("a b.txt"), 1000), path);
+    }
+
+    #[test]
+    fn link_site_parses_and_matches_its_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("axe.db");
+        let open = |link: Option<&str>, public: Option<&str>| {
+            let cfg = Blobs {
+                link_url: link.map(str::to_string),
+                public_url: public.map(str::to_string),
+                ..Blobs::default()
+            };
+            Store::open(&cfg, &db)
+        };
+        let store = open(Some("http://Blobs.Example/"), Some("http://axe.example/")).unwrap();
+        assert_eq!(store.link_base(), Some("http://Blobs.Example"));
+        for host in ["blobs.example", "BLOBS.example", "blobs.example:80"] {
+            assert!(store.is_link_host(Some(host)), "{host}");
+        }
+        for host in [
+            None,
+            Some("axe.example"),
+            Some("blobs.example:8080"),
+            Some("x.blobs.example"),
+        ] {
+            assert!(!store.is_link_host(host), "{host:?}");
+        }
+        let tls = open(Some("https://b.example:8443"), None).unwrap();
+        assert!(tls.is_link_host(Some("b.example:8443")));
+        assert!(!tls.is_link_host(Some("b.example")));
+        // Without a blob site, links use public_url and no host is the site.
+        let plain = open(None, Some("http://axe.example/")).unwrap();
+        assert_eq!(plain.link_base(), Some("http://axe.example"));
+        assert!(!plain.is_link_host(Some("axe.example")));
+        assert_eq!(open(None, None).unwrap().link_base(), None);
+        for bad in [
+            "blobs.example",
+            "ftp://b",
+            "http://",
+            "http://b/x",
+            "http://u@b",
+        ] {
+            assert!(open(Some(bad), None).is_err(), "{bad}");
+        }
     }
 
     #[test]

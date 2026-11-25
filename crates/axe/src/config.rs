@@ -391,6 +391,14 @@ pub struct Blobs {
     /// page under it (no link when unset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    /// Base URL of a separate site that serves signed links (`/b/...`), e.g.
+    /// `http://axe-blob.example`: a host that is not a subdomain of the
+    /// server's, so it is a different site for cookies. When set, links use
+    /// it, the server answers only `/b/...` on that host (never a session or
+    /// the API), blob HTML may run inline scripts there in a no-network
+    /// sandbox, and `/b/...` on any other host redirects to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_url: Option<String>,
     /// File holding the link signing key (default: `link.key` in `dir`,
     /// created on first start). Share it between servers that serve one store.
     #[serde(default, skip_serializing_if = "Option::is_none")]

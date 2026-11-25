@@ -361,7 +361,11 @@ database, or in an S3-compatible bucket with `[blobs.s3]`. `axe blob link`
 signs a URL (`/b/<sha256>/<name>?exp=..&sig=..`, at most seven days) that
 opens without the token, for example from a phone; it renders inline in a
 sandbox. The signing key is created on first start; `[blobs]` sets the
-directory, size limit, link base URL and key file.
+directory, size limit, link base URL and key file. `[blobs] link_url` moves
+links to a separate site (a host that is not a subdomain of the server's):
+there blob HTML may run inline scripts in a no-network sandbox, the host
+answers only `/b/` links and never a session, and `/b/` links on the
+server's own host redirect to it.
 
 The dashboard's Store view lists and searches blobs and docs; a selected
 item shows its metadata and an "Open full" link (the signed `/b/` URL, or

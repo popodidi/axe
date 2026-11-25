@@ -288,6 +288,8 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
 
 struct Request {
     method: String,
+    /// The request target as sent (path and query).
+    target: String,
     path: Vec<String>,
     query: HashMap<String, String>,
     headers: HashMap<String, String>,
@@ -492,6 +494,7 @@ fn read_request(
     }
     Ok(Some(Request {
         method: method.to_string(),
+        target: target.to_string(),
         path,
         query,
         headers,
@@ -771,6 +774,23 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
     };
     let metric_route = crate::metrics::route(&req.path);
     let observe = |status| st.metrics.observe(&req.method, metric_route, status, start);
+    let is_link = req.method == "GET" && req.path.first().is_some_and(|p| p == "b");
+    // The blob site (`[blobs] link_url`) serves signed links and nothing
+    // else: no API, no sign-in, and it never reads or sets a cookie.
+    if st
+        .blobs
+        .is_link_host(req.headers.get("host").map(String::as_str))
+    {
+        if is_link {
+            return blob_link_get(st, &mut w, &req, &observe);
+        }
+        observe(404);
+        return Ok(write_response(
+            &mut w,
+            &error(404, "this host serves only signed blob links"),
+            None,
+        )?);
+    }
     let cors = req
         .headers
         .get("origin")
@@ -793,7 +813,20 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
         )?;
         return Ok(w.flush()?);
     }
-    if req.path.first().is_some_and(|p| p == "b") && req.method == "GET" {
+    if is_link {
+        // Links made before the blob site existed keep working there.
+        if let Some((site, _)) = &st.blobs.link_site {
+            observe(302);
+            write_head(
+                &mut w,
+                302,
+                "text/plain",
+                Some(0),
+                None,
+                &format!("Location: {site}{}\r\n", req.target),
+            )?;
+            return Ok(w.flush()?);
+        }
         return blob_link_get(st, &mut w, &req, &observe);
     }
     if req.path == ["api", "dispatcher", "connect"] {
@@ -1183,11 +1216,7 @@ fn blob_api(
                 }
                 let exp = remote::epoch() + b.ttl;
                 let path = st.blobs.link_path(sha, name.as_deref(), exp);
-                let url = st
-                    .blobs
-                    .public_url
-                    .as_deref()
-                    .map(|base| format!("{}{path}", base.trim_end_matches('/')));
+                let url = st.blobs.link_base().map(|base| format!("{base}{path}"));
                 let expires_at = time::OffsetDateTime::from_unix_timestamp(exp)?
                     .format(&time::format_description::well_known::Rfc3339)?;
                 ok(
@@ -1210,7 +1239,10 @@ fn blob_api(
 
 /// `GET /b/<sha>[/<name>]?exp=..&sig=..`: a signed link, readable without the
 /// token until it expires. The blob renders inline in a sandbox, so HTML
-/// cannot act on this server's origin.
+/// cannot act on this server's origin. On a separate blob site
+/// (`[blobs] link_url`) the sandbox also lets inline scripts run, with no
+/// network access and an opaque origin; any page may read the bytes (CORS),
+/// as anyone holding the link can.
 fn blob_link_get(
     st: &State,
     w: &mut TcpStream,
@@ -1269,7 +1301,14 @@ fn blob_link_get(
                 body,
                 &format!(
                     "Content-Disposition: inline{file}\r\nX-Content-Type-Options: nosniff\r\n\
-                     Content-Security-Policy: sandbox\r\n"
+                     Content-Security-Policy: {}\r\n",
+                    if st.blobs.link_site.is_some() {
+                        // The dashboard reads previews through a redirect,
+                        // so with an opaque `Origin: null`.
+                        format!("{LINK_SITE_CSP}\r\nAccess-Control-Allow-Origin: *")
+                    } else {
+                        "sandbox".to_string()
+                    }
                 ),
             )
         }
@@ -1280,6 +1319,11 @@ fn blob_link_get(
         }
     }
 }
+
+/// The blob site's policy: scripts run in an opaque-origin sandbox (no
+/// `allow-same-origin`), and the page may load nothing over the network.
+const LINK_SITE_CSP: &str = "sandbox allow-scripts; default-src 'none'; \
+     script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:";
 
 /// Request problems carry an [`HttpError`]; any other blob error is the
 /// store's (disk, S3), so a 500.
