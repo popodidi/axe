@@ -530,7 +530,13 @@ fn cli_drives_goals_through_the_api() {
     assert_eq!(show["budget_cost_week"], 20.0);
     assert_eq!(show["tasks"][0]["id"].to_string(), id);
     assert_eq!(show["trajectory"][1]["task_id"].to_string(), id);
-    assert_eq!(show["next_wake"], serde_json::Value::Null);
+    // Activation gave each bot a twice-weekly review schedule for the goal.
+    for b in ["a", "b"] {
+        let s = srv.get(&format!("/api/bots/{b}/schedules"));
+        assert_eq!(s[0]["name"], "goal-review", "{s}");
+        assert_eq!(s[0]["goal"], "g", "{s}");
+        assert_eq!(show["next_wake"], s[0]["next_at"]);
+    }
     let text = srv.ok(&["goal", "show", "g"]);
     assert!(text.contains("# Trajectory"), "{text}");
     assert!(text.contains(&format!("#{id} pending t")), "{text}");
@@ -633,4 +639,266 @@ fn cli_drives_goals_through_the_api() {
         log.contains(r#"bot:a rename owner_ref="msg #2": g -> g2"#),
         "{log}"
     );
+}
+
+/// Goal-tagged schedules of bot `b` for goal `g`.
+fn goal_schedules(c: &Connection, b: &str, g: &str) -> Vec<schedule::Schedule> {
+    schedule::list(c, b)
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.goal.as_deref() == Some(g))
+        .collect()
+}
+
+#[test]
+fn activation_adds_one_review_schedule_per_bot_without_one() {
+    let (_d, mut c) = setup();
+    let mut g = new_goal("g");
+    g.bots = vec!["a".into(), "b".into()];
+    goal::propose(&mut c, &human(), &g, None, T0).unwrap();
+    // a has an unrelated schedule (its timezone is the bot's), b already
+    // has a schedule for the goal.
+    let s = |name: &str, tz: &str| NewSchedule {
+        name: name.into(),
+        cron: "0 8 * * *".into(),
+        timezone: tz.into(),
+        objective: "x".into(),
+    };
+    schedule::add(&mut c, &human(), "a", &s("daily", "Asia/Taipei"), "w", T0).unwrap();
+    schedule::add_for_goal(&mut c, &human(), "b", &s("mine", "UTC"), Some("g"), "w", T0).unwrap();
+
+    goal::change(&mut c, &human(), "g", "activate", "go", None).unwrap();
+    let a = goal_schedules(&c, "a", "g");
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!(a[0].name, goal::REVIEW_SCHEDULE);
+    assert_eq!(a[0].cron, goal::REVIEW_CRON);
+    assert_eq!(a[0].timezone, "Asia/Taipei");
+    assert!(a[0].enabled);
+    assert_eq!(a[0].objective, goal::review_objective("g"));
+    assert!(a[0].objective.contains("axe goal show g"));
+    let b = goal_schedules(&c, "b", "g");
+    assert_eq!(b.len(), 1, "b keeps only its own: {b:?}");
+    assert_eq!(b[0].name, "mine");
+
+    // Pause and resume add nothing; the bot may pause its review.
+    goal::change(&mut c, &human(), "g", "pause", "w", None).unwrap();
+    goal::change(&mut c, &human(), "g", "resume", "w", None).unwrap();
+    goal::change(&mut c, &human(), "g", "activate", "again", None).unwrap();
+    assert_eq!(goal_schedules(&c, "a", "g").len(), 1);
+    assert_eq!(goal_schedules(&c, "b", "g").len(), 1);
+    schedule::change(
+        &mut c,
+        &Actor::new("bot:a"),
+        "a",
+        "goal-review",
+        "pause",
+        "w",
+        T0,
+    )
+    .unwrap();
+    assert!(!goal_schedules(&c, "a", "g")[0].enabled);
+
+    // A second goal of the same bot: the name is taken, so it gets its id;
+    // a bot with no schedule gets UTC.
+    let mut h = new_goal("h");
+    h.bots = vec!["a".into()];
+    let h = goal::propose(&mut c, &human(), &h, None, T0).unwrap();
+    goal::change(&mut c, &human(), "h", "activate", "go", None).unwrap();
+    let ah = goal_schedules(&c, "a", "h");
+    assert_eq!(ah.len(), 1);
+    assert_eq!(ah[0].name, format!("goal-review-{}", h.id));
+    bot::create(&mut c, &human(), &new_bot("z"), T0).unwrap();
+    let mut k = new_goal("k");
+    k.bots = vec!["z".into()];
+    goal::propose(&mut c, &human(), &k, None, T0).unwrap();
+    goal::change(&mut c, &human(), "k", "activate", "go", None).unwrap();
+    assert_eq!(goal_schedules(&c, "z", "k")[0].timezone, "UTC");
+}
+
+/// An active goal attached to bots a and b whose review schedules are removed,
+/// so it has no next action from now on; returns the time it went quiet.
+fn quiet_goal(c: &mut Connection) -> i64 {
+    let mut g = new_goal("g");
+    g.bots = vec!["a".into(), "b".into()];
+    goal::propose(c, &human(), &g, None, T0).unwrap();
+    goal::change(c, &human(), "g", "activate", "go", None).unwrap();
+    for b in ["a", "b"] {
+        schedule::change(
+            c,
+            &Actor::new(&format!("bot:{b}")),
+            b,
+            "goal-review",
+            "remove",
+            "w",
+            T0,
+        )
+        .unwrap();
+    }
+    axe::remote::epoch()
+}
+
+fn idle_wakes(c: &Connection, b: &str) -> Vec<bot::Wake> {
+    bot::wakes(c, b, false, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|w| w.body.contains("idle 24h"))
+        .collect()
+}
+
+#[test]
+fn an_idle_goal_wakes_each_bot_once_per_day() {
+    let (_d, mut c) = setup();
+    let e = quiet_goal(&mut c);
+    let g = goal::get(&c, "g").unwrap();
+    assert_eq!(
+        goal::idle_since(&c, &g, e + 3600).unwrap(),
+        None,
+        "not yet 24h"
+    );
+    assert_eq!(goal::idle_tick(&mut c, e + 23 * 3600).unwrap(), 0);
+
+    let day = e + goal::IDLE_SECONDS + 60;
+    assert!(goal::idle_since(&c, &g, day).unwrap().is_some());
+    assert_eq!(goal::idle_tick(&mut c, day).unwrap(), 2, "one wake per bot");
+    for b in ["a", "b"] {
+        let w = idle_wakes(&c, b);
+        assert_eq!(w.len(), 1, "{b}");
+        assert!(
+            w[0].body.starts_with(
+                "[goal g] idle 24h: no open task, wake or schedule. Set a next action"
+            ),
+            "{}",
+            w[0].body
+        );
+    }
+    // The idle wake is no next action: the goal stays idle, and no second
+    // wake comes within 24h.
+    assert!(goal::idle_since(&c, &g, day + 60).unwrap().is_some());
+    assert_eq!(goal::idle_tick(&mut c, day + 60).unwrap(), 0);
+    assert_eq!(goal::idle_tick(&mut c, day + 23 * 3600).unwrap(), 0);
+    // A day later, still idle: one more each.
+    assert_eq!(
+        goal::idle_tick(&mut c, day + goal::IDLE_SECONDS + 1).unwrap(),
+        2
+    );
+    assert_eq!(idle_wakes(&c, "a").len(), 2);
+
+    // A paused goal is never idle.
+    goal::change(&mut c, &human(), "g", "pause", "w", None).unwrap();
+    let g = goal::get(&c, "g").unwrap();
+    assert_eq!(goal::idle_since(&c, &g, day * 2).unwrap(), None);
+    assert_eq!(goal::idle_tick(&mut c, day * 2).unwrap(), 0);
+}
+
+#[test]
+fn an_open_task_a_pending_wake_or_a_schedule_is_a_next_action() {
+    let (_d, mut c) = setup();
+    let e = quiet_goal(&mut c);
+    let later = e + 2 * goal::IDLE_SECONDS;
+    let idle = |c: &Connection| {
+        let g = goal::get(c, "g").unwrap();
+        goal::idle_since(c, &g, later).unwrap()
+    };
+    assert!(idle(&c).is_some());
+
+    // An open linked task.
+    let t = NewTask {
+        agent: None,
+        project: "p",
+        title: "H1",
+        detail: "",
+        state: "pending",
+    };
+    let id = db::add_linked_task(&mut c, &human(), &t, &[], None, Some("g")).unwrap();
+    assert_eq!(idle(&c), None);
+    assert_eq!(goal::idle_tick(&mut c, later).unwrap(), 0);
+    db::set_task(
+        &mut c,
+        &human(),
+        id,
+        &Changes {
+            state: Some("done".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(idle(&c).is_some(), "a done task is no next action");
+
+    // A pending goal wake.
+    let (wake, _) = bot::add_wake(
+        &mut c,
+        &human(),
+        "a",
+        later + 3600,
+        &goal::label("g", "eval H1"),
+        None,
+        e,
+    )
+    .unwrap();
+    assert_eq!(idle(&c), None);
+    assert_eq!(goal::idle_tick(&mut c, later).unwrap(), 0);
+    c.execute("DELETE FROM bot_wakes WHERE id=?1", [wake])
+        .unwrap();
+    // A wake for another goal is not one.
+    bot::add_wake(
+        &mut c,
+        &human(),
+        "a",
+        later,
+        &goal::label("gx", "x"),
+        None,
+        e,
+    )
+    .unwrap();
+    assert!(idle(&c).is_some());
+
+    // An enabled goal schedule; a paused one is not.
+    let s = NewSchedule {
+        name: "review".into(),
+        cron: "0 9 * * 1".into(),
+        timezone: "UTC".into(),
+        objective: "review".into(),
+    };
+    schedule::add_for_goal(&mut c, &human(), "b", &s, Some("g"), "w", e).unwrap();
+    assert_eq!(idle(&c), None);
+    schedule::change(&mut c, &human(), "b", "review", "pause", "w", e).unwrap();
+    assert!(idle(&c).is_some());
+}
+
+#[test]
+fn the_pin_and_the_api_show_an_idle_goal() {
+    let (_d, mut c) = setup();
+    quiet_goal(&mut c);
+    let pin = |c: &Connection| {
+        let lines = axe::goal_board::pinned_lines(c, "a", None).unwrap();
+        assert_eq!(lines.len(), 1);
+        (
+            lines[0].idle_since.clone(),
+            axe::goal_board::pin_text(&lines[0]),
+        )
+    };
+    // Quiet for minutes only: not idle yet.
+    let (since, text) = pin(&c);
+    assert_eq!(since, None);
+    assert!(!text.contains("idle"), "{text}");
+    assert_eq!(goal::detail(&c, "g").unwrap().goal.idle_since, None);
+
+    // Two days quiet.
+    let old = "2020-01-01T00:00:00Z";
+    c.execute("UPDATE goal_events SET at=?1", [old]).unwrap();
+    c.execute("UPDATE bot_events SET at=?1", [old]).unwrap();
+    let (since, text) = pin(&c);
+    assert_eq!(since.as_deref(), Some(old));
+    assert!(
+        text.starts_with("<b>g</b> · <i>active</i> · <b>idle</b> · "),
+        "{text}"
+    );
+    assert_eq!(
+        goal::detail(&c, "g").unwrap().goal.idle_since.as_deref(),
+        Some(old)
+    );
+    let listed = goal::list(&c, None, None).unwrap();
+    assert_eq!(listed[0].idle_since.as_deref(), Some(old));
+    let json = serde_json::to_value(&listed[0]).unwrap();
+    assert_eq!(json["idle_since"], old);
 }

@@ -3316,6 +3316,9 @@ fn form_event(st: &State, f: &form::Form, body: &str) {
     }
 }
 
+/// How often the housekeeping loop looks for idle goals (`goal::idle_tick`).
+const GOAL_IDLE_EVERY: Duration = Duration::from_secs(60);
+
 /// Expires forms, retries deliveries held for an offline dispatcher and
 /// closes finished forms' prompts (their outcome, with a keyboard of the
 /// forms still open in that chat, or none).
@@ -3325,6 +3328,7 @@ fn form_event(st: &State, f: &form::Form, body: &str) {
 /// `/healthz`, which needs no DB).
 fn housekeeping_loop(st: &State) {
     let mut last_metrics = Instant::now();
+    let mut last_idle: Option<Instant> = None;
     while !st.stop.load(Ordering::SeqCst) {
         let started = Instant::now();
         match routine::tick(&mut st.conn(), routine::now()) {
@@ -3336,6 +3340,14 @@ fn housekeeping_loop(st: &State) {
             Ok(n) if n > 0 => st.notifier.bump(),
             Err(e) => eprintln!("bot schedule tick: {e:#}"),
             _ => {}
+        }
+        if last_idle.is_none_or(|t| t.elapsed() >= GOAL_IDLE_EVERY) {
+            match goal::idle_tick(&mut st.conn(), routine::now()) {
+                Ok(n) if n > 0 => st.notifier.bump(),
+                Err(e) => eprintln!("goal idle tick: {e:#}"),
+                _ => {}
+            }
+            last_idle = Some(Instant::now());
         }
         if last_metrics.elapsed() >= Duration::from_secs(15) {
             if let Err(e) = st.metrics.refresh(&st.conn()) {

@@ -178,6 +178,26 @@ pub fn add_for_goal(
     why: &str,
     now: i64,
 ) -> Result<Schedule> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let b = bot::get(&tx, bot_name)?;
+    let goal = goal.map(|g| goal::resolve(&tx, g)).transpose()?.flatten();
+    let created = insert(&tx, actor, b.id, s, goal.as_ref(), why, now)?;
+    tx.commit()?;
+    Ok(created)
+}
+
+/// Adds schedule `s` to bot `bot_id` inside `tx`, labeled with `goal`, and
+/// records `schedule_add`. Also used by goal activation (`goal.rs`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert(
+    tx: &Connection,
+    actor: &Actor,
+    bot_id: i64,
+    s: &NewSchedule,
+    goal: Option<&goal::Goal>,
+    why: &str,
+    now: i64,
+) -> Result<Schedule> {
     check_name(&s.name)?;
     check_why(why)?;
     if s.objective.trim().is_empty() {
@@ -188,12 +208,9 @@ pub fn add_for_goal(
     }
     let next = routine::next_after(&s.cron, &s.timezone, now)?;
     check_interval(&s.cron, &s.timezone)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let b = bot::get(&tx, bot_name)?;
-    let goal = goal.map(|g| goal::resolve(&tx, g)).transpose()?.flatten();
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM bot_schedules WHERE bot_id=?1 AND name=?2)",
-        params![b.id, s.name],
+        params![bot_id, s.name],
         |r| r.get(0),
     )?;
     if exists {
@@ -205,25 +222,23 @@ pub fn add_for_goal(
            created_at, updated_at, goal_id)
          VALUES (?1,?2,?3,?4,?5,1,?6,?7,?7,?8)",
         params![
-            b.id,
+            bot_id,
             s.name,
             s.cron,
             s.timezone,
             s.objective,
             ts(next),
             at,
-            goal.as_ref().map(|g| g.id)
+            goal.map(|g| g.id)
         ],
     )?;
     let mut detail = json!({"schedule":s.name,"cron":s.cron,"timezone":s.timezone,
         "objective":s.objective,"next_at":ts(next),"why":why});
-    if let Some(g) = &goal {
+    if let Some(g) = goal {
         detail["goal"] = json!(g.name);
     }
-    bot::event(&tx, b.id, actor, "schedule_add", &detail.to_string())?;
-    let created = find(&tx, b.id, &s.name)?;
-    tx.commit()?;
-    Ok(created)
+    bot::event(tx, bot_id, actor, "schedule_add", &detail.to_string())?;
+    find(tx, bot_id, &s.name)
 }
 
 /// `axe bot schedule edit`: sets the goal its firings are labeled with
@@ -286,6 +301,10 @@ pub fn change(
     let b = bot::get(&tx, bot_name)?;
     let s = find(&tx, b.id, name)?;
     let mut detail = json!({"schedule":name,"why":why});
+    if let Some(g) = &s.goal {
+        // Goal idleness reads when a goal schedule stopped (`goal::idle_since`).
+        detail["goal"] = json!(g);
+    }
     match action {
         "pause" if !s.enabled => return Ok(()),
         "resume" if s.enabled => return Ok(()),

@@ -95,6 +95,8 @@ below. You run as one continuous session that axe resumes on every wake.
   owner's behalf needs `--owner-ref` citing the owner message.
 - Link work to its goal: `axe task add --goal NAME`, `axe bot wake --goal NAME`,
   `axe bot schedule add --goal NAME`.
+- An active goal always has a next action: an open hypothesis task linked to
+  it, or a goal-tagged wake or schedule.
 
 ## Retro feedback
 - The owner rates your asks (escalations and cards) on your retro card. When

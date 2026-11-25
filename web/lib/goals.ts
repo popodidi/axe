@@ -24,6 +24,8 @@ export type Goal = {
   updated_at: string;
   bots: string[];
   budget?: Budget;
+  /** Set when the goal is idle: active with no next action for 24h (crates/axe/src/goal.rs `idle_since`). */
+  idle_since?: string;
 };
 export type GoalEvent = {
   id: number;
@@ -77,6 +79,10 @@ export function costMeter(g: Goal): Meter {
 }
 export function attentionMeter(g: Goal): Meter {
   return meter(g.budget?.attention_spent ?? 0, g.budget_attention_week, String);
+}
+/** An active goal with no open linked task, goal wake or goal schedule for 24h or more. */
+export function isIdle(g: Goal) {
+  return g.state === "active" && !!g.idle_since;
 }
 export function openTasks(tasks: GoalTask[]) {
   return tasks.filter((t) => !closedTaskStates.includes(t.state));

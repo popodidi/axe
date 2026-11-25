@@ -34,6 +34,13 @@
   font-family: var(--font-mono);
 }
 
+/* The state badge, then Idle when the goal has no next action. */
+.states {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-quarter);
+}
+
 /* Goal states reuse the task state tints; the text carries the meaning. */
 .meter {
   display: grid;

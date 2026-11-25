@@ -99,6 +99,11 @@ pub struct Goal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub budget: Option<Budget>,
+    /// Set when the goal is idle ([`idle_since`]): since when it has had no
+    /// next action (RFC3339); set by `list` and `detail` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub idle_since: Option<String>,
 }
 
 const GOAL_COLS: &str = "g.*, (SELECT group_concat(name, ',') FROM
@@ -122,6 +127,7 @@ fn from_row(r: &Row) -> rusqlite::Result<Goal> {
             .map(|b| b.split(',').map(str::to_owned).collect())
             .unwrap_or_default(),
         budget: None,
+        idle_since: None,
     })
 }
 
@@ -152,9 +158,11 @@ pub fn list(conn: &Connection, bot_name: Option<&str>, state: Option<&str>) -> R
         ))?
         .query_map(params![bot_id, state], from_row)?
         .collect::<rusqlite::Result<_>>()?;
-    let spend = Spend::load(conn, crate::remote::epoch())?;
+    let now = crate::remote::epoch();
+    let spend = Spend::load(conn, now)?;
     for g in &mut goals {
         g.budget = Some(spend.budget(g));
+        g.idle_since = idle_since(conn, g, now)?;
     }
     Ok(goals)
 }
@@ -240,6 +248,7 @@ pub fn next_wake(conn: &Connection, g: &Goal) -> Result<Option<String>> {
         "SELECT MIN(due) FROM (
            SELECT due_at AS due FROM bot_wakes
             WHERE run_id IS NULL AND kind='wake' AND substr(body,1,length(?1))=?1
+              AND key NOT LIKE 'goal-idle:%'
            UNION ALL
            SELECT next_at FROM bot_schedules WHERE goal_id=?2 AND enabled=1)",
         params![label(&g.name, "").trim_end(), g.id],
@@ -263,7 +272,9 @@ pub struct Detail {
 
 pub fn detail(conn: &Connection, name: &str) -> Result<Detail> {
     let mut goal = get(conn, name)?;
-    goal.budget = Some(budget(conn, &goal, crate::remote::epoch())?);
+    let now = crate::remote::epoch();
+    goal.budget = Some(budget(conn, &goal, now)?);
+    goal.idle_since = idle_since(conn, &goal, now)?;
     Ok(Detail {
         next_wake: next_wake(conn, &goal)?,
         tasks: tasks(conn, name)?,
@@ -758,8 +769,240 @@ pub fn change(
     };
     let body = format!("{} -> {to}\nwhy: {why}", g.state);
     event(&tx, g.id, actor, kind, None, owner, &body, &at)?;
+    if action == "activate" {
+        review_schedules(&tx, actor, &g, crate::remote::epoch())?;
+    }
     tx.commit()?;
     get(conn, name)
+}
+
+/// Name of the review schedule [`change`] adds on activation.
+pub const REVIEW_SCHEDULE: &str = "goal-review";
+/// Its cron: twice a week, Monday and Thursday 09:00 in the bot's timezone.
+pub const REVIEW_CRON: &str = "0 9 * * 1,4";
+
+/// The review schedule's objective: the goal-review pattern of the goals
+/// reference (`skills/axe/references/goals.md`, "Next action").
+pub fn review_objective(goal: &str) -> String {
+    format!(
+        "Goal review for {goal}: read `axe goal show {goal}` and `axe goal log {goal}`; \
+         judge open H tasks and due verdicts; record a status observation \
+         (on track / at risk / off track, with a metric); make sure the goal has a \
+         next action (an open H task, a goal wake or this schedule), or stop it per \
+         the goals reference. Change or pause this schedule as you see fit."
+    )
+}
+
+/// On activation, gives each attached bot with no schedule for the goal a
+/// twice-weekly review schedule in its timezone: that of its latest
+/// schedule, else UTC. The bot may change, pause or remove it.
+fn review_schedules(tx: &Transaction, actor: &Actor, g: &Goal, now: i64) -> Result<()> {
+    let bots: Vec<i64> = tx
+        .prepare(
+            "SELECT b.id FROM goal_bots gb JOIN bots b ON b.id=gb.bot_id
+             WHERE gb.goal_id=?1 AND NOT EXISTS(
+               SELECT 1 FROM bot_schedules s WHERE s.bot_id=b.id AND s.goal_id=?1)
+             ORDER BY b.name",
+        )?
+        .query_map([g.id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for bot_id in bots {
+        let timezone: String = tx
+            .query_row(
+                "SELECT timezone FROM bot_schedules WHERE bot_id=?1
+                 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                [bot_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "UTC".into());
+        let taken = |n: &str| -> Result<bool> {
+            Ok(tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bot_schedules WHERE bot_id=?1 AND name=?2)",
+                params![bot_id, n],
+                |r| r.get(0),
+            )?)
+        };
+        let mut name = REVIEW_SCHEDULE.to_string();
+        if taken(&name)? {
+            name = format!("{REVIEW_SCHEDULE}-{}", g.id);
+        }
+        if taken(&name)? {
+            continue;
+        }
+        let s = crate::schedule::NewSchedule {
+            name,
+            cron: REVIEW_CRON.into(),
+            timezone,
+            objective: review_objective(&g.name),
+        };
+        let why = format!("goal {} activated: default review schedule", g.name);
+        crate::schedule::insert(tx, actor, bot_id, &s, Some(g), &why, now)?;
+    }
+    Ok(())
+}
+
+/// Seconds an active goal may go without a next action before it is idle.
+pub const IDLE_SECONDS: i64 = 24 * 3600;
+/// `bot_wakes.key` prefix of an idle wake, followed by `<goal id>:<epoch>`.
+/// An idle wake is not a next action: it asks for one.
+pub const IDLE_KEY_PREFIX: &str = "goal-idle:";
+
+/// Whether goal `g` has a next action now: an open linked task, a pending
+/// wake labeled with it (not an idle wake) or an enabled schedule with it.
+fn has_next_action(conn: &Connection, g: &Goal) -> Result<bool> {
+    let open = tasks(conn, &g.name)?.iter().any(|t| t.state != "done");
+    if open {
+        return Ok(true);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM bot_wakes WHERE run_id IS NULL
+             AND substr(body,1,length(?1))=?1 AND key NOT LIKE ?3)
+         OR EXISTS(SELECT 1 FROM bot_schedules WHERE goal_id=?2 AND enabled=1)",
+        params![
+            label(&g.name, "").trim_end(),
+            g.id,
+            format!("{IDLE_KEY_PREFIX}%")
+        ],
+        |r| r.get(0),
+    )?)
+}
+
+/// The latest time goal `g` became active or had a next action, as stored
+/// data shows it: the activation or resume, a linked task's last change, a
+/// task unlinked from it, a goal wake's delivery, a goal schedule's change
+/// or firing, and a goal schedule paused, retargeted or removed.
+fn last_action_at(conn: &Connection, g: &Goal) -> Result<i64> {
+    let lbl = label(&g.name, "");
+    let mut times: Vec<String> = Vec::new();
+    let mut add = |sql: &str, p: &[&dyn rusqlite::ToSql]| -> Result<()> {
+        let rows: Vec<Option<String>> = conn
+            .prepare(sql)?
+            .query_map(p, |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        times.extend(rows.into_iter().flatten());
+        Ok(())
+    };
+    add(
+        "SELECT MAX(at) FROM goal_events WHERE goal_id=?1 AND kind IN ('activated','state')",
+        &[&g.id],
+    )?;
+    add(
+        "SELECT t.updated_at FROM tasks t JOIN events e ON e.id=(
+           SELECT MAX(id) FROM events WHERE task_id=t.id AND kind='goal')
+         WHERE e.to_value=?1",
+        &[&g.name],
+    )?;
+    add(
+        "SELECT at FROM events WHERE kind='goal' AND from_value=?1",
+        &[&g.name],
+    )?;
+    add(
+        "SELECT r.started_at FROM bot_wakes w JOIN bot_runs r ON r.id=w.run_id
+         WHERE substr(w.body,1,length(?1))=?1 AND w.key NOT LIKE ?2",
+        &[&lbl.trim_end(), &format!("{IDLE_KEY_PREFIX}%")],
+    )?;
+    add(
+        "SELECT updated_at FROM bot_schedules WHERE goal_id=?1
+         UNION ALL SELECT last_fired_at FROM bot_schedules WHERE goal_id=?1",
+        &[&g.id],
+    )?;
+    add(
+        "SELECT at FROM bot_events
+         WHERE kind IN ('schedule_pause','schedule_remove','schedule_edit') AND json_valid(body)
+           AND (json_extract(body,'$.goal')=?1 OR json_extract(body,'$.goal.from')=?1)",
+        &[&g.name],
+    )?;
+    let at = times
+        .iter()
+        .filter_map(|t| bot::epoch_of(t))
+        .max()
+        .unwrap_or_else(|| bot::epoch_of(&g.updated_at).unwrap_or(0));
+    Ok(at)
+}
+
+/// When goal `g` became idle, if it is idle at `now` (RFC3339): it is active
+/// and has had no next action ([`has_next_action`]) for [`IDLE_SECONDS`] or
+/// more. Derived from stored data; nothing is stored.
+pub fn idle_since(conn: &Connection, g: &Goal, now: i64) -> Result<Option<String>> {
+    if g.state != "active" || has_next_action(conn, g)? {
+        return Ok(None);
+    }
+    let since = last_action_at(conn, g)?;
+    Ok((now - since >= IDLE_SECONDS).then(|| ts(since)))
+}
+
+/// The idle wake's text.
+pub fn idle_note(goal: &str) -> String {
+    label(
+        goal,
+        "idle 24h: no open task, wake or schedule. Set a next action \
+         (an H task, `axe bot wake --goal`, or a goal schedule).",
+    )
+}
+
+/// Wakes each active bot attached to an idle goal ([`idle_since`]) once,
+/// at most once per goal per [`IDLE_SECONDS`]: the last idle wake of the
+/// goal (its key) is the dedupe, so no state is stored. Returns the number
+/// of wakes created.
+pub fn idle_tick(conn: &mut Connection, now: i64) -> Result<usize> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let goals: Vec<Goal> = tx
+        .prepare(&format!(
+            "SELECT {GOAL_COLS} FROM goals g WHERE g.state='active' ORDER BY g.id"
+        ))?
+        .query_map([], from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    let actor = Actor::new("goals");
+    let mut woken = 0;
+    for g in goals {
+        if idle_since(&tx, &g, now)?.is_none() {
+            continue;
+        }
+        let recent: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM bot_wakes WHERE key LIKE ?1 AND created_at>?2)",
+            params![
+                format!("{IDLE_KEY_PREFIX}{}:%", g.id),
+                ts(now - IDLE_SECONDS)
+            ],
+            |r| r.get(0),
+        )?;
+        if recent {
+            continue;
+        }
+        let bots: Vec<i64> = tx
+            .prepare(
+                "SELECT b.id FROM goal_bots gb JOIN bots b ON b.id=gb.bot_id
+                 WHERE gb.goal_id=?1 AND b.state='active' ORDER BY b.id",
+            )?
+            .query_map([g.id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let at = ts(now);
+        for b in bots {
+            let key = format!("{IDLE_KEY_PREFIX}{}:{now}", g.id);
+            let wake = bot::insert_wake(
+                &tx,
+                b,
+                "wake",
+                &key,
+                None,
+                &idle_note(&g.name),
+                &at,
+                &at,
+                &actor,
+            )?;
+            bot::event(
+                &tx,
+                b,
+                &actor,
+                "goal_idle",
+                &json!({"goal":g.name,"wake":wake}).to_string(),
+            )?;
+            woken += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(woken)
 }
 
 /// `join` or `leave`: attaches or detaches a bot. A bot may join or leave

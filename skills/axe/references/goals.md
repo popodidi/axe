@@ -92,6 +92,18 @@ Record one whenever the picture changes (each goal review, each verdict).
 The latest status observation stays on the pin until the next one; without
 one the pin shows the goal state and the intent's first sentence.
 
+### Next action
+
+An active goal always has a next action: an open H task linked to it, or a
+goal-tagged wake or schedule. Activation gives each attached bot without a
+goal schedule a twice-weekly `goal-review` schedule whose objective is the
+review above (read the goal, judge H tasks and verdicts, record a status
+observation, keep a next action); change, pause or remove it as you see fit.
+A goal with no next action for 24h shows `idle` on its pin and in the web
+Goals view, and its bots get one `[goal G] idle 24h` wake a day until it has
+one. Code: `review_schedules`, `idle_since` and `idle_tick` in
+`crates/axe/src/goal.rs`.
+
 ## 3. Autonomy tier
 
 Self-start an H task (state `pending`) only if all hold:
