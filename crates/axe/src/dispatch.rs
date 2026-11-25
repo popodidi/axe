@@ -199,6 +199,25 @@ fn dep_lines(label: &str, deps: &[db::DepRef]) -> String {
     s
 }
 
+/// Derived state label shared by `axe task list` and `axe task show`: dependency
+/// waits read `blocked (deps #1, #2)` (`hold+deps` with a stored hold), wake waits
+/// read `waiting until <time>`; otherwise the derived status. The web mirrors it
+/// in `taskStatusLabel` (`web/lib/model.ts`).
+pub fn status_label(t: &Task) -> String {
+    if t.state == "pending" && t.waiting_on.is_empty() && t.sleeping() {
+        return format!("waiting until {}", t.not_before.as_deref().unwrap_or("?"));
+    }
+    if t.waiting_on.is_empty() || t.status != "blocked" {
+        return t.status.clone();
+    }
+    let kind = if t.state == "blocked" {
+        "hold+deps"
+    } else {
+        "deps"
+    };
+    format!("blocked ({kind} {})", db::ids(&t.waiting_on))
+}
+
 /// Why the task cannot be claimed, or `None` when it is ready, running or done.
 pub fn wait_reason(t: &Task) -> Option<String> {
     let deps = (!t.waiting_on.is_empty())
@@ -211,10 +230,9 @@ pub fn wait_reason(t: &Task) -> Option<String> {
             Some("hold: resolve it explicitly, then set pending".into())
         }
         ("pending", Some(d)) => Some(format!("{d}; becomes ready automatically")),
-        ("pending", None) if t.sleeping() => Some(format!(
-            "waiting until {}; becomes ready automatically",
-            t.not_before.as_deref().unwrap_or("?")
-        )),
+        ("pending", None) if t.sleeping() => {
+            Some(format!("{}; becomes ready automatically", status_label(t)))
+        }
         (_, Some(d)) => Some(format!("{d} (prerequisite reopened; not cancelled)")),
         _ => None,
     }
@@ -234,10 +252,11 @@ pub fn format_deps(t: &Task) -> String {
 }
 
 pub fn format_show(t: &Task) -> String {
+    let label = status_label(t);
     let state = if t.status == t.state {
-        t.state.clone()
+        label
     } else {
-        format!("{} (stored {})", t.status, t.state)
+        format!("{label} (stored {})", t.state)
     };
     let mut s = format!(
         "id: {}\nproject: {}\ntitle: {}\nstate: {}\nclaimed_by: {}\nruns: {}\ncreated_at: {}\nupdated_at: {}",

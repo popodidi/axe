@@ -972,23 +972,6 @@ fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
-/// Status column: dependency waits read `blocked (deps #1, #2)`; wake waits read
-/// `waiting until <time>`.
-fn state_label(t: &db::Task) -> String {
-    if t.state == "pending" && t.waiting_on.is_empty() && t.sleeping() {
-        return format!("waiting until {}", t.not_before.as_deref().unwrap_or("?"));
-    }
-    if t.waiting_on.is_empty() || t.status != "blocked" {
-        return t.status.clone();
-    }
-    let kind = if t.state == "blocked" {
-        "hold+deps"
-    } else {
-        "deps"
-    };
-    format!("blocked ({kind} {})", db::ids(&t.waiting_on))
-}
-
 fn print_table(tasks: &[db::Task]) {
     let rows: Vec<[String; 5]> = tasks
         .iter()
@@ -996,7 +979,7 @@ fn print_table(tasks: &[db::Task]) {
             [
                 t.id.to_string(),
                 t.project.clone(),
-                state_label(t),
+                dispatch::status_label(t),
                 t.runs.to_string(),
                 t.title.clone(),
             ]

@@ -638,7 +638,10 @@ fn cli_and_api_fan_in_fixture_with_separate_manual_hold() {
     ]));
 
     let show = srv.ok(&["show", &c.to_string()]);
-    assert!(show.contains("state: blocked\n"), "{show}");
+    assert!(
+        show.contains(&format!("state: blocked (hold+deps #{a}, #{b})\n")),
+        "{show}"
+    );
     assert!(
         show.contains(&format!(
             "blocked_by:\n  #{a} [orchid] pending A\n  #{b} [fern] pending B"
