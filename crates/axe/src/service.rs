@@ -6,7 +6,10 @@
 //! policy, enabled) and the state the dispatcher last reported for it. The
 //! dispatcher syncs both ways ([`report`]) and raises the events a bot must
 //! hear about ([`notify`]): a crash loop and an upcoming stop wake the owning
-//! bot; a crash loop that persists alerts the owner as well.
+//! bot; a crash loop that persists alerts the owner as well. The change
+//! between two reports is also a set of service events ([`events`]) for the
+//! bots subscribed to them (`subscription.rs`); a new service subscribes its
+//! owning bot to its failures.
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Result};
@@ -118,6 +121,10 @@ pub struct Status {
     /// Restarts since the dispatcher started the service.
     #[serde(default)]
     pub restarts: u64,
+    /// Failures since the dispatcher started the service: unsuccessful exits
+    /// it did not ask for, and starts that failed.
+    #[serde(default)]
+    pub failures: u64,
     /// How the last process ended: `exit N` or `signal N`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<String>,
@@ -266,6 +273,14 @@ pub fn put(
            env=excluded.env, restart=excluded.restart, updated_at=excluded.updated_at",
         params![b.id, name, new.command, new.cwd, env, new.restart, now],
     )?;
+    if old.is_none() {
+        let id: i64 = tx.query_row(
+            "SELECT id FROM services WHERE bot_id=?1 AND name=?2",
+            params![b.id, name],
+            |r| r.get(0),
+        )?;
+        crate::subscription::default_service(&tx, actor, b.id, id)?;
+    }
     let action = if old.is_some() { "update" } else { "add" };
     bot::event(
         &tx,
@@ -318,6 +333,17 @@ pub fn remove(conn: &mut Connection, actor: &Actor, bot: &str, name: &str) -> Re
     let Some(s) = find(&tx, b.id, name)? else {
         bail!("bot {bot} has no service {name}");
     };
+    let id: i64 = tx.query_row(
+        "SELECT id FROM services WHERE bot_id=?1 AND name=?2",
+        params![b.id, name],
+        |r| r.get(0),
+    )?;
+    crate::subscription::drop_source(
+        &tx,
+        actor,
+        &format!("{}{id}", crate::subscription::SERVICE_PREFIX),
+        "service removed",
+    )?;
     tx.execute(
         "DELETE FROM services WHERE bot_id=?1 AND name=?2",
         params![b.id, name],
@@ -360,15 +386,84 @@ pub fn report(
         let mut status = status.clone();
         status.dispatcher = Some(dispatcher.to_string());
         status.reported_at = Some(at.clone());
+        let old: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT s.id, s.bot_id, s.status FROM services s JOIN bots b ON b.id=s.bot_id
+                 WHERE b.name=?1 AND s.name=?2",
+                params![bot, name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((id, bot_id, old)) = old else {
+            continue;
+        };
         tx.execute(
-            "UPDATE services SET status=?3
-             WHERE name=?2 AND bot_id=(SELECT id FROM bots WHERE name=?1)",
-            params![bot, name, serde_json::to_string(&status)?],
+            "UPDATE services SET status=?2 WHERE id=?1",
+            params![id, serde_json::to_string(&status)?],
         )?;
+        let old: Status = serde_json::from_str(&old).unwrap_or_default();
+        for (event, detail) in events(&old, &status) {
+            let line = if detail.is_empty() {
+                key.clone()
+            } else {
+                format!("{key}: {detail}")
+            };
+            crate::subscription::service_event(&tx, id, bot_id, event, &line)?;
+        }
     }
     let all = list(&tx, None)?;
     tx.commit()?;
     Ok(all)
+}
+
+/// The service events between two reported statuses, oldest kind first, each
+/// with a detail: `failed` (counted by `failures`, which restarts at 0 with
+/// the dispatcher), `crash_loop`, `run_finished` (it ended and is not
+/// restarted), `stopped` and `started` (a new process, seen by its start
+/// time).
+pub fn events(old: &Status, new: &Status) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let failures = if new.failures >= old.failures {
+        new.failures - old.failures
+    } else {
+        new.failures
+    };
+    if failures > 0 {
+        let why = new
+            .error
+            .clone()
+            .or_else(|| new.last_exit.clone())
+            .unwrap_or_else(|| "failed".into());
+        let times = if failures > 1 {
+            format!(" ({failures} times)")
+        } else {
+            String::new()
+        };
+        out.push(("failed", format!("{why}{times}")));
+    }
+    if new.crash_loop_since.is_some() && new.crash_loop_since != old.crash_loop_since {
+        out.push((
+            "crash_loop",
+            format!("crash looping, {} restarts", new.restarts),
+        ));
+    }
+    let new_run = new.started_at != old.started_at;
+    if new.state == "exited" && (old.state != "exited" || new_run) {
+        out.push((
+            "run_finished",
+            new.last_exit.clone().unwrap_or_else(|| "exited".into()),
+        ));
+    }
+    if new.state == "stopped" && !matches!(old.state.as_str(), "stopped" | "") {
+        out.push(("stopped", String::new()));
+    }
+    if new.state == "running" && (old.state != "running" || new_run) {
+        out.push((
+            "started",
+            new.pid.map_or(String::new(), |p| format!("pid {p}")),
+        ));
+    }
+    out
 }
 
 /// An event the dispatcher raises for a service.

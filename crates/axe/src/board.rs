@@ -220,7 +220,10 @@ pub fn merged_text() -> &'static str {
 /// The bot's subscribed projects: (every project, the named ones).
 pub(crate) fn projects(conn: &Connection, bot: i64) -> Result<(bool, Vec<String>)> {
     let projects: Vec<String> = conn
-        .prepare("SELECT project FROM bot_subscriptions WHERE bot_id=?1 AND project NOT LIKE '#%'")?
+        .prepare(
+            "SELECT project FROM bot_subscriptions WHERE bot_id=?1 AND project NOT LIKE '#%'
+          AND project NOT LIKE 'service:%' AND project NOT LIKE 'routine:%'",
+        )?
         .query_map([bot], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok((projects.iter().any(|p| p == ALL_PROJECTS), projects))

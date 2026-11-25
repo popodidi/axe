@@ -103,7 +103,12 @@ the commands by primitive and `axe <noun> --help` (`axe task --help`,
 Bots are a separate primitive with their own commands under `axe bot`
 (and `axe bot tg` for the Telegram gateway); see `axe bot --help` and
 `axe bot tg --help`. A bot follows a task with `axe bot watch <task>`, or all
-tasks it owns with `axe bot subscribe --owned-wake done,escalated`. To rename a bot
+tasks it owns with `axe bot subscribe --owned-wake done,escalated`. Service and
+routine events use the same commands: `axe bot subscribe --service [BOT/]NAME
+--wake started,stopped,failed,crash_loop,run_finished` or `--routine ID --wake
+fired,failed` (`--all-services`, `--all-routines`; `unsubscribe` takes the
+same flags); a new service or bot-owned routine starts subscribed to its
+failures. To rename a bot
 and keep everything it has: `axe bot rename OLD NEW --why "..." --owner-ref
 "msg #N"` (an owner decision; refused while it runs). The old name stays
 reserved, and the Telegram bot keeps talking for it without a config change.
