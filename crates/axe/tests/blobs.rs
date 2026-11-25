@@ -439,15 +439,18 @@ fn blob_site_serves_links_with_scripts_redirects_and_takes_no_cookie() {
     assert_eq!(target, link["path"].as_str().unwrap());
     assert!(target.starts_with(&format!("/b/{sha}/page.html?exp=")));
 
-    // Served on the blob site: scripts, no network, no sniffing, no cookie.
+    // Served on the blob site: scripts and https subresources, no requests
+    // of its own, no sniffing, no cookie.
     for host in ["blobs.test", "BLOBS.test:80"] {
         let (status, h, body) = raw_get(&srv, host, target, "");
         assert_eq!(status, 200, "{host}");
         assert_eq!(body, page);
         assert_eq!(
             h["content-security-policy"],
-            "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; \
-             style-src 'unsafe-inline'; img-src data:"
+            "sandbox allow-scripts; default-src 'none'; \
+             script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; \
+             font-src https: data:; img-src https: data:; connect-src 'none'; \
+             form-action 'none'"
         );
         assert_eq!(h["x-content-type-options"], "nosniff");
         assert_eq!(h["access-control-allow-origin"], "*");

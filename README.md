@@ -363,7 +363,9 @@ opens without the token, for example from a phone; it renders inline in a
 sandbox. The signing key is created on first start; `[blobs]` sets the
 directory, size limit, link base URL and key file. `[blobs] link_url` moves
 links to a separate site (a host that is not a subdomain of the server's):
-there blob HTML may run inline scripts in a no-network sandbox, the host
+there blob HTML may run scripts in an opaque-origin sandbox and load
+scripts, styles, fonts and images over https, but cannot fetch, connect or
+post (`connect-src 'none'`, `form-action 'none'`); the host
 answers only `/b/` links and never a session, and `/b/` links on the
 server's own host redirect to it.
 
