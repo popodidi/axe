@@ -55,6 +55,18 @@ struct StubState {
     fail: HashMap<String, String>,
     /// Bot token -> failures its next getUpdates calls get, in order.
     poll_faults: HashMap<String, VecDeque<PollFault>>,
+    /// Method -> failures its next calls get, in order, before the call has
+    /// any effect.
+    send_faults: HashMap<String, VecDeque<SendFault>>,
+}
+
+/// One failed outbound call (task 1718).
+#[derive(Clone, Copy, Debug)]
+enum SendFault {
+    /// The connection drops without a response (a reset, as in production).
+    Reset,
+    /// An HTTP error status with Telegram's JSON body.
+    Status(u16),
 }
 
 /// One failed getUpdates, as seen in production (task 1298).
@@ -149,12 +161,45 @@ fn serve(st: &Mutex<StubState>, stream: TcpStream) -> std::io::Result<()> {
             }
         }
     }
-    let mut body = vec![0; len];
-    r.read_exact(&mut body)?;
     let api_call = [TG_TOKEN, AUX_TOKEN, GRP_TOKEN].into_iter().find_map(|t| {
         path.strip_prefix(&format!("/bot{t}/"))
             .map(|m| (t, m.to_string()))
     });
+    if let Some((token, method)) = &api_call {
+        let fault = {
+            let mut s = st.lock().unwrap();
+            let f = s.send_faults.get_mut(method).and_then(VecDeque::pop_front);
+            if f.is_some() {
+                s.calls.push(Call {
+                    token: token.to_string(),
+                    method: method.clone(),
+                    params: Value::Null,
+                    raw: Vec::new(),
+                    at: Instant::now(),
+                });
+            }
+            f
+        };
+        match fault {
+            // Closing with the body unread resets the connection.
+            Some(SendFault::Reset) => return Ok(()),
+            Some(SendFault::Status(code)) => {
+                let out =
+                    json!({"ok":false,"error_code":code,"description":"Internal Server Error"})
+                        .to_string();
+                let mut w = stream;
+                write!(
+                    w,
+                    "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}",
+                    out.len()
+                )?;
+                return w.flush();
+            }
+            None => {}
+        }
+    }
+    let mut body = vec![0; len];
+    r.read_exact(&mut body)?;
     let (status, out): (u16, Vec<u8>) =
         if let Some(file) = path.strip_prefix(&format!("/file/bot{TG_TOKEN}/")) {
             let s = st.lock().unwrap();
@@ -1027,6 +1072,88 @@ fn rate_limits_honor_retry_after() {
     rig.tg_ok(&["send", "again"]);
     let calls = rig.stub.calls("sendMessage");
     assert!(calls[2].at - calls[1].at >= Duration::from_millis(900));
+}
+
+impl Rig {
+    /// Fails the next calls of `method` with `faults`, in order.
+    fn send_faults(&self, method: &str, faults: &[SendFault]) {
+        self.stub
+            .state
+            .lock()
+            .unwrap()
+            .send_faults
+            .insert(method.into(), faults.iter().copied().collect());
+    }
+
+    /// The messages the stub created (each successful send makes one).
+    fn delivered(&self) -> i64 {
+        self.stub.state.lock().unwrap().next_message - 1000
+    }
+}
+
+#[test]
+fn network_errors_and_5xx_are_retried_and_deliver_once() {
+    let rig = Rig::new();
+    // A reset (no response): retried, delivered once.
+    rig.send_faults("sendMessage", &[SendFault::Reset]);
+    let out = rig.tg_ok(&["send", "hello"]);
+    let calls = rig.stub.calls("sendMessage");
+    assert_eq!(calls.len(), 2, "the reset, then the retry");
+    assert!(calls[1].at - calls[0].at >= Duration::from_millis(900));
+    assert_eq!(rig.delivered(), 1);
+    assert_eq!(rig.messages().len(), 1);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let retries = rig.events("send_retry");
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    let e: Value = serde_json::from_str(&retries[0]).unwrap();
+    assert_eq!(e["method"], "sendMessage");
+    assert_eq!(e["attempt"], 1);
+    assert!(!retries[0].contains("SECRET"), "{retries:?}");
+
+    // A 400 is final: one call, no retry.
+    rig.stub
+        .state
+        .lock()
+        .unwrap()
+        .fail
+        .insert("sendMessage".into(), "Bad Request: chat not found".into());
+    assert!(!rig.tg(&["send", "refused"]).status.success());
+    assert_eq!(rig.stub.calls("sendMessage").len(), 3);
+    assert_eq!(rig.events("send_retry").len(), 1);
+    assert_eq!(rig.delivered(), 1);
+
+    // 5xx is retried up to SEND_ATTEMPTS (3) calls, then fails.
+    rig.send_faults("sendMessage", &[SendFault::Status(502); 3]);
+    let out = rig.tg(&["send", "down"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("502"),
+        "{out:?}"
+    );
+    let calls = rig.stub.calls("sendMessage");
+    assert_eq!(calls.len(), 6, "three more calls");
+    assert!(
+        calls[5].at - calls[4].at >= Duration::from_millis(1900),
+        "doubling"
+    );
+    assert_eq!(rig.events("send_retry").len(), 3, "two more retries");
+    assert_eq!(rig.delivered(), 1);
+
+    // A 500 then success: delivered.
+    rig.send_faults("sendMessage", &[SendFault::Status(500)]);
+    rig.tg_ok(&["send", "back"]);
+    assert_eq!(rig.delivered(), 2);
+}
+
+#[test]
+fn a_command_reply_survives_a_connection_reset() {
+    let rig = Rig::new();
+    rig.send_faults("sendMessage", &[SendFault::Reset]);
+    rig.stub.push(text_msg(100, 200, OWNER, OWNER, "/tasks"));
+    wait_for("the reply", 20, || rig.sent_to(OWNER).len() == 1);
+    assert_eq!(rig.stub.calls("sendMessage").len(), 2);
+    assert_eq!(rig.delivered(), 1);
+    assert_eq!(rig.events("send_retry").len(), 1);
 }
 
 #[test]
