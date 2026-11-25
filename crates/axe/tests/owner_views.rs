@@ -145,6 +145,7 @@ fn tasks_truncates_to_one_message() {
         add(&mut c, "p", &title, "");
     }
     let out = owner_views::tasks(&c, "a", Some(WEB)).unwrap();
+    #[cfg(feature = "telegram")]
     assert!(out.encode_utf16().count() <= axe::telegram::TEXT_LIMIT);
     let shown = out.lines().filter(|l| l.starts_with("<a ")).count();
     assert!(shown > 10 && shown < 200, "{shown}");
