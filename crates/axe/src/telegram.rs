@@ -1523,6 +1523,8 @@ impl Gateway {
 
     /// Sends the owner one card for a runtime alert (`runtime::Alert`) from
     /// the ops bot, in the owner's private chat when the bot may write there.
+    /// An alert of an ok runtime closes that runtime's open cards first
+    /// ([`close_runtime_card`]) and goes out without buttons.
     pub fn runtime_alert(&self, store: &dyn Store, a: &Value) -> Result<Value> {
         let Some(name) = self
             .ops
@@ -1539,9 +1541,22 @@ impl Gateway {
             .chats
             .contains(&self.owner)
             .then_some(self.owner);
+        let runtime = a["runtime"].as_str().unwrap_or_default();
+        let ok = a["state"] == crate::runtime::OK;
+        if ok {
+            let b = self.bot(&name)?;
+            for m in open_runtime_cards(store, &name)? {
+                if card_runtime(&m).as_deref() == Some(runtime) {
+                    close_runtime_card(b, store, &m, runtime)?;
+                }
+            }
+        }
         let opts = SendOpts {
             chat,
-            buttons: vec![("Runtimes".into(), RUNTIMES_BUTTON.into())],
+            buttons: match ok {
+                true => Vec::new(),
+                false => vec![("Runtimes".into(), RUNTIMES_BUTTON.into())],
+            },
             ..SendOpts::default()
         };
         let out = self.send(store, &name, &crate::runtime::alert_text(a), &opts)?;
@@ -1550,8 +1565,8 @@ impl Gateway {
             .and_then(|m| m["id"].as_i64())
             .context("runtime card was not recorded")?;
         store.conn().execute(
-            "UPDATE bot_messages SET flags=json_set(flags,'$.runtime_alert',json('true')) WHERE id=?1",
-            [id],
+            "UPDATE bot_messages SET flags=json_set(flags,'$.runtime_alert',json('true'),'$.runtime',?1) WHERE id=?2",
+            params![runtime, id],
         )?;
         store.changed();
         Ok(json!({"sent": true, "bot": name, "id": id}))
@@ -2483,6 +2498,9 @@ fn inbox_pass(b: &TgBot, store: &dyn Store) -> Result<()> {
     if bot_id(&conn, &b.name()).is_err() {
         return Ok(());
     }
+    drop(conn);
+    runtime_cards(b, store)?;
+    let conn = store.conn();
     let goal_board = goal_board::message(&conn, &b.name())?;
     let Some(m) = board::message(&conn, &b.name())? else {
         return Ok(());
@@ -2647,6 +2665,123 @@ fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> R
             params![format!("task #{task} is {state}"), msg],
         )?;
         store.changed();
+    }
+    Ok(())
+}
+
+/// Open runtime cards ([`Gateway::runtime_alert`]) of runtimes the node
+/// reports ok again close ([`close_runtime_card`]); a runtime can recover
+/// without a card of its own (its periodic probe passes). Nothing closes on
+/// a stale report.
+fn runtime_cards(b: &TgBot, store: &dyn Store) -> Result<()> {
+    let open = open_runtime_cards(store, &b.name())?;
+    if open.is_empty() {
+        return Ok(());
+    }
+    let view = store.runtimes();
+    if view["stale"] != false {
+        return Ok(());
+    }
+    let list = view["runtimes"].as_array().cloned().unwrap_or_default();
+    for m in open {
+        let Some(name) = card_runtime(&m) else {
+            continue;
+        };
+        let ok = list
+            .iter()
+            .any(|r| r["name"] == name.as_str() && r["state"] == crate::runtime::OK);
+        if ok {
+            close_runtime_card(b, store, &m, &name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Bot `name`'s runtime cards that still have buttons, oldest first.
+fn open_runtime_cards(store: &dyn Store, name: &str) -> Result<Vec<StoredMessage>> {
+    let conn = store.conn();
+    let b = bot_id(&conn, name)?;
+    let ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM bot_messages WHERE bot_id=?1 AND direction='out'
+               AND json_extract(flags,'$.runtime_alert')=1
+               AND json_type(flags,'$.buttons')='array' AND json_array_length(flags,'$.buttons')>0
+               AND json_type(flags,'$.deleted') IS NULL ORDER BY id",
+        )?
+        .query_map([b], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.into_iter()
+        .map(|id| get_message(&conn, name, id))
+        .collect()
+}
+
+/// The runtime a card is about: `flags.runtime`, or (cards sent before it
+/// was recorded) the name after the text's leading `Runtime `.
+fn card_runtime(m: &StoredMessage) -> Option<String> {
+    if let Some(r) = m.flags["runtime"].as_str() {
+        return Some(r.to_string());
+    }
+    let rest = m.text.strip_prefix("Runtime ")?;
+    let end = rest.find([' ', ':'])?;
+    Some(rest[..end].to_string()).filter(|r| !r.is_empty())
+}
+
+/// Closes runtime card `m` as task cards close: its keyboard goes (the
+/// text gains a resolved line when it fits) and `flags.closed` says why.
+/// The stored card is claimed first, so a card closes once however many
+/// passes see it; the Telegram edit is best effort (a refusal is logged).
+fn close_runtime_card(
+    b: &TgBot,
+    store: &dyn Store,
+    m: &StoredMessage,
+    runtime: &str,
+) -> Result<()> {
+    let reason = format!("runtime {runtime} is ok");
+    let text = format!("{}\n\nResolved: {reason} again.", m.text);
+    let fits = utf16_len(&text) <= TEXT_LIMIT && m.flags["html"] != true;
+    let claimed = store.conn().execute(
+        "UPDATE bot_messages SET text=?1, flags=json_set(json_remove(flags,'$.buttons'),'$.closed',?2)
+         WHERE id=?3 AND json_type(flags,'$.buttons')='array'",
+        params![if fits { &text } else { &m.text }, reason, m.id],
+    )?;
+    if claimed == 0 {
+        return Ok(());
+    }
+    store.changed();
+    if b.allowed(m.chat_id).is_err() {
+        return Ok(());
+    }
+    let none = json!({"inline_keyboard": []});
+    let (method, p) = match fits {
+        true => (
+            "editMessageText",
+            json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text, "reply_markup": none}),
+        ),
+        false => (
+            "editMessageReplyMarkup",
+            json!({"chat_id": m.chat_id, "message_id": m.message_id, "reply_markup": none}),
+        ),
+    };
+    match b.paced(store, m.chat_id, || b.api.call(method, &p)) {
+        Ok(_) => {}
+        Err(e) if e.description.contains("message is not modified") => {}
+        Err(e) => {
+            eprintln!(
+                "telegram: bot {}: close runtime card {}: {e}",
+                b.name(),
+                m.id
+            );
+            let conn = store.conn();
+            let body = json!({"error": e.to_string(), "step": "close runtime card",
+                              "message": m.id, "skipped": true});
+            bot::event(
+                &conn,
+                bot_id(&conn, &b.name())?,
+                &Actor::new("telegram"),
+                "board_error",
+                &body.to_string(),
+            )?;
+        }
     }
     Ok(())
 }
