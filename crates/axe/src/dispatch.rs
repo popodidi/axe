@@ -83,6 +83,8 @@ struct Run {
     log_len: u64,
     /// The server recorded this run's drain abort; only the kill may remain.
     drain_aborting: bool,
+    /// Unix seconds when the run read its runtime's login.
+    started_at: i64,
 }
 
 /// Progress of a bounded drain, from the first tick that saw SIGUSR1.
@@ -620,11 +622,13 @@ impl Dispatcher {
 
     /// Records what a finished run of runtime `name` said about its login:
     /// the latest quota, and a failure class that marks the runtime.
+    /// `started_at`: when the run read the runtime's login (Unix seconds).
     fn note_runtime(
         &mut self,
         name: &str,
         failure: Option<&crate::failure::Failure>,
         log: &std::path::Path,
+        started_at: i64,
     ) {
         if let Some(q) = runtime::quota_from_log(log) {
             self.runtimes.set_quota(name, q);
@@ -633,7 +637,7 @@ impl Dispatcher {
             return;
         };
         let backoff = agent_proc::api_backoff_seconds(1);
-        if let Some(alert) = self.runtimes.mark(name, f, backoff, now_unix()) {
+        if let Some(alert) = self.runtimes.mark(name, f, backoff, now_unix(), started_at) {
             self.alerts.push(alert);
         }
         if self.runtimes.managed {
@@ -1321,6 +1325,7 @@ impl Dispatcher {
         }
         env.push(("AXE_WORKTREE", cwd.display().to_string()));
         // The runtime's login: its directory variable, or none for the default.
+        let started_at = now_unix();
         let (login, unset) = rt.env();
         env.extend(login);
         // Sealed form values for this task: the folder, and the env ones.
@@ -1391,6 +1396,7 @@ impl Dispatcher {
             activity: None,
             log_len: 0,
             drain_aborting: false,
+            started_at,
         });
         Ok(())
     }
@@ -1463,7 +1469,12 @@ impl Dispatcher {
         let failure = (code.is_some_and(|c| c != 0) && block_note.starts_with("session exited"))
             .then(|| crate::failure::classify(&run.log_path))
             .flatten();
-        self.note_runtime(&run.pick.agent.clone(), failure.as_ref(), &run.log_path);
+        self.note_runtime(
+            &run.pick.agent.clone(),
+            failure.as_ref(),
+            &run.log_path,
+            run.started_at,
+        );
         let api_error = failure.map(|f| f.to_json());
         let retry=self.store.request::<bool>("finish",json!({"api_error":api_error,"usage":usage,"run":run.run_id,"aborted":block_note == "remote abort confirmed","drained":block_note == DRAIN_ABORT_NOTE,"resumed":run.resumed,"code":code,"note":block_note,"session":session,"session_id":run.session_id,"event":{"exit_code":code,"log":run.log_path,"agent":run.pick.agent,"session_id":run.session_id}}))?;
         self.store.log(run.run_id, run.log_path.clone(), true)?;
