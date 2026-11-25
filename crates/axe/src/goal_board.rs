@@ -274,7 +274,7 @@ fn intent_line(s: &str) -> &str {
 }
 
 /// `Jan 31` for a date or RFC3339 time; anything else as it is.
-fn day(s: &str) -> String {
+pub(crate) fn day(s: &str) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -303,15 +303,20 @@ fn money(x: f64) -> String {
     }
 }
 
+/// The bar itself, [`BAR_CELLS`] cells: `ratio` of them filled (`▓`,
+/// rounded) and the rest empty (`░`). A ratio over 1 fills every cell; zero,
+/// negative or NaN leaves them all empty. Shared with the `/cost` reply.
+pub(crate) fn cells(ratio: f64) -> String {
+    let filled = ((ratio * BAR_CELLS as f64).round().max(0.0) as usize).min(BAR_CELLS);
+    format!("{}{}", "▓".repeat(filled), "░".repeat(BAR_CELLS - filled))
+}
+
 /// One budget line in monospace: `Cost ▓░░░░░░░░░  12%  $58/$500 wk`. A
 /// spend over its limit fills the bar and says `over`; no limit shows an
 /// empty bar and `no limit`.
 fn bar(label: &str, spent: f64, limit: Option<f64>, amount: &str) -> String {
     let line = match limit {
-        None => format!(
-            "{label} {}    -  {amount} wk, no limit",
-            "░".repeat(BAR_CELLS)
-        ),
+        None => format!("{label} {}    -  {amount} wk, no limit", cells(0.0)),
         Some(l) => {
             let ratio = if l > 0.0 {
                 spent / l
@@ -320,18 +325,13 @@ fn bar(label: &str, spent: f64, limit: Option<f64>, amount: &str) -> String {
             } else {
                 0.0
             };
-            let filled = ((ratio * BAR_CELLS as f64).round().max(0.0) as usize).min(BAR_CELLS);
             let pct = if ratio.is_finite() {
                 format!("{:.0}%", ratio * 100.0)
             } else {
                 "max".to_string()
             };
             let over = if ratio > 1.0 { " over" } else { "" };
-            format!(
-                "{label} {}{} {pct:>4}  {amount} wk{over}",
-                "▓".repeat(filled),
-                "░".repeat(BAR_CELLS - filled)
-            )
+            format!("{label} {} {pct:>4}  {amount} wk{over}", cells(ratio))
         }
     };
     format!("<code>{}</code>", escape(&line))
@@ -610,6 +610,17 @@ mod tests {
             "{}",
             pin_text(&g)
         );
+    }
+
+    #[test]
+    fn cells_round_and_clamp() {
+        assert_eq!(cells(0.0), "░░░░░░░░░░");
+        assert_eq!(cells(0.12), "▓░░░░░░░░░");
+        assert_eq!(cells(0.5), "▓▓▓▓▓░░░░░");
+        assert_eq!(cells(1.0), "▓▓▓▓▓▓▓▓▓▓");
+        assert_eq!(cells(f64::INFINITY), "▓▓▓▓▓▓▓▓▓▓");
+        assert_eq!(cells(-1.0), "░░░░░░░░░░");
+        assert_eq!(cells(f64::NAN), "░░░░░░░░░░");
     }
 
     #[test]

@@ -259,7 +259,7 @@ fn cost_sums_the_bots_runs_over_the_last_seven_days() {
     let empty = owner_views::cost(&c, "a", Some(WEB), now).unwrap();
     assert_eq!(
         empty,
-        "bot a cost, last 7 days: $0.00\nno runs\n\
+        "<b>bot a cost, last 7 days: $0.00</b>\nno runs\n\
          <a href=\"http://axe.example/?view=cost&amp;days=7&amp;cost_bot=a\">Open cost</a>"
     );
 
@@ -270,18 +270,38 @@ fn cost_sums_the_bots_runs_over_the_last_seven_days() {
     // Outside the window, or another bot's: not counted.
     bot_run(&c, 4, 1, today - COST_DAYS * DAY + 60 - DAY, Some(100.0));
     bot_run(&c, 5, 2, now - 60, Some(7.0));
-    let day = |t: i64| ts(t)[..10].to_string();
-    let out = owner_views::cost(&c, "a", None, now).unwrap();
-    assert_eq!(
-        out,
+    // `Nov 25` for the UTC day `n` days before today.
+    let day = |n: i64| {
+        let d = time::OffsetDateTime::from_unix_timestamp(today - n * DAY)
+            .unwrap()
+            .date();
         format!(
-            "bot a cost, last 7 days: $1.75 over 3 runs\n\
-             1 with unknown usage: the figure is a lower bound\n\
-             {}  $1.25  2 runs\n{}  $0.50  1 run",
-            day(now),
-            day(today - DAY + 60)
+            "{:<6}",
+            format!("{} {}", &format!("{}", d.month())[..3], d.day())
         )
-    );
+    };
+    let out = owner_views::cost(&c, "a", None, now).unwrap();
+    // A bar per day, newest first, scaled to the costliest day: today's
+    // $1.25 fills it, yesterday's $0.50 is 4 of 10 cells, a day without
+    // spend is empty.
+    let mut want = "<b>bot a cost, last 7 days: $1.75 over 3 runs</b>\n\
+         1 with unknown usage: the figure is a lower bound"
+        .to_string();
+    want.push_str(&format!(
+        "\n<code>{} ▓▓▓▓▓▓▓▓▓▓  $1.25  2 runs</code>",
+        day(0)
+    ));
+    want.push_str(&format!(
+        "\n<code>{} ▓▓▓▓░░░░░░  $0.50  1 run</code>",
+        day(1)
+    ));
+    for n in 2..COST_DAYS {
+        want.push_str(&format!(
+            "\n<code>{} ░░░░░░░░░░  $0.00  0 runs</code>",
+            day(n)
+        ));
+    }
+    assert_eq!(out, want);
     // The same figure the Cost view shows for that bot and range.
     let web = usage::cost_stats(
         &c,
@@ -296,4 +316,43 @@ fn cost_sums_the_bots_runs_over_the_last_seven_days() {
     .unwrap();
     assert_eq!(web["total"]["cost"].as_f64(), Some(1.75));
     assert!(owner_views::cost(&c, "nope", None, now).is_err());
+}
+
+#[test]
+fn cost_bars_align_amounts_and_stay_empty_without_spend() {
+    let (_d, c) = setup();
+    let now = now().div_euclid(DAY) * DAY + DAY / 2;
+    let today = now.div_euclid(DAY) * DAY;
+    // Only unknown usage: no day has spend to scale to, every bar is empty.
+    bot_run(&c, 1, 1, now - 60, None);
+    let out = owner_views::cost(&c, "a", None, now).unwrap();
+    let bars: Vec<&str> = out.lines().filter(|l| l.starts_with("<code>")).collect();
+    assert_eq!(bars.len(), COST_DAYS as usize, "{out}");
+    assert!(
+        bars[0].ends_with(" ░░░░░░░░░░  $0.00  1 run</code>"),
+        "{out}"
+    );
+    assert!(bars.iter().all(|b| !b.contains('▓')), "{out}");
+
+    // Amounts right-aligned to the widest; the costliest day fills its bar.
+    bot_run(&c, 2, 1, today - 2 * DAY + 60, Some(12.0));
+    bot_run(&c, 3, 1, today - DAY + 60, Some(3.0));
+    let out = owner_views::cost(&c, "a", None, now).unwrap();
+    let bars: Vec<&str> = out.lines().filter(|l| l.starts_with("<code>")).collect();
+    assert!(
+        bars[0].ends_with(" ░░░░░░░░░░   $0.00  1 run</code>"),
+        "{out}"
+    );
+    assert!(
+        bars[1].ends_with(" ▓▓▓░░░░░░░   $3.00  1 run</code>"),
+        "{out}"
+    );
+    assert!(
+        bars[2].ends_with(" ▓▓▓▓▓▓▓▓▓▓  $12.00  1 run</code>"),
+        "{out}"
+    );
+    assert!(
+        out.starts_with("<b>bot a cost, last 7 days: $15.00 over 3 runs</b>\n"),
+        "{out}"
+    );
 }
