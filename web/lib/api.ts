@@ -230,6 +230,11 @@ started_at?: string,
  */
 restarts: number, 
 /**
+ * Failures since the dispatcher started the service: unsuccessful exits
+ * it did not ask for, and starts that failed.
+ */
+failures: number, 
+/**
  * How the last process ended: `exit N` or `signal N`.
  */
 last_exit?: string, 
