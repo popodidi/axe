@@ -1,14 +1,15 @@
 @value bp-phone from "../../app/styles/breakpoints.module.css";
 
 /* Item side pane: a surface-1 column beside the list, like the task pane.
-   The resizer before it sets --item-size; a task pane may stack right. */
+   The resizer before it sets --item-size, up to all but the list's minimum
+   width; a task pane may stack right. */
 .pane {
   --cell-padding: var(--cell-padding-compact);
 
   flex-shrink: 0;
   width: var(--item-size, var(--item-width));
   min-width: var(--item-min-width);
-  max-width: min(var(--item-max-width), calc(100% - var(--list-min-width)));
+  max-width: calc(100% - var(--list-min-width));
   overflow: auto;
   overflow-wrap: anywhere;
   padding: var(--pane-padding);

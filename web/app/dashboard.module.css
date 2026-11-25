@@ -557,11 +557,16 @@
 }
 
 /* Item views: list | item pane | task pane. A stacked task pane leaves room
-   for the item pane; narrower screens hide the list behind both panes. */
+   for the item pane, and a widened item pane leaves the task pane its
+   minimum; narrower screens hide the list behind both panes. */
 .stacked .detailPane {
   max-width: calc(
     100% - var(--list-min-width) - var(--item-size, var(--item-width))
   );
+}
+
+.stacked [data-item-pane] {
+  max-width: calc(100% - var(--list-min-width) - var(--detail-min-width));
 }
 
 @media bp-stack {
@@ -572,6 +577,10 @@
   .stacked .detailPane {
     flex: 1;
     max-width: calc(100% - var(--item-size, var(--item-width)));
+  }
+
+  .stacked [data-item-pane] {
+    max-width: calc(100% - var(--detail-min-width));
   }
 }
 
