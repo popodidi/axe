@@ -109,7 +109,10 @@ fn run_files_read_prompts_beside_the_log() {
     std::fs::write(&log, "{\"type\":\"system\",\"model\":\"m\"}\nrest\n").unwrap();
     let f = run_files(&log, None);
     assert_eq!(f["prompt"]["unavailable"], "not recorded for this run");
-    assert_eq!(f["system_prompt"]["unavailable"], "not recorded for this run");
+    assert_eq!(
+        f["system_prompt"]["unavailable"],
+        "not recorded for this run"
+    );
     assert_eq!(f["first_line"], "{\"type\":\"system\",\"model\":\"m\"}");
     assert_eq!(f["times"], false);
     // An older bot run falls back to the bot's current system prompt.
@@ -119,13 +122,20 @@ fn run_files_read_prompts_beside_the_log() {
     assert_eq!(f["system_prompt"]["text"], "current system");
     assert_eq!(f["system_prompt"]["source"], "current");
     std::fs::write(dir.path().join("9.prompt.md"), "wake #1").unwrap();
-    std::fs::write(dir.path().join("9.system.md"), "x".repeat(MAX_RUN_FILE as usize + 1)).unwrap();
+    std::fs::write(
+        dir.path().join("9.system.md"),
+        "x".repeat(MAX_RUN_FILE as usize + 1),
+    )
+    .unwrap();
     note_growth(&log, 3);
     let f = run_files(&log, Some(&current));
     assert_eq!(f["prompt"]["text"], "wake #1");
     assert_eq!(f["prompt"]["truncated"], false);
     assert_eq!(f["system_prompt"]["source"], "run");
     assert_eq!(f["system_prompt"]["truncated"], true);
-    assert_eq!(f["system_prompt"]["text"].as_str().unwrap().len(), MAX_RUN_FILE as usize);
+    assert_eq!(
+        f["system_prompt"]["text"].as_str().unwrap().len(),
+        MAX_RUN_FILE as usize
+    );
     assert_eq!(f["times"], true);
 }

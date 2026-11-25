@@ -1026,7 +1026,15 @@ fn run_log_api_is_record_bound_and_preserves_attempts() {
 fn run_meta_api_reports_events_usage_and_prompts() {
     let dir = tempfile::tempdir().unwrap();
     let srv = Server::start(dir.path());
-    srv.ok(&["add", "--project", "orchid", "--title", "meta", "--label", "ui"]);
+    srv.ok(&[
+        "add",
+        "--project",
+        "orchid",
+        "--title",
+        "meta",
+        "--label",
+        "ui",
+    ]);
     let relay = common::LogRelay::start(&srv);
     let conn = db::open(&srv.db).unwrap();
     let path = dir.path().join("1-1.log");
@@ -1054,19 +1062,58 @@ fn run_meta_api_reports_events_usage_and_prompts() {
         )
         .unwrap();
     };
-    event("dispatcher", "run_start", None, Some("dispatch:m"), r#"{"use":"claude-code:m1:high","worktree":"/w"}"#);
+    event(
+        "dispatcher",
+        "run_start",
+        None,
+        Some("dispatch:m"),
+        r#"{"use":"claude-code:m1:high","worktree":"/w"}"#,
+    );
     event("agent", "state", Some("in_progress"), Some("blocked"), "");
-    event("dispatcher", "run_end", None, Some("dispatch:m"), r#"{"exit_code":3}"#);
-    event("dispatcher", "state", Some("blocked"), Some("escalated"), "session exited");
-    event("dispatcher", "claimed", Some("pending"), Some("dispatch:n"), "");
-    event("dispatcher", "state", Some("escalated"), Some("done"), "later run");
+    event(
+        "dispatcher",
+        "run_end",
+        None,
+        Some("dispatch:m"),
+        r#"{"exit_code":3}"#,
+    );
+    event(
+        "dispatcher",
+        "state",
+        Some("blocked"),
+        Some("escalated"),
+        "session exited",
+    );
+    event(
+        "dispatcher",
+        "claimed",
+        Some("pending"),
+        Some("dispatch:n"),
+        "",
+    );
+    event(
+        "dispatcher",
+        "state",
+        Some("escalated"),
+        Some("done"),
+        "later run",
+    );
     db::end_run(&conn, run, Some(3), None).unwrap();
     let mut models = std::collections::BTreeMap::new();
     models.insert(
         "m1".to_string(),
-        axe::usage::Totals { input: 10, output: 5, cost: 0.25, ..Default::default() },
+        axe::usage::Totals {
+            input: 10,
+            output: 5,
+            cost: 0.25,
+            ..Default::default()
+        },
     );
-    let parsed = axe::usage::Parsed { models, turns: Some(4), ..Default::default() };
+    let parsed = axe::usage::Parsed {
+        models,
+        turns: Some(4),
+        ..Default::default()
+    };
     axe::usage::record(&conn, "task", run, &parsed, "finish").unwrap();
     relay.add(&conn, run, &path, true);
     let m = srv.get(&format!("/api/runs/{run}/meta"));
@@ -1082,7 +1129,10 @@ fn run_meta_api_reports_events_usage_and_prompts() {
     assert_eq!(m["usage"]["models"][0]["cost"], 0.25);
     assert_eq!(m["files"]["prompt"]["text"], "Work task 1");
     assert_eq!(m["files"]["system_prompt"]["text"], "# Task 1 instructions");
-    assert_eq!(m["files"]["first_line"], "{\"type\":\"system\",\"model\":\"m1\"}");
+    assert_eq!(
+        m["files"]["first_line"],
+        "{\"type\":\"system\",\"model\":\"m1\"}"
+    );
     let error = srv.request("/api/runs/999/meta").call().unwrap_err();
     assert!(matches!(error, ureq::Error::Status(404, _)), "{error}");
 }

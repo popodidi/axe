@@ -6,7 +6,7 @@
    metadata rail). Narrow: the rail replaces the trace while it is open.
    Enters with at most 4px movement (200ms). */
 .viewer {
-  --run-time-width: calc(var(--space-8) + var(--space-2));
+  --run-time-width: var(--space-7);
   --run-details-width: calc(var(--space-8) * 4 + var(--space-5));
   --run-details-key: calc(var(--space-6) + var(--space-3));
 
@@ -119,7 +119,6 @@
   line-height: var(--lh-label);
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
-  white-space: nowrap;
 }
 .content {
   min-width: 0;
@@ -161,7 +160,7 @@
   padding-block: var(--space-1);
 }
 .record[data-role="user"] {
-  background: var(--surface-1);
+  background: var(--surface-2);
 }
 .role {
   letter-spacing: var(--tracking-label);

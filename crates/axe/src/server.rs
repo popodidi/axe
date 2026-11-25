@@ -1992,7 +1992,11 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             meta["files"] = if reused {
                 json!({"unavailable":"Historical log path was reused by another attempt"})
             } else {
-                relay(st, owner, json!({"kind":"log_meta","run":meta["run"]["id"]}))
+                relay(
+                    st,
+                    owner,
+                    json!({"kind":"log_meta","run":meta["run"]["id"]}),
+                )
             };
             ok(200, &meta)
         }
@@ -2862,7 +2866,11 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         ("GET", ["api", "bot-runs", id, "meta"]) => {
             let mut meta = crate::run_meta::bot_run(&st.conn(), task_id(id)?)?;
             let owner = meta["run"]["dispatcher"].as_str().map(String::from);
-            meta["files"] = relay(st, owner, json!({"kind":"bot_log_meta","run":meta["run"]["id"]}));
+            meta["files"] = relay(
+                st,
+                owner,
+                json!({"kind":"bot_log_meta","run":meta["run"]["id"]}),
+            );
             ok(200, &meta)
         }
         ("POST", ["api", "bots"]) => {

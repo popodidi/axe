@@ -26,9 +26,12 @@ fn body(s: Option<&str>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// A `run_usage` row: status, reason, turns, context tokens.
+type UsageHead = (String, Option<String>, Option<i64>, Option<i64>);
+
 /// Recorded token usage and cost of a run, per model; `Null` when none.
 pub fn usage(conn: &Connection, kind: &str, run: i64) -> Result<Value> {
-    let head: Option<(String, Option<String>, Option<i64>, Option<i64>)> = conn
+    let head: Option<UsageHead> = conn
         .query_row(
             "SELECT status, reason, turns, context_tokens FROM run_usage
              WHERE kind=?1 AND run_id=?2",
@@ -47,9 +50,11 @@ pub fn usage(conn: &Connection, kind: &str, run: i64) -> Result<Value> {
              FROM run_usage_models WHERE kind=?1 AND run_id=?2 ORDER BY model",
         )?
         .query_map(params![kind, run], |r| {
-            Ok(json!({"model":r.get::<_, String>(0)?,"input":r.get::<_, i64>(1)?,
+            Ok(
+                json!({"model":r.get::<_, String>(0)?,"input":r.get::<_, i64>(1)?,
                 "output":r.get::<_, i64>(2)?,"cache_read":r.get::<_, i64>(3)?,
-                "cache_write":r.get::<_, i64>(4)?,"cost":r.get::<_, f64>(5)?}))
+                "cache_write":r.get::<_, i64>(4)?,"cost":r.get::<_, f64>(5)?}),
+            )
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(json!({"status":status,"reason":reason,"turns":turns,
@@ -119,8 +124,12 @@ pub fn bot_run(conn: &Connection, id: i64) -> Result<Value> {
         Ok(body(s.as_deref()))
     };
     let wakes = conn
-        .prepare("SELECT kind, COUNT(*) FROM bot_wakes WHERE run_id=?1 GROUP BY kind ORDER BY kind")?
-        .query_map([id], |r| Ok((r.get::<_, String>(0)?, json!(r.get::<_, i64>(1)?))))?
+        .prepare(
+            "SELECT kind, COUNT(*) FROM bot_wakes WHERE run_id=?1 GROUP BY kind ORDER BY kind",
+        )?
+        .query_map([id], |r| {
+            Ok((r.get::<_, String>(0)?, json!(r.get::<_, i64>(1)?)))
+        })?
         .collect::<rusqlite::Result<Map<String, Value>>>()?;
     Ok(json!({
         "run": run,
