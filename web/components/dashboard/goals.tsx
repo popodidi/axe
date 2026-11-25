@@ -22,6 +22,7 @@ import {
   attentionMeter,
   costMeter,
   deadline,
+  isIdle,
   linkedTasks,
   openTasks,
   selectGoals,
@@ -64,6 +65,19 @@ export function useGoals(base: string, enabled: boolean, revision: number) {
 const tones: Record<string, Tone> = { proposed: "pending", active: "active", paused: "warn", done: "ok" };
 function State({ state }: { state: string }) {
   return <StateBadge tone={tones[state] ?? "neutral"}>{title(state)}</StateBadge>;
+}
+/** The goal's state, and Idle when it has had no next action for 24h. */
+function GoalState({ goal }: { goal: Goal }) {
+  return (
+    <span className={styles.states}>
+      <State state={goal.state} />
+      {isIdle(goal) && (
+        <span title={`No open task, goal wake or goal schedule since ${when(goal.idle_since ?? null)}`}>
+          <StateBadge tone="warn">Idle</StateBadge>
+        </span>
+      )}
+    </span>
+  );
 }
 function Bar({ meter, label }: { meter: Meter; label: string }) {
   return (
@@ -140,7 +154,7 @@ export function GoalList({
                     <div className={styles.sub}>{g.project}</div>
                   </Td>
                   <Td>
-                    <State state={g.state} />
+                    <GoalState goal={g} />
                   </Td>
                   <Td className={styles.optional}>
                     {g.bots.length ? g.bots.join(", ") : <span className={styles.sub}>None</span>}
@@ -221,7 +235,7 @@ export function GoalPane({
       id="goal-detail"
       label="Goal detail"
       kind="Goal"
-      badge={g && <State state={g.state} />}
+      badge={g && <GoalState goal={g} />}
       title={name}
       onClose={onClose}
     >

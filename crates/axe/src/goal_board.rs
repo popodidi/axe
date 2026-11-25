@@ -83,6 +83,8 @@ pub struct GoalLine {
     pub attention_week: Option<i64>,
     /// The next goal-tagged wake or schedule run of any bot (RFC3339).
     pub next_wake: Option<String>,
+    /// Since when the goal is idle, if it is ([`goal::idle_since`]).
+    pub idle_since: Option<String>,
     pub deadline: Option<String>,
     /// The goal's page in the web dashboard, when the server's public URL
     /// is set (`[blobs] public_url`).
@@ -196,6 +198,7 @@ pub fn lines(conn: &Connection, name: &str, web: Option<&str>) -> Result<Vec<Goa
             attention_spent: b.attention_spent,
             attention_week: g.budget_attention_week,
             next_wake,
+            idle_since: g.idle_since,
             deadline: g.deadline,
         });
     }
@@ -337,7 +340,7 @@ fn bar(label: &str, spent: f64, limit: Option<f64>, amount: &str) -> String {
 /// One goal's block of lines, the scoreboard layout:
 ///
 /// ```text
-/// <b>NAME</b> · <i>STATUS</i> · Jan 31
+/// <b>NAME</b> · <i>STATUS</i> · idle · Jan 31   (idle only when idle)
 /// One-line summary.
 /// metric now → target             (with a metric)
 /// Next: short task title #ID · Needs you: 1 open card
@@ -350,6 +353,9 @@ pub(crate) fn block(g: &GoalLine) -> String {
     let mut out = format!("\n\n<b>{}</b> · <i>{}</i>", escape(&g.name), escape(status));
     if g.state == "proposed" {
         out.push_str(" · awaiting your Go");
+    }
+    if g.idle_since.is_some() {
+        out.push_str(" · <b>idle</b>");
     }
     out.push_str(&format!(
         " · {}",
@@ -511,6 +517,7 @@ mod tests {
             attention_spent: 0,
             attention_week: None,
             next_wake: None,
+            idle_since: None,
             deadline: None,
             url: None,
         }
@@ -587,6 +594,19 @@ mod tests {
         g.next = None;
         assert!(
             pin_text(&g).contains("\nNext: nothing open · Needs you: 1 open card\n"),
+            "{}",
+            pin_text(&g)
+        );
+    }
+
+    #[test]
+    fn an_idle_goal_says_idle_on_its_pin() {
+        let mut g = goal("stalled", "active");
+        assert!(!pin_text(&g).contains("idle"));
+        g.idle_since = Some("2027-01-14T08:00:00Z".into());
+        assert!(
+            pin_text(&g)
+                .starts_with("<b>stalled</b> · <i>active</i> · <b>idle</b> · no deadline\n"),
             "{}",
             pin_text(&g)
         );

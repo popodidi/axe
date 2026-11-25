@@ -145,7 +145,12 @@ bots: Array<string>,
  * Spend over the last 7 days against the weekly budgets; set by `list`
  * and `detail` only.
  */
-budget?: Budget, };
+budget?: Budget, 
+/**
+ * Set when the goal is idle ([`idle_since`]): since when it has had no
+ * next action (RFC3339); set by `list` and `detail` only.
+ */
+idle_since?: string, };
 
 export type Budget = { cost_week: number | null, 
 /**
@@ -194,7 +199,12 @@ bots: Array<string>,
  * Spend over the last 7 days against the weekly budgets; set by `list`
  * and `detail` only.
  */
-budget?: Budget, };
+budget?: Budget, 
+/**
+ * Set when the goal is idle ([`idle_since`]): since when it has had no
+ * next action (RFC3339); set by `list` and `detail` only.
+ */
+idle_since?: string, };
 
 export type Service = { bot: string, 
 /**

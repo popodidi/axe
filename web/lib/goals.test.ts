@@ -3,6 +3,7 @@ import {
   attentionMeter,
   costMeter,
   deadline,
+  isIdle,
   linkedTasks,
   openTasks,
   selectGoals,
@@ -99,5 +100,12 @@ describe("goal lists", () => {
   it("shows a date deadline as is", () => {
     expect(deadline("2026-12-01")).toBe("2026-12-01");
     expect(deadline(null)).toBe("—");
+  });
+});
+describe("idle goals", () => {
+  it("is idle only when active with idle_since set", () => {
+    expect(isIdle(goal())).toBe(false);
+    expect(isIdle(goal({ idle_since: "2026-11-20T00:00:00Z" }))).toBe(true);
+    expect(isIdle(goal({ state: "paused", idle_since: "2026-11-20T00:00:00Z" }))).toBe(false);
   });
 });

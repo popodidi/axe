@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { mockGoals } from "./goals-fixture";
+import { goals, mockGoals } from "./goals-fixture";
 import { choose } from "./fixtures";
 const base = "/?server=http://axe.test";
 for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
@@ -207,4 +207,12 @@ test("g o opens goals", async ({ page }) => {
   await page.keyboard.press("g");
   await page.keyboard.press("o");
   await expect(page).toHaveURL(/view=goals/);
+});
+test("an idle goal shows Idle in the list", async ({ page }) => {
+  const idle = { ...goals[0], idle_since: new Date(Date.now() - 2 * 86400000).toISOString() };
+  await mockGoals(page, [idle, ...goals.slice(1)]);
+  await page.goto(base + "&view=goals");
+  const list = page.getByRole("region", { name: "Goals", exact: true });
+  await expect(list.locator("#goal-faster-ci")).toContainText("Idle");
+  await expect(list.locator("#goal-weekly-digest")).not.toContainText("Idle");
 });
