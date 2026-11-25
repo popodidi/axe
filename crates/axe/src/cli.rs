@@ -2219,21 +2219,39 @@ enum BotCmd {
         name: String,
     },
     /// Create or change a task-event subscription (defaults on creation:
-    /// wake on escalated, new and done ride along, batch 5m)
+    /// wake on escalated, new and done ride along, batch 5m), or a service or
+    /// routine one (`--service`, `--routine`; default: wake on failures, batch 1m)
     Subscribe {
         #[arg(env = "AXE_BOT")]
         name: String,
         /// Project to watch (default: the bot's own project)
-        #[arg(long, conflicts_with = "all_projects")]
+        #[arg(long, conflicts_with_all = ["all_projects", "service", "all_services", "routine", "all_routines"])]
         project: Option<String>,
         /// Watch every project
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["service", "all_services", "routine", "all_routines"])]
         all_projects: bool,
+        /// A service's events instead: BOT/NAME, or NAME for this bot's own.
+        /// Events: started, stopped, failed, crash_loop, run_finished
+        /// (default failed,crash_loop)
+        #[arg(long, conflicts_with_all = ["all_services", "routine", "all_routines"])]
+        service: Option<String>,
+        /// Every service's events
+        #[arg(long, conflicts_with_all = ["routine", "all_routines"])]
+        all_services: bool,
+        /// A routine's events instead (its id). Events: fired, failed (a task
+        /// it created was escalated; the default)
+        #[arg(long, conflicts_with = "all_routines")]
+        routine: Option<String>,
+        /// Every routine's events
+        #[arg(long)]
+        all_routines: bool,
         /// Events that wake the bot, comma separated: new, pending, blocked,
-        /// escalated, done. "" for none
+        /// escalated, done (or the service and routine events above). "" for
+        /// none
         #[arg(long)]
         wake: Option<String>,
-        /// Events that only ride along on the next run; same names. "" for none
+        /// Events that only ride along on the next run; same names. "" for
+        /// none. Task events only
         #[arg(long)]
         ride: Option<String>,
         /// Events on tasks this bot owns (`--owner bot:NAME`) in the project
@@ -2246,16 +2264,28 @@ enum BotCmd {
         #[arg(long)]
         why: String,
     },
-    /// Remove a task-event subscription
+    /// Remove a task-event, service or routine subscription
     Unsubscribe {
         #[arg(env = "AXE_BOT")]
         name: String,
         /// Project to stop watching (default: the bot's own project)
-        #[arg(long, conflicts_with = "all_projects")]
+        #[arg(long, conflicts_with_all = ["all_projects", "service", "all_services", "routine", "all_routines"])]
         project: Option<String>,
         /// Remove the all-projects subscription
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["service", "all_services", "routine", "all_routines"])]
         all_projects: bool,
+        /// Remove a service subscription: BOT/NAME, or NAME for this bot's own
+        #[arg(long, conflicts_with_all = ["all_services", "routine", "all_routines"])]
+        service: Option<String>,
+        /// Remove the all-services subscription
+        #[arg(long, conflicts_with_all = ["routine", "all_routines"])]
+        all_services: bool,
+        /// Remove a routine subscription (its id)
+        #[arg(long, conflicts_with = "all_routines")]
+        routine: Option<String>,
+        /// Remove the all-routines subscription
+        #[arg(long)]
+        all_routines: bool,
         #[arg(long)]
         why: String,
     },
@@ -2282,7 +2312,8 @@ enum BotCmd {
         #[arg(long)]
         why: String,
     },
-    /// List a bot's task-event subscriptions and watched tasks
+    /// List a bot's task-event, service and routine subscriptions and watched
+    /// tasks
     Subscriptions {
         #[arg(env = "AXE_BOT")]
         name: String,
@@ -3630,6 +3661,19 @@ fn format_subscription(s: &crate::subscription::Subscription) -> String {
             s.batch_seconds
         );
     }
+    let source = match (&s.service, &s.routine) {
+        (Some(svc), _) => Some(format!("service {svc}")),
+        (_, Some(r)) if r == "*" => Some("routine *".to_string()),
+        (_, Some(r)) => Some(format!("routine #{r}")),
+        _ => None,
+    };
+    if let Some(source) = source {
+        return format!(
+            "{source}\twake={}\tbatch={}s",
+            join(&s.wake),
+            s.batch_seconds
+        );
+    }
     let owned = if s.owned.is_empty() {
         String::new()
     } else {
@@ -3652,6 +3696,14 @@ fn event_list(s: &Option<String>) -> Option<Vec<String>> {
             .map(String::from)
             .collect()
     })
+}
+
+fn all_or(one: &Option<String>, all: bool) -> Option<String> {
+    if all {
+        Some("*".to_string())
+    } else {
+        one.clone()
+    }
 }
 
 fn subscription_project(project: &Option<String>, all: bool) -> Option<String> {
@@ -3931,6 +3983,10 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
             name,
             project,
             all_projects,
+            service,
+            all_services,
+            routine,
+            all_routines,
             wake,
             ride,
             owned_wake,
@@ -3941,30 +3997,44 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 .as_deref()
                 .map(crate::bot::parse_duration)
                 .transpose()?;
-            let s: Subscription = c.send(
-                "POST",
-                &format!("/api/bots/{name}/subscriptions"),
-                json!({
-                    "project": subscription_project(project, *all_projects),
-                    "wake": event_list(wake),
-                    "ride": event_list(ride),
-                    "owned": event_list(owned_wake),
-                    "batch_seconds": batch_seconds,
-                    "why": why,
-                }),
-            )?;
+            let mut body = json!({
+                "wake": event_list(wake),
+                "batch_seconds": batch_seconds,
+                "why": why,
+            });
+            let service = all_or(service, *all_services);
+            let routine = all_or(routine, *all_routines);
+            if service.is_some() || routine.is_some() {
+                if ride.is_some() || owned_wake.is_some() {
+                    anyhow::bail!("--ride and --owned-wake are for task events only");
+                }
+                body["service"] = json!(service);
+                body["routine"] = json!(routine);
+            } else {
+                body["project"] = json!(subscription_project(project, *all_projects));
+                body["ride"] = json!(event_list(ride));
+                body["owned"] = json!(event_list(owned_wake));
+            }
+            let s: Subscription =
+                c.send("POST", &format!("/api/bots/{name}/subscriptions"), body)?;
             println!("{}", format_subscription(&s));
         }
         BotCmd::Unsubscribe {
             name,
             project,
             all_projects,
+            service,
+            all_services,
+            routine,
+            all_routines,
             why,
         } => {
             let _: Value = c.send(
                 "POST",
                 &format!("/api/bots/{name}/subscriptions/remove"),
-                json!({"project": subscription_project(project, *all_projects), "why": why}),
+                json!({"project": subscription_project(project, *all_projects),
+                    "service": all_or(service, *all_services),
+                    "routine": all_or(routine, *all_routines), "why": why}),
             )?;
             println!("unsubscribed");
         }

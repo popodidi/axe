@@ -272,7 +272,10 @@ pub fn save(
         id
     } else {
         tx.execute("INSERT INTO routines(config,enabled,next_at,created_at,updated_at) VALUES (?1,1,?2,?3,?3)",params![raw,next,db::now()])?;
-        tx.last_insert_rowid()
+        let id = tx.last_insert_rowid();
+        // Its owning bot hears of its failures (`axe bot unsubscribe --routine`).
+        crate::subscription::default_routine(&tx, actor, template.owner.as_deref(), id)?;
+        id
     };
     audit(&tx, id, actor, "saved", &raw)?;
     tx.commit()?;
@@ -303,6 +306,14 @@ pub fn change(conn: &mut Connection, actor: &Actor, id: i64, action: &str, now: 
         params![enabled, archived, next, db::now(), id],
     )?;
     audit(&tx, id, actor, action, "")?;
+    if action == "archive" {
+        crate::subscription::drop_source(
+            &tx,
+            actor,
+            &format!("{}{id}", crate::subscription::ROUTINE_PREFIX),
+            "routine archived",
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }

@@ -328,6 +328,9 @@ impl Supervisor {
                             "on-failure" => !st.success(),
                             _ => false,
                         };
+                    if !st.success() {
+                        p.status.failures += 1;
+                    }
                     if ran >= stable {
                         p.clear_loop();
                     } else if !st.success() || restart {
@@ -398,6 +401,7 @@ impl Supervisor {
                     Err(e) => {
                         eprintln!("axe dispatcher: service {key}: start failed: {e:#}");
                         p.status.error = Some(format!("{e:#}"));
+                        p.status.failures += 1;
                         p.started = Some(now);
                         p.quick += 1;
                         self_schedule(p, &cfg, now, &mut notices);
@@ -736,6 +740,7 @@ mod tests {
         assert_eq!(r.state("b/s").restarts, 3, "capped at 4 s");
         let n = r.until(11.0, |s| s.restarts == 4 && s.state == "backoff");
         assert!(n.is_empty());
+        assert_eq!(r.state("b/s").failures, 5, "every crash counts");
         // Still looping escalate_after (300 s) after the wake: the owner hears.
         let n = r.sup.tick(r.at(303.5));
         assert_eq!(n.len(), 1, "{n:?}");
@@ -784,6 +789,7 @@ mod tests {
         r.sup.apply(&[svc("s", "exit 0", "on-failure")], r.at(0.0));
         r.until(0.0, |s| s.state == "exited");
         assert_eq!(r.state("b/s").last_exit.as_deref(), Some("exit 0"));
+        assert_eq!(r.state("b/s").failures, 0, "a clean exit is no failure");
         let mut r = Rig::new(cfg());
         r.sup.apply(&[svc("s", "exit 2", "never")], r.at(0.0));
         r.until(0.0, |s| s.state == "exited");

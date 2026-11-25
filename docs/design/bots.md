@@ -133,6 +133,12 @@ Following single tasks (2026-11-13) extends the same path: events on tasks a
 bot owns (`--owned-wake`) or watches (`axe bot watch`) wake it on a 1m batch,
 so it need not subscribe to a whole project's `done` or poll with self-wakes.
 A watch is a `bot_subscriptions` row keyed `#<task>` (`subscription.rs`).
+Service and routine events (2026-11-25, owner msgs #4022/#4028) take the same
+path on rows keyed `service:<id>` / `routine:<id>` (or `*`), wake events only:
+a service's from the change between two dispatcher reports
+(`service::events`), a routine's from the tasks it creates (`fired`) and their
+escalation (`failed`). A new service, and a new routine owned by a bot,
+subscribe the owning bot to failures only; removal or archival drops the rows.
 
 ## Telegram and security
 

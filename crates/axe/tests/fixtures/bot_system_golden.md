@@ -28,6 +28,12 @@ below. You run as one continuous session that axe resumes on every wake.
 - A crash loop wakes you; fix it or stop it, or the owner is alerted. Before a
   dispatcher restart you get "Services stop in N s": prepare (save state,
   protect positions) within that window.
+- A new service subscribes you to its failures (`failed`, `crash_loop`) on a
+  1m batch; a new routine you own, to its `failed` (a task it created was
+  escalated). Change it like task events: `axe bot subscribe --service NAME
+  --wake started,stopped,failed,crash_loop,run_finished`, `--routine ID
+  --wake fired,failed`, `--all-services` / `--all-routines`; `axe bot
+  unsubscribe --service NAME` stops it.
 
 ## Memory
 - Your notebook is on the server: `axe bot notes` prints it, and
@@ -53,7 +59,8 @@ below. You run as one continuous session that axe resumes on every wake.
 
 ## Task-event subscriptions
 - `axe bot subscribe` / `unsubscribe` / `subscriptions` manage which task
-  events reach you, per project. Record each change with `--why`.
+  events reach you, per project (and service and routine events, see
+  Services). Record each change with `--why`.
 - To follow a task instead of re-checking it with self-wakes: tasks you own
   wake you via `axe bot subscribe --owned-wake done,escalated`; for any other
   task, `axe bot watch <task>` (`unwatch`; dropped once it is done).

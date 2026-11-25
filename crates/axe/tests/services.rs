@@ -241,6 +241,73 @@ fn cli_declares_lists_starts_stops_and_removes_services() {
 }
 
 #[test]
+fn cli_subscriptions_route_a_dispatcher_reported_failure_to_a_batch_wake() {
+    let r = Rig::new("restart_delay_seconds = 30");
+    let s = &r.srv;
+    // Long enough for a sync (every 2 s) to see it running.
+    r.add("sleep 3; exit 7");
+    // The default: the owning bot, failures only.
+    let out = s.ok(&["bot", "subscriptions", "b"]);
+    assert!(
+        out.contains("service b/s\twake=failed,crash_loop\tbatch=60s"),
+        "{out}"
+    );
+    s.ok(&[
+        "bot",
+        "subscribe",
+        "b",
+        "--service",
+        "s",
+        "--wake",
+        "failed,started",
+        "--batch",
+        "1m",
+        "--why",
+        "test",
+    ]);
+    assert!(!s
+        .run(&[
+            "bot",
+            "subscribe",
+            "b",
+            "--service",
+            "s",
+            "--ride",
+            "failed",
+            "--why",
+            "x"
+        ])
+        .status
+        .success());
+    let mut d = r.dispatcher();
+    let batch = || -> Option<Value> {
+        let w: Vec<Value> = serde_json::from_value(s.get("/api/bots/b/wakes")).unwrap();
+        w.into_iter().find(|w| {
+            w["actor"] == "axe"
+                && w["body"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("service failed: b/s: exit 7")
+        })
+    };
+    wait_for("failure batch", 30, || batch().is_some());
+    let body = batch().unwrap()["body"].as_str().unwrap().to_string();
+    assert!(body.contains("service started: b/s"), "{body}");
+    signal(&d, libc::SIGTERM);
+    assert!(d.0.wait().unwrap().success());
+    s.ok(&[
+        "bot",
+        "unsubscribe",
+        "b",
+        "--service",
+        "b/s",
+        "--why",
+        "quiet",
+    ]);
+    assert!(s.ok(&["bot", "subscriptions", "b"]).trim().is_empty());
+}
+
+#[test]
 fn migrates_v21_to_the_services_table_and_keeps_it_after_downgrade() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v21.db");
