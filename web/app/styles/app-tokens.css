@@ -65,8 +65,9 @@
     calc(100% - var(--detail-min-width) - var(--resizer-width))
   );
   /* Item pane (a routine, service, bot or goal beside its list): 40% of the
-     workspace by default, between 320px and 720px (--item-size holds a saved
-     width); a task pane may stack to its right. */
+     workspace by default, between 320px and 720px; dragged (--item-size holds
+     the saved width), it grows to all but the list's minimum width. A task
+     pane may stack to its right. */
   --item-min-width: calc(var(--space-8) * 2 + var(--space-7));
   --item-max-width: calc(var(--space-8) * 6);
   --item-width: clamp(var(--item-min-width), 40%, var(--item-max-width));

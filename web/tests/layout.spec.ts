@@ -251,3 +251,58 @@ for (const [w, h] of [
       await expect(page.locator(detail)).toHaveCount(0);
       await expect(page.locator("#task-3")).toBeVisible();
     });
+test("the item pane widens past 720px up to the list's minimum and persists", async ({
+  page,
+}, info) => {
+  const routine = { id: 9, name: "Acceptance routine", project: "atlas", cron: "0 9 * * 1-5", timezone: "Europe/London", title: "Record acceptance", detail: "## Outcome\nRecord acceptance only.\n\n## Verify\n- A long routine template line that reads better in a wide pane, with enough words to wrap at 720px but not much wider.", enabled: true, archived: false, next_at: 1793696400, latest_task: 3 };
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await mockDesk(page);
+  await page.route("http://axe.test/api/routines**", (route) =>
+    route.fulfill({ json: route.request().url().includes("history") ? [] : [routine] }),
+  );
+  await page.goto(base + "&view=routines&routine=9");
+  const pane = '[aria-label="Routine detail"]';
+  await expect(page.locator(`${pane} h2`).first()).toBeVisible();
+  const handle = page.getByRole("separator", { name: "Resize routine pane" });
+  const workspace = await page
+    .locator(pane)
+    .evaluate((el) => el.parentElement!.clientWidth);
+  // The default stays 40% of the workspace, within 320px to 720px.
+  const start = await width(page, pane);
+  expect(start).toBe(Math.round(Math.min(720, Math.max(320, workspace * 0.4))));
+
+  // Dragging far left stops at all but the list's 224px minimum.
+  const box = (await handle.boundingBox())!;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + box.width / 2, y);
+  await page.mouse.down();
+  await page.mouse.move(5, y, { steps: 8 });
+  await page.mouse.up();
+  const max = Number(await handle.getAttribute("aria-valuemax"));
+  expect(max).toBeGreaterThan(720);
+  expect(max).toBeGreaterThanOrEqual(workspace - 224 - 1);
+  await expect.poll(() => width(page, pane)).toBe(max);
+  expect(await width(page, list)).toBeGreaterThanOrEqual(224);
+  await noPageOverflow(page);
+  await page.screenshot({ path: info.outputPath("routine-pane-wide-1600.png") });
+
+  // The saved width applies on reload.
+  await page.reload();
+  await expect(page.locator(`${pane} h2`).first()).toBeVisible();
+  await expect.poll(() => width(page, pane)).toBe(max);
+  expect(await width(page, list)).toBeGreaterThanOrEqual(224);
+
+  // A task stacked over the wide pane keeps its minimum; so does the list.
+  await page.goto(base + "&view=routines&routine=9&task=3");
+  await expect(page.locator(`${detail} h2`).first()).toBeVisible();
+  await expect.poll(() => width(page, detail)).toBeGreaterThanOrEqual(360);
+  expect(await width(page, list)).toBeGreaterThanOrEqual(224);
+  expect(await width(page, pane)).toBeGreaterThanOrEqual(720);
+  // Nothing hides past the workspace's right edge.
+  const inside = await page.locator(detail).evaluate((el) => {
+    const ws = el.parentElement!.getBoundingClientRect();
+    return Math.round(ws.right - el.getBoundingClientRect().right);
+  });
+  expect(inside).toBeGreaterThanOrEqual(0);
+  await noPageOverflow(page);
+});
