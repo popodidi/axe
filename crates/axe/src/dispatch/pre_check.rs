@@ -126,7 +126,7 @@ impl Dispatcher {
                 }),
                 None if Instant::now() >= pc.deadline => {
                     if let Err(e) = kill_tree(&mut pc.child) {
-                        eprintln!("axe dispatcher: pre-check kill unconfirmed: {e:#}");
+                        eprintln!("axe node: pre-check kill unconfirmed: {e:#}");
                         i += 1;
                         continue;
                     }
@@ -170,7 +170,7 @@ impl Dispatcher {
         // A rollout drain admits no new agent: the next claim runs it all again.
         if self.store.draining.load(Ordering::SeqCst) {
             let note = format!(
-                "pre-check {outcome} while the dispatcher drains: back to pending, it runs \
+                "pre-check {outcome} while the node drains: back to pending, it runs \
                  again on the next claim (log {log})\n{out}"
             );
             self.store.request::<bool>(
@@ -195,7 +195,7 @@ impl Dispatcher {
     pub(super) fn stop_pre_checks(&mut self, why: &str) -> Result<()> {
         for mut pc in std::mem::take(&mut self.pre_checks) {
             if let Err(e) = kill_tree(&mut pc.child) {
-                eprintln!("axe dispatcher: pre-check kill unconfirmed: {e:#}");
+                eprintln!("axe node: pre-check kill unconfirmed: {e:#}");
             }
             self.store.request::<bool>(
                 "release",

@@ -170,7 +170,7 @@ export function RunLog({
         if (!reply.page) {
           setUnavailable(reply.unavailable || "Log unavailable");
           s.stopped = !reply.retryable;
-          if (reply.retryable) setConnection("Dispatcher unavailable");
+          if (reply.retryable) setConnection("Node unavailable");
           return;
         }
         const p = reply.page;
@@ -761,7 +761,7 @@ function Prompt({ title, file }: { title: string; file?: RunFile }) {
       {file.truncated && (
         <p className={styles.missing}>
           Showing the first {size(file.text.length)} of {size(file.bytes ?? 0)};
-          the whole file is on the dispatcher.
+          the whole file is on the node.
         </p>
       )}
     </details>
@@ -809,7 +809,7 @@ function RunDetails({
   const filesMissing = files?.unavailable
     ? capitalize(files.unavailable)
     : files && !files.prompt
-      ? "Dispatcher predates run details"
+      ? "Node predates run details"
       : undefined;
   const repos = meta?.task?.repos ?? meta?.bot?.repos;
   const stopReason = run?.stop_reason;
@@ -932,7 +932,7 @@ function RunDetails({
             run?.session_id ?? undefined,
           ],
           [
-            "Dispatcher",
+            "Node",
             run?.dispatcher ? mono(run.dispatcher) : "",
             run?.dispatcher,
           ],
@@ -945,7 +945,7 @@ function RunDetails({
             "Event times",
             timed
               ? files?.times
-                ? "Recorded as the dispatcher saw each line"
+                ? "Recorded as the node saw each line"
                 : "From the harness's records"
               : run
                 ? missing("Not recorded for this run")

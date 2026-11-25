@@ -277,7 +277,7 @@ fn service_events_from_reports() {
     assert!(service::events(&running("t1", 1), &looping)[0]
         .1
         .contains("(2 times)"));
-    // A restarted dispatcher counts from 0 again.
+    // A restarted node counts from 0 again.
     assert_eq!(names(&running("t1", 5), &running("t1", 0)), [] as [&str; 0]);
     let mut again = r("backoff", "t1");
     again.failures = 1;

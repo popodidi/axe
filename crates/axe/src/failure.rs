@@ -1,7 +1,7 @@
 //! Why an agent run failed, read from its log: Claude Code stream-json
 //! (`claude -p --output-format stream-json`) or Codex JSONL (`codex exec --json`).
 //!
-//! Three classes are not the task's fault, so the dispatcher retries them later
+//! Three classes are not the task's fault, so the node retries them later
 //! instead of escalating: an exhausted usage quota, an invalid login and an
 //! unavailable provider. Only the run's final outcome counts (a retried error the
 //! CLI recovered from is not a failure), and anything unrecognized is a task

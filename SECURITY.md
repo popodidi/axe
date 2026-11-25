@@ -24,22 +24,22 @@ Only the latest release receives security fixes.
   HMAC cookie, revoked only by replacing the blob link key. Plain HTTP
   carries the cookie and token in the clear, so keep the server on a
   trusted network.
-- The dispatcher runs coding agents with the permissions you configure in
+- The node runs coding agents with the permissions you configure in
   `[agents]` (the built-in Claude Code command bypasses its permission
-  prompts). Treat every task spec as code that will run on the dispatcher
+  prompts). Treat every task spec as code that will run on the node
   host.
 - Telegram bot tokens are read from files by the server and never stored in
   the config, the database or the API. Only the configured owner's messages
   in allowlisted chats are accepted.
-- Sealed forms (`axe form`) carry owner input to the dispatcher encrypted to
-  the dispatcher key (`dispatcher.key`, 0600). The channel and the server see
+- Sealed forms (`axe form`) carry owner input to the node encrypted to
+  the node key (`dispatcher.key`, 0600). The channel and the server see
   only the form's metadata and ciphertext, which the server keeps in memory
   until delivery. The form page's code is the trust root; a server could swap
   the key on the first form a browser sees, so compare the fingerprint once
-  (`axe form key`). Values are files readable by the dispatcher's user, like
+  (`axe form key`). Values are files readable by the node's user, like
   its logins: every task run as that user can read them.
 - Sealed messages (`axe form send`, `axe web login-link --tg`) go the other
-  way, encrypted on the dispatcher host to a key derived from the owner's
+  way, encrypted on the node host to a key derived from the owner's
   passphrase (`axe form reply-key`; `ReplyKey` in `crates/axe/src/sealed.rs`).
   The server and the channel see the sender, purpose, expiry and ciphertext.
   The ciphertext stays in the chat and allows offline guessing of the

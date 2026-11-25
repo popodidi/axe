@@ -1,5 +1,5 @@
 //! Task fields (owner, repos, labels) through the CLI and API, and the run
-//! workspace a task with repos gets from the dispatcher.
+//! workspace a task with repos gets from the node.
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -262,7 +262,7 @@ path = "{two}"
         self.dir.path().canonicalize().unwrap()
     }
 
-    /// Adds tasks through the CLI, then runs one dispatcher pass per task.
+    /// Adds tasks through the CLI, then runs one node pass per task.
     fn run(&self, tasks: &[&[&str]]) -> (Server, Vec<String>) {
         self.run_with(|_| {}, tasks)
     }
@@ -797,7 +797,7 @@ fn tree(dir: &Path) -> String {
     out.join("\n")
 }
 
-/// The dispatcher's run folder, byte for byte: the local builder
+/// The node's run folder, byte for byte: the local builder
 /// (`axe workspace`) shares this code and must not change it.
 #[test]
 fn dispatcher_run_folder_is_pinned() {

@@ -159,7 +159,7 @@ fn form_key(path: &std::path::Path) -> Value {
     match crate::sealed::Key::load_or_create(path) {
         Ok(k) => json!({"pubkey": k.pubkey(), "fingerprint": k.fingerprint()}),
         Err(e) => {
-            eprintln!("axe dispatcher: sealed form key: {e:#}");
+            eprintln!("axe node: sealed form key: {e:#}");
             Value::Null
         }
     }
@@ -172,7 +172,7 @@ struct Deferred {
     pick: Pick,
 }
 
-/// Escalates a dispatcher-claimed task; its session resumes once ops resolves the cause.
+/// Escalates a node-claimed task; its session resumes once ops resolves the cause.
 fn block_changes(task_id: i64, blocker: &str) -> Changes {
     Changes {
         state: Some("escalated".into()),
@@ -334,7 +334,9 @@ impl Dispatcher {
         // The config was validated with its registry; a registry that broke
         // since then leaves runs on the default logins, loudly.
         let runtimes = Registry::load(&cfg).unwrap_or_else(|e| {
-            eprintln!("axe dispatcher: runtimes unavailable ({e:#}); each agent runs on the default login");
+            eprintln!(
+                "axe node: runtimes unavailable ({e:#}); each agent runs on the default login"
+            );
             let mut plain = cfg.clone();
             plain.runtimes = None;
             Registry::load(&plain).expect("implicit runtimes always load")
@@ -385,7 +387,7 @@ impl Dispatcher {
             Ok(r) => r,
             Err(reason) => {
                 eprintln!(
-                    "axe dispatcher: agents picked by the deprecated [defaults]/[[rule]] config: \
+                    "axe node: agents picked by the deprecated [defaults]/[[rule]] config: \
                      stored rules cannot express it ({reason})"
                 );
                 return;
@@ -396,18 +398,18 @@ impl Dispatcher {
             Ok(v) => {
                 self.stored_rules = true;
                 if v["already"] != true {
-                    eprintln!("axe dispatcher: imported config rules once: {v}");
+                    eprintln!("axe node: imported config rules once: {v}");
                 }
-                eprintln!("axe dispatcher: agents picked by stored rules (axe rule list)");
+                eprintln!("axe node: agents picked by stored rules (axe rule list)");
                 if self.cfg.sets_legacy_selection() {
                     eprintln!(
-                        "axe dispatcher: [defaults] and [[rule]] agents/strategy are deprecated \
+                        "axe node: [defaults] and [[rule]] agents/strategy are deprecated \
                          and no longer pick agents; edit selection with axe rule"
                     );
                 }
             }
             Err(e) => eprintln!(
-                "axe dispatcher: stored rules unavailable ({e:#}); agents picked by the \
+                "axe node: stored rules unavailable ({e:#}); agents picked by the \
                  deprecated [defaults]/[[rule]] config"
             ),
         }
@@ -576,7 +578,7 @@ impl Dispatcher {
             ) {
                 Ok(v) => {
                     eprintln!(
-                        "axe dispatcher: runtime {} turned {}: card {v}",
+                        "axe node: runtime {} turned {}: card {v}",
                         a.runtime, a.state
                     );
                     // A login check's card is no state episode of its own.
@@ -588,10 +590,7 @@ impl Dispatcher {
                 }
                 Err(e) => {
                     if !self.alert_failed {
-                        eprintln!(
-                            "axe dispatcher: runtime {} card not sent yet: {e:#}",
-                            a.runtime
-                        );
+                        eprintln!("axe node: runtime {} card not sent yet: {e:#}", a.runtime);
                     }
                     self.alert_failed = true;
                     i += 1;
@@ -621,7 +620,7 @@ impl Dispatcher {
         if self.runtimes.managed {
             let r = self.runtimes.get(name);
             eprintln!(
-                "axe dispatcher: runtime {name}: {} -> {}",
+                "axe node: runtime {name}: {} -> {}",
                 f.class,
                 r.map_or("?", |r| r.health.state.as_str())
             );
@@ -706,7 +705,7 @@ impl Dispatcher {
     }
 
     /// One poll: reap finished sessions, take a due resource sample, then admit
-    /// ready work. Tests drive the dispatcher with this and a fake clock.
+    /// ready work. Tests drive the node with this and a fake clock.
     pub fn poll(&mut self) -> Result<()> {
         self.reap()?;
         self.reap_bots()?;
@@ -727,7 +726,7 @@ impl Dispatcher {
 
     /// Publishes the admission status to the server after each new resource
     /// sample, and at least every `REPORT_EVERY`, so `axe admission` and
-    /// `axe task show` describe this dispatcher. Best effort: a failed report only
+    /// `axe task show` describe this node. Best effort: a failed report only
     /// lets the server's copy go stale, which it then reports as unknown.
     fn report_admission(&mut self) {
         let samples = self.gate.as_ref().map_or(0, |g| g.samples());
@@ -761,7 +760,7 @@ impl Dispatcher {
         // cannot flood the journal every sample.
         if let Some(e) = &failed {
             if self.reported.is_some() {
-                eprintln!("axe dispatcher: admission report failed: {e:#}");
+                eprintln!("axe node: admission report failed: {e:#}");
             }
             self.reported = None;
         } else {
@@ -775,10 +774,7 @@ impl Dispatcher {
             .cfg
             .pool_bots()
             .map_or("one per active bot".to_string(), |n| n.to_string());
-        eprintln!(
-            "axe dispatcher: pool total={} bots={bots}",
-            self.cfg.pool_total()
-        );
+        eprintln!("axe node: pool total={} bots={bots}", self.cfg.pool_total());
         if self.runtimes.managed {
             let now = now_unix();
             let list: Vec<String> = self
@@ -787,11 +783,11 @@ impl Dispatcher {
                 .iter()
                 .map(|r| format!("{} ({}, {})", r.name, r.harness, r.state(now)))
                 .collect();
-            eprintln!("axe dispatcher: runtimes {}", list.join(", "));
+            eprintln!("axe node: runtimes {}", list.join(", "));
         }
         match &self.gate {
-            Some(g) => eprintln!("axe dispatcher: resource admission {}", g.summary()),
-            None => eprintln!("axe dispatcher: resource admission off (no [resources])"),
+            Some(g) => eprintln!("axe node: resource admission {}", g.summary()),
+            None => eprintln!("axe node: resource admission off (no [resources])"),
         }
         let poll = Duration::from_secs(self.cfg.poll_seconds);
         let mut next_poll = Instant::now();
@@ -879,7 +875,7 @@ impl Dispatcher {
         let grace = Duration::from_secs(self.cfg.drain_abort_seconds);
         self.drain.get_or_insert_with(|| {
             eprintln!(
-                "axe dispatcher: draining; aborting unprotected task runs after {}s",
+                "axe node: draining; aborting unprotected task runs after {}s",
                 grace.as_secs()
             );
             Drain {
@@ -920,7 +916,7 @@ impl Dispatcher {
             }
             self.runs[i].drain_aborting = true;
             if let Err(e) = kill_tree(&mut self.runs[i].child) {
-                eprintln!("axe dispatcher: run {run_id} drain abort unconfirmed: {e:#}");
+                eprintln!("axe node: run {run_id} drain abort unconfirmed: {e:#}");
                 i += 1;
                 continue;
             }
@@ -986,9 +982,9 @@ impl Dispatcher {
                 if held != self.runtime_hold_logged {
                     match &held {
                         Some(why) => {
-                            eprintln!("axe dispatcher: claims held: no healthy runtime ({why})")
+                            eprintln!("axe node: claims held: no healthy runtime ({why})")
                         }
-                        None => eprintln!("axe dispatcher: a runtime is healthy again; claiming"),
+                        None => eprintln!("axe node: a runtime is healthy again; claiming"),
                     }
                     self.runtime_hold_logged = held.clone();
                 }
@@ -1168,7 +1164,9 @@ impl Dispatcher {
             Ok(p) => p,
             Err(e) => {
                 if !self.profiles_unsupported {
-                    eprintln!("axe dispatcher: routine profiles unavailable ({e:#}); tasks run without them");
+                    eprintln!(
+                        "axe node: routine profiles unavailable ({e:#}); tasks run without them"
+                    );
                     self.profiles_unsupported = true;
                 }
                 None
@@ -1390,7 +1388,7 @@ impl Dispatcher {
             if aborts.contains(&self.runs[i].run_id) {
                 if let Err(e) = kill_tree(&mut self.runs[i].child) {
                     eprintln!(
-                        "axe dispatcher: run {} abort unconfirmed: {e:#}",
+                        "axe node: run {} abort unconfirmed: {e:#}",
                         self.runs[i].run_id
                     );
                     i += 1;
@@ -1544,9 +1542,9 @@ impl Dispatcher {
 fn stop_notice(bot: &str, names: &[String], secs: u64, key: &str) -> crate::service::Notice {
     let list = names.join(", ");
     let text = if secs > 0 {
-        format!("Services stop in {secs} s: {list}. The dispatcher is draining for a restart or upgrade; they start again when it is back. Prepare now if they hold state.")
+        format!("Services stop in {secs} s: {list}. The node is draining for a restart or upgrade; they start again when it is back. Prepare now if they hold state.")
     } else {
-        format!("Services stopped: {list}. The dispatcher is stopping; they start again when it is back.")
+        format!("Services stopped: {list}. The node is stopping; they start again when it is back.")
     };
     crate::service::Notice {
         bot: bot.to_string(),
@@ -1637,10 +1635,10 @@ impl Dispatcher {
                 ) {
                 Ok(decls) => {
                     if self.service_sync_failed {
-                        eprintln!("axe dispatcher: services synced again");
+                        eprintln!("axe node: services synced again");
                     }
                     self.service_sync_failed = false;
-                    // A draining dispatcher starts no new service and
+                    // A draining node starts no new service and
                     // restarts none for a changed definition.
                     if !self.store.draining.load(Ordering::SeqCst) {
                         self.services.apply(&decls, now);
@@ -1648,9 +1646,7 @@ impl Dispatcher {
                 }
                 Err(e) => {
                     if !self.service_sync_failed {
-                        eprintln!(
-                            "axe dispatcher: services sync failed (services keep running): {e:#}"
-                        );
+                        eprintln!("axe node: services sync failed (services keep running): {e:#}");
                     }
                     self.service_sync_failed = true;
                 }
@@ -1674,7 +1670,7 @@ impl Dispatcher {
             ) {
                 Ok(v) => {
                     eprintln!(
-                        "axe dispatcher: service notice {} to bot {} ({}): {v}",
+                        "axe node: service notice {} to bot {} ({}): {v}",
                         n.kind,
                         n.bot,
                         n.services.join(", ")
@@ -1684,11 +1680,11 @@ impl Dispatcher {
                 Err(e) => {
                     // An unknown bot (removed meanwhile) never accepts it.
                     if !crate::client::retryable(&e) {
-                        eprintln!("axe dispatcher: service notice dropped: {e:#}");
+                        eprintln!("axe node: service notice dropped: {e:#}");
                         self.service_notices.remove(0);
                         continue;
                     }
-                    eprintln!("axe dispatcher: service notice not sent yet: {e:#}");
+                    eprintln!("axe node: service notice not sent yet: {e:#}");
                     return;
                 }
             }
@@ -1713,7 +1709,7 @@ impl Dispatcher {
                 .push(stop_notice(bot, names, secs, &key));
         }
         eprintln!(
-            "axe dispatcher: draining; services stop in {secs}s ({} bots warned)",
+            "axe node: draining; services stop in {secs}s ({} bots warned)",
             alive.len()
         );
         self.send_service_notices();
@@ -1727,7 +1723,7 @@ impl Dispatcher {
     fn stop_services_finish(&mut self) {
         if self.services.alive() > 0 {
             eprintln!(
-                "axe dispatcher: stopping {} services (SIGTERM, then SIGKILL after {}s)",
+                "axe node: stopping {} services (SIGTERM, then SIGKILL after {}s)",
                 self.services.alive(),
                 self.cfg.services.stop_grace_seconds
             );

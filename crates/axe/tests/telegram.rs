@@ -3669,7 +3669,7 @@ fn post(rig: &Rig, path: &str, body: Value) -> Value {
 #[test]
 fn runtimes_command_and_one_card_per_runtime_alert() {
     let rig = Rig::new();
-    // A dispatcher reporting one runtime that needs a login.
+    // A node reporting one runtime that needs a login.
     let g = post(
         &rig,
         "/api/dispatcher/register",
@@ -3703,7 +3703,7 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     );
     assert!(rig.message_wakes().is_empty(), "the command wakes no bot");
 
-    // The dispatcher's alert becomes one card to the owner from the first bot.
+    // The node's alert becomes one card to the owner from the first bot.
     let v = post(
         &rig,
         "/api/dispatcher/runtime-alert",
@@ -3749,7 +3749,7 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
 }
 
-/// `axe form ask` once the dispatcher is connected (it signs the form).
+/// `axe form ask` once the node is connected (it signs the form).
 fn form_ask(rig: &Rig, args: &[&str]) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -3782,7 +3782,7 @@ fn form_spec(v: &Value) -> axe::sealed::Spec {
 #[test]
 fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
     let rig = Rig::new();
-    // The dispatcher here only signs and delivers forms: no bot runs.
+    // The node here only signs and delivers forms: no bot runs.
     rig.srv().ok(&["bot", "pause", "cos"]);
     let _disp = rig.srv().dispatcher(&[], &[]);
     let v = form_ask(
@@ -3893,7 +3893,7 @@ fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
         }
     }
 
-    // /runtimes shows the dispatcher key's fingerprint.
+    // /runtimes shows the node key's fingerprint.
     let fp = v["fingerprint"].as_str().unwrap().to_string();
     wait_for("the key in axe runtimes", 20, || {
         rig.srv().ok(&["runtimes"]).contains(&fp)
@@ -4123,7 +4123,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
          \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = oat-dummy-4411 ] || { echo Not logged in; exit 1; }\"]\n",
     )
     .unwrap();
-    // It needs a login: the dispatcher's first probe fails, and the next
+    // It needs a login: the node's first probe fails, and the next
     // periodic one is minutes away.
     std::fs::write(
         reg.join("claude-1/state.json"),

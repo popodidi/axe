@@ -85,7 +85,7 @@ pub struct Template {
     pub repos: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
-    /// Per-routine cost controls, read by the dispatcher from the occurrence
+    /// Per-routine cost controls, read by the node from the occurrence
     /// snapshot ([`profile`]); unset fields change nothing. A shell command
     /// (`sh -c`) run in the run folder before the task's first agent run: exit
     /// 0 marks the task done with no agent, anything else starts the agent as

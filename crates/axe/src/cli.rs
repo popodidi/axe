@@ -17,7 +17,7 @@ use crate::server;
 #[command(
     name = "axe",
     version = env!("AXE_VERSION"),
-    about = "Personal agent task queue and dispatcher"
+    about = "Personal agent task queue and agent node"
 )]
 pub struct Cli {
     /// Actor recorded on events (human, agent, ...)
@@ -57,7 +57,7 @@ enum Cmd {
     },
     /// The repo registry: the Git URL each repo name is cloned from
     ///
-    /// `axe workspace` and the dispatcher clone a repo missing on their
+    /// `axe workspace` and the node clone a repo missing on their
     /// machine from it; a local `[repos.<name>] url` wins
     Repo {
         #[command(subcommand)]
@@ -70,9 +70,9 @@ enum Cmd {
         #[command(subcommand)]
         command: BotCmd,
     },
-    /// Services: long-running processes a bot declares, run by the dispatcher
+    /// Services: long-running processes a bot declares, run by the node
     ///
-    /// The dispatcher starts every declared, enabled service, restarts it by
+    /// The node starts every declared, enabled service, restarts it by
     /// its policy with backoff, wakes the bot on a crash loop and before a
     /// restart stops it. --bot defaults to $AXE_BOT
     Service {
@@ -123,12 +123,16 @@ enum Cmd {
         #[arg(long, default_value = server::DEFAULT_LISTEN)]
         listen: String,
     },
-    /// Run the remote dispatcher and supervise workers
-    Dispatch {
+    /// Run this machine's axe node: claim work, supervise agents and services
+    ///
+    /// The node (formerly the dispatcher) is the server's worker on one
+    /// machine. `axe dispatch` is a working alias.
+    #[command(visible_alias = "dispatch")]
+    Node {
         #[arg(long)]
         once: bool,
         /// After stopping prior workers, resolve their interrupted runs with this
-        /// audit note and exit without dispatching
+        /// audit note and exit without claiming work
         #[arg(long)]
         reconcile_note: Option<String>,
         /// Housekeeping tick, overriding `[dispatcher] housekeep`; a bare
@@ -138,7 +142,7 @@ enum Cmd {
     },
     /// One dry-run housekeeping sweep: prints each decision, deletes nothing
     ///
-    /// Removal runs only inside `axe dispatch` (`[dispatcher] housekeep`)
+    /// Removal runs only inside `axe node` (`[dispatcher] housekeep`)
     Housekeeping {
         #[arg(long, required = true)]
         dry_run: bool,
@@ -154,9 +158,9 @@ enum Cmd {
         #[arg(long)]
         print: bool,
     },
-    /// Show or hold the dispatcher's admission of new sessions
+    /// Show or hold the node's admission of new sessions
     ///
-    /// Shows whether the dispatcher is admitting new sessions (resource
+    /// Shows whether the node is admitting new sessions (resource
     /// pressure or a manual hold), or sets and releases a hold
     Admission {
         #[arg(long)]
@@ -164,16 +168,16 @@ enum Cmd {
         #[command(subcommand)]
         command: Option<AdmissionCmd>,
     },
-    /// The dispatcher's runtimes: state, limit, last failure and quota
+    /// The node's runtimes: state, limit, last failure and quota
     ///
-    /// A runtime is a harness plus one login, as the dispatcher last reported it
+    /// A runtime is a harness plus one login, as the node last reported it
     Runtimes {
         #[arg(long)]
         json: bool,
     },
     /// Sealed forms: ask the owner for secrets, codes or files
     ///
-    /// Only the dispatcher can read the values. They are encrypted in the owner's browser, relayed
+    /// Only the node can read the values. They are encrypted in the owner's browser, relayed
     /// as ciphertext and written to the target as 0600 files ($AXE_SECRETS_DIR)
     Form {
         #[command(subcommand)]
@@ -372,7 +376,7 @@ pub(crate) enum TaskCmd {
     /// Escalate with `--state escalated --note ...`
     Set {
         id: i64,
-        /// Reset the task run budget (refused for live dispatcher claims)
+        /// Reset the task run budget (refused for live node claims)
         #[arg(long)]
         reset_runs: bool,
         #[arg(long, value_parser = state_parser())]
@@ -943,7 +947,7 @@ fn run_blob(c: &Client, command: &BlobCmd) -> Result<()> {
     Ok(())
 }
 
-/// How long `axe admission hold|release` waits for the dispatcher to report it.
+/// How long `axe admission hold|release` waits for the node to report it.
 const HOLD_CONFIRM: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Longest body line `axe task log` prints without `--full`.
@@ -1052,7 +1056,7 @@ fn format_pools(a: &Value) -> String {
     )
 }
 
-/// The bot run decision (hard floor), when the dispatcher reports one.
+/// The bot run decision (hard floor), when the node reports one.
 fn format_bot_admission(a: &Value) -> String {
     match a["bots_admitting"].as_bool() {
         Some(true) => "bots: admitting bot runs (only the hard floor holds them)\n".into(),
@@ -1064,7 +1068,7 @@ fn format_bot_admission(a: &Value) -> String {
     }
 }
 
-/// The manual hold line, when the dispatcher reports one.
+/// The manual hold line, when the node reports one.
 fn format_hold(a: &Value) -> String {
     let h = &a["hold"];
     if h.is_null() {
@@ -1096,7 +1100,7 @@ fn format_admission(a: &Value) -> String {
     }
     if a["enabled"] != true {
         let head = if a["hold"].is_null() {
-            "admission: not gated (no [resources] in the dispatcher config)\n".to_string()
+            "admission: not gated (no [resources] in the node config)\n".to_string()
         } else {
             format!(
                 "admission: paused ({})\n",
@@ -1150,7 +1154,7 @@ enum FormCmd {
         #[arg(long = "field", value_name = "NAME:TYPE[:FLAG...]", required = true)]
         fields: Vec<String>,
         /// A git credential for https://HOST instead, used by the
-        /// dispatcher's clones and fetches (fields token and, optionally, username)
+        /// node's clones and fetches (fields token and, optionally, username)
         #[arg(long, value_name = "HOST")]
         git: Option<String>,
         /// The task the values go to
@@ -1201,7 +1205,7 @@ enum FormCmd {
     /// Hand in a sealed reply (`sealed.v1.<form>.<data>`, or `-` for stdin)
     /// from a channel without its own hook
     Submit { sealed: String },
-    /// The dispatcher key's fingerprint, read on the dispatcher host (the key
+    /// The node key's fingerprint, read on the node host (the key
     /// is made on first use). Compare it once with the one a form shows
     Key {
         #[arg(long)]
@@ -1227,7 +1231,7 @@ enum FormCmd {
     },
     /// Send the owner a sealed message on Telegram: a secret, a link or a
     /// small file (2 KiB in all), encrypted on this host to the owner's reply
-    /// key (`axe form reply-key`; run it on the dispatcher host). The server
+    /// key (`axe form reply-key`; run it on the node host). The server
     /// and Telegram see only ciphertext and the text "<from>: <purpose>"; the
     /// owner opens it in the form page with the passphrase
     #[command(group(clap::ArgGroup::new("payload").required(true).args(["secret_file", "link", "file"])))]
@@ -1900,20 +1904,20 @@ enum ServiceCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Turn a service on: the dispatcher starts it
+    /// Turn a service on: the node starts it
     Start {
         name: String,
         #[arg(long, env = "AXE_BOT")]
         bot: String,
     },
-    /// Turn a service off: the dispatcher stops it (SIGTERM, then SIGKILL
+    /// Turn a service off: the node stops it (SIGTERM, then SIGKILL
     /// after the grace period); it stays declared
     Stop {
         name: String,
         #[arg(long, env = "AXE_BOT")]
         bot: String,
     },
-    /// The tail of a service's log, read from the dispatcher running it
+    /// The tail of a service's log, read from the node running it
     Logs {
         name: String,
         #[arg(long, env = "AXE_BOT")]
@@ -1922,7 +1926,7 @@ enum ServiceCmd {
         #[arg(short = 'n', long, default_value_t = 100)]
         lines: u64,
     },
-    /// Remove a service; the dispatcher stops it
+    /// Remove a service; the node stops it
     #[command(alias = "rm")]
     Remove {
         name: String,
@@ -2405,7 +2409,7 @@ enum BotCmd {
 #[derive(Subcommand)]
 enum AdmissionCmd {
     /// Admit no new task sessions until a time. Running sessions continue and
-    /// bot runs are unaffected. Run it on the dispatcher host: the hold is a
+    /// bot runs are unaffected. Run it on the node host: the hold is a
     /// file there ($AXE_ADMISSION_HOLD, default
     /// ~/.local/state/axe/admission-hold.json). Replaces any current hold
     Hold {
@@ -4214,7 +4218,7 @@ const HELP_SECTIONS: &[(&str, &[&str])] = &[
         "Ops and admin",
         &[
             "server",
-            "dispatch",
+            "node",
             "admission",
             "runtimes",
             "housekeeping",
@@ -4288,7 +4292,7 @@ pub fn run() -> Result<()> {
     crate::skill::auto_refresh();
     // Long-running commands never reach the hint.
     let check = match cli.cmd {
-        Cmd::Server { .. } | Cmd::Dispatch { .. } => crate::upgrade::Check::Off,
+        Cmd::Server { .. } | Cmd::Node { .. } => crate::upgrade::Check::Off,
         _ => crate::upgrade::Check::start(),
     };
     let result = run_cmd(&cli);
@@ -4435,7 +4439,7 @@ fn run_cmd(cli: &Cli) -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Dispatch {
+        Cmd::Node {
             once,
             reconcile_note,
             housekeep,
@@ -4447,7 +4451,7 @@ fn run_cmd(cli: &Cli) -> Result<()> {
             let store =
                 crate::remote::Store::open(&cfg, Arc::clone(&stop), reconcile_note.as_deref())?;
             if reconcile_note.is_some() {
-                println!("dispatcher reconciled; start `axe dispatch` to resume admissions");
+                println!("node reconciled; start `axe node` to resume admissions");
                 return Ok(());
             }
             signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&store.draining))?;
@@ -4507,7 +4511,7 @@ fn run_cmd(cli: &Cli) -> Result<()> {
             println!("  mkdir -p {}", demo.display());
             println!("  axe server &");
             println!("  axe task add --project demo --title \"first task\" --agent stub");
-            println!("  axe dispatch --once");
+            println!("  axe node --once");
             println!("  axe task list --all");
         }
         Cmd::Backup { to } => {
@@ -4552,20 +4556,20 @@ fn run_cmd(cli: &Cli) -> Result<()> {
                     Value::Null
                 }
             };
-            // The dispatcher reads the file before every claim and reports it
+            // The node reads the file before every claim and reports it
             // within seconds; say so only once the server shows it.
             let deadline = std::time::Instant::now() + HOLD_CONFIRM;
             loop {
                 let a: Value = client().get("/api/admission", &[])?;
-                // An older dispatcher reports no `hold` field at all.
+                // An older node reports no `hold` field at all.
                 if a.get("hold") == Some(&want) {
                     print!("{}", format_admission(&a));
                     break;
                 }
                 if std::time::Instant::now() >= deadline {
                     anyhow::bail!(
-                        "the dispatcher has not reported this change within {} s (it reports {}): \
-                         run this on the dispatcher host with a dispatcher that supports holds",
+                        "the node has not reported this change within {} s (it reports {}): \
+                         run this on the node host with a node that supports holds",
                         HOLD_CONFIRM.as_secs(),
                         a.get("hold")
                             .map_or("no hold support".to_string(), |h| h.to_string())
@@ -4931,7 +4935,7 @@ fn patch(client: &Client, id: i64, body: Value) -> Result<()> {
 pub enum UsageCmd {
     /// Read usage from this machine's run logs into the server. Safe to repeat
     Backfill {
-        /// Log directory (default: the dispatcher config's log_dir)
+        /// Log directory (default: the node config's log_dir)
         #[arg(long)]
         log_dir: Option<PathBuf>,
         /// Report what would be read without storing it
@@ -5136,6 +5140,29 @@ mod tests {
                 TASK_CASES.iter().any(|c| c[0] == verb.get_name()),
                 "no alias case for `{}`",
                 verb.get_name()
+            );
+        }
+    }
+
+    #[test]
+    fn node_runs_as_node_and_as_the_dispatch_alias() {
+        for name in ["node", "dispatch"] {
+            let cli = Cli::from_arg_matches(
+                &command()
+                    .try_get_matches_from(["axe", name, "--once", "--housekeep=off"])
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    cli.cmd,
+                    Cmd::Node {
+                        once: true,
+                        housekeep: Some(crate::config::Housekeep::Off),
+                        ..
+                    }
+                ),
+                "{name}"
             );
         }
     }

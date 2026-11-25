@@ -1,6 +1,6 @@
 //! Named bot cron schedules. A firing is an ordinary `bot_wakes` row labeled in
 //! its body, so readiness, batching and delivery are the normal wake path, and
-//! the dispatcher needs no change. The server ticks these next to routines.
+//! the node needs no change. The server ticks these next to routines.
 //!
 //! `next_at` is a durable cursor advanced in the same transaction as the wake,
 //! so a restart neither loses nor repeats a firing, and missed slots after
@@ -322,7 +322,7 @@ pub fn change(
 }
 
 /// The wake text, prefixed `[goal NAME]` for a goal's schedule. The label is
-/// stored rather than rendered, so a dispatcher running an older binary still
+/// stored rather than rendered, so a node running an older binary still
 /// delivers it.
 fn wake_body(objective: &str, goal: Option<&str>) -> String {
     let body = format!("scheduled wake (automation, not an owner message). Objective: {objective}");

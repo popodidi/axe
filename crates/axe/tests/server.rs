@@ -694,7 +694,7 @@ fn approve_endpoint_resumes_held_tasks_and_refuses_dispatched_sessions() {
         404
     );
 
-    // The dispatcher and dispatched agents are refused.
+    // The node and dispatched agents are refused.
     for body in [
         serde_json::json!({"sha": "abc", "scope": "prod", "actor": "agent"}),
         serde_json::json!({"sha": "abc", "scope": "prod", "actor": "dispatcher"}),
@@ -734,7 +734,7 @@ fn approve_endpoint_resumes_held_tasks_and_refuses_dispatched_sessions() {
     assert!(v["error"]
         .as_str()
         .unwrap()
-        .contains("running dispatcher session"));
+        .contains("running node session"));
     assert_eq!(srv.get("/api/tasks/3")["state"], "blocked");
 
     db::end_run(&conn, run, Some(0), None).unwrap();
@@ -811,7 +811,7 @@ fn session_lookup_returns_task_agent_and_latest_run() {
             "task_id"
         ]
     );
-    // The dispatcher claim maps to the same run.
+    // The node claim maps to the same run.
     assert_eq!(srv.get("/api/sessions/dispatch:c")["run"]["id"], run);
 }
 
@@ -852,7 +852,7 @@ fn reset_runs_api_and_cli_preserve_continuity_and_reopen_budget() {
     .unwrap_err();
     match *err {
         ureq::Error::Status(400, response) => {
-            assert!(response.into_string().unwrap().contains("dispatcher claim"))
+            assert!(response.into_string().unwrap().contains("node claim"))
         }
         e => panic!("{e}"),
     }

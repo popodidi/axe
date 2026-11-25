@@ -1,4 +1,4 @@
-//! Bot services: declarations through the CLI, and the dispatcher running
+//! Bot services: declarations through the CLI, and the node running
 //! them (start on dispatcher start, restart with backoff, crash-loop wakes,
 //! SIGTERM then SIGKILL on stop, the pre-stop wake on a drain).
 mod common;

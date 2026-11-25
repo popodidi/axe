@@ -137,14 +137,14 @@ impl Drop for Live {
     }
 }
 
-/// Starts a server for `env` and connects a dispatcher using `gate`; the stop
-/// flag also ends the dispatcher's control connection.
+/// Starts a server for `env` and connects a node using `gate`; the stop
+/// flag also ends the node's control connection.
 fn connect(env: &Env, cfg: Config, gate: Gate) -> (Server, Arc<AtomicBool>, Dispatcher) {
     let (srv, stop, _, d) = connect_draining(env, cfg, gate);
     (srv, stop, d)
 }
 
-/// `connect`, also returning the dispatcher's drain flag (SIGUSR1).
+/// `connect`, also returning the node's drain flag (SIGUSR1).
 fn connect_draining(
     env: &Env,
     cfg: Config,
@@ -245,7 +245,7 @@ fn gated_work_stays_pending_unclaimed_and_resumes_oldest_first() {
         .as_str()
         .unwrap()
         .starts_with("disk /fake/workspace 10.0 GiB free"));
-    // The server reports what the dispatcher decided, for `axe admission`/`show`.
+    // The server reports what the node decided, for `axe admission`/`show`.
     let served = d.srv.get("/api/admission");
     assert_eq!(
         (served["enabled"].clone(), served["admitting"].clone()),
@@ -447,7 +447,7 @@ fn server_reports_live_readings_and_show_explains_resource_wait() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = server_config(dir.path(), UNREACHABLE_DISK);
     let s = Server::start_with(dir.path(), &cfg, Some(TOKEN), &[], &[]);
-    // The dispatcher samples this guest and reports to the server.
+    // The node samples this guest and reports to the server.
     let _dispatcher = s.dispatcher(&[], &[]);
     let id = s
         .ok(&["add", "--project", "a", "--title", "waits"])
@@ -512,7 +512,7 @@ fn server_reports_live_readings_and_show_explains_resource_wait() {
 fn admission_is_unknown_until_a_dispatcher_reports_and_ungated_without_resources() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = server_config(dir.path(), "");
-    // Drop [resources] so this dispatcher is not gated.
+    // Drop [resources] so this node is not gated.
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, &text[..text.find("[resources]").unwrap()]).unwrap();
     let s = Server::start_with(dir.path(), &cfg, Some(TOKEN), &[], &[]);
@@ -520,7 +520,7 @@ fn admission_is_unknown_until_a_dispatcher_reports_and_ungated_without_resources
         .ok(&["add", "--project", "a", "--title", "t"])
         .trim()
         .to_string();
-    // No dispatcher has reported: unknown, never claimed healthy.
+    // No node has reported: unknown, never claimed healthy.
     let a = s.get("/api/admission");
     assert_eq!(
         (a["enabled"].clone(), a["admitting"].clone()),
@@ -528,7 +528,7 @@ fn admission_is_unknown_until_a_dispatcher_reports_and_ungated_without_resources
     );
     assert_eq!(
         s.ok(&["admission"]),
-        "admission: unknown: no dispatcher has reported since the server started\n"
+        "admission: unknown: no node has reported since the server started\n"
     );
     assert!(!s.ok(&["show", &id]).contains("waiting:"));
 
@@ -548,7 +548,7 @@ fn admission_is_unknown_until_a_dispatcher_reports_and_ungated_without_resources
     );
     assert_eq!(
         s.ok(&["admission"]),
-        "admission: not gated (no [resources] in the dispatcher config)\n\
+        "admission: not gated (no [resources] in the node config)\n\
          tasks:  0/1 slots\n\
          bots:   0/0 slots (one per active bot)\n"
     );
@@ -574,11 +574,11 @@ fn once_pass_waits_for_a_full_window_then_obeys_the_gate() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "{stderr}");
         assert!(
-            stderr.contains("axe dispatcher: pool total=1 bots=one per active bot\n"),
+            stderr.contains("axe node: pool total=1 bots=one per active bot\n"),
             "{stderr}"
         );
         assert!(
-            stderr.contains("axe dispatcher: resource admission on "),
+            stderr.contains("axe node: resource admission on "),
             "{stderr}"
         );
         let t = db::get_task(&db::open(&db).unwrap(), id).unwrap();
@@ -1078,7 +1078,7 @@ fn admission_hold_blocks_new_task_sessions_only_and_expires_or_releases() {
     d.shutdown().unwrap();
 }
 
-/// `axe admission hold|release` against a real dispatcher process: the
+/// `axe admission hold|release` against a real node process: the
 /// command returns once the server reports the change.
 #[test]
 fn admission_hold_and_release_cli_round_trip() {

@@ -3,7 +3,7 @@
 Design decision, 2026-10-30. axe used to run each task through three personas
 (builder, verifier, delivery), each with its own session, persona system prompt
 and a handoff command. That is retired: one agent session carries a task from
-spec to done, and the dispatcher resumes the same session whenever the task
+spec to done, and the node resumes the same session whenever the task
 returns to `pending`.
 
 ## Why
@@ -20,7 +20,7 @@ returns to `pending`.
 ## What changed
 
 - axe has no `owner` or persona: no `handoff`, no `--owner`, no persona-keyed
-  admission (one task pool), one session per task (schema v9). Dispatcher
+  admission (one task pool), one session per task (schema v9). Node
   sessions start as plain sessions in the task's run workspace with a one-line prompt;
   no system prompt or persona files.
 - The task protocol lives in the deployment's agent instructions (for example
@@ -29,7 +29,7 @@ returns to `pending`.
 - The spec is the workflow: Outcome and Verify required; Plan, Context and
   Deliver optional (see the `axe` skill, Spec format).
 - Independent review for risky work is the human approval gate
-  (`approval: owner` in the spec, then `axe task approve`). Dispatcher task sessions
+  (`approval: owner` in the spec, then `axe task approve`). Node task sessions
   cannot approve. A bot session (actor `bot:<name>`, see [Bots](bots.md)) may
   approve on an explicit owner message, citing its id in the note; that counts
   as the owner's approval. A session may run a review subagent of its own.

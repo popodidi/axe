@@ -44,7 +44,7 @@ cmd = ["sh", "-c", "printf '%s|%s' \"$AXE_SECRETS_DIR\" \"$DEPLOY_TOKEN\" > {out
     (dir, srv)
 }
 
-/// `axe form ask` once the dispatcher is connected (it signs the form).
+/// `axe form ask` once the node is connected (it signs the form).
 fn ask(srv: &Server, args: &[&str]) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -165,7 +165,7 @@ fn a_sealed_reply_reaches_only_the_requesting_task() {
         v["fingerprint"].as_str().unwrap(),
         sealed::fingerprint_b64(&spec.pubkey).unwrap()
     );
-    // The key is next to the dispatcher's config file, private.
+    // The key is next to the node's config file, private.
     let key = dir.path().join("dispatcher.key");
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
@@ -258,7 +258,7 @@ fn a_sealed_reply_reaches_only_the_requesting_task() {
         serr.contains(&format!("form {form}: delivered to task {task}")),
         "{serr}"
     );
-    // The dispatcher's run log holds no value either (env is not logged).
+    // The node's run log holds no value either (env is not logged).
     for e in std::fs::read_dir(dir.path().join("logs")).unwrap() {
         let p = e.unwrap().path();
         if p.is_file() {

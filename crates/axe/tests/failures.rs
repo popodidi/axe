@@ -1,5 +1,5 @@
 //! Failure classes from agent logs (`failure.rs`). Fixtures in
-//! `fixtures/failures/` are redacted real dispatcher logs where one exists
+//! `fixtures/failures/` are redacted real node logs where one exists
 //! (Claude Code connection failure, 401 retry, missing session, not logged in;
 //! Codex "at capacity"); the others keep a real log's shape with the error message the
 //! CLI defines for that case (Claude Code result `api_error` kinds and

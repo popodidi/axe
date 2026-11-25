@@ -1,7 +1,7 @@
 //! What the server knows about one run, for the run page's metadata panel:
 //! its start and end events (command, rule, runtime, run folder, exit), the
 //! task's or bot's labels and repos, and recorded usage. The prompts and the
-//! harness's init record live beside the log on the dispatcher
+//! harness's init record live beside the log on the node
 //! (`run_log::run_files`); the server relays those separately.
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -63,7 +63,7 @@ pub fn usage(conn: &Connection, kind: &str, run: i64) -> Result<Value> {
 
 /// Task run `id`: `{run, task, start, end, outcome, usage}`. `start` and `end`
 /// are the bodies of its `run_start` and `run_end` events; `outcome` is the
-/// dispatcher's state change right after the run (an escalation or retry
+/// node's state change right after the run (an escalation or retry
 /// note), if any; `task_state` the task's state when the run ended.
 pub fn task_run(conn: &Connection, id: i64) -> Result<Value> {
     let run = db::get_run(conn, id)?;

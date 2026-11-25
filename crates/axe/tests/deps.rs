@@ -320,7 +320,7 @@ fn dependency_completion_and_removal_never_clear_other_holds() {
     let manual = add_as(&mut conn, "p", "blocked", &[a]);
     // Approval hold (blocked awaiting approval) plus a dependency.
     let approval = add_as(&mut conn, "p", "blocked", &[a]);
-    // Failure hold: a claimed run that the dispatcher blocked, then a new prerequisite.
+    // Failure hold: a claimed run that the node blocked, then a new prerequisite.
     let failed = add_as(&mut conn, "p", "pending", &[]);
     assert_eq!(claim(&mut conn), Some(a));
     assert_eq!(claim(&mut conn), Some(b));

@@ -1,22 +1,22 @@
 //! Sealed forms: a one-off form that carries input from any channel to the
 //! dispatcher, which alone can read it.
 //!
-//! - The dispatcher holds `dispatcher.key`, a P-256 private key (0600, made
+//! - The node holds `dispatcher.key`, a P-256 private key (0600, made
 //!   on first use). Its public key and fingerprint are not secret.
 //! - A form [`Spec`] (purpose, typed fields, target, expiry) is made and
-//!   signed (ECDSA P-256, SHA-256) by the dispatcher; the server only relays
+//!   signed (ECDSA P-256, SHA-256) by the node; the server only relays
 //!   it. The link to the static form page carries it in the URL fragment as
 //!   `f=<base64url spec>.<base64url signature>`.
-//! - The page encrypts the values as one JSON object to the dispatcher key:
+//! - The page encrypts the values as one JSON object to the node key:
 //!   ephemeral ECDH P-256, HKDF-SHA256 (salt: ephemeral then dispatcher
 //!   public key, info [`HKDF_INFO`]) and AES-256-GCM with
 //!   `form|dispatcher|expires` as associated data. The result is the text
 //!   `sealed.v1.<form>.<base64url(ephemeral public key | iv | ciphertext)>`
 //!   ([`Sealed`]), which any channel can carry back.
-//! - The dispatcher checks its own signature, the expiry and that the form
+//! - The node checks its own signature, the expiry and that the form
 //!   was not used, decrypts, checks the values against the fields and writes
 //!   them to the signed target ([`Desk`]). A value never leaves the
-//!   dispatcher host and is never logged.
+//!   node host and is never logged.
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -245,7 +245,7 @@ pub fn check_env_name(env: &str) -> Result<()> {
     Ok(())
 }
 
-/// Where the values go. The dispatcher writes only to the target inside the
+/// Where the values go. The node writes only to the target inside the
 /// spec it signed, so a relay cannot redirect them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
@@ -255,9 +255,9 @@ pub enum Target {
     /// Files in the bot's secrets folder (`AXE_SECRETS_DIR`).
     Bot { bot: String },
     /// A git credential for `https://<host>` (fields `token`, optional
-    /// `username`), used by the dispatcher's clones and fetches.
+    /// `username`), used by the node's clones and fetches.
     Git { host: String },
-    /// A login of one of the dispatcher's runtimes (`runtime::login_methods`);
+    /// A login of one of the node's runtimes (`runtime::login_methods`);
     /// one field, `secret`.
     Runtime { runtime: String, login: String },
     /// The owner's reply key for sealed messages back to the owner
@@ -338,7 +338,7 @@ pub fn check_host(host: &str) -> Result<()> {
     Ok(())
 }
 
-/// What a caller asks for; the dispatcher turns it into a signed [`Spec`].
+/// What a caller asks for; the node turns it into a signed [`Spec`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -354,7 +354,7 @@ pub struct Request {
 }
 
 impl Request {
-    /// Form schema validation; the server and the dispatcher both run it.
+    /// Form schema validation; the server and the node both run it.
     pub fn validate(&self) -> Result<()> {
         let p = self.purpose.trim();
         if p.is_empty() || p.chars().count() > MAX_PURPOSE {
@@ -398,9 +398,9 @@ pub struct Spec {
     pub v: u32,
     /// 128 random bits, hex.
     pub form: String,
-    /// The dispatcher's id.
+    /// The node's id.
     pub dispatcher: String,
-    /// The dispatcher's public key (uncompressed SEC1, base64url).
+    /// The node's public key (uncompressed SEC1, base64url).
     pub pubkey: String,
     /// RFC 3339, UTC, whole seconds.
     pub expires: String,
@@ -565,7 +565,7 @@ pub fn seal(spec: &Spec, values: &Value) -> Result<Sealed> {
 
 // --------------------------------------------------------------- the key
 
-/// The dispatcher's key pair.
+/// The node's key pair.
 pub struct Key {
     secret: SecretKey,
 }
@@ -586,7 +586,7 @@ impl Key {
                 }
                 let bytes = B64
                     .decode(text.trim())
-                    .with_context(|| format!("{}: not a dispatcher key", path.display()))?;
+                    .with_context(|| format!("{}: not a node key", path.display()))?;
                 let secret = SecretKey::from_slice(&bytes)
                     .with_context(|| format!("{}: not a P-256 key", path.display()))?;
                 Ok(Key { secret })
@@ -668,10 +668,10 @@ impl Key {
         let sig = Signature::from_slice(&sig).context("invalid signature")?;
         VerifyingKey::from(&SigningKey::from(&self.secret))
             .verify(&bytes, &sig)
-            .map_err(|_| anyhow::anyhow!("the form was not signed by this dispatcher"))?;
+            .map_err(|_| anyhow::anyhow!("the form was not signed by this node"))?;
         let spec: Spec = serde_json::from_slice(&bytes).context("invalid form spec")?;
         if spec.pubkey != self.pubkey() {
-            bail!("the form names another dispatcher key");
+            bail!("the form names another node key");
         }
         Ok(spec)
     }
@@ -919,11 +919,11 @@ pub fn write_git_credential(path: &Path, host: &str, username: &str, token: &str
 
 // ------------------------------------------- sealed messages to the owner
 //
-// The reverse of a form: an agent or the dispatcher sends the owner a secret,
+// The reverse of a form: an agent or the node sends the owner a secret,
 // a link or a small file over a channel that must see only ciphertext.
 //
 // - The owner sets a passphrase once through a reply key form
-//   ([`Target::Reply`]). The dispatcher derives the reply key
+//   ([`Target::Reply`]). The node derives the reply key
 //   `K = PBKDF2-HMAC-SHA256(passphrase, salt, iter)` (random 16-byte salt,
 //   [`REPLY_ITERATIONS`]) and keeps only `K`, salt and count in
 //   `reply.key` (0600, [`ReplyKey`]); the passphrase is dropped.
@@ -1172,9 +1172,9 @@ pub fn message_link(page: &str, text: &str) -> String {
     format!("{page}#m={text}")
 }
 
-// ------------------------------------------------------- the dispatcher side
+// ------------------------------------------------------- the node side
 
-/// The dispatcher's half: signs requests and delivers sealed replies. It
+/// The node's half: signs requests and delivers sealed replies. It
 /// answers the server's relay jobs `form_sign` and `form_deliver`.
 pub struct Desk {
     key: Key,
@@ -1184,13 +1184,13 @@ pub struct Desk {
     /// Delivered forms and their expiry (Unix seconds), so each is used once.
     used_path: PathBuf,
     used: Mutex<BTreeMap<String, i64>>,
-    /// The dispatcher config, for runtime logins.
+    /// The node config, for runtime logins.
     cfg: Option<crate::config::Config>,
     /// Runtimes with a device login in progress.
     logins: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// Where a reply key form writes the owner's [`ReplyKey`].
     reply_key: PathBuf,
-    /// Runtimes just logged in, for the dispatcher to check at once.
+    /// Runtimes just logged in, for the node to check at once.
     logged_in: std::sync::Arc<Mutex<Vec<String>>>,
 }
 
@@ -1230,7 +1230,7 @@ impl Desk {
         }
     }
 
-    /// The desk with the dispatcher config, which runtime logins need.
+    /// The desk with the node config, which runtime logins need.
     pub fn with_config(mut self, cfg: crate::config::Config) -> Desk {
         self.cfg = Some(cfg);
         self
@@ -1250,7 +1250,7 @@ impl Desk {
         .with_reply_key(cfg.forms.reply_key_path()))
     }
 
-    /// The desk telling the dispatcher, through `logged_in`, which runtimes
+    /// The desk telling the node, through `logged_in`, which runtimes
     /// a login just finished for.
     pub fn with_logged_in(mut self, logged_in: std::sync::Arc<Mutex<Vec<String>>>) -> Desk {
         self.logged_in = logged_in;
@@ -1301,15 +1301,15 @@ impl Desk {
         let cfg = self
             .cfg
             .clone()
-            .context("runtime logins need the dispatcher config")?;
+            .context("runtime logins need the node config")?;
         let reg = crate::runtime::Registry::load(&cfg)?;
         if !reg.managed {
-            bail!("this dispatcher has no runtime registry ([runtimes] dir)");
+            bail!("this node has no runtime registry ([runtimes] dir)");
         }
         let rt = reg
             .get(name)
             .cloned()
-            .with_context(|| format!("no runtime {name} on this dispatcher"))?;
+            .with_context(|| format!("no runtime {name} on this node"))?;
         Ok((cfg, rt))
     }
 
@@ -1349,7 +1349,7 @@ impl Desk {
         let signed: Signed = serde_json::from_value(q["signed"].clone()).context("signed form")?;
         let spec = self.key.verify(&signed)?;
         if spec.dispatcher != self.id {
-            bail!("the form names another dispatcher");
+            bail!("the form names another node");
         }
         let expires = spec.expires_at()?;
         if now > expires {
@@ -1366,7 +1366,7 @@ impl Desk {
         used.retain(|_, exp| *exp >= now);
         used.insert(spec.form.clone(), expires);
         if let Err(e) = write_private(&self.used_path, &serde_json::to_vec(&*used)?) {
-            eprintln!("axe dispatcher: forms: record used form: {e:#}");
+            eprintln!("axe node: forms: record used form: {e:#}");
         }
         Ok(json!({"delivered": delivered}))
     }
@@ -1693,7 +1693,7 @@ mod tests {
         assert!(deliver(&d, &s, &sealed, 1001)["error"].is_null());
         let again = deliver(&d, &s, &sealed, 1002);
         assert!(again["error"].as_str().unwrap().contains("already used"));
-        // The used set survives a dispatcher restart.
+        // The used set survives a node restart.
         let d2 = Desk::new(
             Key {
                 secret: d.key.secret.clone(),
@@ -1720,7 +1720,7 @@ mod tests {
         let other = desk(&tmp.path().join("other"));
         let (spec, s) = signed(&d, &req(Target::Task { task: 7 }), 1000);
         let sealed = seal(&spec, &json!({"token": "x"})).unwrap();
-        // Another dispatcher's key did not sign it.
+        // Another node's key did not sign it.
         let e = deliver(&other, &s, &sealed, 1001);
         assert!(e["error"].as_str().unwrap().contains("not signed"), "{e}");
         // A relay that rewrites the target breaks the signature.
@@ -1737,7 +1737,7 @@ mod tests {
             1001,
         );
         assert!(e["error"].as_str().unwrap().contains("not signed"), "{e}");
-        // Sealed to another dispatcher's key (a swapped pubkey).
+        // Sealed to another node's key (a swapped pubkey).
         let (ospec, _) = signed(&other, &req(Target::Task { task: 7 }), 1000);
         let mut swapped = spec.clone();
         swapped.pubkey = ospec.pubkey.clone();
@@ -1884,10 +1884,7 @@ mod tests {
             &seal(&spec, &json!({"secret": "oat"})).unwrap(),
             1001,
         );
-        assert!(
-            e["error"].as_str().unwrap().contains("dispatcher config"),
-            "{e}"
-        );
+        assert!(e["error"].as_str().unwrap().contains("node config"), "{e}");
     }
 
     #[test]

@@ -245,7 +245,7 @@ pub fn record(
     Ok(true)
 }
 
-/// Stores usage from a dispatcher finish. A bad payload or a storage error must not
+/// Stores usage from a node finish. A bad payload or a storage error must not
 /// fail the finish itself, so it is contained in a savepoint and only logged.
 pub fn record_best_effort(conn: &Connection, kind: &str, run: i64, usage: &Value) {
     if usage.is_null() {

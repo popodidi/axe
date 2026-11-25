@@ -281,7 +281,7 @@ fn create_then_first_run_gets_system_prompt_and_only_wakes() {
     assert_eq!(meta["start"]["mode"], "fresh");
     assert_eq!(meta["end"]["exit_code"], 0);
     assert_eq!(meta["wakes"]["wake"], 1);
-    // The dispatcher ran once and left: its files are unavailable, not an error.
+    // The node ran once and left: its files are unavailable, not an error.
     assert!(meta["files"]["unavailable"].is_string(), "{meta}");
 }
 
@@ -974,7 +974,7 @@ fn claim_replay_returns_the_same_payload() {
     assert_eq!(runs, 1);
     // A new operation finds the bot busy.
     assert_eq!(op("op-2", "bot_claim", body).unwrap(), Value::Null);
-    // Another dispatcher cannot touch the run.
+    // Another node cannot touch the run.
     let err = remote::operation(
         &conn,
         &json!({"dispatcher":"d2","generation":"g","operation_id":"op-3","op":"bot_finish",

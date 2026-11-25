@@ -341,7 +341,7 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
         // The cost controls of the routine that created the task (`routine.rs`).
         "routine_profile" => json!(crate::routine::profile(&tx, task()?)?),
         // Dispatchers before stored rules (`rule.rs`) pick round-robin agents
-        // here; kept while such a dispatcher may still talk to this server.
+        // here; kept while such a node may still talk to this server.
         "round_robin" => {
             let len = number(b, "len")?;
             if len <= 0 {
@@ -521,7 +521,7 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             let changed = events
                 .iter()
                 .any(|e| e.id > start && e.actor != "dispatcher");
-            // A quota, login or provider failure the dispatcher saw end a plain failed
+            // A quota, login or provider failure the node saw end a plain failed
             // exit (`failure.rs`): keep the session, refund the run and retry later
             // instead of escalating.
             let outage = !aborted && b["drained"] != true && b["api_error"].is_object();
@@ -613,7 +613,7 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
                     "run_interrupted",
                     None,
                     Some(&run.to_string()),
-                    Some("aborted by a dispatcher rollout drain; re-check real state before repeating any step"),
+                    Some("aborted by a node rollout drain; re-check real state before repeating any step"),
                 )?;
                 tx.execute(
                     "UPDATE tasks SET runs = MAX(runs - 1, 0) WHERE id = ?1",
@@ -736,7 +736,7 @@ pub struct LocalLog {
 }
 pub struct Store {
     pub aborts: Arc<Mutex<Vec<i64>>>,
-    /// Runtimes a sealed form or device login just logged in; the dispatcher
+    /// Runtimes a sealed form or device login just logged in; the node
     /// checks each login at once (`runtime::Registry::check_now`).
     pub logins: Arc<Mutex<Vec<String>>>,
     pub client: Client,
@@ -782,7 +782,7 @@ impl Store {
             .write(true)
             .open(dir.join("lock"))?;
         lock.try_lock_exclusive()
-            .context("another dispatcher uses this journal")?;
+            .context("another node uses this journal")?;
         let path = dir.join("journal.json");
         let mut journal: Journal = if path.exists() {
             serde_json::from_slice(&std::fs::read(&path)?)?
@@ -820,7 +820,7 @@ impl Store {
                 .any(|l| !l.finished)
         {
             bail!(
-                "unresolved dispatcher journal {}; reconcile interrupted runs before restarting",
+                "unresolved node journal {}; reconcile interrupted runs before restarting",
                 path.display()
             );
         }
@@ -875,7 +875,7 @@ impl Store {
                     if !crate::client::retryable(&e) {
                         return Err(e);
                     }
-                    eprintln!("axe dispatcher: server unavailable; retaining operation: {e}");
+                    eprintln!("axe node: server unavailable; retaining operation: {e}");
                     for _ in 0..delay * 10 {
                         if self.stop.load(Ordering::SeqCst) {
                             return Err(e);
@@ -924,21 +924,21 @@ impl Store {
         let base = self.client.base().to_owned();
         let token = self.client.token()?;
         let control = self.client.clone();
-        // Sealed forms: the dispatcher key is made on first start.
+        // Sealed forms: the node key is made on first start.
         let desk = {
             let id = self.journal.lock().unwrap().id.clone();
             match crate::sealed::Desk::open(cfg, &id) {
                 Ok(d) => {
                     let d = d.with_logged_in(Arc::clone(&self.logins));
                     eprintln!(
-                        "axe dispatcher: sealed form key {} ({})",
+                        "axe node: sealed form key {} ({})",
                         d.key().fingerprint(),
                         cfg.forms.key_path().display()
                     );
                     Some(Arc::new(d))
                 }
                 Err(e) => {
-                    eprintln!("axe dispatcher: sealed forms disabled: {e:#}");
+                    eprintln!("axe node: sealed forms disabled: {e:#}");
                     None
                 }
             }
@@ -1057,7 +1057,7 @@ impl Store {
                                         .as_deref(),
                                 ),
                                 None => {
-                                    json!({"unavailable":"Log not registered on this dispatcher"})
+                                    json!({"unavailable":"Log not registered on this node"})
                                 }
                             }
                         } else if q["kind"] == "log" || q["kind"] == "bot_log" {
@@ -1085,7 +1085,7 @@ impl Store {
                                     Err(e) => json!({"unavailable":e.to_string()}),
                                 },
                                 None => {
-                                    json!({"unavailable":"Log not registered on this dispatcher"})
+                                    json!({"unavailable":"Log not registered on this node"})
                                 }
                             }
                         } else if q["kind"] == "service_log" {
@@ -1103,7 +1103,7 @@ impl Store {
                             match &desk {
                                 Some(d) => d.handle(&q, epoch()),
                                 None => {
-                                    json!({"error":"sealed forms are disabled on this dispatcher (see its log)"})
+                                    json!({"error":"sealed forms are disabled on this node (see its log)"})
                                 }
                             }
                         } else {
@@ -1118,7 +1118,7 @@ impl Store {
                         let _ = ready_tx.send(Err(e.to_string()));
                         return;
                     }
-                    eprintln!("axe dispatcher control disconnected: {e}");
+                    eprintln!("axe node control disconnected: {e}");
                 }
                 for _ in 0..10 {
                     if stop.load(Ordering::SeqCst) {
@@ -1153,7 +1153,7 @@ pub fn reconcile(conn: &Connection, v: &Value) -> Result<Value> {
         .as_ref()
         .is_some_and(|(i, g)| i != id || g != generation)
     {
-        bail!("cannot reconcile another dispatcher");
+        bail!("cannot reconcile another node");
     }
     let actor = Actor::new("ops");
     let claims = db::in_progress_claims(&tx, "dispatch:")?;

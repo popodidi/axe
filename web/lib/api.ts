@@ -89,7 +89,7 @@ last_run_end: string | null,
  */
 attention: boolean, 
 /**
- * Derived: the name the bot's folders on the dispatcher host are keyed
+ * Derived: the name the bot's folders on the node host are keyed
  * by (run folder, logs, sealed form values): its first
  * name, so a rename keeps them and the agent session that lives in them.
  * `None` from servers that predate renames: the name.
@@ -202,7 +202,7 @@ export type Service = { bot: string,
  */
 home: string, name: string, enabled: boolean, 
 /**
- * Empty (`state` "") until a dispatcher reported it.
+ * Empty (`state` "") until a node reported it.
  */
 status: ServiceStatus, created_at: string, updated_at: string, 
 /**
@@ -236,11 +236,11 @@ state: string, pid?: number,
  */
 started_at?: string, 
 /**
- * Restarts since the dispatcher started the service.
+ * Restarts since the node started the service.
  */
 restarts: number, 
 /**
- * Failures since the dispatcher started the service: unsuccessful exits
+ * Failures since the node started the service: unsuccessful exits
  * it did not ask for, and starts that failed.
  */
 failures: number, 
@@ -270,11 +270,11 @@ finished_at?: string,
  */
 next_run_at?: string, 
 /**
- * The log file on the dispatcher's machine.
+ * The log file on the node's machine.
  */
 log?: string, 
 /**
- * The dispatcher that reported it, and when.
+ * The node that reported it, and when.
  */
 dispatcher?: string, reported_at?: string, };
 

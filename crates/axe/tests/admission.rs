@@ -563,7 +563,7 @@ fn disabled_admission_reports_not_gated() {
     assert_eq!(v["reason"], "not sampled yet");
 }
 
-// ---- server copy of the dispatcher's report ----------------------------------
+// ---- server copy of the node's report ----------------------------------
 
 #[test]
 fn server_report_is_unknown_when_missing_or_expired_and_ages_into_stale() {
@@ -587,7 +587,7 @@ fn server_report_is_unknown_when_missing_or_expired_and_ages_into_stale() {
         (true.into(), 7.into())
     );
     assert_eq!(fresh["report_age_seconds"], 2);
-    // Readings older than stale_seconds pause, as on the dispatcher.
+    // Readings older than stale_seconds pause, as on the node.
     let stale = admission::reported(Some(&(enabled.clone(), at(26))));
     assert_eq!(stale["admitting"], false);
     assert!(
@@ -597,7 +597,7 @@ fn server_report_is_unknown_when_missing_or_expired_and_ages_into_stale() {
             .starts_with("status stale: "),
         "{stale}"
     );
-    // No report within the dispatcher lease: unknown, even for an ungated dispatcher.
+    // No report within the node lease: unknown, even for an ungated dispatcher.
     let ungated = serde_json::json!({"enabled": false, "admitting": true, "age_seconds": null});
     assert_eq!(
         admission::reported(Some(&(ungated.clone(), at(30))))["admitting"],

@@ -112,7 +112,7 @@ fn dispatcher_admits_oldest_ready_tasks_up_to_pool_total() {
     assert!(
         stderr
             .lines()
-            .any(|l| l == "axe dispatcher: pool total=3 bots=one per active bot"),
+            .any(|l| l == "axe node: pool total=3 bots=one per active bot"),
         "{stderr}"
     );
 
