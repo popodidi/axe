@@ -1,6 +1,6 @@
-//! Bot services in the dispatcher (`service.rs` holds the declarations).
+//! Bot services in the node (`service.rs` holds the declarations).
 //!
-//! The dispatcher runs every declared, enabled service as a child process
+//! The node runs every declared, enabled service as a child process
 //! (`sh -c <command>`, its own process group) with its output appended to
 //! `<log_dir>/services/<bot>/<name>.log`, rotated past `[services] log_bytes`
 //! with one previous file kept. A process that exits is restarted by its
@@ -13,7 +13,7 @@
 //! are woken first and the services keep running for `stop_warn_seconds`.
 //!
 //! [`Supervisor`] holds the processes and takes the time as an argument, so
-//! tests drive it with their own clock; the dispatcher syncs it with the
+//! tests drive it with their own clock; the node syncs it with the
 //! server ([`Supervisor::apply`], [`Supervisor::statuses`]) and sends the
 //! notices it returns.
 use std::collections::BTreeMap;
@@ -29,7 +29,7 @@ use anyhow::{bail, Context, Result};
 use crate::config::Services as Cfg;
 use crate::service::{Notice, Service, Status};
 
-/// Variables a service never inherits from the dispatcher: they belong to
+/// Variables a service never inherits from the node: they belong to
 /// task and bot runs.
 const ENV_REMOVE: [&str; 5] = [
     "AXE_TASK",
@@ -65,7 +65,7 @@ pub fn tail(log_root: &Path, home: &str, name: &str, lines: usize) -> Result<Str
     };
     let current = match read(&path) {
         Ok(t) => t,
-        Err(_) if !path.exists() => bail!("no log yet for service {name} on this dispatcher"),
+        Err(_) if !path.exists() => bail!("no log yet for service {name} on this node"),
         Err(e) => return Err(e),
     };
     let mut text = current;
@@ -297,7 +297,7 @@ impl Supervisor {
             let exited = match p.child.as_mut().map(|c| c.try_wait()) {
                 Some(Ok(Some(st))) => Some(st),
                 Some(Err(e)) => {
-                    eprintln!("axe dispatcher: service {key}: wait failed: {e}");
+                    eprintln!("axe node: service {key}: wait failed: {e}");
                     None
                 }
                 _ => None,
@@ -399,7 +399,7 @@ impl Supervisor {
                         p.started = Some(now);
                     }
                     Err(e) => {
-                        eprintln!("axe dispatcher: service {key}: start failed: {e:#}");
+                        eprintln!("axe node: service {key}: start failed: {e:#}");
                         p.status.error = Some(format!("{e:#}"));
                         p.status.failures += 1;
                         p.started = Some(now);
@@ -489,7 +489,7 @@ fn self_schedule(p: &mut Proc, cfg: &Cfg, now: Instant, notices: &mut Vec<Notice
             kind: "crash_loop".into(),
             services: vec![p.svc.name.clone()],
             text: format!(
-                "Service {name} is crash looping: {n} quick crashes in a row (last: {why}). The dispatcher keeps restarting it with backoff (next in {delay}). Read `axe service logs {name}`, then fix it or `axe service stop {name}`. If it still crash loops in {esc}, the owner is alerted.",
+                "Service {name} is crash looping: {n} quick crashes in a row (last: {why}). The node keeps restarting it with backoff (next in {delay}). Read `axe service logs {name}`, then fix it or `axe service stop {name}`. If it still crash loops in {esc}, the owner is alerted.",
                 name = p.svc.name,
                 n = p.quick,
                 delay = human(delay),
@@ -529,7 +529,7 @@ fn rotate(path: &Path, max: u64) {
 /// Starts `svc`: `sh -c <command>` in its cwd (default: the bot's run
 /// folder), in its own process group, with the bot's variables and sealed
 /// env values and its own env, output appended to its log. The process gets
-/// SIGTERM if the dispatcher dies without stopping it.
+/// SIGTERM if the node dies without stopping it.
 fn spawn(
     svc: &Service,
     log_root: &Path,

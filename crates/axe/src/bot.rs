@@ -192,7 +192,7 @@ pub struct Bot {
     /// Derived: paused by repeated failures (needs the owner).
     #[serde(default)]
     pub attention: bool,
-    /// Derived: the name the bot's folders on the dispatcher host are keyed
+    /// Derived: the name the bot's folders on the node host are keyed
     /// by (run folder, logs, sealed form values): its first
     /// name, so a rename keeps them and the agent session that lives in them.
     /// `None` from servers that predate renames: the name.
@@ -1259,7 +1259,7 @@ pub fn claim(
     }))
 }
 
-/// Ids of a bot run's owner bot, if the run belongs to this dispatcher generation.
+/// Ids of a bot run's owner bot, if the run belongs to this node generation.
 pub fn run_owned(conn: &Connection, run: i64, dispatcher: &str, generation: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM bot_runs WHERE id=?1 AND dispatcher=?2 AND generation=?3)",
@@ -1309,7 +1309,7 @@ fn undeliver(conn: &Connection, run: i64) -> Result<usize> {
 /// Ends a run. `reason`: `exit` (with `code`), `stop` (owner interrupt), `pause`,
 /// `dispatcher_stopped`, `api_error`, `spawn_failed` or `error`. Exit 0 saves the
 /// session and resets failures; stop and pause keep the session and are not
-/// failures; a dispatcher stop also returns the prompt's wakes. `api_error` (the
+/// failures; a node stop also returns the prompt's wakes. `api_error` (the
 /// dispatcher saw a model-API outage end the run) keeps the session and the
 /// failure count, and returns the prompt's wakes due after a backoff that grows
 /// with consecutive outage runs. Anything else is a failure:
@@ -1524,7 +1524,7 @@ pub fn shrink_after(
     Ok(Some(body))
 }
 
-/// Live runs of this dispatcher that must be killed: (run, `pause` | `stop`).
+/// Live runs of this node that must be killed: (run, `pause` | `stop`).
 pub fn control(
     conn: &Connection,
     dispatcher: &str,

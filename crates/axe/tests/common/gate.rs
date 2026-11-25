@@ -123,7 +123,7 @@ impl Rig {
         .with_emit(Box::new(move |l| log.lock().unwrap().push(l.to_string())))
     }
 
-    /// The same fake guest on the real monotonic clock (live dispatcher tests).
+    /// The same fake guest on the real monotonic clock (live node tests).
     pub fn gate_real_clock(&self, cfg: Resources) -> Gate {
         self.r.lock().unwrap().auto_cpu = true;
         let log = Arc::clone(&self.log);

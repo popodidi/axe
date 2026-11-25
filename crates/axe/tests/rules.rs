@@ -315,7 +315,7 @@ harness = "claude-code"
         assert_eq!(db::get_task(&c, id).unwrap().state, "done");
     }
 
-    // Rules added first: the dispatcher's import skips its own rows.
+    // Rules added first: the node's import skips its own rows.
     let import = log(&s).into_iter().find(|e| e["kind"] == "import").unwrap();
     assert_eq!(import["body"]["skipped"], "rules already stored");
     assert_eq!(rules(&s).len(), 6);

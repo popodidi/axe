@@ -1,4 +1,4 @@
-//! A routine's cost controls through the dispatcher: the pre-check, the
+//! A routine's cost controls through the node: the pre-check, the
 //! model and effort, and the skill profile of the run folder.
 mod common;
 

@@ -574,7 +574,7 @@ fn approve_refuses_open_dispatcher_sessions() {
     t.state = "blocked";
     let id = db::add_task(&mut conn, &a, &t).unwrap();
     let run = open_run(&conn, id, "sess-1", "dispatch:c1");
-    // Dispatched agents, the dispatcher, and any session of an open run.
+    // Dispatched agents, the node, and any session of an open run.
     for (name, s) in [
         ("human", Some("sess-1")),
         ("human", Some("dispatch:c1")),

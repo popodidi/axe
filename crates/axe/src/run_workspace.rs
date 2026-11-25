@@ -37,7 +37,7 @@
 //! `origin` copy when pushed, attached docs are written in full under
 //! `docs/store/<path>`, and every file written from the store is returned
 //! with its version ([`Stored`]) for the workspace's manifest. The
-//! dispatcher's folders ([`Mode::Run`]) are unchanged.
+//! node's folders ([`Mode::Run`]) are unchanged.
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -68,7 +68,7 @@ pub fn build(
     Ok((dir, out.cloned))
 }
 
-/// Who a folder is built for: a dispatcher run, or `axe workspace`.
+/// Who a folder is built for: a node run, or `axe workspace`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Run,
@@ -390,7 +390,7 @@ fn checkout(
             eprintln!(
                 "{}: cloned repo {name} into {}",
                 match mode {
-                    Mode::Run => "axe dispatcher",
+                    Mode::Run => "axe node",
                     Mode::Local => "axe",
                 },
                 cfg.repo_path(name).display()

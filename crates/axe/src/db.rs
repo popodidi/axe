@@ -1167,7 +1167,7 @@ pub fn apply_changes(
             .as_deref()
             .is_some_and(|claim| claim.starts_with("dispatch:"))
     {
-        bail!("cannot reset runs for an in_progress task under a dispatcher claim");
+        bail!("cannot reset runs for an in_progress task under a node claim");
     }
 
     let mut changed = false;
@@ -1419,7 +1419,7 @@ pub fn append(conn: &mut Connection, actor: &Actor, id: i64, kind: &str, body: &
     Ok(())
 }
 
-/// An approval refused because the caller is a live dispatcher session.
+/// An approval refused because the caller is a live node session.
 #[derive(Debug)]
 pub struct Forbidden(pub String);
 
@@ -1457,7 +1457,7 @@ pub fn approve(
             .as_deref()
             .is_some_and(|s| s.starts_with("dispatch:"))
     {
-        return Err(Forbidden("the dispatcher and dispatched agents cannot approve".into()).into());
+        return Err(Forbidden("the node and dispatched agents cannot approve".into()).into());
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(s) = &actor.session {
@@ -1469,7 +1469,7 @@ pub fn approve(
         )?;
         if live {
             return Err(Forbidden(format!(
-                "session {s} is a running dispatcher session; dispatched agents cannot approve"
+                "session {s} is a running node session; dispatched agents cannot approve"
             ))
             .into());
         }
@@ -1656,7 +1656,7 @@ pub fn delete_session(conn: &Connection, task: i64) -> Result<()> {
     Ok(())
 }
 
-/// One dispatcher run (one spawned agent process).
+/// One node run (one spawned agent process).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "Run"))]
 pub struct RunRecord {
@@ -1748,7 +1748,7 @@ pub fn set_run_activity(conn: &Connection, id: i64, activity: &str) -> Result<()
     Ok(())
 }
 
-/// Ends runs left open by a previous dispatcher process.
+/// Ends runs left open by a previous node process.
 pub fn end_open_runs(conn: &Connection) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE runs SET ended_at = ?1 WHERE ended_at IS NULL",
@@ -1793,7 +1793,7 @@ pub fn run_log_reused(conn: &Connection, run: &RunRecord) -> Result<bool> {
     )?)
 }
 
-/// Maps an agent session id (or a dispatcher claim used as AXE_SESSION) to its task.
+/// Maps an agent session id (or a node claim used as AXE_SESSION) to its task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: String,
@@ -1870,7 +1870,7 @@ pub struct Overview {
     /// (`kind` hold, actionable by ops) and pending tasks waiting on prerequisites
     /// (`kind` dependency, not actionable). Ready, running and done tasks are excluded.
     pub ops_queue: Vec<QueueItem>,
-    /// Live dispatcher runs.
+    /// Live node runs.
     pub running: i64,
 }
 

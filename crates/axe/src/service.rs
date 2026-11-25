@@ -1,9 +1,9 @@
-//! Services: long-running processes a bot declares and the dispatcher runs on
+//! Services: long-running processes a bot declares and the node runs on
 //! its machine (`dispatch/services.rs`), the way routines are crontab and
 //! services are systemd.
 //!
 //! The server holds each declaration (name, command, cwd, env, restart
-//! policy, enabled) and the state the dispatcher last reported for it. The
+//! policy, enabled) and the state the node last reported for it. The
 //! dispatcher syncs both ways ([`report`]) and raises the events a bot must
 //! hear about ([`notify`]): a crash loop and an upcoming stop wake the owning
 //! bot; a crash loop that persists alerts the owner as well. The change
@@ -100,7 +100,7 @@ impl NewService {
                 bail!("env name {k:?} must be letters, digits and '_', not starting with a digit");
             }
             if k.starts_with("AXE_") {
-                bail!("env name {k:?}: AXE_ variables are set by the dispatcher");
+                bail!("env name {k:?}: AXE_ variables are set by the node");
             }
             if v.len() > VALUE_MAX || v.contains('\0') {
                 bail!("env {k}: the value must be at most {VALUE_MAX} bytes without NUL");
@@ -110,7 +110,7 @@ impl NewService {
     }
 }
 
-/// What the dispatcher reports for one service; stored as `services.status`.
+/// What the node reports for one service; stored as `services.status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "ServiceStatus"))]
 pub struct Status {
@@ -124,10 +124,10 @@ pub struct Status {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub started_at: Option<String>,
-    /// Restarts since the dispatcher started the service.
+    /// Restarts since the node started the service.
     #[serde(default)]
     pub restarts: u64,
-    /// Failures since the dispatcher started the service: unsuccessful exits
+    /// Failures since the node started the service: unsuccessful exits
     /// it did not ask for, and starts that failed.
     #[serde(default)]
     pub failures: u64,
@@ -147,11 +147,11 @@ pub struct Status {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub error: Option<String>,
-    /// The log file on the dispatcher's machine.
+    /// The log file on the node's machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub log: Option<String>,
-    /// The dispatcher that reported it, and when.
+    /// The node that reported it, and when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub dispatcher: Option<String>,
@@ -171,7 +171,7 @@ pub struct Service {
     #[serde(flatten)]
     pub spec: NewService,
     pub enabled: bool,
-    /// Empty (`state` "") until a dispatcher reported it.
+    /// Empty (`state` "") until a node reported it.
     #[serde(default)]
     pub status: Status,
     pub created_at: String,
@@ -179,7 +179,7 @@ pub struct Service {
 }
 
 impl Service {
-    /// The key the dispatcher tracks it by: `<bot>/<name>`.
+    /// The key the node tracks it by: `<bot>/<name>`.
     pub fn key(&self) -> String {
         format!("{}/{}", self.bot, self.name)
     }
@@ -193,7 +193,7 @@ impl Service {
 
     /// The state a person reads: `crash-looping` while in a crash loop,
     /// `stopped` when it is off and nothing runs, `pending` when it is on
-    /// and no dispatcher reported it yet, else the reported state
+    /// and no node reported it yet, else the reported state
     /// (`starting`, `running`, `backoff`, `stopping`, `exited`, `stopped`).
     pub fn display_state(&self) -> &str {
         let st = &self.status;
@@ -246,7 +246,7 @@ impl Service {
             if now - t > STALE_SECONDS {
                 parts.push(format!(
                     "no report from {} for {}",
-                    st.dispatcher.as_deref().unwrap_or("its dispatcher"),
+                    st.dispatcher.as_deref().unwrap_or("its node"),
                     crate::board::age(now - t)
                 ));
             }
@@ -255,8 +255,8 @@ impl Service {
     }
 }
 
-/// A dispatcher reports its services every few seconds; a report older
-/// than this reads as stale (the dispatcher is down or cut off).
+/// A node reports its services every few seconds; a report older
+/// than this reads as stale (the node is down or cut off).
 pub const STALE_SECONDS: i64 = 60;
 
 /// `home` as [`bot::Bot::home`]: the name before the bot's first rename, else its name.
@@ -384,7 +384,7 @@ pub fn put(
     Ok(s)
 }
 
-/// Turns a service on (`start`) or off (`stop`); the dispatcher follows.
+/// Turns a service on (`start`) or off (`stop`); the node follows.
 pub fn set_enabled(
     conn: &mut Connection,
     actor: &Actor,
@@ -414,7 +414,7 @@ pub fn set_enabled(
     Ok(s)
 }
 
-/// Removes a service; the dispatcher stops it. Returns what it held.
+/// Removes a service; the node stops it. Returns what it held.
 pub fn remove(conn: &mut Connection, actor: &Actor, bot: &str, name: &str) -> Result<Service> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = bot::get(&tx, bot)?;
@@ -447,7 +447,7 @@ pub fn remove(conn: &mut Connection, actor: &Actor, bot: &str, name: &str) -> Re
     Ok(s)
 }
 
-/// The dispatcher `dispatcher` (generation `generation`, the registered one)
+/// The node `dispatcher` (generation `generation`, the registered one)
 /// reports the services it runs, keyed `<bot>/<name>`; returns every
 /// declaration, which it then runs. Reports for services no longer declared
 /// are ignored.
@@ -506,7 +506,7 @@ pub fn report(
 
 /// The service events between two reported statuses, oldest kind first, each
 /// with a detail: `failed` (counted by `failures`, which restarts at 0 with
-/// the dispatcher), `crash_loop`, `run_finished` (it ended and is not
+/// the node), `crash_loop`, `run_finished` (it ended and is not
 /// restarted), `stopped` and `started` (a new process, seen by its start
 /// time).
 pub fn events(old: &Status, new: &Status) -> Vec<(&'static str, String)> {
@@ -554,7 +554,7 @@ pub fn events(old: &Status, new: &Status) -> Vec<(&'static str, String)> {
     out
 }
 
-/// An event the dispatcher raises for a service.
+/// An event the node raises for a service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notice {
     pub bot: String,

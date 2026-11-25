@@ -753,7 +753,7 @@ function BotStats({
                 ["Failed runs", o.failure],
                 ["Owner stops", o.stop],
                 ["Runs ended by pause", o.pause],
-                ["Dispatcher interruptions", o.interrupted],
+                ["Node interruptions", o.interrupted],
                 ["Owner pauses", o.ownerPauses],
                 ["Automatic pauses (attention)", o.attention],
                 ["Security drops", o.securityDrops],

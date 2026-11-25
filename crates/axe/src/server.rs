@@ -1,5 +1,5 @@
 //! `axe server`: the only process that opens the database. It serves a small
-//! HTTP/1.1 JSON API (one request per connection) and runs the dispatcher loop
+//! HTTP/1.1 JSON API (one request per connection) and runs the node loop
 //! in the same process.
 
 use std::collections::HashMap;
@@ -108,7 +108,7 @@ struct State {
     /// When `cli:` replay rows were last pruned (epoch seconds).
     last_replay_prune: std::sync::atomic::AtomicI64,
     relay: remote::Relay,
-    /// The dispatcher's last admission report and when it arrived.
+    /// The node's last admission report and when it arrived.
     admission: Mutex<Option<(serde_json::Value, Instant)>>,
     /// Telegram gateway, when `[telegram]` is configured.
     telegram: Option<Arc<Gateway>>,
@@ -183,7 +183,7 @@ impl State {
     }
 }
 
-/// Binds the API, then runs the dispatcher on the calling thread until `stop`
+/// Binds the API, then runs the node on the calling thread until `stop`
 /// (or, with `once`, until the single pass and its sessions finish).
 pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let token = config::read_token(&opts.token_path)?;
@@ -939,7 +939,7 @@ fn fnv1a(parts: &[&[u8]]) -> String {
 }
 
 /// Runs a write at most once per client request id. The id is reserved in
-/// `dispatch_ops` (the dispatcher's replay table, rows keyed `cli:<id>`) before
+/// `dispatch_ops` (the node's replay table, rows keyed `cli:<id>`) before
 /// the write runs and the response is stored after it, so a retry after a lost
 /// reply returns the original response instead of applying the write again.
 /// A retry while the reservation has no response (still running, or the server
@@ -2328,23 +2328,23 @@ fn relay(st: &State, owner: Option<String>, query: serde_json::Value) -> serde_j
         .filter(|(id, _, _)| Some(id) == owner.as_ref())
         .map(|(_, _, s)| s.clone());
     let Some(sender) = sender else {
-        return json!({"unavailable":"Dispatcher unavailable","retryable":true});
+        return json!({"unavailable":"Node unavailable","retryable":true});
     };
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     if sender
         .try_send(remote::LogJob { query, reply: tx })
         .is_err()
     {
-        return json!({"unavailable":"Dispatcher busy","retryable":true});
+        return json!({"unavailable":"Node busy","retryable":true});
     }
     rx.recv_timeout(Duration::from_secs(5))
-        .unwrap_or_else(|_| json!({"unavailable":"Dispatcher unavailable","retryable":true}))
+        .unwrap_or_else(|_| json!({"unavailable":"Node unavailable","retryable":true}))
 }
 
 /// Most log lines `GET .../services/<name>/logs` returns.
 const SERVICE_LOG_LINES_MAX: u64 = 2000;
 
-/// Services (`service.rs`): bot-owned declarations, and the dispatcher's sync
+/// Services (`service.rs`): bot-owned declarations, and the node's sync
 /// and notices. `None`: not a service route.
 fn service_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response>> {
     use crate::service;
@@ -3247,22 +3247,22 @@ fn relay_job(
         .filter(|(id, _, _)| dispatcher.is_none_or(|d| d == id))
         .map(|(_, _, s)| s.clone());
     let Some(sender) = sender else {
-        return Err("the dispatcher is not connected".into());
+        return Err("the node is not connected".into());
     };
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     sender
         .try_send(remote::LogJob { query, reply: tx })
-        .map_err(|_| "the dispatcher is busy".to_string())?;
+        .map_err(|_| "the node is busy".to_string())?;
     rx.recv_timeout(timeout)
-        .map_err(|_| "the dispatcher did not answer".to_string())
+        .map_err(|_| "the node did not answer".to_string())
 }
 
-/// How long the server waits for the dispatcher to sign or deliver a form.
+/// How long the server waits for the node to sign or deliver a form.
 const FORM_RELAY_TIMEOUT: Duration = Duration::from_secs(8);
 /// Longest `GET /api/forms/<id>?wait=` hold.
 const FORM_WAIT_MAX: u64 = 60;
 
-/// Delivers a submitted form through the dispatcher and records the outcome
+/// Delivers a submitted form through the node and records the outcome
 /// (a task event for a task target). `None` when it is not submitted.
 fn deliver_form(st: &State, id: &str) -> Option<form::Form> {
     let job = st.forms.job(id)?;
@@ -3501,7 +3501,7 @@ fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
     }
 }
 
-/// Validates `req`, has the dispatcher sign it and keeps the form.
+/// Validates `req`, has the node sign it and keeps the form.
 fn sign_form(st: &State, req: &crate::sealed::Request, now: i64) -> Result<form::Form> {
     req.validate()
         .map_err(|e| HttpError(400, format!("{e:#}")))?;
@@ -3509,7 +3509,7 @@ fn sign_form(st: &State, req: &crate::sealed::Request, now: i64) -> Result<form:
     let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT)
         .map_err(|e| HttpError(503, format!("cannot sign the form: {e}")))?;
     if let Some(e) = v["error"].as_str() {
-        return Err(HttpError(400, format!("the dispatcher refused the form: {e}")).into());
+        return Err(HttpError(400, format!("the node refused the form: {e}")).into());
     }
     let signed: crate::sealed::Signed = serde_json::from_value(v["signed"].clone())
         .map_err(|e| HttpError(502, format!("invalid signed form: {e}")))?;
@@ -3519,7 +3519,7 @@ fn sign_form(st: &State, req: &crate::sealed::Request, now: i64) -> Result<form:
         .map_err(|e| HttpError(502, format!("{e:#}")))?)
 }
 
-/// A login of a dispatcher runtime started from the owner's Telegram: a
+/// A login of a node runtime started from the owner's Telegram: a
 /// sealed form for a credential, or the device code the CLI printed.
 fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<String> {
     let view = crate::runtime::view(&st.admission());
@@ -3527,7 +3527,7 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
         .as_array()
         .and_then(|l| l.iter().find(|r| r["name"] == runtime))
         .and_then(|r| r["harness"].as_str())
-        .with_context(|| format!("the dispatcher reports no runtime {runtime}"))?
+        .with_context(|| format!("the node reports no runtime {runtime}"))?
         .to_string();
     let Some((_, _, label)) = crate::runtime::login_methods(&harness)
         .iter()

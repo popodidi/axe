@@ -29,7 +29,7 @@ routines. Nothing in code or in the dashboard is specific to one kind of bot.
 - The bot is a standalone primitive with its own tables, API, CLI namespace
   and lifecycle. Task code gains no bot branches.
 - Shared logic is reused through plain modules (agent process spawning,
-  activity parsing, the dispatcher operation journal, the log relay,
+  activity parsing, the node operation journal, the log relay,
   worktrees). There is no plugin framework.
 - CLI verbs must not be confusable between tasks and bots (`axe bot ...`,
   `axe bot tg ...`).
@@ -71,9 +71,9 @@ NEW". The server config's names (`[[telegram.bot]] name`, `ops_bot`)
 still bind to the renamed bot, on the live gateway at once and
 after a restart, so a rename needs no config, Secret or schema change; the
 config may be updated to NEW at leisure. `[housekeeping.alert] bot` in the
-dispatcher config is not resolved and must be edited by hand.
+node config is not resolved and must be edited by hand.
 
-On the dispatcher host a bot's folders (run folder `bot-<home>`, its
+On the node host a bot's folders (run folder `bot-<home>`, its
 worktrees and branch, logs, sealed form values) are keyed
 by `home`, the bot's first name, so a rename keeps them. That matters for the
 session: Claude Code stores sessions per working directory, so moving the
@@ -135,7 +135,7 @@ so it need not subscribe to a whole project's `done` or poll with self-wakes.
 A watch is a `bot_subscriptions` row keyed `#<task>` (`subscription.rs`).
 Service and routine events (2026-11-25, owner msgs #4022/#4028) take the same
 path on rows keyed `service:<id>` / `routine:<id>` (or `*`), wake events only:
-a service's from the change between two dispatcher reports
+a service's from the change between two node reports
 (`service::events`), a routine's from the tasks it creates (`fired`) and their
 escalation (`failed`). A new service, and a new routine owned by a bot,
 subscribe the owning bot to failures only; removal or archival drops the rows.
@@ -150,7 +150,7 @@ queued per chat. Agents call the server, never Telegram.
 Only the owner controls a bot:
 
 1. **Token isolation.** Each bot has its own Telegram bot. Tokens live only in
-   files the server reads, never on the dispatcher host or in agent
+   files the server reads, never on the node host or in agent
    environments.
 2. **Sender filter before anything is stored.** An update is accepted only
    from the configured owner's user id, not from a bot, an anonymous admin, a

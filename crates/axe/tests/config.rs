@@ -143,7 +143,7 @@ fn pool_bots_is_optional_positive_and_separate() {
     assert!(Config::parse("[pool]\nbots = \"auto\"").is_err());
     // deny_unknown_fields still rejects a misspelt key next to it.
     assert!(Config::parse("[pool]\nbots = 2\nbot = 2").is_err());
-    // Round-trips through serialization (the dispatcher config the tests write).
+    // Round-trips through serialization (the node config the tests write).
     let back = Config::parse(&toml::to_string(&cfg).unwrap()).unwrap();
     assert_eq!(back.pool, cfg.pool);
     let none = Config::parse("").unwrap();
@@ -395,4 +395,13 @@ session = "jsonl:thread_id"
     let cfg = Config::parse("[agents.x]\ncmd = [\"/opt/bin/codex\"]\n").unwrap();
     assert_eq!(cfg.agents["x"].harness(), Some("codex"));
     assert!(Config::parse("[agents.x]\ncmd = [\"sh\"]\nharness = \"claude\"").is_err());
+}
+
+#[test]
+fn node_section_is_the_dispatcher_section() {
+    use axe::config::Housekeep;
+    let old = Config::parse("[dispatcher]\nhousekeep = \"apply\"\n").unwrap();
+    let new = Config::parse("[node]\nhousekeep = \"apply\"\n").unwrap();
+    assert_eq!(old.dispatcher.housekeep, Housekeep::Apply);
+    assert_eq!(new.dispatcher, old.dispatcher);
 }

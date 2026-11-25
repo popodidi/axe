@@ -1,4 +1,4 @@
-//! Housekeeping: remove what the dispatcher's tasks leave behind once a task
+//! Housekeeping: remove what the node's tasks leave behind once a task
 //! has been `done` long enough.
 //!
 //! Candidates are task worktrees older dispatchers (and agents) left under
@@ -50,7 +50,7 @@ use crate::admission::{self, Probe};
 use crate::client::Client;
 use crate::config::{expand_tilde, Config, Housekeep};
 
-/// How often the dispatcher runs a housekeeping tick.
+/// How often the node runs a housekeeping tick.
 pub const TICK: Duration = Duration::from_secs(180);
 /// Unpressured sweeps and cache trims run at most this often.
 const HOURLY: Duration = Duration::from_secs(3600);
@@ -1221,7 +1221,7 @@ impl Keeper {
                     || remove_tree(&path),
                 )
             } else if !self.one_off {
-                // The dispatcher counts them instead of a line each hour.
+                // The node counts them instead of a line each hour.
                 waiting += 1;
                 continue;
             } else {
@@ -1607,7 +1607,7 @@ impl Keeper {
         Ok("fired")
     }
 
-    /// One tick. `admission` is the dispatcher's admission view, for the
+    /// One tick. `admission` is the node's admission view, for the
     /// disk-pause alert; `None` skips the alert. Stops early once `stop` is set.
     pub fn tick(&mut self, admission: Option<&Value>, stop: &AtomicBool) -> Tick {
         let mut out = Tick {
@@ -1836,7 +1836,7 @@ pub fn once(cfg: &Config, client: Client) -> Result<bool> {
     Ok(tick.ok)
 }
 
-/// Starts the dispatcher's housekeeping thread, or nothing when `mode` is
+/// Starts the node's housekeeping thread, or nothing when `mode` is
 /// off. It ticks every [`TICK`] until `stop` is set.
 pub fn start(
     cfg: &Config,
@@ -1847,7 +1847,7 @@ pub fn start(
 ) -> Result<Option<JoinHandle<()>>> {
     let apply = match mode {
         Housekeep::Off => {
-            eprintln!("axe dispatcher: housekeeping off");
+            eprintln!("axe node: housekeeping off");
             return Ok(None);
         }
         Housekeep::DryRun => false,
@@ -1855,7 +1855,7 @@ pub fn start(
     };
     let rules = Rules::new(cfg)?;
     eprintln!(
-        "axe dispatcher: housekeeping {} every {}s, retention {}s, roots under {}",
+        "axe node: housekeeping {} every {}s, retention {}s, roots under {}",
         if apply { "apply" } else { "dry-run" },
         TICK.as_secs(),
         rules.retention,

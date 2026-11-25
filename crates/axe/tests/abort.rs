@@ -130,7 +130,7 @@ fn disconnected_request_is_durable_and_never_claims_confirmation() {
     let mut d = s.dispatcher(&[], &[("PID_DIR", dir.path().to_str().unwrap())]);
     wait(|| dir.path().join("1").exists());
     let target = pids(dir.path(), "1");
-    // Stop the dispatcher process only. Its worker stays running and its control
+    // Stop the node process only. Its worker stays running and its control
     // connection times out, reproducing loss of the control channel.
     unsafe {
         libc::kill(d.0.id() as i32, libc::SIGSTOP);
@@ -161,7 +161,7 @@ fn missing_nonrunning_and_stale_targets_are_rejected() {
     s.ok(&["add", "--project", "p", "--title", "not running"]);
     assert!(!s.run(&["abort", "1"]).status.success());
     assert!(!s.run(&["abort", "1", "--run", "999"]).status.success());
-    // Exercise the same authenticated API with a dispatcher whose run completes
+    // Exercise the same authenticated API with a node whose run completes
     // immediately before the abort request, and then with a stale generation.
     let reg: Value = post(
         &s,

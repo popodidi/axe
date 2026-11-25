@@ -879,7 +879,7 @@ fn cli_dry_run_prints_decisions() {
     assert!(lines[&recent].1.contains("retention 21600s"), "{lines:?}");
     assert!(wt.exists() && recent.exists(), "dry-run deletes nothing");
 
-    // Removal is only a dispatcher mode; bad config and modes are rejected.
+    // Removal is only a node mode; bad config and modes are rejected.
     assert!(!cli(&["housekeeping"], &good).status.success());
     let bad = format!("{good}[housekeeping]\nretention = \"soon\"\n");
     assert!(!cli(&["housekeeping", "--dry-run"], &bad).status.success());
@@ -1131,7 +1131,7 @@ fn stale_scratch_goes_only_under_pressure() {
     let at = |name: &str| scratch.join(name);
     let stop = AtomicBool::new(false);
 
-    // Calm: the dispatcher only counts stale directories.
+    // Calm: the node only counts stale directories.
     let cfg = tmp_config(&tmp, &scratch, &calm(&tmp));
     let tick = keeper(&cfg, &url, true, &tmp).tick(None, &stop);
     assert!(

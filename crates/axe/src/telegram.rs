@@ -942,7 +942,7 @@ impl Gateway {
             && m["forward_origin"].is_null()
             && m["is_automatic_forward"].is_null();
         // A sealed form reply (Mini App data, pasted text or a `.sealed`
-        // file) goes to the dispatcher; it is not stored and wakes no bot.
+        // file) goes to the node; it is not stored and wakes no bot.
         if !edit {
             if let Some(data) = m["web_app_data"]["data"].as_str() {
                 return self.form_reply(b, store, chat, tg_id, Ok(data.to_string()));
@@ -1202,7 +1202,7 @@ impl Gateway {
                 } else {
                     format!(
                         "Log in runtime {name} ({harness}). A credential goes through a sealed \
-                         form, so only the dispatcher reads it."
+                         form, so only the node reads it."
                     )
                 };
                 let rows = vec![1; buttons.len()];
@@ -1227,7 +1227,7 @@ impl Gateway {
         Ok(true)
     }
 
-    /// The runtime list, with a login button per runtime the dispatcher
+    /// The runtime list, with a login button per runtime the node
     /// manages, in reply to `reply_to`.
     fn runtimes_reply(
         &self,
@@ -1344,7 +1344,7 @@ impl Gateway {
         String::from_utf8(bytes).context("the .sealed file is not text")
     }
 
-    /// Hands a sealed reply to the dispatcher and tells the owner the
+    /// Hands a sealed reply to the node and tells the owner the
     /// outcome; once the form is done, the outcome replaces the form
     /// keyboard with the buttons of the forms still open in the chat, or
     /// removes it. A form that finishes later has its prompt closed by the
@@ -1532,7 +1532,7 @@ impl Gateway {
         else {
             return Ok(json!({"sent": false, "reason": "no telegram bot to send runtime cards"}));
         };
-        // The bot exists once it was created; until then the dispatcher retries.
+        // The bot exists once it was created; until then the node retries.
         bot_id(&store.conn(), &name)?;
         let chat = self
             .bot(&name)?

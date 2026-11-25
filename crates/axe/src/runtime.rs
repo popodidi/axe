@@ -2,7 +2,7 @@
 //!
 //! With `[runtimes] dir` set, each `<dir>/<name>/runtime.toml` is one runtime:
 //! its harness, the `[agents.*]` command template that drives it and the login
-//! directory the CLI keeps its credentials in. The dispatcher never reads,
+//! directory the CLI keeps its credentials in. The node never reads,
 //! copies or writes the login itself: it only points the CLI at its directory
 //! (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`), and the CLI's own default directory is
 //! adopted in place by setting nothing. Each runtime's health (ok, limited
@@ -12,7 +12,7 @@
 //! path or token.
 //!
 //! Without `[runtimes]`, every `[agents.*]` entry is a runtime of its own on
-//! the dispatcher's default login, always healthy: selection and retries work
+//! the node's default login, always healthy: selection and retries work
 //! as before.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest failure message kept (as `failure::Failure::to_json`).
 const MAX_MESSAGE: usize = 200;
 
-/// `[runtimes]` in the dispatcher config.
+/// `[runtimes]` in the node config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
@@ -353,7 +353,7 @@ impl Runtime {
             let ok = child.wait().map(|s| s.success()).unwrap_or(false);
             let _ = drain.join();
             eprintln!(
-                "axe dispatcher: runtime {name}: device login {}",
+                "axe node: runtime {name}: device login {}",
                 if ok { "succeeded" } else { "failed" }
             );
             done(ok);
@@ -618,7 +618,7 @@ impl Registry {
             until,
         });
         if let Err(e) = rt.save() {
-            eprintln!("axe dispatcher: runtime {name}: {e:#}");
+            eprintln!("axe node: runtime {name}: {e:#}");
         }
         alert
     }
@@ -628,7 +628,7 @@ impl Registry {
         if let Some(rt) = self.get_mut(name) {
             rt.health.alerted = Some(state.into());
             if let Err(e) = rt.save() {
-                eprintln!("axe dispatcher: runtime {name}: {e:#}");
+                eprintln!("axe node: runtime {name}: {e:#}");
             }
         }
     }
@@ -643,7 +643,7 @@ impl Registry {
         }
         rt.health.quota = Some(quota);
         if let Err(e) = rt.save() {
-            eprintln!("axe dispatcher: runtime {name}: {e:#}");
+            eprintln!("axe node: runtime {name}: {e:#}");
         }
     }
 
@@ -657,7 +657,7 @@ impl Registry {
                 rt.health.until = None;
                 rt.health.alerted = None;
                 if let Err(e) = rt.save() {
-                    eprintln!("axe dispatcher: runtime {}: {e:#}", rt.name);
+                    eprintln!("axe node: runtime {}: {e:#}", rt.name);
                 }
             }
         }
@@ -673,22 +673,18 @@ impl Registry {
             return;
         }
         let Some(rt) = self.get(name) else {
-            eprintln!(
-                "axe dispatcher: runtime {name}: logged in, but not in this dispatcher's registry"
-            );
+            eprintln!("axe node: runtime {name}: logged in, but not in this node's registry");
             return;
         };
         if rt.disabled || rt.probe.is_empty() {
-            eprintln!(
-                "axe dispatcher: runtime {name}: logged in; no login check (disabled or no probe)"
-            );
+            eprintln!("axe node: runtime {name}: logged in; no login check (disabled or no probe)");
             return;
         }
         if let Some((mut child, _)) = self.probes.remove(name) {
             let _ = child.kill();
             let _ = child.wait();
         }
-        eprintln!("axe dispatcher: runtime {name}: logged in; checking the login now");
+        eprintln!("axe node: runtime {name}: logged in; checking the login now");
         self.checks.insert(name.to_string());
         self.start_probe(name);
     }
@@ -724,7 +720,7 @@ impl Registry {
                     .insert(name.to_string(), (child, Instant::now()));
             }
             Err(e) => {
-                eprintln!("axe dispatcher: runtime {name}: probe {argv:?}: {e}");
+                eprintln!("axe node: runtime {name}: probe {argv:?}: {e}");
                 let status = format!("the login check did not start: {e}");
                 if let Some(a) = self.finished(name, false, &status) {
                     self.ready.push(a);
@@ -787,12 +783,12 @@ impl Registry {
         let check = self.checks.remove(name);
         let rt = self.get_mut(name)?;
         if ok && rt.health.state == NEEDS_LOGIN {
-            eprintln!("axe dispatcher: runtime {name}: login probe passed; ok again");
+            eprintln!("axe node: runtime {name}: login probe passed; ok again");
             rt.health.state = OK.into();
             rt.health.until = None;
             rt.health.alerted = None;
             if let Err(e) = rt.save() {
-                eprintln!("axe dispatcher: runtime {name}: {e:#}");
+                eprintln!("axe node: runtime {name}: {e:#}");
             }
         }
         if !check {
@@ -803,7 +799,7 @@ impl Registry {
             false => rt.probe_output().unwrap_or_else(|| status.to_string()),
         };
         eprintln!(
-            "axe dispatcher: runtime {name}: login check {}",
+            "axe node: runtime {name}: login check {}",
             if ok { "passed" } else { "failed" }
         );
         Some(Alert {
@@ -962,7 +958,7 @@ pub fn quota_from_log(path: &Path) -> Option<Value> {
     }))
 }
 
-/// `GET /api/runtimes`: the runtimes in the dispatcher's last report (an
+/// `GET /api/runtimes`: the runtimes in the node's last report (an
 /// admission report, `admission::reported`), and whether it is stale.
 pub fn view(admission: &Value) -> Value {
     let age = admission["report_age_seconds"].as_u64();
@@ -985,9 +981,7 @@ pub fn render(v: &Value) -> String {
     let list = v["runtimes"].as_array().cloned().unwrap_or_default();
     if list.is_empty() {
         return match v["report_age_seconds"].as_u64() {
-            None => {
-                "runtimes: unknown (no dispatcher has reported since the server started)".into()
-            }
+            None => "runtimes: unknown (no node has reported since the server started)".into(),
             Some(_) => "runtimes: none reported".into(),
         };
     }
@@ -1023,7 +1017,7 @@ pub fn render(v: &Value) -> String {
     }
     if v["stale"] == true {
         out.push(format!(
-            "(stale: the dispatcher last reported {}s ago)",
+            "(stale: the node last reported {}s ago)",
             v["report_age_seconds"].as_u64().unwrap_or(0)
         ));
     }

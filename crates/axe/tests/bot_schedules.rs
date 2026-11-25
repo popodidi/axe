@@ -181,7 +181,7 @@ fn restart_mid_window_neither_loses_nor_doubles_a_firing() {
         )
         .unwrap();
     assert_eq!(fired, 1);
-    // A wake returned by a dispatcher stop is redelivered, not doubled.
+    // A wake returned by a node stop is redelivered, not doubled.
     let run = claim(&mut c, T0 + HOUR + 32).unwrap().run;
     bot::finish(
         &c,

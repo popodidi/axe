@@ -3,7 +3,7 @@ use axe::activity::{clip, from_text, line_activity, MAX_ACTIVITY};
 const CLAUDE: &str = include_str!("fixtures/claude-stream.jsonl");
 const CODEX: &str = include_str!("fixtures/codex-exec.jsonl");
 
-/// Activity after each prefix of the recorded stream, as the dispatcher sees it
+/// Activity after each prefix of the recorded stream, as the node sees it
 /// while the log grows.
 fn progression(fixture: &str) -> Vec<Option<String>> {
     let lines: Vec<&str> = fixture.lines().collect();

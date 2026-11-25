@@ -60,7 +60,7 @@ agents = ["good"]
     path
 }
 
-/// One dispatcher pass inside `axe server --once`; agents reach the server
+/// One node pass inside `axe server --once`; agents reach the server
 /// through the inherited `AXE_SERVER` and token file.
 fn run_dispatch_once(dir: &Path, db_path: &Path, cfg: &Path) {
     assert_eq!(db_path, dir.join("t.db"));

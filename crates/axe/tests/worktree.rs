@@ -1,5 +1,5 @@
 //! Where a task without repos runs: its run workspace, with no project
-//! checkout needed; a directory an older dispatcher left in the project's
+//! checkout needed; a directory an older node left in the project's
 //! worktree root is resumed in place. Also the clone URL of a run
 //! workspace's repos.
 mod common;
@@ -173,7 +173,7 @@ fn a_project_checkout_without_origin_head_is_not_needed() {
 
 #[test]
 fn a_task_left_in_an_old_project_worktree_resumes_there() {
-    // An older dispatcher ran this repo-less task in the project's worktree
+    // An older node ran this repo-less task in the project's worktree
     // root; its work there is not stranded. Nothing is created or reset.
     let f = Fixture::new();
     let id = f.add();

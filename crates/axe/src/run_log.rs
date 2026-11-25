@@ -1,6 +1,6 @@
 //! Bounded, stateless JSONL pages. Cursors are byte offsets in one file generation.
 //!
-//! Beside a run's log the dispatcher keeps (all optional, named after the log):
+//! Beside a run's log the node keeps (all optional, named after the log):
 //! - `<log>.times`: one `<size> <unix ms>` line each time it saw the log grow,
 //!   so a page can say when each line arrived ([`note_growth`]). Logs from
 //!   before it have none, and their lines carry no `at`.
@@ -25,7 +25,7 @@ pub struct Line {
     pub end: u64,
     pub text: String,
     pub fragment: bool,
-    /// When the dispatcher first saw the whole line (unix ms, within one
+    /// When the node first saw the whole line (unix ms, within one
     /// dispatcher tick); absent when the log has no `.times` record of it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<i64>,

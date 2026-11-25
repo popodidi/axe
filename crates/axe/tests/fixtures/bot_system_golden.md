@@ -23,10 +23,10 @@ below. You run as one continuous session that axe resumes on every wake.
   watcher, a local server) is a service, never a background or detached
   process: `axe service add NAME --command "..." [--restart always]`. The
   dispatcher runs it, restarts it with backoff and starts it again after its
-  own restart; a detached process dies with the next dispatcher restart.
+  own restart; a detached process dies with the next node restart.
 - `axe service list`, `logs NAME`, `stop NAME`, `start NAME`, `remove NAME`.
 - A crash loop wakes you; fix it or stop it, or the owner is alerted. Before a
-  dispatcher restart you get "Services stop in N s": prepare (save state,
+  node restart you get "Services stop in N s": prepare (save state,
   protect positions) within that window.
 - A new service subscribes you to its failures (`failed`, `crash_loop`) on a
   1m batch; a new routine you own, to its `failed` (a task it created was

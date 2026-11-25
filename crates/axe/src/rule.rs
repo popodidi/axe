@@ -2,7 +2,7 @@
 //! run. A rule matches a task or bot on any of workload, repo, goal, label, bot
 //! and owner (none set: the default) and holds an ordered `use` list. At claim
 //! the most specific matching rule wins, then the higher priority, then the
-//! newer rule; the dispatcher walks its `use` list for the first harness it can
+//! newer rule; the node walks its `use` list for the first harness it can
 //! run (`dispatch.rs`). Every edit is a row in `rule_events`.
 use crate::db::{self, Actor};
 use anyhow::{bail, Context, Result};
@@ -455,7 +455,7 @@ pub fn events(conn: &Connection, before: i64) -> Result<Vec<Value>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// The one-time import of a dispatcher's config rules. The first call writes
+/// The one-time import of a node's config rules. The first call writes
 /// the `import` event and, when no rule is stored yet, the rules (each with an
 /// `imported` event); every later call changes nothing. Returns the import
 /// event's body.

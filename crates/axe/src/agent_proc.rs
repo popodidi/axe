@@ -285,7 +285,7 @@ pub fn kill_tree(_child: &mut Child) -> Result<()> {
 
 pub fn kill_child(child: &mut Child) {
     // Each worker has its own process group, including subprocesses writing logs.
-    // The group id is the child PID created above; never signal the dispatcher's group.
+    // The group id is the child PID created above; never signal the node's group.
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }

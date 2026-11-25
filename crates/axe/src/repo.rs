@@ -1,6 +1,6 @@
 //! The repo registry: the server's map from a repo name (as in a task's or
 //! bot's `repos`) to the Git URL its canonical clone is cloned from, so any
-//! machine running `axe workspace` or the dispatcher can clone a repo it has
+//! machine running `axe workspace` or the node can clone a repo it has
 //! never seen without a `[repos.<name>] url` in its own config.
 //!
 //! A local `[repos.<name>] url` still wins; `path` stays local-only

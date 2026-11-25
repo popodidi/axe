@@ -12,7 +12,7 @@ pub enum Strategy {
 }
 
 /// `[defaults]`. `agents` and `strategy` are deprecated: stored rules pick
-/// agents (`rule.rs`) once the dispatcher has imported them
+/// agents (`rule.rs`) once the node has imported them
 /// ([`Config::rules_to_import`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,7 +137,7 @@ pub struct Config {
     pub defaults: Defaults,
     #[serde(default)]
     pub agents: BTreeMap<String, Agent>,
-    /// `[runtimes]`: the dispatcher's runtime registry (`runtime.rs`);
+    /// `[runtimes]`: the node's runtime registry (`runtime.rs`);
     /// omitted means each agent is a runtime on the default login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtimes: Option<crate::runtime::Section>,
@@ -167,7 +167,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub prompts: Prompts,
-    #[serde(default)]
+    /// `[dispatcher]`, also accepted as `[node]` (the dispatcher's new name).
+    #[serde(default, alias = "node")]
     pub dispatcher: DispatcherSection,
     /// Worktree and task-path cleanup rules; used when `[dispatcher]
     /// housekeep` is not `off` (see `housekeeping.rs`).
@@ -186,7 +187,7 @@ pub struct Config {
     /// `upgrade.rs`).
     #[serde(default)]
     pub cli: CliSection,
-    /// `[services]`: how the dispatcher runs bot services
+    /// `[services]`: how the node runs bot services
     /// (`dispatch/services.rs`).
     #[serde(default)]
     pub services: Services,
@@ -306,7 +307,7 @@ pub fn cli_switch(env: &str, key: &str) -> bool {
 /// The static sealed form page every form link opens.
 pub const DEFAULT_FORM_PAGE: &str = "https://popodidi.github.io/sealed-form/";
 
-/// `[forms]`: sealed forms. The server uses `page_url`; the dispatcher its
+/// `[forms]`: sealed forms. The server uses `page_url`; the node its
 /// key and git credential files.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -314,12 +315,12 @@ pub struct Forms {
     /// The static form page (default [`DEFAULT_FORM_PAGE`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_url: Option<String>,
-    /// The dispatcher's private key (default `dispatcher.key` next to the
+    /// The node's private key (default `dispatcher.key` next to the
     /// config file, `~/.config/axe/dispatcher.key`; made on first start, 0600).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_file: Option<String>,
     /// The `git credential-store` file a git credential form writes and the
-    /// dispatcher's clones and fetches read (default `git-credentials` next
+    /// node's clones and fetches read (default `git-credentials` next
     /// to the config file).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_credentials: Option<String>,
@@ -426,17 +427,17 @@ fn default_true() -> bool {
     true
 }
 
-/// `[dispatcher]`: switches of `axe dispatch`.
+/// `[dispatcher]` (or `[node]`): switches of `axe node`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatcherSection {
-    /// Housekeeping tick inside the dispatcher; `axe dispatch --housekeep`
+    /// Housekeeping tick inside the node; `axe dispatch --housekeep`
     /// overrides it.
     #[serde(default)]
     pub housekeep: Housekeep,
 }
 
-/// Whether the dispatcher's housekeeping tick reports or removes.
+/// Whether the node's housekeeping tick reports or removes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Housekeep {
@@ -596,7 +597,7 @@ fn default_alert_after() -> String {
     "15m".into()
 }
 
-/// `[otel]`: `OTEL_RESOURCE_ATTRIBUTES` the dispatcher passes to each agent
+/// `[otel]`: `OTEL_RESOURCE_ATTRIBUTES` the node passes to each agent
 /// run. Per-run keys are `<prefix>.task_id`, `<prefix>.project`,
 /// `<prefix>.agent`, `<prefix>.mode` and `<prefix>.run` (bots:
 /// `<prefix>.bot` and `<prefix>.bot_run` instead of the task keys).
@@ -649,7 +650,7 @@ pub struct MetricsConfig {
     pub projects: Vec<String>,
 }
 
-/// `[prompts]`: the dispatcher's task prompts. `{id}` and `{project}` are
+/// `[prompts]`: the node's task prompts. `{id}` and `{project}` are
 /// replaced; omitted keys use the built-in text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1280,7 +1281,7 @@ impl Config {
         Ok(())
     }
 
-    /// Concurrent task agents the dispatcher runs.
+    /// Concurrent task agents the node runs.
     pub fn pool_total(&self) -> usize {
         self.pool.total
     }
@@ -1458,7 +1459,7 @@ workspace_root = "~/workspace"
 #   axe task add --project demo --title "first task" --agent stub
 #   axe dispatch --once
 # The built-in `claude` agent (unpinned tasks) needs the Claude Code CLI
-# installed and logged in on the dispatcher host.
+# installed and logged in on the node host.
 [agents.stub]
 cmd = ["sh", "-c", "axe task note \"$AXE_TASK\" \"stub agent ran in $PWD\" && axe task set \"$AXE_TASK\" --state done"]
 session = "none"

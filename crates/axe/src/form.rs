@@ -2,9 +2,9 @@
 //!
 //! The server never sees a value. It holds each form's signed spec (purpose,
 //! field names and types, target, expiry: not secret) and, between a
-//! channel's reply and the dispatcher's delivery, the sealed reply
+//! channel's reply and the node's delivery, the sealed reply
 //! (ciphertext). Nothing about a form is written to the database except a
-//! task event naming it; the sealed reply is dropped once the dispatcher
+//! task event naming it; the sealed reply is dropped once the node
 //! answers, and a restart forgets open forms (their links stop working).
 //! Crypto and targets: `sealed.rs`.
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use crate::sealed::{self, Sealed, Signed, Spec};
 
 pub const OPEN: &str = "open";
-/// A reply arrived; the dispatcher has not taken it yet.
+/// A reply arrived; the node has not taken it yet.
 pub const SUBMITTED: &str = "submitted";
 pub const DELIVERED: &str = "delivered";
 pub const EXPIRED: &str = "expired";
@@ -44,7 +44,7 @@ pub struct Form {
     pub state: &'static str,
     /// The sealed reply, held only while `submitted`.
     sealed: Option<String>,
-    /// Where the dispatcher wrote the values (never the values).
+    /// Where the node wrote the values (never the values).
     pub delivered: Option<Value>,
     /// The last rejected reply's reason (the form stays open).
     pub error: Option<String>,
@@ -89,13 +89,13 @@ impl Form {
     }
 }
 
-/// The dispatcher's side of a delivery, as the relay reports it.
+/// The node's side of a delivery, as the relay reports it.
 pub enum Delivery {
     /// `{"delivered": ...}` from the dispatcher.
     Done(Value),
-    /// The dispatcher refused the reply (`{"error": ...}`).
+    /// The node refused the reply (`{"error": ...}`).
     Refused(String),
-    /// No dispatcher answered; the reply is kept for a retry.
+    /// No node answered; the reply is kept for a retry.
     Unavailable(String),
 }
 
@@ -111,15 +111,15 @@ impl Forms {
         self.forms.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Records a form the dispatcher signed for `req`. The spec must match
-    /// the request: a dispatcher cannot change the target or the fields.
+    /// Records a form the node signed for `req`. The spec must match
+    /// the request: a node cannot change the target or the fields.
     pub fn add(&self, req: &sealed::Request, signed: Signed, now: i64) -> Result<Form> {
         let spec = signed.decode()?;
         if spec.target != req.target || spec.fields != req.fields || spec.v != sealed::VERSION {
-            bail!("the dispatcher signed a different form");
+            bail!("the node signed a different form");
         }
         if !sealed::is_form_id(&spec.form) {
-            bail!("the dispatcher returned an invalid form id");
+            bail!("the node returned an invalid form id");
         }
         let expires = spec.expires_at()?;
         let form = Form {
@@ -200,8 +200,8 @@ impl Forms {
         Some(json!({"kind": "form_deliver", "signed": f.signed, "sealed": sealed}))
     }
 
-    /// Records the dispatcher's answer. The sealed reply is dropped unless
-    /// no dispatcher answered.
+    /// Records the node's answer. The sealed reply is dropped unless
+    /// no node answered.
     pub fn finish(&self, form: &str, d: &Delivery, now: i64) -> Option<Form> {
         let mut forms = self.lock();
         let f = forms.get_mut(form)?;
@@ -218,7 +218,7 @@ impl Forms {
             Delivery::Refused(e) => {
                 f.sealed = None;
                 f.error = Some(e.clone());
-                // Used or expired on the dispatcher: final. Otherwise the
+                // Used or expired on the node: final. Otherwise the
                 // reply was bad and the form stays open for another one.
                 if e.contains("already used") || e.contains("expired") {
                     f.state = EXPIRED;
@@ -409,13 +409,13 @@ pub fn outcome_text(f: &Form) -> String {
                 ),
                 None => format!("Sealed form delivered: {}.", f.spec.target.describe()),
             };
-            // What happens next, from the dispatcher (a runtime login's check).
+            // What happens next, from the node (a runtime login's check).
             match f.delivered.as_ref().and_then(|d| d["note"].as_str()) {
                 Some(note) if !note.is_empty() => format!("{head} {}.", capitalize(note)),
                 _ => head,
             }
         }
-        SUBMITTED => "Sealed form received and held until the dispatcher reconnects. \
+        SUBMITTED => "Sealed form received and held until the node reconnects. \
              If no \"Sealed form delivered\" confirmation arrives within a few minutes, \
              send it again."
             .into(),
@@ -470,17 +470,14 @@ mod tests {
             "one reply at a time"
         );
         assert!(forms.job(&f.spec.form).is_some());
-        // No dispatcher: kept for a retry.
+        // No node: kept for a retry.
         let held = forms
             .finish(&f.spec.form, &Delivery::Unavailable("offline".into()), 2)
             .unwrap();
         assert!(forms.job(&f.spec.form).is_some());
         // Held in memory only: the notice promises no delivery.
         let text = outcome_text(&held);
-        assert!(
-            text.contains("held until the dispatcher reconnects"),
-            "{text}"
-        );
+        assert!(text.contains("held until the node reconnects"), "{text}");
         assert!(text.contains("\"Sealed form delivered\""), "{text}");
         // A bad reply reopens the form and drops the ciphertext.
         forms.finish(

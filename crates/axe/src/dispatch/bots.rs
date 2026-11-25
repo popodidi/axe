@@ -1,4 +1,4 @@
-//! Bot runs in the dispatcher: claim ready bots, render their system prompt and
+//! Bot runs in the node: claim ready bots, render their system prompt and
 //! hook settings, spawn, relay activity, kill stopped or paused runs, and finish.
 //! Bots have their own pool (`[pool] bots`), separate from task slots, and
 //! the resource gate holds them only at its hard floor (`admission.rs`).
@@ -62,7 +62,7 @@ impl Dispatcher {
             Err(e) => {
                 // An older server has no bot operations; tasks still run.
                 if !self.bots_unsupported {
-                    eprintln!("axe dispatcher: bot scheduling unavailable: {e:#}");
+                    eprintln!("axe node: bot scheduling unavailable: {e:#}");
                     self.bots_unsupported = true;
                 }
                 return Ok(());
@@ -81,17 +81,14 @@ impl Dispatcher {
             let pick = match self.bot_pick(&name)? {
                 Ok(p) => {
                     if self.bots_held.remove(&name).is_some() {
-                        eprintln!(
-                            "axe dispatcher: bot {name}: runtime {} healthy; running",
-                            p.agent
-                        );
+                        eprintln!("axe node: bot {name}: runtime {} healthy; running", p.agent);
                     }
                     Some(p)
                 }
                 // Its wakes wait; nothing is claimed.
                 Err(NoPick::Unhealthy { note, .. }) => {
                     if self.bots_held.get(&name) != Some(&note) {
-                        eprintln!("axe dispatcher: bot {name} held: {note}");
+                        eprintln!("axe node: bot {name} held: {note}");
                         self.bots_held.insert(name.clone(), note);
                     }
                     continue;
@@ -151,7 +148,7 @@ impl Dispatcher {
             match self.pick_from(Some(r), true) {
                 Ok(p) => return Ok(Ok(p)),
                 Err(NoPick::Missing(note)) => {
-                    eprintln!("axe dispatcher: bot {name}: {note}; using its own agent");
+                    eprintln!("axe node: bot {name}: {note}; using its own agent");
                 }
                 Err(e) => return Ok(Err(e)),
             }
@@ -205,7 +202,7 @@ impl Dispatcher {
         for r in &refreshed {
             if let crate::worktree::Refresh::Skipped { reason } = &r.refresh {
                 eprintln!(
-                    "axe dispatcher: bot {}: repos/{} not refreshed: {reason}",
+                    "axe node: bot {}: repos/{} not refreshed: {reason}",
                     b.name, r.repo
                 );
             }
@@ -371,7 +368,7 @@ impl Dispatcher {
             let mut run = self.bots.swap_remove(i);
             if let Err(e) = kill_tree(&mut run.child) {
                 eprintln!(
-                    "axe dispatcher: bot {} run {} kill: {e:#}; killing its group",
+                    "axe node: bot {} run {} kill: {e:#}; killing its group",
                     run.name, run.run_id
                 );
                 kill_child(&mut run.child);

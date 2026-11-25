@@ -1,4 +1,4 @@
-//! Resource admission: the dispatcher starts no new agent session while guest
+//! Resource admission: the node starts no new agent session while guest
 //! disk, memory or CPU is tight. Running sessions are never touched.
 //!
 //! Signals (Linux guest, see proc(5) and statvfs(3)):
@@ -206,7 +206,7 @@ pub struct Status {
     pub thresholds: Option<Resources>,
 }
 
-/// Status plus when the dispatcher published it.
+/// Status plus when the node published it.
 pub struct Published {
     status: Status,
     at: Option<Instant>,
@@ -246,7 +246,7 @@ pub fn handle(resources: Option<&Resources>) -> Handle {
     }))
 }
 
-/// The status as the API reports it. A status the dispatcher has not refreshed
+/// The status as the API reports it. A status the node has not refreshed
 /// within `stale_seconds` is reported as not admitting.
 pub fn view(h: &Handle) -> Value {
     let p = h.lock().unwrap_or_else(|e| e.into_inner());
@@ -269,20 +269,20 @@ pub fn view(h: &Handle) -> Value {
     v
 }
 
-/// How long the server trusts a dispatcher report without a newer one: the
-/// dispatcher lease. Dispatchers report at least every 10 s.
+/// How long the server trusts a node report without a newer one: the
+/// node lease. Dispatchers report at least every 10 s.
 pub const REPORT_STALE: Duration = Duration::from_secs(60);
 
 /// The server's view of the last dispatcher report, `(view, received)`. A missing
 /// or expired report is unknown (`admitting` null), never healthy; an enabled
 /// gate's reading ages by the time since the report and goes stale under the
-/// dispatcher's own `stale_seconds` rule.
+/// node's own `stale_seconds` rule.
 pub fn reported(report: Option<&(Value, Instant)>) -> Value {
     let Some((v, at)) = report else {
         return json!({
             "enabled": null,
             "admitting": null,
-            "reason": "unknown: no dispatcher has reported since the server started",
+            "reason": "unknown: no node has reported since the server started",
             "checked_at": null,
             "signals": [],
             "thresholds": null,
@@ -460,7 +460,7 @@ impl Gate {
         !was && self.admitting
     }
 
-    /// Samples now and returns whether a new session may start. The dispatcher
+    /// Samples now and returns whether a new session may start. The node
     /// calls this immediately before every claim.
     pub fn check(&mut self) -> bool {
         self.sample();
@@ -473,7 +473,7 @@ impl Gate {
         self.bot_floor.is_none()
     }
 
-    /// Samples now and returns whether a new bot run may start. The dispatcher
+    /// Samples now and returns whether a new bot run may start. The node
     /// calls this immediately before every bot claim.
     pub fn check_bots(&mut self) -> bool {
         self.sample();
@@ -752,9 +752,9 @@ fn describe(cfg: &Resources, s: &Signal, path: &Path) -> String {
 }
 
 /// A manual, expiring hold on task admission (`axe admission hold`): while
-/// it is active the dispatcher claims no task for a new session. Running
+/// it is active the node claims no task for a new session. Running
 /// sessions, deferred fallbacks of already claimed tasks and bot runs are not
-/// affected. The hold is a file on the dispatcher host, so it needs no server
+/// affected. The hold is a file on the node host, so it needs no server
 /// change and survives restarts of either process; it ends by itself at
 /// `until`, or when `axe admission release` removes the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -778,7 +778,7 @@ pub fn hold_path() -> PathBuf {
     }
 }
 
-/// The hold as the dispatcher sees it at `now`.
+/// The hold as the node sees it at `now`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HoldState {
     /// No hold file.

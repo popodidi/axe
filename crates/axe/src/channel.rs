@@ -29,11 +29,11 @@ pub trait Store: Send + Sync + 'static {
     /// the counter.
     fn wait_changed(&self, seen: u64, timeout: std::time::Duration) -> u64;
     fn stopping(&self) -> bool;
-    /// The dispatcher's runtimes (`runtime::view`); none outside a server.
+    /// The node's runtimes (`runtime::view`); none outside a server.
     fn runtimes(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
-    /// Takes a channel's sealed form reply and delivers it to the dispatcher
+    /// Takes a channel's sealed form reply and delivers it to the node
     /// (`form.rs`); returns the form after the attempt.
     fn form_submit(&self, _sealed: &str) -> anyhow::Result<crate::form::Form> {
         anyhow::bail!("sealed forms need an axe server")
@@ -45,7 +45,7 @@ pub trait Store: Send + Sync + 'static {
     fn form_close(&self, _form: &str, _bot: &str, _chat: i64) -> Option<Vec<(String, String)>> {
         None
     }
-    /// Starts a login of a dispatcher runtime by `method`
+    /// Starts a login of a node runtime by `method`
     /// (`runtime::login_methods`) on behalf of the owner, prompted through
     /// `bot`; returns the text for the owner.
     fn runtime_login(&self, _bot: &str, _runtime: &str, _method: &str) -> anyhow::Result<String> {

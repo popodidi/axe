@@ -1,10 +1,10 @@
 # axe
 
 A self-hosted task queue for coding agents. `axe server` owns a SQLite
-database and serves an HTTP JSON API; `axe dispatch` is a separate process
+database and serves an HTTP JSON API; `axe node` is a separate process
 (optionally on another machine) that starts one headless coding-agent session
 (Claude Code, Codex, or any command you configure) per ready task. Every
-command other than `server`, including `dispatch`, is an HTTP client of the
+command other than `server`, including `node`, is an HTTP client of the
 server.
 
 This README explains the concepts and where each lives in the code. The code
@@ -72,9 +72,9 @@ update_check = false    # or AXE_UPDATE_CHECK=0
 
 One host, a loopback server, one task, using the built-in defaults.
 
-1. **Install the agent CLI and log in** on the host that runs `axe dispatch`
+1. **Install the agent CLI and log in** on the host that runs `axe node`
    (`claude` for the built-in agent; `axe config` prints its command). The
-   dispatcher only spawns it; a missing binary escalates the task with
+   node only spawns it; a missing binary escalates the task with
    `spawn "claude" failed`. To try axe without a model, use the `stub` agent
    from `axe init`.
 2. **Config** (optional): `~/.config/axe/config.toml`. `axe init` writes a
@@ -94,14 +94,14 @@ One host, a loopback server, one task, using the built-in defaults.
    naming the repo escalates with "has no worktree base". A project is only a
    name: it needs no checkout.
 5. **A task**: `axe task add --project <p> --title <t> [--repo <name>] --detail
-   "## Outcome ..."` (add `--agent <name>` to pin one), then `axe dispatch`
+   "## Outcome ..."` (add `--agent <name>` to pin one), then `axe node`
    (`--once` for one pass). Follow it with `axe task list --all` and `axe task log <id>`;
    an escalated task says why in its block note.
 
 A bot works the same way: `axe bot create --file bot.json` (`name`,
 `project`, `agent`, `identity`, `conduct`), `axe bot edit <name> --repo a,b`
 for a multi-repo run folder, `axe bot wake <name> --now --note ...`, then
-`axe dispatch`. The bot protocol is built in; bundles only add opinions.
+`axe node`. The bot protocol is built in; bundles only add opinions.
 Telegram is optional. The `axe doc put` commands below read
 `skills/` and `bundles/` from a clone of this repository; `cargo install`
 leaves none, and the release skills tarball has `skills/axe` only. For a
@@ -123,7 +123,7 @@ what changed.
 
 | State | Meaning |
 |---|---|
-| `pending` | Eligible to run; the dispatcher claims it and starts or resumes its session |
+| `pending` | Eligible to run; the node claims it and starts or resumes its session |
 | `in_progress` | A session is working on it |
 | `escalated` | A hold for a human decision; resumes only when set back to `pending` (or `axe task approve`) |
 | `blocked` | A non-human external wait; also resumed explicitly |
@@ -143,7 +143,7 @@ never marked `done` to release its dependents. Code: `db.rs`.
 
 The actor on each event is `--actor`, else `$AXE_ACTOR`, else `human`, with
 `$AXE_SESSION` alongside. `axe task approve` records an owner decision and resumes
-a held task; dispatcher task sessions are refused, a guardrail rather than a
+a held task; node task sessions are refused, a guardrail rather than a
 security boundary since agents share one token.
 
 ## Architecture
@@ -152,19 +152,23 @@ security boundary since agents share one token.
 |---|---|---|
 | Server | Sole owner of the database; HTTP API, change stream, routine and schedule ticks, Telegram gateway | `server.rs`, `db.rs` |
 | CLI | HTTP client; rides out a server restart by retrying with one request id per write, so a write is applied once | `cli.rs`, `client.rs` |
-| Dispatcher | Holds a lease on the server, claims ready work, supervises agent processes, relays their logs | `dispatch.rs`, `remote.rs`, `agent_proc.rs` |
+| Node | Holds a lease on the server, claims ready work, supervises agent processes, relays their logs | `dispatch.rs`, `remote.rs`, `agent_proc.rs` |
 | Dashboard | Read-only Next.js UI over the GET API | `web/` |
 
 Paths in `crates/axe/src/` unless noted.
 
-**Dispatcher.** One dispatcher at a time holds a server-issued lease; its
-operations go through a journaled, replayable endpoint so a retry after an
+**Node.** `axe node` (formerly the dispatcher; `axe dispatch` still works,
+and the config section may be `[dispatcher]` or `[node]`) is the server's
+worker on one machine. Wire names keep `dispatcher` (the event actor,
+`/api/dispatcher/*`, `dispatch:` claims, `dispatcher.key`) so an older
+server or node keeps working with a newer one. One node at a time holds a
+server-issued lease; its operations go through a journaled, replayable endpoint so a retry after an
 outage is applied once (`remote.rs`). While the server is unreachable it
-admits nothing and keeps workers running; a dispatcher that finds unresolved
-runs refuses to start until `axe dispatch --reconcile-note` escalates them.
-Worker logs stay on the dispatcher host and the server relays reads over the
-dispatcher's WebSocket without storing them (`run_log.rs`, `relay_log` in `server.rs`).
-Beside each log the dispatcher keeps when it saw each line, the run's user
+admits nothing and keeps workers running; a node that finds unresolved
+runs refuses to start until `axe node --reconcile-note` escalates them.
+Worker logs stay on the node host and the server relays reads over the
+node's WebSocket without storing them (`run_log.rs`, `relay_log` in `server.rs`).
+Beside each log the node keeps when it saw each line, the run's user
 prompt and its system prompt or run instructions; the run page's details
 (`/api/runs/<id>/meta`, `/api/bot-runs/<id>/meta`) join them with the run's
 events and usage (`run_meta.rs`).
@@ -175,29 +179,29 @@ add/list/rm/log`, `rule.rs`). A rule matches any of workload, repo, goal,
 label (the project counts), bot and owner; the most specific matching rule
 wins, then the higher priority, then the newer rule. Its ordered `use` list
 of `harness[:model[:effort]]` (`claude-code`, `codex`) is walked down to the
-first harness the dispatcher has an agent for (an agent's `harness`, or
+first harness the node has an agent for (an agent's `harness`, or
 inferred from its command), least used first; the model and effort go to the
 CLI, and the task gets a `runtime:<name>` label. A bot runs its own agent
 unless a rule names it (`bot=`). Every edit is a logged event. The
-dispatcher imports the config's `[defaults]`/`[[rule]]` agent lists once
+node imports the config's `[defaults]`/`[[rule]]` agent lists once
 (`Config::rules_to_import`); those keys are deprecated and keep picking only
 when stored rules cannot express them (an agent with no harness, two agents
 of one harness, round-robin), with a startup line saying why.
 
 **Runtimes.** A runtime is a harness plus exactly one login on the
-dispatcher (`runtime.rs`). With `[runtimes] dir`, each `<dir>/<name>/runtime.toml`
+node (`runtime.rs`). With `[runtimes] dir`, each `<dir>/<name>/runtime.toml`
 names its `harness`, optionally the `agent` template that drives it, a
 `login_dir` (the CLI's own default, `~/.claude` or `~/.codex`, is adopted in
-place: the dispatcher only sets `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for any
+place: the node only sets `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for any
 other directory and never touches the login), `plan` and `disabled`. Rules
-pick a harness; the dispatcher takes its least-used healthy runtime, skips to
+pick a harness; the node takes its least-used healthy runtime, skips to
 the next `use` entry when none is healthy, and otherwise returns the task to
 pending until one may be (run refunded). A stored session resumes on its own
 runtime while it is healthy; sessions recorded before runtimes resolve to the
 runtime on the default login. Quota, login and provider failures
 (`failure.rs`) mark the runtime limited, needs_login or degraded
 (`<name>/state.json`); a needs_login runtime is probed with `claude auth
-status` / `codex login status` until it passes. The dispatcher reports each
+status` / `codex login status` until it passes. The node reports each
 runtime's state, last failure and quota with its admission report, never a
 login directory or credential: `axe runtimes`, `GET /api/runtimes` and the
 Telegram owner command `/runtimes` show them, and a runtime turning limited
@@ -214,7 +218,7 @@ runtime (`runtime::login_methods`):
   takes precedence over the login directory.
 - **Codex.** An API key arrives in a sealed form and goes to `codex login
   --with-api-key` on stdin. Or `codex login --device-auth` runs on the
-  dispatcher, and its link and code are relayed to the owner.
+  node, and its link and code are relayed to the owner.
 
 A login made this way is checked at once (`runtime::Registry::check_now`): the
 runtime is ok again when the check passes, and the owner gets a runtime card
@@ -226,7 +230,7 @@ the agent's `resume_cmd`. A failed resume with no axe change
 retries fresh in the same pass. Prompts are one line (`[prompts]`); the agent
 reads the task itself.
 
-**When the dispatcher escalates.** A session that exits with its task still
+**When the node escalates.** A session that exits with its task still
 `in_progress`, a task over `max_runs`, a repo with no worktree base, a spawn
 failure, an orphaned claim after restart, and a
 SIGTERM. Each gets a block note. A run that a quota, login or provider
@@ -250,7 +254,7 @@ anything.
 
 **Run workspaces.** Every session of a task runs in one reused folder,
 `<run_root>/task-<id>` (`[worktrees] run_root`, default
-`<workspace_root>/.runs`; `$AXE_WORKTREE`), generated by the dispatcher
+`<workspace_root>/.runs`; `$AXE_WORKTREE`), generated by the node
 (`run_workspace.rs`). Nothing needs a project checkout. It holds one worktree
 per repo the task names (`--repo`; none when omitted) under `repos/<name>`,
 all on the task branch `<branch_prefix>task-<id>--work`, plus a generated
@@ -258,7 +262,7 @@ all on the task branch `<branch_prefix>task-<id>--work`, plus a generated
 repo's `.agents/skills` and a `docs/index.md`, plus attached docs (see Run
 context below). A repo's canonical clone is
 `[repos.<name>] path`, default `<workspace_root>/<name>` (`run_workspace.rs`).
-When that clone is missing, the dispatcher clones it there on first use from
+When that clone is missing, the node clones it there on first use from
 its clone URL, with the host's own Git credentials (never a token in config
 or on the server), before building the worktree; concurrent first uses clone
 once, and the run's `run_start` event lists it in `repos_cloned`
@@ -270,14 +274,14 @@ machine's config sets one, else the server's repo registry
 `-` is refused, as in config). `path` stays local. A missing clone with no URL
 stops the run with that reason, pointing at `axe repo add`; when the registry
 cannot be read, the reason says so.
-Worktrees are never reset. A task an older dispatcher started in
+Worktrees are never reset. A task an older node started in
 `<workspace_root>/.worktrees/<project>/task-<id>--work` (no repos) resumes
 there while that folder exists; nothing creates one any more. A bot runs in
 `<run_root>/bot-<name>` the same way, with its repo list
 (`axe bot edit <name> --repo <r>`, `--no-repos` clears it), on branch
 `bot-<name>--work`. `axe bot edit <name> --project <p>`
 moves a bot to another project (its subscriptions keep the projects they
-name), and `axe goal edit <name> --project <p>` moves a goal. Before each bot run the dispatcher
+name), and `axe goal edit <name> --project <p>` moves a goal. Before each bot run the node
 fetches and fast-forwards each of its repo worktrees to the base branch's
 origin commit when it is clean and has no local commits; otherwise it leaves it
 unchanged and records why in the run's `run_start` event (`repos_refresh`). Housekeeping removes a task's run
@@ -302,7 +306,7 @@ code gains no branches for them.
   the created task's owner, repos and labels like `axe task add` (`routine::Template`).
   Each task keeps a snapshot of the template it came from. Cost controls on the
   template (`pre_check`, `model`, `effort`, `skills`) are read from that
-  snapshot by the dispatcher (`dispatch/pre_check.rs`,
+  snapshot by the node (`dispatch/pre_check.rs`,
   [skills/axe/references/routines.md](skills/axe/references/routines.md)).
 - **Bots** (`axe bot`, `bot.rs`, `dispatch/bots.rs`) are persistent
   identities with one agent session resumed on every wake. Wakes come from the
@@ -315,18 +319,18 @@ code gains no branches for them.
   `never`). `axe service add <name> --command <cmd> [--cwd D] [--env K=V]
   [--restart P]`, `list`, `start`, `stop`, `logs [-n N]` and `remove`, with
   `--bot` defaulting to `$AXE_BOT`. The server stores the declarations; a
-  long-running `axe dispatch` runs every enabled one as its own child process
+  long-running `axe node` runs every enabled one as its own child process
   group (`sh -c`, with `AXE_BOT`, `AXE_SERVICE`, `AXE_SERVER` and the bot's
   sealed values), its output in `<log_dir>/services/<bot>/<name>.log`
   (rotated past `[services] log_bytes`, one old file kept). An exit is
   restarted by the policy with a delay that doubles per quick crash; a crash
   loop wakes the bot, and one still going `escalate_after_seconds` later
-  messages the owner too. Stopping the dispatcher sends SIGTERM to every
+  messages the owner too. Stopping the node sends SIGTERM to every
   service and SIGKILL after `stop_grace_seconds` (keep it under the unit's
   stop timeout); starting it starts every enabled service again. A drain
   (SIGUSR1) first wakes each owning bot ("Services stop in N s") and keeps the
   services running for `stop_warn_seconds`. No systemd unit or container per
-  service: they live and die with the dispatcher. `[services]` in
+  service: they live and die with the node. `[services]` in
   `config.rs` lists every knob and default. Bot `/status`, `axe bot show`
   and the dashboard's Services page (per node, with recent logs) show each
   service's kind, state (crash-looping included), restarts and uptime
@@ -361,7 +365,7 @@ too when a link-map doc (any doc path ending in `.links.tsv`, with `url` and
 ## Sealed forms and messages
 
 `axe form ask` (`sealed.rs`, `form.rs`) asks the owner for values (secret,
-text, code, choice and file fields) that only the dispatcher can read, for
+text, code, choice and file fields) that only the node can read, for
 any task or bot session:
 
 ```sh
@@ -386,23 +390,23 @@ axe form ask --bot ops --purpose "Deploy token" --field token:secret:required:en
   (`a_finished_form_removes_its_button_and_no_telegram_forms_send_nothing`)
   pins this.
 
-- The dispatcher signs the form with its key (`dispatcher.key`, P-256, 0600,
+- The node signs the form with its key (`dispatcher.key`, P-256, 0600,
   made on first start next to the config file; `axe form key` prints its
   fingerprint, as do `axe runtimes`, `/runtimes` and every form). Compare it
   once.
 - The link opens a static page (`[forms] page_url`, default
   [`DEFAULT_FORM_PAGE`](crates/axe/src/config.rs)) with the signed spec in its
-  URL fragment. The page encrypts the values in the browser to the dispatcher
+  URL fragment. The page encrypts the values in the browser to the node
   key and returns `sealed.v1.<form>.<ciphertext>`: through the Telegram Mini
   App button the server sends the owner, pasted into the chat, a `.sealed`
   file, or `axe form submit`.
-- The server keeps forms and ciphertext in memory only, until the dispatcher
+- The server keeps forms and ciphertext in memory only, until the node
   takes the reply (or 15 minutes pass), and records only names and outcomes.
-  The dispatcher checks its signature, the expiry and one use, decrypts, and
+  The node checks its signature, the expiry and one use, decrypts, and
   writes each value as a 0600 file in the target: the task's or bot's
   `$AXE_SECRETS_DIR` (`<run_root>/task-<id>/.secrets`, outside `repos/`;
   `env=VAR` fields are also set on its later runs), or a git credential for
-  `--git <host>` that the dispatcher's clones fall back to
+  `--git <host>` that the node's clones fall back to
   (`[forms] git_credentials`).
 
 The reverse, sealed messages to the owner (sealed messages in `sealed.rs`):
@@ -413,9 +417,9 @@ axe form send --bot ops --purpose "Staging DB password" --secret-file pw.txt
 axe web login-link --tg --bot ops     # a one-time portal sign-in link, sealed
 ```
 
-The owner's passphrase arrives through a sealed form; the dispatcher keeps
+The owner's passphrase arrives through a sealed form; the node keeps
 only the key derived from it (`[forms] reply_key_file`). `axe form send`
-(`--secret-file`, `--link` or `--file`, 2 KiB in all) runs on the dispatcher
+(`--secret-file`, `--link` or `--file`, 2 KiB in all) runs on the node
 host, encrypts there and sends an inline "Open sealed message" Mini App
 button whose form page link carries the ciphertext in its fragment. The page
 asks for the passphrase and decrypts in the browser. Telegram and the server
@@ -436,7 +440,7 @@ what a scope has. A write may name the version it edits (`--base`, or
 Back the repository up with git (`git clone --mirror`); `axe backup` covers
 the database only.
 
-**Run context.** When the dispatcher builds a run workspace it collects the
+**Run context.** When the node builds a run workspace it collects the
 docs attached to the task's scopes: each repo, the owner, each label (the
 project first) and `global`. A conflict (the same skill name, or the same path
 on two scopes) goes to the more specific scope: repo > owner > label > global.
@@ -465,7 +469,7 @@ it was included or skipped (`context.rs`).
 
 **Working locally.** `axe workspace <task-id|bot-name> [--dir D]` builds, on
 the machine it runs on, the folder a run of that task or bot gets, through
-the dispatcher's own builder (`run_workspace.rs`, `Mode::Local`): the same
+the node's own builder (`run_workspace.rs`, `Mode::Local`): the same
 `AGENTS.md`, `skills/`, `docs/index.md`, skill links and `repos/<r>`
 worktrees of this machine's clones (`[repos.<name>] path`, else
 `<workspace_root>/<name>`, cloned on first use from the repo's clone URL:
@@ -493,9 +497,9 @@ at the repo's git root; from `repos/<r>`, run
 
 One TOML file, `$AXE_CONFIG` (default `~/.config/axe/config.toml`; built-in
 defaults when missing), read once at startup by both `axe server` and
-`axe dispatch`. The server uses `[server]`, `[telegram]`, `[metrics]`,
+`axe node`. The server uses `[server]`, `[telegram]`, `[metrics]`,
 `[blobs]`, `[docs]` and the agent names; every local command reads `[cli]`;
-the dispatcher uses the rest, so keep agent
+the node uses the rest, so keep agent
 names aligned when they run on different machines. Unknown keys fail validation.
 `crates/axe/src/config.rs` defines every table, default and check;
 `axe config` validates and prints the resolved file, including the built-in
@@ -507,8 +511,8 @@ names aligned when they run on different machines. Unknown keys fail validation.
 | Bearer token | `~/.config/axe/token` | `$AXE_TOKEN_FILE`; clients also take `$AXE_TOKEN` |
 | Server address (clients) | `http://127.0.0.1:8790` | `$AXE_SERVER` |
 | Listen address | `127.0.0.1:8790` | `axe server --listen` |
-| Admission hold (dispatcher host) | `~/.local/state/axe/admission-hold.json` | `$AXE_ADMISSION_HOLD` |
-| Agent logs and dispatcher journal | `~/.local/state/axe/logs` | `log_dir` |
+| Admission hold (node host) | `~/.local/state/axe/admission-hold.json` | `$AXE_ADMISSION_HOLD` |
+| Agent logs and node journal | `~/.local/state/axe/logs` | `log_dir` |
 
 The database uses WAL: back it up with `axe backup PATH`, a consistent
 snapshot from the running server, never by copying the file. Schema upgrades
@@ -530,7 +534,7 @@ file. Expose it only on a trusted network: reads include full agent logs. Bodies
 `{"error": "..."}`, and `X-Axe-Request-Id` makes a write retry-safe.
 
 The route table is `route`, `service_route`, `bot_route`, `goal_route`, `doc_route` and `blob_api` in
-`crates/axe/src/server.rs`; dispatcher operations are in `remote.rs`. Response
+`crates/axe/src/server.rs`; node operations are in `remote.rs`. Response
 shapes are the serialized Rust types, exported to `web/lib/api.ts`. There is
 no version prefix.
 
