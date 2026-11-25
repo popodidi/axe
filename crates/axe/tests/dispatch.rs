@@ -127,6 +127,10 @@ fn dispatch_once_runs_agents_and_blocks_silent_exits() {
     assert!(Path::new(prompt_file).ends_with(format!("logs/{good}-1.prompt.md")));
     let prompt = std::fs::read_to_string(prompt_file).unwrap();
     assert_eq!(prompt, fresh_prompt(good, "a"));
+    // The run folder's instructions as this run saw them, beside its log.
+    let system = Path::new(prompt_file).with_file_name(format!("{good}-1.system.md"));
+    let agents = std::fs::read_to_string(dir.path().join(format!("ws/.runs/task-{good}/AGENTS.md")));
+    assert_eq!(std::fs::read_to_string(&system).unwrap(), agents.unwrap());
     let cmd: Vec<&str> = start["cmd"]
         .as_array()
         .unwrap()

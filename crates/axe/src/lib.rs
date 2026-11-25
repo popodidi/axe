@@ -22,6 +22,7 @@ pub mod goal_board;
 pub mod housekeeping;
 pub mod login;
 pub mod run_log;
+pub mod run_meta;
 pub mod run_workspace;
 pub mod schedule;
 pub mod sealed;

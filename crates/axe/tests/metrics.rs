@@ -168,4 +168,6 @@ fn bot_routes_have_bounded_labels() {
         "/api/bots/:name/action"
     );
     assert_eq!(r(&["api", "bot-runs", "9", "log"]), "/api/bot-runs/:id/log");
+    assert_eq!(r(&["api", "bot-runs", "9", "meta"]), "/api/bot-runs/:id/meta");
+    assert_eq!(r(&["api", "runs", "9", "meta"]), "/api/runs/:id/meta");
 }

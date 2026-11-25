@@ -1247,6 +1247,9 @@ impl Dispatcher {
         let prompt_path = log_path.with_extension("prompt.md");
         std::fs::write(&prompt_path, &prompt)
             .with_context(|| format!("write prompt {}", prompt_path.display()))?;
+        // The run folder's instructions as this run saw them, for the run
+        // page: the folder is regenerated on every run. Best effort.
+        let _ = std::fs::copy(cwd.join("AGENTS.md"), log_path.with_extension("system.md"));
         let vars: BTreeMap<&str, String> = BTreeMap::from([
             ("session_id", session_id.clone().unwrap_or_default()),
             ("prompt", prompt),
@@ -1587,6 +1590,7 @@ fn refresh_activity(store: &Store, run: &mut Run) -> Result<()> {
         return Ok(());
     }
     run.log_len = len;
+    crate::run_log::note_growth(&run.log_path, len);
     if let Some(a) = activity::from_log(&run.log_path) {
         if run.activity.as_ref() != Some(&a) {
             store

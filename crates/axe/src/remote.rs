@@ -1033,7 +1033,34 @@ impl Store {
                             }
                         }
                         // `log` reads a task run, `bot_log` a bot run: separate id spaces.
-                        let response = if q["kind"] == "log" || q["kind"] == "bot_log" {
+                        // `*_meta` returns the files recorded beside the log instead.
+                        let kind = q["kind"].as_str().unwrap_or_default();
+                        let response = if matches!(kind, "log_meta" | "bot_log_meta") {
+                            let path = {
+                                let j = journal.lock().unwrap();
+                                let logs = if kind == "bot_log_meta" {
+                                    &j.bot_logs
+                                } else {
+                                    &j.logs
+                                };
+                                q["run"]
+                                    .as_i64()
+                                    .and_then(|id| logs.get(&id))
+                                    .map(|l| l.path.clone())
+                            };
+                            match path {
+                                // A bot's `system.md` is its latest system prompt.
+                                Some(p) => crate::run_log::run_files(
+                                    &p,
+                                    (kind == "bot_log_meta")
+                                        .then(|| p.with_file_name("system.md"))
+                                        .as_deref(),
+                                ),
+                                None => {
+                                    json!({"unavailable":"Log not registered on this dispatcher"})
+                                }
+                            }
+                        } else if q["kind"] == "log" || q["kind"] == "bot_log" {
                             let local = {
                                 let j = journal.lock().unwrap();
                                 let logs = if q["kind"] == "bot_log" {

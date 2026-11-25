@@ -1,4 +1,4 @@
-use axe::run_log::{read, PAGE_BYTES};
+use axe::run_log::{note_growth, read, run_files, times_path, MAX_RUN_FILE, PAGE_BYTES};
 use std::io::Write;
 
 #[test]
@@ -75,4 +75,57 @@ fn oversized_and_empty_partial_records_are_bounded() {
     let p = read(f.path(), Some(0), None, None, false).unwrap();
     assert_eq!(p.end, PAGE_BYTES);
     assert!(p.lines[0].fragment);
+}
+
+#[test]
+fn growth_records_time_lines_and_older_logs_have_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("7-1.log");
+    std::fs::write(&log, "one\ntwo\n").unwrap();
+    let p = read(&log, None, None, None, false).unwrap();
+    assert!(p.lines.iter().all(|l| l.at.is_none()));
+    assert!(!serde_json::to_string(&p).unwrap().contains("\"at\""));
+    note_growth(&log, 4);
+    let first = read(&log, None, None, None, false).unwrap();
+    let at = first.lines[0].at.unwrap();
+    assert!(at > 1_700_000_000_000);
+    assert_eq!(first.lines[1].at, None);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    note_growth(&log, 8);
+    let p = read(&log, None, None, None, false).unwrap();
+    assert_eq!(p.lines[0].at, Some(at));
+    assert!(p.lines[1].at.unwrap() > at);
+    assert_eq!(times_path(&log), dir.path().join("7-1.times"));
+    // A damaged record costs only its own line.
+    std::fs::write(times_path(&log), "garbage\n8 42\n").unwrap();
+    let p = read(&log, None, None, None, false).unwrap();
+    assert_eq!(p.lines[0].at, Some(42));
+}
+
+#[test]
+fn run_files_read_prompts_beside_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("9.log");
+    std::fs::write(&log, "{\"type\":\"system\",\"model\":\"m\"}\nrest\n").unwrap();
+    let f = run_files(&log, None);
+    assert_eq!(f["prompt"]["unavailable"], "not recorded for this run");
+    assert_eq!(f["system_prompt"]["unavailable"], "not recorded for this run");
+    assert_eq!(f["first_line"], "{\"type\":\"system\",\"model\":\"m\"}");
+    assert_eq!(f["times"], false);
+    // An older bot run falls back to the bot's current system prompt.
+    let current = dir.path().join("system.md");
+    std::fs::write(&current, "current system").unwrap();
+    let f = run_files(&log, Some(&current));
+    assert_eq!(f["system_prompt"]["text"], "current system");
+    assert_eq!(f["system_prompt"]["source"], "current");
+    std::fs::write(dir.path().join("9.prompt.md"), "wake #1").unwrap();
+    std::fs::write(dir.path().join("9.system.md"), "x".repeat(MAX_RUN_FILE as usize + 1)).unwrap();
+    note_growth(&log, 3);
+    let f = run_files(&log, Some(&current));
+    assert_eq!(f["prompt"]["text"], "wake #1");
+    assert_eq!(f["prompt"]["truncated"], false);
+    assert_eq!(f["system_prompt"]["source"], "run");
+    assert_eq!(f["system_prompt"]["truncated"], true);
+    assert_eq!(f["system_prompt"]["text"].as_str().unwrap().len(), MAX_RUN_FILE as usize);
+    assert_eq!(f["times"], true);
 }

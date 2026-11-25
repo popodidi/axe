@@ -56,10 +56,12 @@ pub fn route(path: &[String]) -> &'static str {
         ["api", "bot-runs"] => "/api/bot-runs",
         ["api", "bot-runs", _] => "/api/bot-runs/:id",
         ["api", "bot-runs", _, "log"] => "/api/bot-runs/:id/log",
+        ["api", "bot-runs", _, "meta"] => "/api/bot-runs/:id/meta",
         ["api", "stats", "history"] => "/api/stats/history",
         ["api", "stats", "flow"] => "/api/stats/flow",
         ["api", "runs"] => "/api/runs",
         ["api", "runs", _, "log"] => "/api/runs/:id/log",
+        ["api", "runs", _, "meta"] => "/api/runs/:id/meta",
         ["api", "sessions", _] => "/api/sessions/:id",
         ["api", "dispatcher"] => "/api/dispatcher",
         ["api", "dispatcher", "connect" | "recovery" | "log-catalog" | "admission" | "adopt-logs" | "reconcile"
