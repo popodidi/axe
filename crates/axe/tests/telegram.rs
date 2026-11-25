@@ -1492,6 +1492,15 @@ fn owner_commands_are_handled_without_waking_the_bot() {
             schedule: None,
         };
         axe::service::put(&mut conn, &axe::db::Actor::new("t"), "cos", "feed", &new).unwrap();
+        // And a schedule.
+        let sched = axe::schedule::NewSchedule {
+            name: "review".into(),
+            cron: "0 9 * * 1".into(),
+            timezone: "Asia/Taipei".into(),
+            objective: "look".into(),
+        };
+        let t = axe::remote::epoch();
+        axe::schedule::add(&mut conn, &axe::db::Actor::new("t"), "cos", &sched, "w", t).unwrap();
     }
     let cmds = [
         "/status",
@@ -1518,7 +1527,8 @@ fn owner_commands_are_handled_without_waking_the_bot() {
     );
     assert!(
         replies[0].contains("\nservices:\n- feed (long-running): pending, 0 restarts")
-            && replies[0].contains("logs: axe service logs <name> --bot cos"),
+            && replies[0].contains("logs: axe service logs <name> --bot cos")
+            && replies[0].contains("\nschedules:\n- review: 0 9 * * 1 Asia/Taipei, next "),
         "{}",
         replies[0]
     );
@@ -4492,8 +4502,8 @@ fn a_renamed_bot_keeps_its_telegram_bot_across_a_restart() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("renamed to chief"));
 }
 
-/// `/tasks`, `/task N` and `/cost` reply in HTML with links to the web
-/// pages, in the gateway like `/status` (no agent session needed), and
+/// `/tasks`, `/task N`, `/cost`, `/goals`, `/services` and `/routines`
+/// reply in HTML with links to the web pages, in the gateway like `/status` (no agent session needed), and
 /// neither wake the bot nor change anything.
 #[test]
 fn read_only_views_reply_without_waking_the_bot() {
@@ -4517,13 +4527,16 @@ fn read_only_views_reply_without_waking_the_bot() {
         format!("/task {id}"),
         "/task".to_string(),
         "/cost@cos_bot".to_string(),
+        "/goals".to_string(),
+        "/services".to_string(),
+        "/routines".to_string(),
     ];
     for (i, c) in cmds.iter().enumerate() {
         rig.stub
             .push(text_msg(500 + i as i64, 600 + i as i64, OWNER, OWNER, c));
     }
-    rig.stub.wait_confirmed(503);
-    wait_for("4 replies", 20, || rig.sent_to(OWNER).len() >= 4);
+    rig.stub.wait_confirmed(506);
+    wait_for("7 replies", 20, || rig.sent_to(OWNER).len() >= 7);
     let sent = rig.sent_to(OWNER);
     let text = |i: usize| sent[i]["text"].as_str().unwrap().to_string();
     let link = format!("<a href=\"{WEB}/?task={id}\">#{id}</a>");
@@ -4541,6 +4554,25 @@ fn read_only_views_reply_without_waking_the_bot() {
         text(3).starts_with("<b>bot cos cost, last 7 days: $0.00</b>\nno runs\n<a href="),
         "{}",
         text(3)
+    );
+    assert_eq!(
+        text(4),
+        format!(
+            "bot cos: no open goals. Propose one: <code>axe goal propose</code>\n\
+             <a href=\"{WEB}/?view=goals\">Open goals</a>"
+        )
+    );
+    assert_eq!(
+        text(5),
+        format!(
+            "bot cos: no services. Declare one: <code>axe service add</code>\n\
+             <a href=\"{WEB}/?view=services&amp;q=cos\">Open services</a>"
+        )
+    );
+    assert!(
+        text(6).starts_with("bot cos: no routines. Create one: <code>axe routine save</code>"),
+        "{}",
+        text(6)
     );
     for (i, p) in sent.iter().enumerate() {
         assert_eq!(p["parse_mode"], "HTML", "{p}");
@@ -4593,7 +4625,10 @@ fn command_menu_lists_the_routed_commands_for_the_owner_only() {
         .iter()
         .map(|(c, _)| *c)
         .collect();
-    for c in ["runtimes", "tasks", "task", "cost"] {
+    assert_eq!(names.len(), 13, "{names:?}");
+    for c in [
+        "runtimes", "tasks", "task", "cost", "goals", "services", "routines",
+    ] {
         assert!(names.contains(&c), "{c} in {names:?}");
     }
 
