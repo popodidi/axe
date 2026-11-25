@@ -330,6 +330,16 @@ fn read_session_cookie_reads_but_never_writes() {
         .as_str()
         .unwrap()
         .starts_with(&format!("/b/{sha}/page.html?exp=")));
+    // A service's recent log, for the Services page (the server answers,
+    // here that the bot does not exist, instead of refusing the session).
+    assert_ne!(
+        fetch_with(
+            &format!("{}/api/bots/nobot/services/s/logs", srv.url),
+            Some(&cookie)
+        )
+        .0,
+        401
+    );
     // Other reads too (the portal), but not message content.
     assert_eq!(
         fetch_with(&format!("{}/api/tasks", srv.url), Some(&cookie)).0,

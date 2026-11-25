@@ -3737,11 +3737,16 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 .filter(|e| crate::schedule::CHANGE_KINDS.contains(&e.kind.as_str()))
                 .collect();
             let changes = &changes[changes.len().saturating_sub(10)..];
+            // A server from before services has no such route: none.
+            let services: Vec<crate::service::Service> = c
+                .get(&format!("/api/bots/{name}/services"), &[])
+                .unwrap_or_default();
             if *json {
                 let mut v = serde_json::to_value(&b)?;
                 v["subscriptions"] = serde_json::to_value(&subs)?;
                 v["schedules"] = serde_json::to_value(&schedules)?;
                 v["schedule_changes"] = serde_json::to_value(changes)?;
+                v["services"] = serde_json::to_value(&services)?;
                 return print_json(&v);
             }
             println!("{}", format_bot(&b));
@@ -3761,6 +3766,17 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
             }
             for e in changes {
                 println!("{} {} {}: {}", e.at, e.actor, e.kind, e.body);
+            }
+            println!("\n# Services\n");
+            if services.is_empty() {
+                println!("(none)");
+            }
+            let now = crate::remote::epoch();
+            for s in &services {
+                println!("{}", s.summary(now));
+            }
+            if !services.is_empty() {
+                println!("logs: axe service logs <name> --bot {}", b.name);
             }
         }
         BotCmd::Edit {

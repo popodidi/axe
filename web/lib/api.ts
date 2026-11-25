@@ -196,4 +196,62 @@ bots: Array<string>,
  */
 budget?: Budget, };
 
+export type Service = { bot: string, 
+/**
+ * The bot's folder key (`Bot::home`): where its run folder and logs are.
+ */
+home: string, name: string, enabled: boolean, 
+/**
+ * Empty (`state` "") until a dispatcher reported it.
+ */
+status: ServiceStatus, created_at: string, updated_at: string, 
+/**
+ * A shell command (`sh -c`).
+ */
+command: string, 
+/**
+ * Where it runs: absolute, or relative to the bot's run folder (the
+ * default).
+ */
+cwd?: string, env?: { [key in string]: string }, restart: string, };
+
+export type ServiceStatus = { 
+/**
+ * `starting`, `running`, `backoff` (waiting to restart), `stopping`,
+ * `stopped` or `exited` (done, not restarted by its policy).
+ */
+state: string, pid?: number, 
+/**
+ * When the current (or last) process started.
+ */
+started_at?: string, 
+/**
+ * Restarts since the dispatcher started the service.
+ */
+restarts: number, 
+/**
+ * How the last process ended: `exit N` or `signal N`.
+ */
+last_exit?: string, 
+/**
+ * When the next restart is due, in `backoff`.
+ */
+next_start_at?: string, 
+/**
+ * Since when it has been crash looping, if it is.
+ */
+crash_loop_since?: string, 
+/**
+ * Why it could not start, if it could not.
+ */
+error?: string, 
+/**
+ * The log file on the dispatcher's machine.
+ */
+log?: string, 
+/**
+ * The dispatcher that reported it, and when.
+ */
+dispatcher?: string, reported_at?: string, };
+
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;

@@ -527,12 +527,14 @@ fn private_read(path: &[String]) -> bool {
             ))
 }
 
-/// Store reads a dashboard read session (`/api/session`) may make without
-/// the token: blob and doc GETs, and signing a link to a blob.
+/// Private reads a dashboard read session (`/api/session`) may make without
+/// the token: blob and doc GETs, signing a link to a blob, and a service's
+/// recent log (the Services page).
 fn store_read(req: &Request) -> bool {
     let p: Vec<&str> = req.path.iter().map(String::as_str).collect();
     match (req.method.as_str(), p.as_slice()) {
         ("GET", ["api", "blobs" | "docs" | "store", ..]) => true,
+        ("GET", ["api", "bots", _, "services", _, "logs"]) => true,
         ("POST", ["api", "blobs", sha, "link"]) => blob::check_sha(sha).is_ok(),
         _ => false,
     }

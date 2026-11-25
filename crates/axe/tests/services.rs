@@ -287,6 +287,15 @@ fn services_start_with_the_dispatcher_stop_with_sigterm_and_start_again() {
     assert!(st["dispatcher"].is_string() && st["started_at"].is_string());
     let logs = r.srv.ok(&["service", "logs", "s", "--bot", "b", "-n", "5"]);
     assert!(logs.contains("started-s"), "{logs}");
+    // `axe bot show` lists the bot's services with kind, state and uptime.
+    let show = r.srv.ok(&["bot", "show", "b"]);
+    assert!(
+        show.contains("# Services\n\ns (long-running): running, up ")
+            && show.contains("logs: axe service logs <name> --bot b"),
+        "{show}"
+    );
+    let v: Value = serde_json::from_str(&r.srv.ok(&["bot", "show", "b", "--json"])).unwrap();
+    assert_eq!(v["services"][0]["status"]["state"], "running");
     // Dispatcher stop: the service gets SIGTERM and exits in its grace period.
     let t = Instant::now();
     signal(&d, libc::SIGTERM);

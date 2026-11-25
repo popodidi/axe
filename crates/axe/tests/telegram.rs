@@ -1483,6 +1483,14 @@ fn owner_commands_are_handled_without_waking_the_bot() {
             .unwrap()
             .unwrap();
         tx.commit().unwrap();
+        // A declared service, so /status lists it.
+        let new = axe::service::NewService {
+            command: "sleep 600".into(),
+            cwd: None,
+            env: Default::default(),
+            restart: "always".into(),
+        };
+        axe::service::put(&mut conn, &axe::db::Actor::new("t"), "cos", "feed", &new).unwrap();
     }
     let cmds = [
         "/status",
@@ -1506,6 +1514,12 @@ fn owner_commands_are_handled_without_waking_the_bot() {
     assert!(
         replies[0].contains("bot cos (p): active") && replies[0].contains("live run 1"),
         "{replies:?}"
+    );
+    assert!(
+        replies[0].contains("\nservices:\n- feed (long-running): pending, 0 restarts")
+            && replies[0].contains("logs: axe service logs <name> --bot cos"),
+        "{}",
+        replies[0]
     );
     assert!(replies[1].contains("stopping the live run"));
     assert!(replies[2].starts_with("paused"));

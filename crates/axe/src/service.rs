@@ -42,6 +42,7 @@ pub const PER_BOT_MAX: usize = 16;
 
 /// What a declaration sets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct NewService {
     /// A shell command (`sh -c`).
@@ -49,8 +50,10 @@ pub struct NewService {
     /// Where it runs: absolute, or relative to the bot's run folder (the
     /// default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<BTreeMap<String, String>>", optional))]
     pub env: BTreeMap<String, String>,
     #[serde(default = "on_failure")]
     pub restart: String,
@@ -106,42 +109,53 @@ impl NewService {
 
 /// What the dispatcher reports for one service; stored as `services.status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "ServiceStatus"))]
 pub struct Status {
     /// `starting`, `running`, `backoff` (waiting to restart), `stopping`,
     /// `stopped` or `exited` (done, not restarted by its policy).
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub pid: Option<u32>,
     /// When the current (or last) process started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub started_at: Option<String>,
     /// Restarts since the dispatcher started the service.
     #[serde(default)]
     pub restarts: u64,
     /// How the last process ended: `exit N` or `signal N`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub last_exit: Option<String>,
     /// When the next restart is due, in `backoff`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub next_start_at: Option<String>,
     /// Since when it has been crash looping, if it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub crash_loop_since: Option<String>,
     /// Why it could not start, if it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub error: Option<String>,
     /// The log file on the dispatcher's machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub log: Option<String>,
     /// The dispatcher that reported it, and when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub dispatcher: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub reported_at: Option<String>,
 }
 
 /// One declared service with its last reported status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Service {
     pub bot: String,
     /// The bot's folder key (`Bot::home`): where its run folder and logs are.
@@ -162,7 +176,81 @@ impl Service {
     pub fn key(&self) -> String {
         format!("{}/{}", self.bot, self.name)
     }
+
+    /// `long-running`; scheduled (cron) services are the other kind, once
+    /// they exist. The web Services page (`web/lib/services.ts`) reads it
+    /// the same way.
+    pub fn kind(&self) -> &'static str {
+        "long-running"
+    }
+
+    /// The state a person reads: `crash-looping` while in a crash loop,
+    /// `stopped` when it is off and nothing runs, `pending` when it is on
+    /// and no dispatcher reported it yet, else the reported state
+    /// (`starting`, `running`, `backoff`, `stopping`, `exited`, `stopped`).
+    pub fn display_state(&self) -> &str {
+        let st = &self.status;
+        if st.crash_loop_since.is_some() && self.enabled {
+            return "crash-looping";
+        }
+        match st.state.as_str() {
+            "" if self.enabled => "pending",
+            "" => "stopped",
+            s => s,
+        }
+    }
+
+    /// One line for `/status` and `axe bot show`: name, kind, state, uptime
+    /// or the next restart, restarts, the last exit, and a stale report.
+    /// `now` is epoch seconds.
+    pub fn summary(&self, now: i64) -> String {
+        let st = &self.status;
+        let ago = |at: &Option<String>| {
+            at.as_deref()
+                .and_then(bot::epoch_of)
+                .map(|t| crate::board::age(now - t))
+        };
+        let state = self.display_state();
+        let mut parts = vec![format!("{} ({}): {state}", self.name, self.kind())];
+        if !self.enabled && state != "stopped" {
+            parts.push("turned off".into());
+        }
+        if state == "running" {
+            if let Some(up) = ago(&st.started_at) {
+                parts.push(format!("up {up}"));
+            }
+        }
+        if let Some(at) = st.next_start_at.as_deref().and_then(bot::epoch_of) {
+            if state == "backoff" || state == "crash-looping" {
+                parts.push(format!("restart in {}", crate::board::age(at - now)));
+            }
+        }
+        parts.push(match st.restarts {
+            1 => "1 restart".into(),
+            n => format!("{n} restarts"),
+        });
+        if let Some(e) = &st.last_exit {
+            parts.push(format!("last {e}"));
+        }
+        if let Some(e) = &st.error {
+            parts.push(format!("error: {e}"));
+        }
+        if let Some(t) = st.reported_at.as_deref().and_then(bot::epoch_of) {
+            if now - t > STALE_SECONDS {
+                parts.push(format!(
+                    "no report from {} for {}",
+                    st.dispatcher.as_deref().unwrap_or("its dispatcher"),
+                    crate::board::age(now - t)
+                ));
+            }
+        }
+        parts.join(", ")
+    }
 }
+
+/// A dispatcher reports its services every few seconds; a report older
+/// than this reads as stale (the dispatcher is down or cut off).
+pub const STALE_SECONDS: i64 = 60;
 
 /// `home` as [`bot::Bot::home`]: the name before the bot's first rename, else its name.
 const SELECT: &str = "SELECT b.name, (SELECT json_extract(e.body,'$.from') FROM bot_events e
@@ -453,4 +541,86 @@ pub fn notify(conn: &mut Connection, n: &Notice) -> Result<Notified> {
         wake: Some(wake),
         owner_text,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn svc(enabled: bool, status: Status) -> Service {
+        Service {
+            bot: "b".into(),
+            home: "b".into(),
+            name: "feed".into(),
+            spec: NewService {
+                command: "run".into(),
+                cwd: None,
+                env: BTreeMap::new(),
+                restart: "on-failure".into(),
+            },
+            enabled,
+            status,
+            created_at: bot::ts(0),
+            updated_at: bot::ts(0),
+        }
+    }
+
+    const NOW: i64 = 1_000_000;
+
+    fn st(state: &str) -> Status {
+        Status {
+            state: state.into(),
+            reported_at: Some(bot::ts(NOW - 2)),
+            dispatcher: Some("vm".into()),
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn summary_reads_kind_state_uptime_and_restarts() {
+        let mut s = st("running");
+        s.started_at = Some(bot::ts(NOW - 7300));
+        s.restarts = 1;
+        s.last_exit = Some("exit 1".into());
+        assert_eq!(
+            svc(true, s).summary(NOW),
+            "feed (long-running): running, up 2h, 1 restart, last exit 1"
+        );
+        assert_eq!(
+            svc(true, Status::default()).summary(NOW),
+            "feed (long-running): pending, 0 restarts"
+        );
+        assert_eq!(
+            svc(false, Status::default()).summary(NOW),
+            "feed (long-running): stopped, 0 restarts"
+        );
+    }
+
+    #[test]
+    fn summary_flags_crash_loops_turned_off_services_and_stale_reports() {
+        let mut s = st("backoff");
+        s.crash_loop_since = Some(bot::ts(NOW - 60));
+        s.next_start_at = Some(bot::ts(NOW + 30));
+        s.restarts = 5;
+        s.last_exit = Some("exit 2".into());
+        let looping = svc(true, s);
+        assert_eq!(looping.display_state(), "crash-looping");
+        assert_eq!(
+            looping.summary(NOW),
+            "feed (long-running): crash-looping, restart in 30s, 5 restarts, last exit 2"
+        );
+        let mut s = st("stopping");
+        s.crash_loop_since = Some(bot::ts(NOW - 60));
+        assert_eq!(
+            svc(false, s).summary(NOW),
+            "feed (long-running): stopping, turned off, 0 restarts"
+        );
+        let mut s = st("running");
+        s.started_at = Some(bot::ts(NOW - 4000));
+        s.reported_at = Some(bot::ts(NOW - 600));
+        assert_eq!(
+            svc(true, s).summary(NOW),
+            "feed (long-running): running, up 1h, 0 restarts, no report from vm for 10m"
+        );
+    }
 }

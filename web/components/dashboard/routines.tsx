@@ -100,11 +100,13 @@ export function RoutineList({
   params,
   onOpen,
   onOpenTask,
+  onOpenServices,
 }: {
   state: RoutinesState;
   params: URLSearchParams;
   onOpen: (id: number) => void;
   onOpenTask: (id: number) => void;
+  onOpenServices?: () => void;
 }) {
   const selected = params.get("routine");
   const q = (params.get("q") || "").toLowerCase();
@@ -126,7 +128,19 @@ export function RoutineList({
         <Panel aria-label="Routines">
           <PanelHead
             label="Routines"
-            meta="Read-only · manage with axe routine"
+            meta={
+              <>
+                Read-only · manage with axe routine
+                {onOpenServices && (
+                  <>
+                    {" "}· processes bots run on nodes are{" "}
+                    <Button variant="link" onClick={onOpenServices}>
+                      Services
+                    </Button>
+                  </>
+                )}
+              </>
+            }
           />
           <Table className={styles.table}>
             <thead>
