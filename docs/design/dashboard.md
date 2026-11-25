@@ -38,6 +38,17 @@ sections, log records and toolbars use their role tokens, not raw spacing.
 When adding a dense surface, extend `density.spec.ts`; lint alone only proves
 tokens are used.
 
+## List and detail
+
+Tasks, Routines, Services, Bots, Goals and the Store share one grammar: a
+search and filter bar, the list, and the selected row opening its item in a
+right side pane (never inline below the list) with the same header (kind,
+state badge, Close/Esc, title), a field grid and titled sections. The item's
+URL parameter (`task`, `routine`, `service`, `bot`, `goal`, `blob`/`doc`) is
+its deep link; `j`/`k` move between rows, Enter opens, Escape closes the
+topmost pane, and a task opened from an item stacks to its right. The shared
+pieces are `web/components/dashboard/side-pane.tsx`.
+
 ## Interaction
 
 - Actions work immediately; motion never delays them, and the newest action

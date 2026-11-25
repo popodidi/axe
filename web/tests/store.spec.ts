@@ -352,6 +352,7 @@ test("a store item fills the pane height", async ({ page }) => {
     // Short content: the viewer reaches the pane's bottom (no blank band).
     const [p, v] = await Promise.all([pane.boundingBox(), viewer.boundingBox()]);
     expect(p!.y + p!.height - (v!.y + v!.height)).toBeLessThan(40);
+    await page.screenshot({ path: test.info().outputPath(`store-item-${item.startsWith("blob") ? "blob" : "doc"}.png`) });
   }
 });
 

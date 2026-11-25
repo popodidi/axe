@@ -1,0 +1,171 @@
+@value bp-phone from "../../app/styles/breakpoints.module.css";
+
+/* Item side pane: a surface-1 column beside the list, like the task pane.
+   The resizer before it sets --item-size; a task pane may stack right. */
+.pane {
+  --cell-padding: var(--cell-padding-compact);
+
+  flex-shrink: 0;
+  width: var(--item-size, var(--item-width));
+  min-width: var(--item-min-width);
+  max-width: min(var(--item-max-width), calc(100% - var(--list-min-width)));
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: var(--pane-padding);
+  background: var(--surface-1);
+  border-left: var(--border-subtle);
+  animation: pane-in var(--transition-feedback) both;
+
+  /* Tables inside drop optional columns by the pane's width, like the list. */
+  container-type: inline-size;
+}
+
+@keyframes pane-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--motion-distance));
+  }
+}
+
+.body {
+  display: grid;
+  gap: var(--section-gap);
+  min-width: 0;
+}
+
+/* Header: kind or id and state, Close on the right, then the title. */
+.header {
+  display: grid;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.kind {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+}
+
+.close {
+  margin-left: auto;
+}
+
+.title {
+  font-size: var(--text-h2);
+  line-height: var(--lh-h2);
+  overflow-wrap: anywhere;
+}
+
+.title:focus-visible {
+  outline-offset: var(--space-quarter);
+}
+
+/* State labels share one shape; tone picks the state accent. */
+.badge {
+  display: inline-block;
+  padding: var(--pill-padding);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+}
+
+.badge[data-tone="ok"] {
+  color: var(--state-done-fg);
+  background: var(--state-done-bg);
+}
+
+.badge[data-tone="warn"] {
+  color: var(--state-blocked-fg);
+  background: var(--state-blocked-bg);
+}
+
+.badge[data-tone="bad"] {
+  color: var(--state-escalated-fg);
+  background: var(--state-escalated-bg);
+}
+
+.badge[data-tone="active"] {
+  color: var(--state-in-progress-fg);
+  background: var(--state-in-progress-bg);
+}
+
+.badge[data-tone="pending"] {
+  color: var(--state-pending-fg);
+  background: var(--state-pending-bg);
+}
+
+/* Key facts in one inset grid: label above value. */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--space-8) + var(--space-3))), 1fr));
+  gap: var(--space-snug) var(--space-2);
+  padding: var(--space-snug) var(--space-2);
+  margin: 0 0 var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+
+/* Item panes space their blocks with the body's gap. */
+.body > .facts {
+  margin-bottom: 0;
+}
+
+.facts dt {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.facts dd {
+  margin: 0;
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  overflow-wrap: anywhere;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.section {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.sectionTitle {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+}
+
+.note {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+@media bp-phone {
+  .pane {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    border: 0;
+    padding: var(--pane-padding-phone);
+  }
+}

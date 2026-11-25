@@ -64,11 +64,12 @@
     calc(var(--space-8) * 4),
     calc(100% - var(--detail-min-width) - var(--resizer-width))
   );
-  /* Routine pane: 392px by default, resizable 320-560px (--routine-size holds
-     a saved width); a task pane may stack to its right. */
-  --routine-width: calc(var(--space-8) * 3 + var(--space-4));
-  --routine-min-width: calc(var(--space-8) * 2 + var(--space-7));
-  --routine-max-width: calc(var(--space-8) * 4 + var(--space-7));
+  /* Item pane (a routine, service, bot or goal beside its list): 40% of the
+     workspace by default, between 320px and 720px (--item-size holds a saved
+     width); a task pane may stack to its right. */
+  --item-min-width: calc(var(--space-8) * 2 + var(--space-7));
+  --item-max-width: calc(var(--space-8) * 6);
+  --item-width: clamp(var(--item-min-width), 40%, var(--item-max-width));
   --resizer-width: var(--space-1);
   --resizer-line: 1px;
   --search-min-width: calc(var(--space-8) + var(--space-4) + var(--space-1));

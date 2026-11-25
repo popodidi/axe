@@ -5,7 +5,7 @@ let navMotion: ReturnType<typeof setTimeout> | undefined;
 type Saved = {
   nav?: "collapsed";
   detail?: number;
-  routine?: number;
+  item?: number;
   navWidth?: number;
 };
 const event = "axe-layout";

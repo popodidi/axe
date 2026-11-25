@@ -3,13 +3,12 @@
 // the axe node (dispatcher) runs, per node. Read-only; `axe service` manages
 // them. Routines, server-side schedules that create tasks, have their own
 // page; the two link to each other only.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
   CodeBlock,
   EmptyState,
-  Kbd,
   Panel,
   PanelHead,
   Skeleton,
@@ -32,6 +31,7 @@ import {
   type Service,
 } from "../../lib/services";
 import { StoreUnlock } from "./store-viewer";
+import { Facts, ItemPane, ListEmpty, PaneSection, StateBadge, type Fact } from "./side-pane";
 import styles from "./services.module.css";
 
 export type ServicesState = { rows: Service[] | null; error: string };
@@ -72,29 +72,29 @@ export function useServices(base: string, enabled: boolean): ServicesState {
 
 function StateLabel({ s }: { s: Service }) {
   const state = serviceState(s);
+  const tone = stateTone(state);
   return (
-    <span className={styles.state} data-tone={stateTone(state)}>
+    <StateBadge tone={tone === "idle" ? "neutral" : tone}>
       {state}
       {!s.enabled && state !== "stopped" && " · off"}
-    </span>
+    </StateBadge>
   );
 }
 
-
 export function ServiceList({
-  base,
   state: { rows, error },
   params,
   now,
   onOpen,
   onOpenRoutines,
+  onClearFilters,
 }: {
-  base: string;
   state: ServicesState;
   params: URLSearchParams;
   now: number;
-  onOpen: (key: string | null) => void;
+  onOpen: (key: string, keyboard: boolean) => void;
   onOpenRoutines: () => void;
+  onClearFilters?: () => void;
 }) {
   const selected = params.get("service");
   const q = (params.get("q") || "").toLowerCase();
@@ -107,7 +107,6 @@ export function ServiceList({
         .toLowerCase()
         .includes(q),
   );
-  const open = rows?.find((s) => serviceKey(s) === selected);
   return (
     <div className={styles.stack}>
       {error && <Alert>Unable to load services: {error}. Retrying automatically.</Alert>}
@@ -127,11 +126,12 @@ export function ServiceList({
             }
           />
           {!filtered?.length && (
-            <EmptyState>
-              {rows.length
-                ? "No matching services"
-                : "No services yet: a bot declares one with axe service add"}
-            </EmptyState>
+            <ListEmpty
+              total={rows.length}
+              noun="services"
+              empty="No services yet: a bot declares one with axe service add"
+              onClear={onClearFilters}
+            />
           )}
           {byNode(filtered || []).map(({ node, services }) => {
             const stale = Math.max(...services.map((s) => staleFor(s, secs) ?? 0));
@@ -173,7 +173,7 @@ export function ServiceList({
                         id={"service-" + serviceKey(s)}
                         data-interactive=""
                         aria-selected={serviceKey(s) === selected}
-                        onClick={() => onOpen(serviceKey(s))}
+                        onClick={(e) => onOpen(serviceKey(s), e.detail === 0)}
                       >
                         <Td data-label="Service">
                           {/* Keyboard target; clicks bubble to the row. */}
@@ -205,91 +205,93 @@ export function ServiceList({
           })}
         </Panel>
       )}
-      {selected && rows && (
-        open ? (
-          <ServiceDetail key={selected} base={base} s={open} now={secs} onClose={() => onOpen(null)} />
-        ) : (
-          <Alert>Service {selected} not found</Alert>
-        )
-      )}
     </div>
   );
 }
 
 type Logs = { text?: string; unavailable?: string };
 
-// One service: what it runs, its state and its recent log (a private read:
-// the store's read session unlocks it).
-function ServiceDetail({
+// One service in the side pane: what it runs, its state and its recent log
+// (a private read: the store's read session unlocks it). The facts stay
+// generic (kind, timing, last result) so scheduled services fit too.
+export function ServicePane({
   base,
-  s,
+  id,
+  state: { rows },
   now,
   onClose,
 }: {
   base: string;
-  s: Service;
+  id: string;
+  state: ServicesState;
   now: number;
   onClose: () => void;
 }) {
-  const ref = useRef<HTMLElement>(null);
-  useEffect(() => {
-    ref.current?.scrollIntoView?.({ block: "nearest" });
-  }, []);
+  const s = rows?.find((x) => serviceKey(x) === id);
+  const secs = Math.floor(now / 1000);
+  return (
+    <ItemPane
+      id="service-detail"
+      label="Service detail"
+      kind="Service"
+      badge={s && <StateLabel s={s} />}
+      title={id}
+      onClose={onClose}
+    >
+      {!rows ? (
+        <Skeleton label="Loading service…" lines={4} />
+      ) : !s ? (
+        <Alert>Service {id} not found</Alert>
+      ) : (
+        <>
+          <Facts items={serviceFacts(s, secs)} />
+          <ServiceLogs base={base} s={s} />
+        </>
+      )}
+    </ItemPane>
+  );
+}
+
+function serviceFacts(s: Service, now: number): Fact[] {
   const stale = staleFor(s, now);
-  const facts: [string, string, boolean?][] = [
-    ["Bot", s.bot],
-    ["Node", s.status.dispatcher || "—"],
-    ["Kind", serviceKind(s)],
+  const time = (at?: string) => (at ? new Date(at).toLocaleString() : "—");
+  const facts: Fact[] = [
+    { label: "Bot", value: s.bot },
+    { label: "Node", value: s.status.dispatcher || "—", mono: true },
+    { label: "Kind", value: serviceKind(s) },
     ...(s.schedule
-      ? ([
-          ["Schedule", scheduleText(s) || "", true],
-          ["Timeout", span(s.schedule.timeout_seconds)],
-          ["Catch-up", s.schedule.catch_up ? "one run after node downtime" : "off"],
-          ["Next run", serviceTime(s, now)],
-        ] as [string, string, boolean?][])
-      : ([
-          ["Restart policy", s.restart],
-          ["Restarts", String(s.status.restarts)],
-          ["Uptime / next", serviceTime(s, now)],
-        ] as [string, string, boolean?][])),
-    ["Last exit", lastRun(s, now)],
-    ["PID", s.status.pid ? String(s.status.pid) : "—"],
-    [s.schedule ? "Last run" : "Started", s.status.started_at ? new Date(s.status.started_at).toLocaleString() : "—"],
+      ? [
+          { label: "Schedule", value: scheduleText(s) || "", wide: true },
+          { label: "Timeout", value: span(s.schedule.timeout_seconds) },
+          { label: "Catch-up", value: s.schedule.catch_up ? "one run after node downtime" : "off" },
+          { label: "Next run", value: serviceTime(s, now) },
+        ]
+      : [
+          { label: "Restart policy", value: s.restart },
+          { label: "Restarts", value: String(s.status.restarts) },
+          { label: "Uptime / next", value: serviceTime(s, now) },
+        ]),
+    { label: "Last exit", value: lastRun(s, now), mono: true },
+    { label: "PID", value: s.status.pid ? String(s.status.pid) : "—" },
+    { label: s.schedule ? "Last run" : "Started", value: time(s.status.started_at) },
     ...(s.schedule && s.status.finished_at
-      ? ([["Ended", new Date(s.status.finished_at).toLocaleString()]] as [string, string][])
+      ? [{ label: "Ended", value: time(s.status.finished_at) }]
       : []),
-    ["Last report", s.status.reported_at
-      ? `${new Date(s.status.reported_at).toLocaleString()}${stale ? ` (${span(stale)} ago)` : ""}`
-      : "—"],
-    ["Command", s.command, true],
-    ["Working directory", s.cwd || "the bot's run folder", true],
+    {
+      label: "Last report",
+      value: s.status.reported_at
+        ? `${time(s.status.reported_at)}${stale ? ` (${span(stale)} ago)` : ""}`
+        : "—",
+    },
+    { label: "Command", value: s.command, wide: true, mono: true },
+    { label: "Working directory", value: s.cwd || "the bot's run folder", wide: true },
   ];
   if (s.status.crash_loop_since)
-    facts.push(["Crash loop since", new Date(s.status.crash_loop_since).toLocaleString()]);
-  if (s.status.error) facts.push(["Error", s.status.error, true]);
-  if (s.env && Object.keys(s.env).length) facts.push(["Env", Object.keys(s.env).join(", "), true]);
-  return (
-    <section ref={ref} id="service-detail" className={styles.detail} aria-label="Service detail">
-      <header className={styles.detailTop}>
-        <h3 className={styles.detailTitle}>
-          {s.bot}/{s.name}
-        </h3>
-        <StateLabel s={s} />
-        <Button variant="ghost" className={styles.close} onClick={onClose}>
-          Close <Kbd>Esc</Kbd>
-        </Button>
-      </header>
-      <dl className={styles.facts}>
-        {facts.map(([k, v, wide]) => (
-          <div key={k} className={wide ? styles.wide : undefined}>
-            <dt>{k}</dt>
-            <dd className={k === "Command" || k === "Last exit" ? styles.mono : undefined}>{v}</dd>
-          </div>
-        ))}
-      </dl>
-      <ServiceLogs base={base} s={s} />
-    </section>
-  );
+    facts.push({ label: "Crash loop since", value: time(s.status.crash_loop_since) });
+  if (s.status.error) facts.push({ label: "Error", value: s.status.error, wide: true });
+  if (s.env && Object.keys(s.env).length)
+    facts.push({ label: "Env", value: Object.keys(s.env).join(", "), wide: true, mono: true });
+  return facts;
 }
 
 function ServiceLogs({ base, s }: { base: string; s: Service }) {
@@ -323,12 +325,19 @@ function ServiceLogs({ base, s }: { base: string; s: Service }) {
       clearInterval(timer);
     };
   }, [url, session.read]);
+  // The log scrolls inside the pane and follows its tail while the reader
+  // is at it; scrolling up holds the position across refreshes.
+  const log = useRef<HTMLPreElement>(null);
+  const atTail = useRef(true);
+  useLayoutEffect(() => {
+    const el = log.current;
+    if (el && atTail.current) el.scrollTop = el.scrollHeight;
+  }, [logs?.text]);
   return (
-    <section className={styles.block} aria-label="Recent logs">
-      <h3 className={styles.blockTitle}>Recent logs</h3>
-      <p className={styles.note}>
-        Last 100 lines from the node · axe service logs {s.name} --bot {s.bot}
-      </p>
+    <PaneSection
+      title="Recent logs"
+      note={<>Last 100 lines from the node · axe service logs {s.name} --bot {s.bot}</>}
+    >
       {session.read === null ? (
         <Skeleton label="Checking the read session…" lines={2} />
       ) : !session.read ? (
@@ -342,13 +351,24 @@ function ServiceLogs({ base, s }: { base: string; s: Service }) {
         <Skeleton label="Loading logs…" lines={4} />
       ) : logs.text !== undefined ? (
         logs.text.trim() ? (
-          <CodeBlock className={styles.log}>{logs.text}</CodeBlock>
+          <CodeBlock
+            ref={log}
+            className={styles.log}
+            tabIndex={0}
+            aria-label="Log output"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              atTail.current = el.scrollHeight - el.scrollTop - el.clientHeight < 4;
+            }}
+          >
+            {logs.text}
+          </CodeBlock>
         ) : (
           <EmptyState>No output yet</EmptyState>
         )
       ) : (
         <Alert>Logs unavailable: {logs.unavailable || "no answer from the node"}</Alert>
       )}
-    </section>
+    </PaneSection>
   );
 }

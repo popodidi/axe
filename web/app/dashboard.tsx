@@ -46,18 +46,15 @@ import {
   routineStatuses,
   useRoutines,
 } from "../components/dashboard/routines";
-import { ServiceList, useServices } from "../components/dashboard/services";
+import { ServiceList, ServicePane, useServices } from "../components/dashboard/services";
 import { serviceStates } from "../lib/services";
 import { Cost } from "../components/dashboard/cost";
 import { Stats } from "../components/dashboard/stats";
 import { ClusterList } from "../components/dashboard/cluster-list";
 import { clusterIds } from "../lib/scatter-cluster";
-import { BotDetail, BotList, useBots } from "../components/dashboard/bots";
-import {
-  GoalDetailPage,
-  GoalList,
-  useGoals,
-} from "../components/dashboard/goals";
+import { BotList, BotPane, useBots } from "../components/dashboard/bots";
+import { GoalList, GoalPane, useGoals } from "../components/dashboard/goals";
+import { Facts, PaneHeader } from "../components/dashboard/side-pane";
 import { goalStateFilters } from "../lib/goals";
 import { Dependencies } from "../components/dashboard/dependencies";
 import {
@@ -97,6 +94,14 @@ const host = (base: string) => {
 const views = ["tasks", "routines", "services", "bots", "goals", "store", "stats", "cost"];
 const labels = ["Tasks", "Routines", "Services", "Bots", "Goals", "Store", "Stats", "Cost"];
 const keys = ["t", "r", "n", "b", "o", "e", "s", "c"];
+// The list views whose selected item opens in the item pane, by the URL
+// parameter that names it; the list row id is `<param>-<key>`.
+const itemParams: Record<string, string> = {
+  routines: "routine",
+  services: "service",
+  bots: "bot",
+  goals: "goal",
+};
 type Snapshot = {
   tasks: Task[];
 };
@@ -161,7 +166,7 @@ export default function Dashboard() {
       if (["task", "tab", "blob", "doc", "cluster"].some((k) => k in patch))
         u.searchParams.delete("detailY");
       if (
-        ["view", "project", "state", "goalstate", "status", "q", "sort", "page", "bot", "goal"].some(
+        ["view", "project", "state", "goalstate", "status", "sstate", "q", "sort", "page"].some(
           (k) => k in patch,
         )
       )
@@ -393,58 +398,43 @@ export default function Dashboard() {
         ?.focus();
     update({ cluster: null, clabel: null });
   }, [update]);
-  // Routines: the routine pane, with a task pane stacked on its right.
-  const routineId = view === "routines" ? p.get("routine") : null;
+  // Routines, Services, Bots and Goals: the list stays, and the selected
+  // item opens in the item pane beside it; a task may stack on its right.
+  const itemParam = itemParams[view] || null;
+  const itemKey = itemParam ? p.get(itemParam) : null;
   const routines = useRoutines(base, view === "routines");
   const services = useServices(base, view === "services");
-  const closeRoutine = useCallback(() => {
-    const id = new URLSearchParams(location.search).get("routine");
-    if (!id) return;
+  const bots = useBots(base, view === "bots", revision);
+  const goals = useGoals(base, view === "goals", revision);
+  // Closing returns focus to the item's row when focus was in the pane (or
+  // nowhere), before the pane unmounts.
+  const closeItem = useCallback(() => {
+    if (!itemParam) return;
+    const key = new URLSearchParams(location.search).get(itemParam);
+    if (!key) return;
+    const active = document.activeElement;
     if (
-      document.getElementById("routine-detail")?.contains(document.activeElement)
+      !active ||
+      active === document.body ||
+      document.querySelector("[data-item-pane]")?.contains(active)
     )
-      document.querySelector<HTMLElement>(`#routine-${id} button`)?.focus();
-    update({ routine: null, task: null, tab: null });
-  }, [update]);
-  // Bots: the list, or one bot's detail page in its place.
-  const botName = view === "bots" ? p.get("bot") : null;
-  const bots = useBots(base, view === "bots" && !botName, revision);
-  // Closing returns focus to the bot's row once the list has loaded.
-  const botFocus = useRef<string | null>(null);
-  const closeBot = useCallback(() => {
-    const name = new URLSearchParams(location.search).get("bot");
-    if (!name) return;
-    botFocus.current = name;
-    update({ bot: null, tab: null, days: null });
-  }, [update]);
+      document
+        .querySelector<HTMLElement>(`#${itemParam}-${CSS.escape(key)} button`)
+        ?.focus();
+    update({ [itemParam]: null, task: null, tab: null, days: null });
+  }, [itemParam, update]);
+  // Keyboard opening (Enter on a row) focuses the pane's heading on mount.
+  const focusItem = useRef<string | null>(null);
+  const openItem = (key: string, keyboard: boolean) => {
+    if (!itemParam) return;
+    if (keyboard) focusItem.current = key;
+    update({ [itemParam]: key, task: null, tab: null, days: null });
+  };
   useEffect(() => {
-    if (botName || !botFocus.current) return;
-    const row = document.querySelector<HTMLElement>(
-      `#bot-${CSS.escape(botFocus.current)} button`,
-    );
-    if (!row) return;
-    row.focus();
-    botFocus.current = null;
-  }, [botName, bots.bots]);
-  // Goals: the list, or one goal's detail page in its place.
-  const goalName = view === "goals" ? p.get("goal") : null;
-  const goals = useGoals(base, view === "goals" && !goalName, revision);
-  const goalFocus = useRef<string | null>(null);
-  const closeGoal = useCallback(() => {
-    const name = new URLSearchParams(location.search).get("goal");
-    if (!name) return;
-    goalFocus.current = name;
-    update({ goal: null });
-  }, [update]);
-  useEffect(() => {
-    if (goalName || !goalFocus.current) return;
-    const row = document.querySelector<HTMLElement>(
-      `#goal-${CSS.escape(goalFocus.current)} button`,
-    );
-    if (!row) return;
-    row.focus();
-    goalFocus.current = null;
-  }, [goalName, goals.goals]);
+    if (!itemKey || focusItem.current !== itemKey) return;
+    focusItem.current = null;
+    document.querySelector<HTMLElement>("[data-item-pane] h2")?.focus();
+  }, [itemKey]);
   // Keyboard opening moves focus to the detail heading once it is mounted.
   const focusDetail = useRef<number | null>(null);
   useEffect(() => {
@@ -477,7 +467,7 @@ export default function Dashboard() {
           e: "store",
         };
         if (v[e.key]) {
-          update({ view: v[e.key], task: null, focus: null, page: null, bot: null, goal: null, cluster: null, clabel: null });
+          update({ view: v[e.key], task: null, focus: null, page: null, routine: null, service: null, bot: null, goal: null, cluster: null, clabel: null });
           prefix.current = 0;
           return;
         }
@@ -493,12 +483,24 @@ export default function Dashboard() {
         if (q.has("task")) closeTask();
         else if (q.get("view") === "store" && storeItemKey(q)) closeStoreItem();
         else if (q.get("view") === "stats" && q.has("cluster")) closeCluster();
-        else if (q.get("view") === "routines" && q.has("routine"))
-          closeRoutine();
-        else if (q.get("view") === "services" && q.has("service"))
-          update({ service: null });
-        else if (q.has("bot")) closeBot();
-        else if (q.has("goal")) closeGoal();
+        else closeItem();
+      }
+      // j/k move between rows of an item list; Enter on a row opens it.
+      if (itemParam && (e.key === "j" || e.key === "k")) {
+        e.preventDefault();
+        const rows = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            "#list-pane tbody tr[data-interactive]",
+          ),
+        );
+        const i = rows.findIndex((r) => r.contains(document.activeElement));
+        const next =
+          rows[
+            i < 0
+              ? 0
+              : Math.max(0, Math.min(rows.length - 1, i + (e.key === "j" ? 1 : -1)))
+          ];
+        next?.querySelector<HTMLElement>("button")?.focus();
       }
       if (view === "tasks") {
         if (e.key === "j" || e.key === "k") {
@@ -527,7 +529,7 @@ export default function Dashboard() {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [rows, focus, view, update, closeTask, closeRoutine, closeBot, closeGoal, closeStoreItem, closeCluster]);
+  }, [rows, focus, view, itemParam, update, closeTask, closeItem, closeStoreItem, closeCluster]);
   // Polite announcement; failures are also shown, and the button stays "Copy".
   const [copied, setCopied] = useState({ text: "", failed: false });
   const announce = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -568,6 +570,9 @@ export default function Dashboard() {
   const changeFilter = (k: string, v: string) =>
     update({ [k]: v, page: null, focus: null });
   const openTask = (id: number) => update({ task: String(id) });
+  // An item list's "Clear filters": its search and filters, not the view.
+  const clearFilters = () =>
+    update({ q: null, project: null, status: null, sstate: null, goalstate: null });
   const live = connection.startsWith("Live");
   const [light, toggleTheme] = useTheme();
   const [collapsed, toggleNav] = useNavCollapsed();
@@ -629,7 +634,7 @@ export default function Dashboard() {
               title={`${labels[i]} (g ${keys[i]})`}
               aria-current={view === v ? "page" : undefined}
               onClick={() =>
-                update({ view: v, task: null, page: null, focus: null, bot: null, goal: null, cluster: null, clabel: null })
+                update({ view: v, task: null, page: null, focus: null, routine: null, service: null, bot: null, goal: null, cluster: null, clabel: null })
               }
             >
               <span className={styles.navLabel}>{labels[i]}</span>
@@ -700,9 +705,9 @@ export default function Dashboard() {
       <main
         className={cx(
           styles.main,
-          (paneItem || routineId) && styles.hasDetail,
-          routineId && styles.hasRoutine,
-          routineId && shown && styles.stacked,
+          (paneItem || itemKey) && styles.hasDetail,
+          itemKey && styles.hasItem,
+          itemKey && shown && styles.stacked,
           view === "store" && styles.storeView,
         )}
         inert={overlay}
@@ -710,10 +715,11 @@ export default function Dashboard() {
         <div className={styles.workspace}>
           <section
             {...listScroll}
+            id="list-pane"
             className={styles.listPane}
             aria-label="Task workspace"
           >
-            {view !== "stats" && view !== "cost" && view !== "store" && !botName && !goalName && (
+            {view !== "stats" && view !== "cost" && view !== "store" && (
             <div className={styles.filters}>
               <Search
                 compact
@@ -810,60 +816,37 @@ export default function Dashboard() {
                 </Alert>
               </div>
             )}
-            {botName ? (
-              <BotDetail
-                key={base + botName}
-                base={base}
-                name={botName}
-                params={p}
-                revision={revision}
-                now={now}
-                onBack={closeBot}
-                onChange={(patch) => update(patch)}
-                onWatch={(id) => update({ botrun: String(id) })}
-                onCopy={copy}
-              />
-            ) : goalName ? (
-              <GoalDetailPage
-                key={base + goalName}
-                base={base}
-                name={goalName}
-                revision={revision}
-                onBack={closeGoal}
-                selectedTask={selected}
-                onOpenTask={(id) => update({ task: String(id), tab: null })}
-                onCopy={copy}
-              />
-            ) : view === "goals" ? (
+            {view === "goals" ? (
               <GoalList
                 state={goals}
                 params={p}
-                onOpen={(name) => update({ goal: name })}
+                onOpen={openItem}
+                onClearFilters={clearFilters}
               />
             ) : view === "bots" ? (
               <BotList
                 state={bots}
                 params={p}
-                onOpen={(name) => update({ bot: name, tab: null })}
+                onOpen={openItem}
+                onClearFilters={clearFilters}
               />
             ) : view === "routines" ? (
               <RoutineList
                 state={routines}
                 params={p}
-                onOpen={(id) =>
-                  update({ routine: String(id), task: null, tab: null })
-                }
+                onOpen={(id, keyboard) => openItem(String(id), keyboard)}
                 onOpenTask={(id) => update({ task: String(id), tab: null })}
                 onOpenServices={() => update({ view: "services", routine: null, task: null, tab: null })}
+                onClearFilters={clearFilters}
               />
             ) : view === "services" ? (
               <ServiceList
-                base={base}
                 state={services}
                 params={p}
                 now={now}
-                onOpen={(key) => update({ service: key })}
+                onOpen={openItem}
                 onOpenRoutines={() => update({ view: "routines", service: null })}
+                onClearFilters={clearFilters}
               />
             ) : view === "store" ? (
               <Store
@@ -1009,24 +992,57 @@ export default function Dashboard() {
               </Panel>
             )}
           </section>
-          {routineId && (
+          {itemKey && (
             <PaneResizer
-              controls="routine-detail"
-              label="Resize routine pane"
-              pane="routine"
+              controls={`${itemParam}-detail`}
+              label={`Resize ${itemParam} pane`}
+              pane="item"
             />
           )}
-          {routineId && (
+          {itemKey && view === "routines" ? (
             <RoutinePane
-              key={base + routineId}
+              key={base + itemKey}
               base={base}
-              id={routineId}
+              id={itemKey}
               state={routines}
               selectedTask={selected}
-              onClose={closeRoutine}
+              onClose={closeItem}
               onOpenTask={(id) => update({ task: String(id), tab: null })}
             />
-          )}
+          ) : itemKey && view === "services" ? (
+            <ServicePane
+              key={base + itemKey}
+              base={base}
+              id={itemKey}
+              state={services}
+              now={now}
+              onClose={closeItem}
+            />
+          ) : itemKey && view === "bots" ? (
+            <BotPane
+              key={base + itemKey}
+              base={base}
+              name={itemKey}
+              params={p}
+              revision={revision}
+              now={now}
+              onClose={closeItem}
+              onChange={(patch) => update(patch)}
+              onWatch={(id) => update({ botrun: String(id) })}
+              onCopy={copy}
+            />
+          ) : itemKey && view === "goals" ? (
+            <GoalPane
+              key={base + itemKey}
+              base={base}
+              name={itemKey}
+              revision={revision}
+              selectedTask={selected}
+              onClose={closeItem}
+              onOpenTask={(id) => update({ task: String(id), tab: null })}
+              onCopy={copy}
+            />
+          ) : null}
           {shownItem && (
             <DetailResizer
               controls={
@@ -1044,24 +1060,11 @@ export default function Dashboard() {
               aria-label="Cluster tasks"
             >
               <div className={styles.detailInner}>
-                <header className={styles.detailHeader}>
-                  <div className={styles.detailTop}>
-                    <span className={styles.detailId}>
-                      Cluster · {shownCluster.length}{" "}
-                      {shownCluster.length === 1 ? "task" : "tasks"}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      className={styles.back}
-                      onClick={closeCluster}
-                    >
-                      Close <Kbd>Esc</Kbd>
-                    </Button>
-                  </div>
-                  <h2 tabIndex={-1} className={styles.detailTitle}>
-                    {p.get("clabel") || "Selected tasks"}
-                  </h2>
-                </header>
+                <PaneHeader
+                  kind={`Cluster · ${shownCluster.length} ${shownCluster.length === 1 ? "task" : "tasks"}`}
+                  title={p.get("clabel") || "Selected tasks"}
+                  onClose={closeCluster}
+                />
                 <ClusterList
                   ids={shownCluster}
                   tasks={data?.tasks || []}
@@ -1083,20 +1086,10 @@ export default function Dashboard() {
               aria-label="Store item"
             >
               <div className={`${styles.detailInner} ${styles.storeInner}`}>
-                <header className={styles.detailHeader}>
-                  <div className={styles.detailTop}>
-                    <span className={styles.detailId}>
-                      {shownStore.startsWith("doc:") ? "Doc" : "Blob"}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      className={styles.back}
-                      onClick={closeStoreItem}
-                    >
-                      Close <Kbd>Esc</Kbd>
-                    </Button>
-                  </div>
-                </header>
+                <PaneHeader
+                  kind={shownStore.startsWith("doc:") ? "Doc" : "Blob"}
+                  onClose={closeStoreItem}
+                />
                 <StoreItem
                   base={base}
                   item={shownStore}
@@ -1116,9 +1109,9 @@ export default function Dashboard() {
               aria-label="Task detail"
             >
               <div className={styles.detailInner}>
-              <header className={styles.detailHeader}>
-                <div className={styles.detailTop}>
-                  {cluster && !routineId ? (
+              <PaneHeader
+                kind={
+                  cluster && !itemKey ? (
                     <nav aria-label="Breadcrumb" className={styles.crumbs}>
                       <Button variant="link" className={styles.detailId} onClick={closeTask}>
                         Cluster ({clusterCount})
@@ -1131,55 +1124,31 @@ export default function Dashboard() {
                       </span>
                     </nav>
                   ) : (
-                    <span className={styles.detailId}>Task #{shown}</span>
-                  )}
-                  {activeDetail && <StatusPill task={activeDetail.task} />}
-                  <Button
-                    variant="ghost"
-                    className={styles.back}
-                    onClick={closeTask}
-                  >
-                    {routineId
-                      ? "Back to routine"
-                      : cluster
-                        ? "Back to cluster"
-                        : "Back"}{" "}
-                    <Kbd>Esc</Kbd>
-                  </Button>
-                </div>
-                {activeDetail && (
-                  <h2
-                    ref={detailHeading}
-                    tabIndex={-1}
-                    className={styles.detailTitle}
-                  >
-                    {activeDetail.task.title}
-                  </h2>
-                )}
-              </header>
+                    `Task #${shown}`
+                  )
+                }
+                badge={activeDetail && <StatusPill task={activeDetail.task} />}
+                title={activeDetail ? activeDetail.task.title : undefined}
+                headingRef={detailHeading}
+                closeLabel={
+                  itemKey ? `Back to ${itemParam}` : cluster ? "Back to cluster" : "Close"
+                }
+                onClose={closeTask}
+              />
               {detailError ? (
                 <Alert>{detailError}</Alert>
               ) : !activeDetail ? (
                 <Skeleton label="Loading task…" lines={8} />
               ) : (
                 <>
-                  <dl className={styles.facts}>
-                    <div>
-                      <dt>Project</dt>
-                      <dd>{activeDetail.task.project}</dd>
-                    </div>
-                    <div>
-                      <dt>Runs</dt>
-                      <dd>{activeDetail.runs.length}</dd>
-                    </div>
-                    <div>
-                      <dt>Created</dt>
-                      <dd>{when(activeDetail.task.created_at)}</dd>
-                    </div>
-                    <div>
-                      <dt>Updated</dt>
-                      <dd>{when(activeDetail.task.updated_at)}</dd>
-                    </div>
+                  <Facts
+                    items={[
+                      { label: "Project", value: activeDetail.task.project },
+                      { label: "Runs", value: activeDetail.runs.length },
+                      { label: "Created", value: when(activeDetail.task.created_at) },
+                      { label: "Updated", value: when(activeDetail.task.updated_at) },
+                    ]}
+                  >
                     <RoutineBacklink
                       key={base + activeDetail.task.id}
                       base={base}
@@ -1188,7 +1157,7 @@ export default function Dashboard() {
                         update({ view: "routines", routine: String(id) })
                       }
                     />
-                  </dl>
+                  </Facts>
                   <Dependencies
                     tasks={data?.tasks || []}
                     task={activeDetail.task}

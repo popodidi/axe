@@ -7,7 +7,6 @@ import {
   Command,
   Commands,
   EmptyState,
-  Kbd,
   Panel,
   PanelHead,
   Skeleton,
@@ -33,6 +32,7 @@ import {
   type Meter,
 } from "../../lib/goals";
 import { useGoalTaskFilter, type GoalTaskFilter } from "../../lib/goal-task-filter";
+import { Facts, ItemPane, ListEmpty, PaneSection, StateBadge, type Tone } from "./side-pane";
 import styles from "./goals.module.css";
 // Goals: durable outcomes bots share (docs/design/goals.md). Read-only; the
 // owner and bots change goals with `axe goal`.
@@ -61,12 +61,9 @@ export function useGoals(base: string, enabled: boolean, revision: number) {
   }, [base, enabled, revision]);
   return state;
 }
+const tones: Record<string, Tone> = { proposed: "pending", active: "active", paused: "warn", done: "ok" };
 function State({ state }: { state: string }) {
-  return (
-    <span className={styles.state} data-state={state}>
-      {title(state)}
-    </span>
-  );
+  return <StateBadge tone={tones[state] ?? "neutral"}>{title(state)}</StateBadge>;
 }
 function Bar({ meter, label }: { meter: Meter; label: string }) {
   return (
@@ -95,11 +92,14 @@ export function GoalList({
   state: { goals, error },
   params,
   onOpen,
+  onClearFilters,
 }: {
   state: GoalListData;
   params: URLSearchParams;
-  onOpen: (name: string) => void;
+  onOpen: (name: string, keyboard: boolean) => void;
+  onClearFilters?: () => void;
 }) {
+  const selected = params.get("goal");
   const filtered = goals && selectGoals(goals, params);
   return (
     <div className={styles.stack}>
@@ -129,7 +129,8 @@ export function GoalList({
                   key={g.name}
                   id={"goal-" + g.name}
                   data-interactive=""
-                  onClick={() => onOpen(g.name)}
+                  aria-selected={g.name === selected}
+                  onClick={(e) => onOpen(g.name, e.detail === 0)}
                 >
                   <Td>
                     {/* Keyboard target; clicks bubble to the row. */}
@@ -158,7 +159,12 @@ export function GoalList({
             </tbody>
           </Table>
           {!filtered?.length && (
-            <EmptyState>{goals.length ? "No matching goals" : "No goals yet."}</EmptyState>
+            <ListEmpty
+              total={goals.length}
+              noun="goals"
+              empty="No goals yet: set one with axe goal add"
+              onClear={onClearFilters}
+            />
           )}
         </Panel>
       )}
@@ -166,12 +172,13 @@ export function GoalList({
   );
 }
 type Detail = { goal: GoalDetail; trajectory: GoalEvent[] };
-export function GoalDetailPage({
+// One goal in the side pane; a linked task opens in a pane stacked right.
+export function GoalPane({
   base,
   name,
   revision,
   selectedTask,
-  onBack,
+  onClose,
   onOpenTask,
   onCopy,
 }: {
@@ -180,7 +187,7 @@ export function GoalDetailPage({
   revision: number;
   /** The task open in the right-hand detail pane, if any. */
   selectedTask: string | null;
-  onBack: () => void;
+  onClose: () => void;
   onOpenTask: (id: number) => void;
   onCopy: (command: string) => void;
 }) {
@@ -210,58 +217,33 @@ export function GoalDetailPage({
   const [taskFilter, setTaskFilter] = useGoalTaskFilter();
   const shown = taskFilter === "all" ? linked : open;
   return (
-    <section className={styles.stack} id="goal-detail" aria-label="Goal detail">
-      <header className={styles.header}>
-        <div className={styles.top}>
-          <span className={styles.id}>Goal</span>
-          {g && <State state={g.state} />}
-          <Button variant="ghost" className={styles.back} onClick={onBack}>
-            Back to goals <Kbd>Esc</Kbd>
-          </Button>
-        </div>
-        <h2 className={styles.title} tabIndex={-1}>
-          {name}
-        </h2>
-      </header>
+    <ItemPane
+      id="goal-detail"
+      label="Goal detail"
+      kind="Goal"
+      badge={g && <State state={g.state} />}
+      title={name}
+      onClose={onClose}
+    >
       {error && <Alert>Unable to load goal: {error}. Retrying on the next change.</Alert>}
       {!d || !g ? (
         !error && <Skeleton label="Loading goal…" lines={8} />
       ) : (
         <>
-          <dl className={styles.facts}>
-            <div>
-              <dt>Project</dt>
-              <dd>{g.project}</dd>
-            </div>
-            <div>
-              <dt>Bots</dt>
-              <dd>{g.bots.length ? g.bots.join(", ") : "None"}</dd>
-            </div>
-            <div>
-              <dt>Budget (last {g.budget?.window.days ?? 7} days)</dt>
-              <dd>
-                <Bar meter={costMeter(g)} label="Cost this week" />
-              </dd>
-            </div>
-            <div>
-              <dt>Attention</dt>
-              <dd>
-                <Bar meter={attentionMeter(g)} label="Attention this week" />
-              </dd>
-            </div>
-            <div>
-              <dt>Deadline</dt>
-              <dd>{deadline(g.deadline)}</dd>
-            </div>
-            <div>
-              <dt>Next goal wake</dt>
-              <dd>{g.next_wake ? when(g.next_wake) : "None scheduled"}</dd>
-            </div>
-            <div>
-              <dt>Updated</dt>
-              <dd>{when(g.updated_at)}</dd>
-            </div>
-          </dl>
+          <Facts
+            items={[
+              { label: "Project", value: g.project },
+              { label: "Bots", value: g.bots.length ? g.bots.join(", ") : "None" },
+              {
+                label: `Budget (last ${g.budget?.window.days ?? 7} days)`,
+                value: <Bar meter={costMeter(g)} label="Cost this week" />,
+              },
+              { label: "Attention", value: <Bar meter={attentionMeter(g)} label="Attention this week" /> },
+              { label: "Deadline", value: deadline(g.deadline) },
+              { label: "Next goal wake", value: g.next_wake ? when(g.next_wake) : "None scheduled" },
+              { label: "Updated", value: when(g.updated_at) },
+            ]}
+          />
           {g.budget && (
             <p className={styles.note}>
               Spend by source: tasks {usd(g.budget.cost_tasks)}
@@ -284,14 +266,13 @@ export function GoalDetailPage({
               onCopy={onCopy}
             />
           </Commands>
-          <section className={styles.block} aria-label="Intent">
-            <h3 className={styles.blockTitle}>Intent</h3>
+          <PaneSection title="Intent">
             {g.intent.trim() ? (
               <Markdown compact body={g.intent} />
             ) : (
               <p className={styles.note}>None</p>
             )}
-          </section>
+          </PaneSection>
           <Panel aria-label="Linked tasks">
             <PanelHead
               label="Linked tasks"
@@ -353,8 +334,7 @@ export function GoalDetailPage({
               </EmptyState>
             )}
           </Panel>
-          <section className={styles.block} aria-label="Trajectory">
-            <h3 className={styles.blockTitle}>Trajectory</h3>
+          <PaneSection title="Trajectory">
             {d.trajectory.length ? (
               <ol className={styles.trajectory}>
                 {d.trajectory.map((e) => (
@@ -386,9 +366,9 @@ export function GoalDetailPage({
             ) : (
               <EmptyState>No trajectory yet</EmptyState>
             )}
-          </section>
+          </PaneSection>
         </>
       )}
-    </section>
+    </ItemPane>
   );
 }
