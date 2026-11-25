@@ -20,6 +20,8 @@ import {
 import { getJson, useStoreSession } from "../../lib/store";
 import {
   byNode,
+  lastRun,
+  scheduleText,
   serviceKey,
   serviceKind,
   serviceState,
@@ -78,8 +80,6 @@ function StateLabel({ s }: { s: Service }) {
   );
 }
 
-// Last run for a long-running service: how its last process ended.
-const lastExit = (s: Service) => s.status.last_exit || "—";
 
 export function ServiceList({
   base,
@@ -184,16 +184,17 @@ export function ServiceList({
                         </Td>
                         <Td data-label="Kind" className={styles.optional}>
                           {serviceKind(s)}
+                          {s.schedule && <div className={styles.sub}>{scheduleText(s)}</div>}
                         </Td>
                         <Td data-label="State">
                           <StateLabel s={s} />
                         </Td>
                         <Td data-label="Restarts" numeric zero={!s.status.restarts} className={styles.optional}>
-                          {s.status.restarts}
+                          {s.schedule ? "—" : s.status.restarts}
                         </Td>
                         <Td data-label="Uptime / next">{serviceTime(s, secs)}</Td>
                         <Td data-label="Last exit" mono className={styles.optional}>
-                          {lastExit(s)}
+                          {lastRun(s, secs)}
                         </Td>
                       </tr>
                     ))}
@@ -239,12 +240,24 @@ function ServiceDetail({
     ["Bot", s.bot],
     ["Node", s.status.dispatcher || "—"],
     ["Kind", serviceKind(s)],
-    ["Restart policy", s.restart],
-    ["Restarts", String(s.status.restarts)],
-    ["Uptime / next", serviceTime(s, now)],
-    ["Last exit", lastExit(s)],
+    ...(s.schedule
+      ? ([
+          ["Schedule", scheduleText(s) || "", true],
+          ["Timeout", span(s.schedule.timeout_seconds)],
+          ["Catch-up", s.schedule.catch_up ? "one run after node downtime" : "off"],
+          ["Next run", serviceTime(s, now)],
+        ] as [string, string, boolean?][])
+      : ([
+          ["Restart policy", s.restart],
+          ["Restarts", String(s.status.restarts)],
+          ["Uptime / next", serviceTime(s, now)],
+        ] as [string, string, boolean?][])),
+    ["Last exit", lastRun(s, now)],
     ["PID", s.status.pid ? String(s.status.pid) : "—"],
-    ["Started", s.status.started_at ? new Date(s.status.started_at).toLocaleString() : "—"],
+    [s.schedule ? "Last run" : "Started", s.status.started_at ? new Date(s.status.started_at).toLocaleString() : "—"],
+    ...(s.schedule && s.status.finished_at
+      ? ([["Ended", new Date(s.status.finished_at).toLocaleString()]] as [string, string][])
+      : []),
     ["Last report", s.status.reported_at
       ? `${new Date(s.status.reported_at).toLocaleString()}${stale ? ` (${span(stale)} ago)` : ""}`
       : "—"],

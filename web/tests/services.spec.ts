@@ -17,6 +17,12 @@ const services = [
     status: { state: "backoff", restarts: 6, last_exit: "exit 1", next_start_at: at(40), crash_loop_since: at(-300), dispatcher: "hlab-vm", ...reported },
   },
   {
+    bot: "trader", home: "trader", name: "report", enabled: true, command: "./report.sh", restart: "never",
+    schedule: { cron: "*/5 * * * *", timezone: "Asia/Taipei", timeout_seconds: 600, catch_up: true },
+    created_at: at(-9000), updated_at: at(-9000),
+    status: { state: "scheduled", restarts: 0, failures: 1, started_at: at(-185), finished_at: at(-180), last_exit: "exit 3", next_run_at: at(115), dispatcher: "hlab-vm", ...reported },
+  },
+  {
     bot: "cos", home: "cos", name: "digest", enabled: false, command: "sleep 1", restart: "never",
     created_at: at(-9000), updated_at: at(-9000),
     status: { state: "stopped", restarts: 0, last_exit: "exit 0", dispatcher: "laptop", reported_at: at(-900) },
@@ -57,6 +63,9 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     await expect(vm.getByText("crash-looping", { exact: true })).toBeVisible();
     await expect(vm.getByText(/^up 2h 5m$/)).toBeVisible();
     await expect(vm.getByText(/^restart in \d+s$/)).toBeVisible();
+    // A scheduled service: its next run, and its last run's exit.
+    await expect(vm.getByText("scheduled", { exact: true })).toBeVisible();
+    await expect(vm.getByText(/^next run in 1m$/)).toBeVisible();
     const laptop = page.getByRole("region", { name: "Node laptop" });
     await expect(laptop.getByText(/no report for 15m/)).toBeVisible();
     await expect(laptop.getByText("stopped", { exact: true })).toBeVisible();
@@ -64,6 +73,8 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     if (width > 760) {
       await expect(vm.getByText("long-running", { exact: true }).first()).toBeVisible();
       await expect(vm.getByText("signal 15", { exact: true })).toBeVisible();
+      await expect(vm.getByText("*/5 * * * * Asia/Taipei", { exact: true })).toBeVisible();
+      await expect(vm.getByText("exit 3, 3m ago", { exact: true })).toBeVisible();
     }
     // A row opens the service with its recent log.
     await vm.getByRole("button", { name: "feed", exact: true }).click();
@@ -74,6 +85,14 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     await expect(detail.getByText(/feed: tick 2/)).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath(`services-${theme}-${width}.png`), fullPage: true });
+    await page.keyboard.press("Escape");
+    await expect(detail).toBeHidden();
+    // A scheduled service's detail: its schedule, timeout and runs.
+    await vm.getByRole("button", { name: "report", exact: true }).click();
+    await expect(detail.getByText("*/5 * * * * Asia/Taipei", { exact: true })).toBeVisible();
+    await expect(detail.getByText("10m", { exact: true })).toBeVisible();
+    await expect(detail.getByText("next run in 1m", { exact: true })).toBeVisible();
+    await expect(detail.getByText("exit 3, 3m ago", { exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(detail).toBeHidden();
     // The state filter.

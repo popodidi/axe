@@ -9,11 +9,14 @@ export type { Service };
 // reads as stale (`service::STALE_SECONDS`).
 export const STALE_SECONDS = 60;
 
-// "long-running"; scheduled (cron) services are the other kind once they
-// exist, and read their own fields (next run, last run, exit code).
+// As `Service::kind`: a service with a schedule is a scheduled (cron)
+// service and reads its own fields (next run, last run, exit code).
 export type ServiceKind = "long-running" | "scheduled";
-export const serviceKind = (s: Service): ServiceKind =>
-  "schedule" in s && (s as { schedule?: unknown }).schedule ? "scheduled" : "long-running";
+export const serviceKind = (s: Service): ServiceKind => (s.schedule ? "scheduled" : "long-running");
+
+// "*/5 * * * * UTC" for a scheduled service, else null.
+export const scheduleText = (s: Service): string | null =>
+  s.schedule ? `${s.schedule.cron} ${s.schedule.timezone}` : null;
 
 // As `Service::display_state`.
 export function serviceState(s: Service): string {
@@ -49,15 +52,30 @@ export function span(secs: number): string {
 }
 
 // The time column: uptime while running, the next restart while waiting
-// to restart, else a dash. `now` is epoch seconds.
+// to restart, else a dash; a scheduled service's next run. `now` is epoch
+// seconds.
 export function serviceTime(s: Service, now: number): string {
   const state = serviceState(s);
   const started = epoch(s.status.started_at);
+  if (s.schedule) {
+    if (state === "running" && started !== null) return `running ${span(now - started)}`;
+    const next = epoch(s.status.next_run_at);
+    return s.enabled && next !== null ? `next run in ${span(next - now)}` : "—";
+  }
   if (state === "running" && started !== null) return `up ${span(now - started)}`;
   const next = epoch(s.status.next_start_at);
   if ((state === "backoff" || state === "crash-looping") && next !== null)
     return `restart in ${span(next - now)}`;
   return "—";
+}
+
+// The last-exit column: how the last process ended; for a scheduled
+// service also when its last run started ("exit 0, 3m ago").
+export function lastRun(s: Service, now: number): string {
+  const exit = s.status.last_exit || (s.status.error ? "start failed" : "");
+  const started = epoch(s.status.started_at);
+  if (!s.schedule || started === null || serviceState(s) === "running") return exit || "—";
+  return `${exit || "no exit"}, ${span(now - started)} ago`;
 }
 
 // Seconds since the last report when it is stale, else null.
@@ -87,6 +105,7 @@ export function byNode(services: Service[]): { node: string | null; services: Se
 // Every state serviceState() can return, as the list's State filter.
 export const serviceStates = [
   "running",
+  "scheduled",
   "crash-looping",
   "backoff",
   "starting",

@@ -35,6 +35,7 @@ fn bindings() -> String {
         goal::Detail::decl(&cfg),
         service::Service::decl(&cfg),
         service::Status::decl(&cfg),
+        service::Schedule::decl(&cfg),
         serde_json::Value::decl(&cfg),
     ];
     let mut out = String::from(
