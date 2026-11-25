@@ -125,7 +125,7 @@ enum Cmd {
     },
     /// Run this machine's axe node: claim work, supervise agents and services
     ///
-    /// The node (formerly the node) is the server's worker on one
+    /// The node (formerly the dispatcher) is the server's worker on one
     /// machine. `axe dispatch` is a working alias.
     #[command(visible_alias = "dispatch")]
     Node {
