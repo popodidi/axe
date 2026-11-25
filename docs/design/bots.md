@@ -197,9 +197,9 @@ itself: the sender filter, the outbound allowlist and the token staying on the
 server.
 
 **Responsiveness.** A bot runs one wake at a time, so a long run delays every
-new message. The protocol says to acknowledge first, do quick work inline,
-use subagents for parallel lookups, and turn anything long into a task or
-routine followed up with `axe bot wake --in`. The dashboard tracks reply
+new message. The protocol's Responsiveness section
+(`crates/axe/src/bot_protocol.md`) covers acknowledging and offloading;
+`bundles/responsive` adds size thresholds. The dashboard tracks reply
 latency and run duration per bot so blocking shows up.
 
 ## Deferred

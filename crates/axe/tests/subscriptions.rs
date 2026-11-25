@@ -412,7 +412,7 @@ fn protocol_states_the_triage_rules() {
     assert!(protocol.contains("Triage it"));
     assert!(protocol.contains("never clear an escalation"));
     let preferences = include_str!("../../../bundles/responsive/prompt.md");
-    assert!(preferences.contains("Never relay `new` or `done`"));
+    assert!(preferences.contains("never `new` or `done` events one by one"));
 }
 
 const FOLLOW: i64 = sub::FOLLOW_BATCH_SECONDS;
