@@ -4,13 +4,17 @@
 //! pages when the server has a public URL), rendered from the same store
 //! queries as the dashboard: the task list, a task and its events, and the
 //! Cost view's aggregate (`usage::cost_stats`). Nothing here writes.
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::Value;
+use time::OffsetDateTime;
 
 use crate::board::{cap, escape, short, utf16, FOOTER_ROOM, TEXT_LIMIT};
 use crate::bot;
 use crate::db::{self, Filter, Task};
+use crate::goal_board::{cells, day};
 use crate::usage::{cost_stats, CostQuery};
 
 /// Notes `/task N` shows, newest last.
@@ -187,6 +191,14 @@ pub fn task(conn: &Connection, arg: &str, web: Option<&str>) -> Result<String> {
     Ok(s)
 }
 
+fn plural(n: i64, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
 fn usd(n: f64) -> String {
     if n > 0.0 && n < 0.01 {
         "<$0.01".into()
@@ -196,7 +208,10 @@ fn usd(n: f64) -> String {
 }
 
 /// `/cost`: bot `name`'s spend over the web Cost view's "Last 7 days" (UTC
-/// days, today included) at `now`, from the same aggregate, per day.
+/// days, today included) at `now`, from the same aggregate, laid out like the
+/// goal pin: a bold headline (total and runs), then one monospace bar per
+/// day, newest first, scaled to the costliest day (a day with no spend shows
+/// an empty bar), with its amount and runs.
 pub fn cost(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> Result<String> {
     bot::get(conn, name)?;
     let until = now.div_euclid(DAY) * DAY + DAY;
@@ -208,38 +223,57 @@ pub fn cost(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> Resul
     let stats = cost_stats(conn, since, until, None, &query)?;
     let total = &stats["total"];
     let runs = total["runs"].as_i64().unwrap_or(0);
-    let mut s = format!(
+    let mut head = format!(
         "bot {} cost, last {COST_DAYS} days: {}",
         escape(name),
         escape(&usd(total["cost"].as_f64().unwrap_or(0.0)))
     );
+    if runs > 0 {
+        head.push_str(&format!(" over {runs} {}", plural(runs, "run")));
+    }
+    let mut s = format!("<b>{head}</b>");
     if runs == 0 {
         s.push_str("\nno runs");
     } else {
-        s.push_str(&format!(
-            " over {runs} run{}",
-            if runs == 1 { "" } else { "s" }
-        ));
         let unknown = total["unknown_runs"].as_i64().unwrap_or(0);
         if unknown > 0 {
             s.push_str(&format!(
                 "\n{unknown} with unknown usage: the figure is a lower bound"
             ));
         }
-        let days = stats["breakdowns"]["day"]
+        let by_day: HashMap<&str, &Value> = stats["breakdowns"]["day"]
             .as_array()
-            .cloned()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| Some((d["key"].as_str()?, d)))
+                    .collect()
+            })
             .unwrap_or_default();
-        let mut days: Vec<&Value> = days.iter().collect();
-        days.sort_by(|a, b| b["key"].as_str().cmp(&a["key"].as_str()));
-        for d in days {
-            s.push_str(&format!(
-                "\n{}  {}  {} run{}",
-                escape(d["key"].as_str().unwrap_or("?")),
-                escape(&usd(d["cost"].as_f64().unwrap_or(0.0))),
-                d["runs"].as_i64().unwrap_or(0),
-                if d["runs"] == 1 { "" } else { "s" }
-            ));
+        // Every day of the range, newest first, zero where nothing ran.
+        let days: Vec<(String, f64, i64)> = (0..COST_DAYS)
+            .rev()
+            .map(|i| {
+                let key = OffsetDateTime::from_unix_timestamp(since + i * DAY)?
+                    .date()
+                    .to_string();
+                let d = by_day.get(key.as_str());
+                let cost = d.and_then(|d| d["cost"].as_f64()).unwrap_or(0.0);
+                let runs = d.and_then(|d| d["runs"].as_i64()).unwrap_or(0);
+                Ok((key, cost, runs))
+            })
+            .collect::<Result<_>>()?;
+        let max = days.iter().map(|d| d.1).fold(0.0, f64::max);
+        let amounts: Vec<String> = days.iter().map(|d| usd(d.1)).collect();
+        let width = amounts.iter().map(|a| a.chars().count()).max().unwrap_or(0);
+        for ((key, cost, runs), amount) in days.iter().zip(&amounts) {
+            let ratio = if max > 0.0 { cost / max } else { 0.0 };
+            let line = format!(
+                "{:<6} {}  {amount:>width$}  {runs} {}",
+                day(key),
+                cells(ratio),
+                plural(*runs, "run")
+            );
+            s.push_str(&format!("\n<code>{}</code>", escape(&line)));
         }
     }
     if let Some(w) = web {

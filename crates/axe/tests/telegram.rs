@@ -4538,7 +4538,7 @@ fn read_only_views_reply_without_waking_the_bot() {
     );
     assert_eq!(text(2), "usage: /task N (a task id)");
     assert!(
-        text(3).starts_with("bot cos cost, last 7 days: $0.00\nno runs\n<a href="),
+        text(3).starts_with("<b>bot cos cost, last 7 days: $0.00</b>\nno runs\n<a href="),
         "{}",
         text(3)
     );
