@@ -1787,6 +1787,45 @@ enum RepoCmd {
     Show { name: String },
     /// Remove a repo from the registry; existing clones are untouched
     Rm { name: String },
+    /// Fetch a run folder's worktree of a repo and fast-forward it to its
+    /// base branch (origin/HEAD), only when it has no uncommitted changes or
+    /// local commits; records the sync time its AGENTS.md shows. Bot runs
+    /// are not fetched before they start: sync a repo before reading or
+    /// changing its code
+    Sync {
+        name: String,
+        /// The run folder holding `repos/<name>` (default $AXE_WORKTREE, else .)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+/// `axe repo sync`: local Git only, no server.
+fn repo_sync(name: &str, dir: Option<PathBuf>) -> Result<()> {
+    use crate::worktree::Refresh;
+    db::validate_name("repo", name)?;
+    let dir = match dir {
+        Some(d) => d,
+        None => std::env::var_os("AXE_WORKTREE")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    };
+    let path = dir.join("repos").join(name);
+    anyhow::ensure!(
+        path.is_dir(),
+        "{} does not exist: no worktree of repo {name} in this run folder",
+        path.display()
+    );
+    match crate::worktree::sync(&path)? {
+        Refresh::Current { head } => println!("repos/{name}: up to date at {head}"),
+        Refresh::Updated { from, to } => println!("repos/{name}: fast-forwarded {from} -> {to}"),
+        Refresh::Skipped { reason } => anyhow::bail!(
+            "repos/{name} not fast-forwarded: {reason}; origin was fetched, nothing \
+             else changed (commit, push or set aside your changes, then sync again)"
+        ),
+    }
+    Ok(())
 }
 
 fn run_repo(c: &Client, command: RepoCmd) -> Result<()> {
@@ -1831,6 +1870,7 @@ fn run_repo(c: &Client, command: RepoCmd) -> Result<()> {
             let r: Repo = c.send("DELETE", &format!("/api/repos/{name}"), json!({}))?;
             println!("repo {} removed (was {})", r.name, r.url);
         }
+        RepoCmd::Sync { name, dir } => repo_sync(&name, dir)?,
     }
     Ok(())
 }
@@ -4349,6 +4389,9 @@ fn run_cmd(cli: &Cli) -> Result<()> {
         Cmd::Goal { command } => run_goal(&client(), command)?,
         Cmd::Ask { command } => run_ask(&client(), command)?,
         Cmd::Rule { command } => run_rule(&client(), command.clone())?,
+        Cmd::Repo {
+            command: RepoCmd::Sync { name, dir },
+        } => repo_sync(name, dir.clone())?,
         Cmd::Repo { command } => run_repo(&client(), command.clone())?,
         Cmd::Service { command } => run_service(&client(), command.clone())?,
         Cmd::Form { command } => run_form(&client(), command.clone())?,

@@ -21,10 +21,12 @@
 //! A bot gets the same layout at `<run_root>/bot-<name>` ([`build_bot`]), on
 //! branch `<branch_prefix>bot-<name>--work`, with the skills attached to the
 //! bot's scopes, and also without `repos/` when it has none. A bot's
-//! worktrees outlive many runs, so before each run every one
-//! is fast-forwarded to its base branch's origin commit when that is safe
-//! ([`worktree::refresh`]: clean, no local commits) and left unchanged, with
-//! the reason, when it is not.
+//! worktrees outlive many runs and are not fetched before a run: its
+//! `AGENTS.md` shows how long ago each was synced ([`worktree::synced_at`]),
+//! and the bot runs `axe repo sync <repo>` ([`worktree::sync`]) before it
+//! reads or changes a repo's code. `axe workspace` ([`Mode::Local`]) still
+//! fast-forwards each one when that is safe ([`worktree::refresh`]: clean, no
+//! local commits) and leaves it unchanged, with the reason, when it is not.
 //!
 //! A repo whose canonical clone is missing is cloned first
 //! ([`worktree::ensure_clone_from`]) from `[repos.<name>] url`, else from the
@@ -155,9 +157,9 @@ pub fn build_task(
 /// laid out like a task's, each repo on branch `<branch_prefix>bot-<home>--work`.
 /// `home` is the bot's first name (`Bot::home`), so a rename keeps the folder,
 /// its worktrees and the agent session that lives there.
-/// Worktrees persist across runs and are refreshed before each one
-/// ([`worktree::refresh`]); the outcome per repo is returned for the run's
-/// start event, with the repos cloned first. The caller guarantees the bot has no live run. The skills
+/// Worktrees persist across runs and are not fetched here (the bot syncs a
+/// repo on demand, `axe repo sync`); the repos cloned first are returned for
+/// the run's start event. The caller guarantees the bot has no live run. The skills
 /// attached to the bot's scopes (`attached`, read from `store`) are written
 /// into `skills/` like a task's; attached docs and bundles stay in the bot's
 /// system prompt.
@@ -168,16 +170,17 @@ pub fn build_bot(
     repos: &[String],
     attached: &context::Resolution,
     store: &dyn context::Source,
-) -> Result<(PathBuf, Vec<RepoRefresh>, Vec<String>)> {
+) -> Result<(PathBuf, Vec<String>)> {
     let dir = cfg.run_root().join(format!("bot-{home}"));
     let out = build_bot_in(cfg, name, home, repos, attached, store, &dir, Mode::Run)?;
-    Ok((dir, out.refreshed, out.cloned))
+    Ok((dir, out.cloned))
 }
 
 /// The bot layout in `dir`; [`build_bot`] in [`Mode::Run`]. In
 /// [`Mode::Local`] the attached docs and bundles are also written in full and
-/// indexed, and `AGENTS.md` names the bot's system prompt (`.axe/system.md`,
-/// written by `axe workspace`).
+/// indexed, `AGENTS.md` names the bot's system prompt (`.axe/system.md`,
+/// written by `axe workspace`), and each worktree is refreshed
+/// ([`worktree::refresh`]); a node run fetches nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn build_bot_in(
     cfg: &Config,
@@ -192,7 +195,7 @@ pub fn build_bot_in(
     let branch = format!("{}bot-{home}--work", branch_prefix(cfg));
     let (built, cloned) = checkout(cfg, dir, repos, &branch, mode, Some(store))?;
     let mut refreshed = Vec::new();
-    for (repo, path) in &built {
+    for (repo, path) in built.iter().filter(|_| mode == Mode::Local) {
         let ready = worktree::repo_readiness(cfg, repo).map_err(anyhow::Error::msg)?;
         refreshed.push(RepoRefresh {
             repo: repo.clone(),
@@ -349,7 +352,7 @@ fn local_docs_section(res: &context::Resolution) -> String {
     s
 }
 
-/// What [`build_bot`] did to one repo's worktree before the run.
+/// What `axe workspace` did to one repo's worktree of a bot.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RepoRefresh {
     pub repo: String,
@@ -633,6 +636,7 @@ fn agents_md(
         skills,
         &context::skills_lines(attached, "skills/"),
         "This task has no repos.\n",
+        None,
     ));
     if !attached.is_empty() {
         let _ = writeln!(
@@ -700,25 +704,60 @@ fn bot_agents_md(
     } else {
         ""
     };
-    s.push_str(&index_md(repos, skills, attached_skills, ""));
+    s.push_str(&index_md(
+        repos,
+        skills,
+        attached_skills,
+        "",
+        Some(unix_now()),
+    ));
     s
 }
 
-/// The `## Repos`, `## Skills` and `## Docs` sections.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// How long ago the worktree at `path` was synced, as of `now`.
+fn sync_age(repo: &str, path: &Path, now: i64) -> String {
+    match worktree::synced_at(path) {
+        Some(at) if now - at < 60 => "synced just now".to_string(),
+        Some(at) => format!("synced {} ago", crate::board::age(now - at)),
+        None => format!("not synced yet (`axe repo sync {repo}`)"),
+    }
+}
+
+/// The `## Repos`, `## Skills` and `## Docs` sections. With `synced` (now,
+/// in Unix seconds; a bot's folder), each repo's line says how long ago it
+/// was synced and the section says how to sync it.
 fn index_md(
     repos: &[(String, PathBuf)],
     skills: &[Skill],
     attached_skills: &str,
     no_repos: &str,
+    synced: Option<i64>,
 ) -> String {
     let mut s = String::from("## Repos\n\n");
     if repos.is_empty() {
         s.push_str(no_repos);
+    } else if synced.is_some() {
+        s.push_str(
+            "Not fetched before the run: run `axe repo sync <repo>` before reading or \
+             changing a repo's code.\n\n",
+        );
     }
     for (repo, path) in repos {
         let _ = write!(s, "- `repos/{repo}`");
+        let mut sep = ":";
+        if let Some(now) = synced {
+            let _ = write!(s, ": {}", sync_age(repo, path, now));
+            sep = ";";
+        }
         if path.join("AGENTS.md").is_file() {
-            let _ = write!(s, ": its rules are in `repos/{repo}/AGENTS.md`");
+            let _ = write!(s, "{sep} its rules are in `repos/{repo}/AGENTS.md`");
         }
         s.push('\n');
     }
