@@ -1565,3 +1565,80 @@ fn retained_run_folders_lose_ignored_build_output() {
     );
     assert!(nm(42).exists());
 }
+
+/// A just-done task's run folder loses its build output on the next tick,
+/// even between hourly sweeps, while its unpushed commit and source stay.
+#[test]
+fn done_run_folder_loses_build_output_at_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let workspace = tmp.join("workspace");
+    let src = workspace.join("src");
+    repo(&src);
+    let runs = workspace.join(".runs");
+    let folder = |id: u64| runs.join(format!("task-{id}"));
+    for id in [50, 51, 52] {
+        run_folder(&folder(id), &[(&src, "src")]);
+        let wt = folder(id).join("repos/src");
+        // Unpushed work: a commit on no remote branch keeps the folder.
+        fs::write(wt.join(".gitignore"), "/target/\n").unwrap();
+        git(&wt, &["add", ".gitignore"]);
+        git(&wt, &["commit", "-q", "-m", "unpushed"]);
+        write_mib(&wt.join("target/debug/axe"), 1);
+        write_mib(&wt.join("web/node_modules/pkg/index.js"), 1);
+    }
+    // 50 done a minute ago, 51 done but its run still live, 52 escalated just now.
+    let mut routes = HashMap::new();
+    let just = ago(Duration::minutes(1));
+    held_task(&mut routes, 50, "done", "done", &just);
+    held_task(&mut routes, 51, "done", "done", &just);
+    live_run(&mut routes, 51);
+    held_task(&mut routes, 52, "escalated", "escalated", &just);
+    let url = serve(routes, 200).url;
+    let cfg = config(
+        &workspace,
+        &format!("{}[housekeeping.build_output]\n", calm(&tmp)),
+    );
+    let mut k = keeper(&cfg, &url, true, &tmp);
+    let stop = AtomicBool::new(false);
+    let caches = |id: u64| {
+        let wt = folder(id).join("repos/src");
+        [wt.join("target"), wt.join("web/node_modules")]
+    };
+
+    // The first tick is the full sweep: the folder stays (unpushed commit).
+    let tick = k.tick(None, &stop);
+    assert!(tick.ok, "{:?}", tick.lines);
+    let runs_lines = kind_lines(&tick.lines, "run_folder");
+    assert_eq!(runs_lines[&folder(50)].1, "retain");
+    for dir in caches(50) {
+        assert!(!dir.exists(), "{}", dir.display());
+    }
+    // Fresh output between sweeps goes on the next tick, which is no full sweep.
+    write_mib(&folder(50).join("repos/src/target/debug/axe"), 1);
+    write_mib(
+        &folder(50).join("repos/src/web/node_modules/pkg/index.js"),
+        1,
+    );
+    let tick = k.tick(None, &stop);
+    assert!(tick.ok, "{:?}", tick.lines);
+    assert!(kind_lines(&tick.lines, "run_folder").is_empty());
+    let lines = kind_lines(&tick.lines, "build_output");
+    for dir in caches(50) {
+        let (task, decision, why) = &lines[&dir];
+        assert_eq!((task, decision.as_str()), (&json!(50), "deleted"), "{why}");
+        assert!(why.starts_with("done, idle"), "{why}");
+        assert!(!dir.exists(), "{}", dir.display());
+    }
+    // Source and the unpushed commit stay.
+    let wt = folder(50).join("repos/src");
+    assert!(wt.join("tracked.txt").exists() && wt.join(".gitignore").exists());
+    assert_eq!(git(&wt, &["log", "-1", "--format=%s"]).trim(), "unpushed");
+    // A live run and a fresh hold keep theirs; neither is reported between sweeps.
+    for id in [51, 52] {
+        for dir in caches(id) {
+            assert!(dir.exists(), "{}", dir.display());
+            assert!(!lines.contains_key(&dir), "{lines:?}");
+        }
+    }
+}

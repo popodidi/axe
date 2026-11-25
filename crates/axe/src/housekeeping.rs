@@ -18,9 +18,10 @@
 //!
 //! Optional reclaim rules for what that misses:
 //! - `[housekeeping.build_output]`: git-ignored build output (`target`,
-//!   `node_modules`, ...) in the worktrees of idle done, blocked or escalated
-//!   tasks, including the `repos/<name>` worktrees of a retained run folder;
-//!   source and commits stay.
+//!   `node_modules`, ...) in the worktrees of done tasks (once no run is live)
+//!   and of idle blocked or escalated tasks, including the `repos/<name>`
+//!   worktrees of a retained run folder; source and commits stay. Run folders
+//!   get this every tick, not only on the (hourly, unpressured) full sweep.
 //! - `[housekeeping.tmp]`: task-named scratch in a temp directory once the task
 //!   is done (or held and idle, above a size floor), and under pressure other
 //!   stale scratch.
@@ -320,6 +321,13 @@ impl TaskRow {
             return Err(format!("{status}, updated {age}s ago, idle {idle}s"));
         }
         Ok(format!("{status}, idle {age}s"))
+    }
+
+    /// Rule C's gate: a done task's build output may go at once (nothing
+    /// resumes a done task on its own); a held task's waits for `idle`.
+    fn build_idle(&self, idle: u64, now: i64) -> Result<String, String> {
+        let idle = if self.status() == "done" { 0 } else { idle };
+        self.idle_for(idle, now)
     }
 }
 
@@ -1252,7 +1260,7 @@ impl Keeper {
         if task.project != project {
             return Err(format!("task belongs to project {:?}", task.project));
         }
-        let reason = task.idle_for(bo.idle, unix_now())?;
+        let reason = task.build_idle(bo.idle, unix_now())?;
         if run_is_live(&self.events(id, fresh)?) {
             return Err("task has a live run".into());
         }
@@ -1262,23 +1270,29 @@ impl Keeper {
     }
 
     /// Rule C: build output in an idle task's worktree, after its own decision
-    /// retained it. Silent unless the task is idle and output exists.
+    /// retained it. Silent unless the task is idle and output exists; with
+    /// `quiet`, also for output it keeps.
     fn sweep_build_output(
         &self,
         bo: &BuildOutput,
         project: &str,
         c: &Candidate,
+        quiet: bool,
         stop: &AtomicBool,
         out: &mut Vec<Value>,
     ) -> bool {
+        let dirs = build_dirs(&c.path, &bo.names);
+        if dirs.is_empty() {
+            return true;
+        }
         let idle = self
             .task_row(c.task, false)
-            .is_ok_and(|t| t.project == project && t.idle_for(bo.idle, unix_now()).is_ok());
+            .is_ok_and(|t| t.project == project && t.build_idle(bo.idle, unix_now()).is_ok());
         if !idle {
             return true;
         }
         let mut ok = true;
-        for dir in build_dirs(&c.path, &bo.names) {
+        for dir in dirs {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
@@ -1287,6 +1301,9 @@ impl Keeper {
                 || remove_tree(&dir),
             );
             ok &= decision != "error";
+            if quiet && decision == "retain" {
+                continue;
+            }
             let mut l = rule_line("build_output", &dir, Some(c.task), decision, &reason);
             l["project"] = json!(project);
             out.push(l);
@@ -1468,8 +1485,30 @@ impl Keeper {
                 &reason,
             ));
             if let (Some(bo), "retain") = (build_output, decision) {
-                ok &= self.sweep_run_build_output(bo, &c, stop, out);
+                ok &= self.sweep_run_build_output(bo, &c, false, stop, out);
             }
+        }
+        ok
+    }
+
+    /// Rule C alone over every run folder, between full sweeps, so a done
+    /// task's build output goes within a tick instead of the next hourly sweep.
+    fn sweep_run_caches(
+        &self,
+        runs: &Path,
+        bo: &BuildOutput,
+        stop: &AtomicBool,
+        out: &mut Vec<Value>,
+    ) -> bool {
+        let Ok(found) = run_folders(runs) else {
+            return true;
+        };
+        let mut ok = true;
+        for c in found {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            ok &= self.sweep_run_build_output(bo, &c, true, stop, out);
         }
         ok
     }
@@ -1479,6 +1518,7 @@ impl Keeper {
         &self,
         bo: &BuildOutput,
         c: &Candidate,
+        quiet: bool,
         stop: &AtomicBool,
         out: &mut Vec<Value>,
     ) -> bool {
@@ -1494,7 +1534,7 @@ impl Keeper {
                 path: repo,
                 task: c.task,
             };
-            ok &= self.sweep_build_output(bo, &task.project, &wt, stop, out);
+            ok &= self.sweep_build_output(bo, &task.project, &wt, quiet, stop, out);
         }
         ok
     }
@@ -1672,6 +1712,9 @@ impl Keeper {
                 .push(json!({"event": "disk_pause_alert", "result": format!("{outcome:?}")}));
         }
         if !sweep {
+            if let Some(bo) = &rules.build_output {
+                out.ok &= self.sweep_run_caches(&rules.runs, bo, stop, &mut out.lines);
+            }
             return out;
         }
         if rules.pressure.is_some() {
@@ -1710,6 +1753,7 @@ impl Keeper {
                                         bo,
                                         &project,
                                         &c,
+                                        false,
                                         stop,
                                         &mut out.lines,
                                     );
