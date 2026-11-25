@@ -580,6 +580,7 @@ export default function Dashboard() {
           id={watched}
           base={base}
           onClose={() => update({ run: null })}
+          onOpen={update}
         />
       )}
       {botRun && !watched && (
@@ -589,6 +590,7 @@ export default function Dashboard() {
           base={base}
           kind="bot"
           onClose={() => update({ botrun: null })}
+          onOpen={update}
         />
       )}
       <aside id="app-nav" className={styles.nav} inert={overlay}>

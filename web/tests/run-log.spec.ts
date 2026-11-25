@@ -114,7 +114,8 @@ for (const agent of ["claude", "codex"])
     ).toHaveCount(0);
     const scroll = dialog.getByLabel("Log output");
     await scroll.evaluate((el) => {
-      el.scrollTop = 300;
+      // Well away from the tail, whatever the record density.
+      el.scrollTop = 100;
       el.dispatchEvent(new Event("scroll"));
     });
     const top = await scroll.evaluate((el) => el.scrollTop);

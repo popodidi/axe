@@ -164,6 +164,10 @@ admits nothing and keeps workers running; a dispatcher that finds unresolved
 runs refuses to start until `axe dispatch --reconcile-note` escalates them.
 Worker logs stay on the dispatcher host and the server relays reads over the
 dispatcher's WebSocket without storing them (`run_log.rs`, `relay_log` in `server.rs`).
+Beside each log the dispatcher keeps when it saw each line, the run's user
+prompt and its system prompt or run instructions; the run page's details
+(`/api/runs/<id>/meta`, `/api/bot-runs/<id>/meta`) join them with the run's
+events and usage (`run_meta.rs`).
 
 **Selection rules.** A task's first run starts fresh with the agent from its
 `--agent` pin, or else from the stored rule that matches it (`axe rule

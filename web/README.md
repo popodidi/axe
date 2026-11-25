@@ -53,7 +53,7 @@ regenerate it from the repository root with
 | Task list and detail model, copyable commands | `lib/model.ts` (`lib/model.test.ts` pins the command strings) |
 | Views | `components/dashboard/` (`routines`, `services`, `bots`, `goals`, `stats`, `cost`) |
 | Services page model (state, uptime, per node) | `lib/services.ts` |
-| Run log viewer and conversation replay | `components/dashboard/run-log.tsx`, `lib/run-log.ts`, `lib/transcript.ts` |
+| Run page: trace with event times, conversation replay and the details rail | `components/dashboard/run-log.tsx`, `lib/run-log.ts`, `lib/transcript.ts`, `lib/run-meta.ts` |
 | Stats, bot stats, cost and goal calculations | `lib/stats.ts`, `lib/bot-stats.ts`, `lib/cost.ts`, `lib/goals.ts` |
 | Store view, store previews and the read session | `components/dashboard/store.tsx`, `store-viewer.tsx`, `lib/store.ts` |
 | A doc's full page (`/doc?path=`): metadata and contents rails | `app/doc/page.tsx`, `components/dashboard/doc-page.tsx`, `lib/doc-toc.ts` |

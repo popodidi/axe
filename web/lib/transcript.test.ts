@@ -80,21 +80,24 @@ test("Claude associates tools across history pages, preserves order and hides op
   const tail = buildTranscript(records.slice(5));
   expect(tail[0].label).toContain("outside loaded history");
   const all = buildTranscript(records);
+  // The init record is a one-line system event naming only what it chose.
   expect(all.map((e) => e.kind)).toEqual([
+    "system",
     "message",
     "tool",
     "message",
     "event",
   ]);
-  expect(all[1]).toMatchObject({
+  expect(all[0]).toMatchObject({ label: "Session started", body: "" });
+  expect(all[2]).toMatchObject({
     label: "Bash · echo hello",
     status: "Failed",
     error: true,
     offset: records[3].start,
   });
-  expect(all[1].body).toBe("long output\n".repeat(300));
+  expect(all[2].body).toBe("long output\n".repeat(300));
   expect(JSON.stringify(all)).not.toMatch(/opaque|metadata|allowed/);
-  expect(all[3].body).toContain("retained");
+  expect(all[4].body).toContain("retained");
 });
 test("Codex snapshots merge by id with honest status and available reasoning", () => {
   const records = lines([
@@ -138,22 +141,24 @@ test("Codex snapshots merge by id with honest status and available reasoning", (
     },
     { type: "turn.failed", error: { message: "Authentication required" } },
   ]);
-  expect(buildTranscript(records.slice(0, 2))[0].status).toBe("Started");
+  expect(buildTranscript(records.slice(0, 2))[1].status).toBe("Started");
   const all = buildTranscript(records);
   expect(all.map((e) => e.kind)).toEqual([
+    "system",
     "tool",
     "message",
     "thinking",
     "tool",
     "event",
   ]);
-  expect(all[0]).toMatchObject({
+  expect(all[0]).toMatchObject({ label: "Session started", body: "thread x" });
+  expect(all[1]).toMatchObject({
     error: true,
     status: "Failed",
     body: "failed",
   });
-  expect(all[1].body).toBe("final");
-  expect(all[4].error).toBe(true);
+  expect(all[2].body).toBe("final");
+  expect(all[5].error).toBe(true);
 });
 test("errors and unknown records remain visible; signature-only payloads do not become reasoning", () => {
   const all = buildTranscript(
@@ -241,4 +246,79 @@ test("Codex error items surface their actionable message without asserting run f
     error: true,
   });
   expect(entries[0].status).toBeUndefined();
+});
+test("entries carry their record's timestamp, else when the line was seen", () => {
+  const records = lines([
+    {
+      type: "system",
+      subtype: "init",
+      model: "m1",
+      claude_code_version: "2.1",
+    },
+    {
+      ...message([{ type: "tool_use", id: "t", name: "Bash", input: {} }]),
+      timestamp: "2026-11-25T02:00:00.000Z",
+    },
+    {
+      ...message(
+        [{ type: "tool_result", tool_use_id: "t", content: "ok" }],
+        "r",
+        "user",
+      ),
+      timestamp: "2026-11-25T02:00:03.500Z",
+    },
+    {
+      type: "result",
+      result: "",
+      num_turns: 3,
+      duration_ms: 65000,
+      total_cost_usd: 1.234,
+    },
+  ]).map((l, i) => ({ ...l, at: i === 1 ? undefined : 1_000 + i }));
+  const all = buildTranscript(records);
+  expect(all[0]).toMatchObject({
+    kind: "system",
+    body: "m1 · Claude Code 2.1",
+    at: 1_000,
+  });
+  // Claude's own timestamp wins over when the dispatcher saw the line.
+  expect(all[1]).toMatchObject({
+    kind: "tool",
+    at: Date.parse("2026-11-25T02:00:00.000Z"),
+    endAt: Date.parse("2026-11-25T02:00:03.500Z"),
+  });
+  expect(all[2]).toMatchObject({
+    kind: "system",
+    label: "Finished",
+    body: "3 turns · 1m 05s · $1.23",
+    at: 1_003,
+  });
+  // Older logs: no time at all, never an invented one.
+  expect(
+    buildTranscript(lines([message([{ type: "text", text: "x" }])]))[0].at,
+  ).toBeUndefined();
+});
+test("Codex turns and tool completions are timed from when lines were seen", () => {
+  const records = lines([
+    { type: "thread.started", thread_id: "x" },
+    {
+      type: "item.started",
+      item: { type: "command_execution", id: "c", command: "ls" },
+    },
+    {
+      type: "item.completed",
+      item: { type: "command_execution", id: "c", command: "ls", exit_code: 0 },
+    },
+    {
+      type: "turn.completed",
+      usage: { input_tokens: 12000, output_tokens: 300 },
+    },
+  ]).map((l, i) => ({ ...l, at: 5_000 + i * 1_000 }));
+  const all = buildTranscript(records);
+  expect(all[1]).toMatchObject({ kind: "tool", at: 6_000, endAt: 7_000 });
+  expect(all[2]).toMatchObject({
+    label: "Turn complete",
+    body: "12k in · 300 out tokens",
+    at: 8_000,
+  });
 });

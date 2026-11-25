@@ -1976,6 +1976,33 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             )
         }
 
+        ("GET", ["api", "runs", id, "meta"]) => {
+            let (mut meta, owner, reused) = {
+                let conn = st.conn();
+                let id = task_id(id)?;
+                let run = db::get_run(&conn, id)?;
+                let reused = db::run_log_reused(&conn, &run)?;
+                let owner: Option<String> = conn
+                    .query_row(
+                        "SELECT dispatcher FROM dispatch_runs WHERE run_id=?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                (crate::run_meta::task_run(&conn, id)?, owner, reused)
+            };
+            meta["files"] = if reused {
+                json!({"unavailable":"Historical log path was reused by another attempt"})
+            } else {
+                relay(
+                    st,
+                    owner,
+                    json!({"kind":"log_meta","run":meta["run"]["id"]}),
+                )
+            };
+            ok(200, &meta)
+        }
+
         ("POST", ["api", "tasks", id, "abort"]) => {
             let b: serde_json::Value = req.json()?;
             let who: Who = req.json()?;
@@ -2837,6 +2864,16 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                 json!({"kind":"bot_log","run":run.id}),
                 serde_json::to_value(run)?,
             )
+        }
+        ("GET", ["api", "bot-runs", id, "meta"]) => {
+            let mut meta = crate::run_meta::bot_run(&st.conn(), task_id(id)?)?;
+            let owner = meta["run"]["dispatcher"].as_str().map(String::from);
+            meta["files"] = relay(
+                st,
+                owner,
+                json!({"kind":"bot_log_meta","run":meta["run"]["id"]}),
+            );
+            ok(200, &meta)
         }
         ("POST", ["api", "bots"]) => {
             let b: Create = req.json()?;

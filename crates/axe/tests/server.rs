@@ -1023,6 +1023,121 @@ fn run_log_api_is_record_bound_and_preserves_attempts() {
 }
 
 #[test]
+fn run_meta_api_reports_events_usage_and_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    srv.ok(&[
+        "add",
+        "--project",
+        "orchid",
+        "--title",
+        "meta",
+        "--label",
+        "ui",
+    ]);
+    let relay = common::LogRelay::start(&srv);
+    let conn = db::open(&srv.db).unwrap();
+    let path = dir.path().join("1-1.log");
+    std::fs::write(&path, "{\"type\":\"system\",\"model\":\"m1\"}\n").unwrap();
+    std::fs::write(dir.path().join("1-1.prompt.md"), "Work task 1").unwrap();
+    std::fs::write(dir.path().join("1-1.system.md"), "# Task 1 instructions").unwrap();
+    let run = db::insert_run(
+        &conn,
+        &db::NewRun {
+            task_id: 1,
+            project: "orchid",
+            agent: "claude-1",
+            mode: "fresh",
+            session_id: Some("s1"),
+            claim: "dispatch:m",
+            log_path: path.to_str().unwrap(),
+        },
+    )
+    .unwrap();
+    let event = |actor: &str, kind: &str, from: Option<&str>, to: Option<&str>, body: &str| {
+        conn.execute(
+            "INSERT INTO events (task_id, at, actor, kind, from_value, to_value, body)
+             VALUES (1, '2026-11-25T00:00:00Z', ?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![actor, kind, from, to, body],
+        )
+        .unwrap();
+    };
+    event(
+        "dispatcher",
+        "run_start",
+        None,
+        Some("dispatch:m"),
+        r#"{"use":"claude-code:m1:high","worktree":"/w"}"#,
+    );
+    event("agent", "state", Some("in_progress"), Some("blocked"), "");
+    event(
+        "dispatcher",
+        "run_end",
+        None,
+        Some("dispatch:m"),
+        r#"{"exit_code":3}"#,
+    );
+    event(
+        "dispatcher",
+        "state",
+        Some("blocked"),
+        Some("escalated"),
+        "session exited",
+    );
+    event(
+        "dispatcher",
+        "claimed",
+        Some("pending"),
+        Some("dispatch:n"),
+        "",
+    );
+    event(
+        "dispatcher",
+        "state",
+        Some("escalated"),
+        Some("done"),
+        "later run",
+    );
+    db::end_run(&conn, run, Some(3), None).unwrap();
+    let mut models = std::collections::BTreeMap::new();
+    models.insert(
+        "m1".to_string(),
+        axe::usage::Totals {
+            input: 10,
+            output: 5,
+            cost: 0.25,
+            ..Default::default()
+        },
+    );
+    let parsed = axe::usage::Parsed {
+        models,
+        turns: Some(4),
+        ..Default::default()
+    };
+    axe::usage::record(&conn, "task", run, &parsed, "finish").unwrap();
+    relay.add(&conn, run, &path, true);
+    let m = srv.get(&format!("/api/runs/{run}/meta"));
+    assert_eq!(m["run"]["id"], run);
+    assert_eq!(m["task"]["labels"], serde_json::json!(["ui"]));
+    assert!(m["task"].get("detail").is_none());
+    assert_eq!(m["start"]["use"], "claude-code:m1:high");
+    assert_eq!(m["end"]["exit_code"], 3);
+    assert_eq!(m["outcome"]["to"], "escalated");
+    assert_eq!(m["outcome"]["note"], "session exited");
+    assert_eq!(m["task_state"], "blocked");
+    assert_eq!(m["usage"]["turns"], 4);
+    assert_eq!(m["usage"]["models"][0]["cost"], 0.25);
+    assert_eq!(m["files"]["prompt"]["text"], "Work task 1");
+    assert_eq!(m["files"]["system_prompt"]["text"], "# Task 1 instructions");
+    assert_eq!(
+        m["files"]["first_line"],
+        "{\"type\":\"system\",\"model\":\"m1\"}"
+    );
+    let error = srv.request("/api/runs/999/meta").call().unwrap_err();
+    assert!(matches!(error, ureq::Error::Status(404, _)), "{error}");
+}
+
+#[test]
 fn wal_safe_backup_supports_rollback() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("t.db");
