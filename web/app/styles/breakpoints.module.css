@@ -19,3 +19,7 @@
 
 /* The doc page (app/doc) shows its metadata and contents rails from here. */
 @value bp-doc-rails: (min-width: 1280px);
+
+/* A rendered run prompt shows its contents beside the text, not folded
+   above it, from this box width (components/dashboard/run-log.module.css). */
+@value bp-prompt-toc: (min-width: 560px);

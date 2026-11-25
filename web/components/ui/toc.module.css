@@ -1,0 +1,93 @@
+/* The table of contents (toc.tsx): a compact numbered list, one line per
+   heading. Entries are secondary text on the canvas; hover gives a neutral
+   fill, the current section the selected fill in primary semibold text.
+   The level indents the entry; numbers are tabular and tertiary. */
+.list {
+  display: grid;
+  gap: var(--space-quarter);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+}
+.list a {
+  display: flex;
+  gap: var(--space-half);
+  padding: var(--space-half) var(--space-1);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+  transition:
+    background-color var(--transition-hover),
+    color var(--transition-hover);
+}
+.list a[data-depth="1"] {
+  padding-left: calc(var(--space-1) + var(--space-snug));
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.list a[data-depth="2"] {
+  padding-left: calc(var(--space-1) + var(--space-3));
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.list a:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.list a.active {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+.number {
+  flex: none;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-regular);
+}
+.active .number {
+  color: var(--text-secondary);
+}
+.text {
+  min-width: 0;
+}
+
+.label {
+  display: block;
+  margin: 0 0 var(--space-half);
+  padding-left: var(--space-1);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  color: var(--text-tertiary);
+}
+
+/* The rail sticks to the top of its scrolling box. A rail taller than the
+   box scrolls itself, with a thin scrollbar shown only while hovered. */
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.rail:hover {
+  scrollbar-color: var(--border-control-color) transparent;
+}
+
+.fold summary {
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.fold[open] summary {
+  margin-bottom: var(--space-half);
+}

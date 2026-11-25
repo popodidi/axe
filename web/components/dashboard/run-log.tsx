@@ -1,6 +1,7 @@
 "use client";
 import {
   memo,
+  useCallback,
   useMemo,
   useEffect,
   useLayoutEffect,
@@ -32,7 +33,16 @@ import {
 } from "../../lib/run-meta";
 import { buildTranscript, type TranscriptEntry } from "../../lib/transcript";
 import { usePromptView, type PromptKind } from "../../lib/prompt-view";
-import { Button, CodeBlock, Tag } from "../ui";
+import { tocEntries } from "../../lib/doc-toc";
+import {
+  Button,
+  CodeBlock,
+  Tag,
+  TocFold,
+  TocRail,
+  useHeadings,
+  useScrollSpy,
+} from "../ui";
 import { PaneResizer } from "./detail-resizer";
 import styles from "./run-log.module.css";
 
@@ -793,9 +803,7 @@ function Prompt({
       {view === "raw" ? (
         <CodeBlock className={styles.promptText}>{file.text}</CodeBlock>
       ) : (
-        <div className={styles.promptRendered}>
-          <Markdown body={file.text} compact />
-        </div>
+        <RenderedPrompt kind={kind} text={file.text} />
       )}
       {file.truncated && (
         <p className={styles.missing}>
@@ -804,6 +812,40 @@ function Prompt({
         </p>
       )}
     </details>
+  );
+}
+
+/** A prompt as Markdown in its scroll box, with a contents list for a long
+ * one (components/ui/toc.tsx): beside the text when the box is wide, folded
+ * above it when narrow. The section in view follows the box's scroll. */
+function RenderedPrompt({ kind, text }: { kind: PromptKind; text: string }) {
+  const box = useRef<HTMLDivElement>(null);
+  const body = useRef<HTMLDivElement>(null);
+  const headings = useHeadings(body, text);
+  const entries = useMemo(() => tocEntries(headings), [headings]);
+  const active = useScrollSpy(entries, box);
+  const jump = useCallback((id: string) => {
+    const b = box.current;
+    const h = document.getElementById(id);
+    if (!b || !h) return;
+    b.scrollTop +=
+      h.getBoundingClientRect().top - b.getBoundingClientRect().top;
+  }, []);
+  const toc = { entries, active, onJump: jump };
+  return (
+    <div
+      ref={box}
+      className={styles.promptRendered}
+      data-toc={entries.length ? "" : undefined}
+    >
+      <div className={styles.promptLayout}>
+        <TocRail {...toc} className={styles.promptTocRail} />
+        <TocFold {...toc} className={styles.promptTocFold} />
+        <div ref={body} className={styles.promptBody}>
+          <Markdown body={text} compact headingIds={`prompt-${kind}-`} />
+        </div>
+      </div>
+    </div>
   );
 }
 

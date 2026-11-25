@@ -1,5 +1,6 @@
 @value bp-run-details from "../../app/styles/breakpoints.module.css";
 @value bp-phone from "../../app/styles/breakpoints.module.css";
+@value bp-prompt-toc from "../../app/styles/breakpoints.module.css";
 
 /* The run page: an opaque dialog over the dashboard. A toolbar, then the
    trace and, beside it, the run's details rail (like the doc page's
@@ -384,11 +385,44 @@
   font-weight: var(--weight-semibold);
 }
 .promptRendered {
-  max-height: calc(var(--space-8) * 6);
+  --prompt-box-height: calc(var(--space-8) * 6);
+
+  max-height: var(--prompt-box-height);
   overflow: auto;
   padding: var(--space-1);
   border-radius: var(--radius-sm);
   background: var(--surface-1);
+  container-type: inline-size;
+}
+/* A long prompt's contents (components/ui/toc.tsx): folded above the text
+   in a narrow box; in a wide one, a sticky list beside it. */
+.promptLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+}
+.promptBody {
+  min-width: 0;
+}
+.promptBody :is(h1, h2, h3)[id] {
+  scroll-margin-top: var(--space-1);
+}
+.promptLayout .promptTocRail {
+  display: none;
+}
+@container bp-prompt-toc {
+  .promptLayout {
+    grid-template-columns: calc(var(--space-8) * 2 - var(--space-2)) minmax(0, 1fr);
+    gap: var(--space-2);
+    align-items: start;
+  }
+  .promptLayout .promptTocRail {
+    display: block;
+    max-height: calc(var(--prompt-box-height) - var(--space-2));
+  }
+  .promptLayout .promptTocFold {
+    display: none;
+  }
 }
 .promptText {
   white-space: pre-wrap;
