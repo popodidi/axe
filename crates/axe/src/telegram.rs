@@ -1928,10 +1928,11 @@ impl Gateway {
             return Ok(());
         }
         let actor = owner_actor();
-        // The read-only views (`owner_views`) reply in HTML, for their links.
+        // The read-only views (`owner_views`) reply in HTML, for their links
+        // and bold headlines.
         let html = matches!(
             cmd,
-            "tasks" | "task" | "cost" | "goals" | "services" | "routines"
+            "status" | "tasks" | "task" | "cost" | "goals" | "services" | "routines"
         );
         let reply = {
             let mut conn = store.conn();

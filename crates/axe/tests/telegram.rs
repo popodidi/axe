@@ -1522,16 +1522,17 @@ fn owner_commands_are_handled_without_waking_the_bot() {
         .map(|p| p["text"].as_str().unwrap().to_string())
         .collect();
     assert!(
-        replies[0].contains("bot cos (p): active") && replies[0].contains("live run 1"),
+        replies[0].starts_with("<b>cos · active</b> · running: starting, "),
         "{replies:?}"
     );
     assert!(
-        replies[0].contains("\nservices:\n- feed (long-running): pending, 0 restarts")
-            && replies[0].contains("logs: axe service logs <name> --bot cos")
-            && replies[0].contains("\nschedules:\n- review: 0 9 * * 1 Asia/Taipei, next "),
+        replies[0].contains("\n\n<b>Services</b>\n• feed · pending · restart always · no exit yet")
+            && !replies[0].contains("axe service logs")
+            && replies[0].contains("\n\n<b>Schedules</b>\n• review · Mon 09:00 · next in "),
         "{}",
         replies[0]
     );
+    assert_eq!(rig.sent_to(OWNER)[0]["parse_mode"], "HTML");
     assert!(replies[1].contains("stopping the live run"));
     assert!(replies[2].starts_with("paused"));
     assert_eq!(replies[3], "resumed");
@@ -4687,19 +4688,19 @@ fn read_only_views_reply_without_waking_the_bot() {
     assert_eq!(
         text(4),
         format!(
-            "bot cos: no open goals. Propose one: <code>axe goal propose</code>\n\
-             <a href=\"{WEB}/?view=goals\">Open goals</a>"
+            "{}\n<a href=\"{WEB}/?view=goals\">Open goals</a>",
+            axe::owner_views::EMPTY_GOALS
         )
     );
     assert_eq!(
         text(5),
         format!(
-            "bot cos: no services. Declare one: <code>axe service add</code>\n\
-             <a href=\"{WEB}/?view=services&amp;q=cos\">Open services</a>"
+            "{}\n<a href=\"{WEB}/?view=services&amp;q=cos\">Open services</a>",
+            axe::owner_views::EMPTY_SERVICES
         )
     );
     assert!(
-        text(6).starts_with("bot cos: no routines. Create one: <code>axe routine save</code>"),
+        text(6).starts_with(axe::owner_views::EMPTY_ROUTINES),
         "{}",
         text(6)
     );

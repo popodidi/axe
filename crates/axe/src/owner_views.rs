@@ -5,8 +5,9 @@
 //! public URL), rendered from the same store queries as the dashboard: the
 //! task list, a task and its events, the Cost view's aggregate
 //! (`usage::cost_stats`), the goal pins' lines (`goal_board`), the bot's
-//! services and the routines it owns. `/status` is plain text. Nothing here
-//! writes.
+//! services and the routines it owns, and `/status` (state, wakes, services
+//! and schedules, times as a short Taipei clock plus how far off). Nothing
+//! here writes.
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -316,18 +317,169 @@ fn view_link(web: Option<&str>, query: &str, label: &str) -> String {
     }
 }
 
-/// `Nov 26 09:00 (in 3h)`: epoch `at` as wall time in `timezone` (UTC when
-/// it does not parse), and how far it is from `now`.
-pub fn fire_time(at: i64, timezone: &str, now: i64) -> String {
-    let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
-    let when = match tz.timestamp_opt(at, 0).single() {
-        Some(t) => t.format("%b %-d %H:%M").to_string(),
-        None => bot::ts(at),
+/// The owner's time zone: `/status` shows the bot's own times (wakes, runs)
+/// as wall time here.
+pub const OWNER_TZ: chrono_tz::Tz = chrono_tz::Asia::Taipei;
+
+/// A short wall clock for epoch `at` in `tz`: `16:50` on `now`'s day,
+/// `Thu 16:50` within six days, else `Nov 26 16:50`.
+pub fn clock(at: i64, tz: chrono_tz::Tz, now: i64) -> String {
+    let (Some(t), Some(n)) = (
+        tz.timestamp_opt(at, 0).single(),
+        tz.timestamp_opt(now, 0).single(),
+    ) else {
+        return bot::ts(at);
     };
-    if at >= now {
-        format!("{when} (in {})", crate::board::age(at - now))
+    let fmt = if t.date_naive() == n.date_naive() {
+        "%H:%M"
+    } else if (at - now).abs() < 6 * DAY {
+        "%a %H:%M"
     } else {
-        format!("{when} ({} ago)", crate::board::age(now - at))
+        "%b %-d %H:%M"
+    };
+    t.format(fmt).to_string()
+}
+
+/// `in 35m` or `2h ago`: how far epoch `at` is from `now`.
+pub fn relative(at: i64, now: i64) -> String {
+    if at >= now {
+        format!("in {}", crate::board::age(at - now))
+    } else {
+        format!("{} ago", crate::board::age(now - at))
+    }
+}
+
+/// `16:50 (in 35m)`: [`clock`] in the owner's zone and [`relative`].
+fn when(at: i64, now: i64) -> String {
+    format!("{} ({})", clock(at, OWNER_TZ, now), relative(at, now))
+}
+
+const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// A cron day-of-week field as day numbers (0 Sunday), or `None` for what
+/// it does not read: numbers 0-7, `SUN`..`SAT`, ranges and lists.
+fn weekdays(field: &str) -> Option<Vec<usize>> {
+    let day = |s: &str| -> Option<usize> {
+        let n = match s.parse::<usize>() {
+            Ok(n) if n <= 7 => n % 7,
+            Ok(_) => return None,
+            Err(_) => DAYS.iter().position(|d| d.eq_ignore_ascii_case(s))?,
+        };
+        Some(n)
+    };
+    let mut out = Vec::new();
+    for part in field.split(',') {
+        match part.split_once('-') {
+            Some((a, b)) => {
+                let (a, b) = (day(a)?, day(b)?);
+                let b = if b == 0 && a > 0 { 7 } else { b };
+                if a > b {
+                    return None;
+                }
+                out.extend((a..=b).map(|d| d % 7));
+            }
+            None => out.push(day(part)?),
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
+
+/// `cron` (five fields) in words for the common patterns: `daily 09:00`,
+/// `weekdays 09:00`, `Mon, Thu 10:00`, `every 6h`, `hourly at :15`,
+/// `every 15m`, `monthly on day 1 09:00`; `None` for anything else.
+pub fn cron_words(cron: &str) -> Option<String> {
+    let f: Vec<&str> = cron.split_whitespace().collect();
+    let [min, hour, dom, month, dow] = f[..] else {
+        return None;
+    };
+    let num = |s: &str, max: u32| s.parse::<u32>().ok().filter(|n| *n <= max);
+    let step = |s: &str| {
+        s.strip_prefix("*/")
+            .or_else(|| s.strip_prefix("0/"))
+            .and_then(|n| n.parse::<u32>().ok())
+            .filter(|n| *n > 0)
+    };
+    if month != "*" {
+        return None;
+    }
+    let all_days = dom == "*" && dow == "*";
+    // Sub-daily: every N minutes, hourly, every N hours.
+    if all_days {
+        if hour == "*" {
+            if let Some(n) = step(min) {
+                return Some(if n == 1 {
+                    "every minute".into()
+                } else {
+                    format!("every {n}m")
+                });
+            }
+            return match num(min, 59)? {
+                0 => Some("hourly".into()),
+                m => Some(format!("hourly at :{m:02}")),
+            };
+        }
+        if let Some(n) = step(hour) {
+            let m = num(min, 59)?;
+            let every = if n == 1 {
+                "hourly".into()
+            } else {
+                format!("every {n}h")
+            };
+            return Some(if m == 0 {
+                every
+            } else {
+                format!("{every} at :{m:02}")
+            });
+        }
+    }
+    // At fixed times of day.
+    let m = num(min, 59)?;
+    let hours: Vec<u32> = hour.split(',').map(|h| num(h, 23)).collect::<Option<_>>()?;
+    let times = hours
+        .iter()
+        .map(|h| format!("{h:02}:{m:02}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let days = match (dom, dow) {
+        ("*", "*") => "daily".to_string(),
+        ("*", d) => {
+            let d = weekdays(d)?;
+            match d[..] {
+                [1, 2, 3, 4, 5] => "weekdays".into(),
+                [0, 6] => "weekends".into(),
+                [0, 1, 2, 3, 4, 5, 6] => "daily".into(),
+                _ => d.iter().map(|&i| DAYS[i]).collect::<Vec<_>>().join(", "),
+            }
+        }
+        (d, "*") => format!("monthly on day {}", num(d, 31).filter(|n| *n > 0)?),
+        _ => return None,
+    };
+    Some(format!("{days} {times}"))
+}
+
+/// When a schedule fires, for an owner line: its cron in words (else the
+/// raw cron in `<code>`), with the time zone unless it is the owner's.
+pub fn schedule_words(cron: &str, timezone: &str) -> String {
+    let mut s = match cron_words(cron) {
+        Some(w) => w,
+        None => format!("<code>{}</code>", escape(cron)),
+    };
+    let tz = timezone.parse::<chrono_tz::Tz>().ok();
+    if tz != Some(OWNER_TZ) {
+        s.push(' ');
+        s.push_str(&escape(timezone));
+    }
+    s
+}
+
+/// `next in 9h`, or `due now` once `at` has passed.
+fn next_in(at: i64, now: i64) -> String {
+    if at > now {
+        format!("next in {}", crate::board::age(at - now))
+    } else {
+        "due now".into()
     }
 }
 
@@ -348,6 +500,17 @@ fn fit_blocks(head: String, blocks: Vec<String>, tail: String) -> String {
     out
 }
 
+/// The empty `/goals` reply: what a goal is, in plain words, no commands.
+pub const EMPTY_GOALS: &str = "<b>No open goals.</b> A goal is an outcome you want, with a weekly \
+     budget I work toward and report on. Tell me what you want to achieve and I'll propose one.";
+/// The empty `/services` reply.
+pub const EMPTY_SERVICES: &str = "<b>No services.</b> A service keeps a program running for this \
+     bot (a watcher, a trading loop, a local server) and restarts it if it stops. \
+     Ask me to set one up.";
+/// The empty `/routines` reply.
+pub const EMPTY_ROUTINES: &str = "<b>No routines.</b> A routine creates a task on a schedule \
+     (a weekly report, a daily check) for me to carry out. Ask me to set one up.";
+
 /// `/goals`: the open goals (proposed, active, paused) bot `name` is
 /// attached to, each laid out as its goal pin: name, status line, Next and
 /// Needs you, and the cost and attention bars against the weekly budgets.
@@ -356,10 +519,7 @@ pub fn goals(conn: &Connection, name: &str, web: Option<&str>) -> Result<String>
     let lines = goal_board::lines(conn, name, web)?;
     let link = view_link(web, "view=goals", "Open goals");
     if lines.is_empty() {
-        return Ok(format!(
-            "bot {}: no open goals. Propose one: <code>axe goal propose</code>{link}",
-            escape(name)
-        ));
+        return Ok(format!("{EMPTY_GOALS}{link}"));
     }
     let n = lines.len() as i64;
     let head = format!("<b>bot {}: {n} {}</b>", escape(name), plural(n, "goal"));
@@ -375,9 +535,9 @@ pub fn goals(conn: &Connection, name: &str, web: Option<&str>) -> Result<String>
     ))
 }
 
-/// One `/services` line: name, state, the schedule or the restart policy,
-/// then the last run or exit.
-fn service_line(svc: &crate::service::Service, now: i64) -> String {
+/// One `/services` (and `/status`) bullet: name (bold when `bold`), state,
+/// the schedule or the restart policy, then the last run or exit.
+fn service_line(svc: &crate::service::Service, now: i64, bold: bool) -> String {
     let st = &svc.status;
     let ago = |at: &Option<String>| {
         at.as_deref()
@@ -385,17 +545,18 @@ fn service_line(svc: &crate::service::Service, now: i64) -> String {
             .map(|t| crate::board::age(now - t))
     };
     let state = svc.display_state();
-    let mut parts = vec![format!("<b>{}</b>", escape(&svc.name)), escape(state)];
+    let name = if bold {
+        format!("<b>{}</b>", escape(&svc.name))
+    } else {
+        escape(&svc.name)
+    };
+    let mut parts = vec![format!("• {name}"), escape(state)];
     if !svc.enabled && state != "stopped" {
         parts.push("turned off".into());
     }
     match &svc.spec.schedule {
         Some(s) => {
-            parts.push(format!(
-                "<code>{}</code> {}",
-                escape(&s.cron),
-                escape(&s.timezone)
-            ));
+            parts.push(schedule_words(&s.cron, &s.timezone));
             parts.push(match (ago(&st.started_at), state) {
                 (Some(at), "running") => format!("running {at}"),
                 (Some(at), _) => format!(
@@ -440,14 +601,11 @@ pub fn services(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> R
         "Open services",
     );
     if list.is_empty() {
-        return Ok(format!(
-            "bot {}: no services. Declare one: <code>axe service add</code>{link}",
-            escape(name)
-        ));
+        return Ok(format!("{EMPTY_SERVICES}{link}"));
     }
     let n = list.len() as i64;
     let head = format!("<b>bot {}: {n} {}</b>", escape(name), plural(n, "service"));
-    let lines = list.iter().map(|s| service_line(s, now)).collect();
+    let lines = list.iter().map(|s| service_line(s, now, true)).collect();
     Ok(fit(
         head,
         lines,
@@ -456,8 +614,8 @@ pub fn services(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> R
 }
 
 /// `/routines`: the routines whose tasks bot `name` owns (`owner`
-/// `bot:<name>`), archived ones left out, one line each: name, cron and time
-/// zone, and the next fire or `paused`.
+/// `bot:<name>`), archived ones left out, one bullet each: name, when it
+/// fires in words, and the next fire or `paused`.
 pub fn routines(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> Result<String> {
     bot::get(conn, name)?;
     let owner = format!("bot:{name}");
@@ -468,11 +626,7 @@ pub fn routines(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> R
     list.sort_by(|a, b| a.template.name.cmp(&b.template.name));
     let link = view_link(web, "view=routines", "Open routines");
     if list.is_empty() {
-        return Ok(format!(
-            "bot {}: no routines. Create one: <code>axe routine save</code> with \"owner\": \"{}\"{link}",
-            escape(name),
-            escape(&owner)
-        ));
+        return Ok(format!("{EMPTY_ROUTINES}{link}"));
     }
     let n = list.len() as i64;
     let head = format!("<b>bot {}: {n} {}</b>", escape(name), plural(n, "routine"));
@@ -481,15 +635,14 @@ pub fn routines(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> R
         .map(|r| {
             let t = &r.template;
             let next = if r.enabled {
-                format!("next {}", fire_time(r.next_at, &t.timezone, now))
+                next_in(r.next_at, now)
             } else {
-                "paused".into()
+                "<i>paused</i>".into()
             };
             format!(
-                "<b>{}</b> · <code>{}</code> {} · {next}",
+                "• <b>{}</b> · {} · {next}",
                 escape(&t.name),
-                escape(&t.cron),
-                escape(&t.timezone)
+                schedule_words(&t.cron, &t.timezone)
             )
         })
         .collect();
@@ -500,55 +653,87 @@ pub fn routines(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> R
     ))
 }
 
-/// `/status`, plain text: the bot's state, live run, wakes, services and
-/// schedules (one line each: name, cron in its time zone, the next fire or
-/// `paused`).
+/// Characters of the live run's activity `/status` shows.
+const ACTIVITY_CAP: usize = 80;
+
+/// `/status`, HTML for a phone: a bold headline with the bot's state and
+/// what it is doing, one line of wakes and the last run (Taipei clock and
+/// how far off), then its services and its schedules (when each fires in
+/// words, the next fire; soonest first, paused last).
 pub fn status(conn: &Connection, name: &str, now: i64) -> Result<String> {
     let b = bot::get(conn, name)?;
-    let mut s = format!("bot {} ({}): {}", b.name, b.project, b.state);
-    if b.attention {
-        s.push_str(&format!(
-            " — needs attention after {} failed runs",
-            b.failures
-        ));
-    }
-    match b.live_run {
+    let doing = match b.live_run {
         Some(r) => {
             let run = bot::get_run(conn, r)?;
-            s.push_str(&format!(
-                "\nlive run {r} since {}: {}",
-                run.started_at,
-                run.current_activity.as_deref().unwrap_or("starting")
-            ));
+            let what = run
+                .current_activity
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .unwrap_or("starting");
+            let mut d = format!("running: {}", escape(&cap(what, ACTIVITY_CAP)));
+            if let Some(at) = bot::epoch_of(&run.started_at) {
+                d.push_str(&format!(", {}", crate::board::age(now - at)));
+            }
+            d
         }
-        None => s.push_str("\nno live run"),
+        None => "idle".into(),
+    };
+    let mut s = format!(
+        "<b>{} · {}</b> · {doing}",
+        escape(&b.name),
+        escape(&b.state)
+    );
+    if b.attention {
+        s.push_str(&format!(
+            "\nNeeds attention: {} failed {} in a row",
+            b.failures,
+            plural(b.failures, "run")
+        ));
     }
-    s.push_str(&format!(
-        "\nnext wake: {}\nqueued wakes: {}\nlast run ended: {}",
-        b.next_wake.as_deref().unwrap_or("-"),
-        b.queued,
-        b.last_run_end.as_deref().unwrap_or("-")
-    ));
+    let mut line = Vec::new();
+    match b.next_wake.as_deref().and_then(bot::epoch_of) {
+        Some(at) if at > now => line.push(format!("Next wake {}", when(at, now))),
+        Some(_) => line.push("Wake due now".into()),
+        None => line.push("No wakes queued".into()),
+    }
+    if b.queued > 1 {
+        line.push(format!("{} queued", b.queued));
+    }
+    line.push(match b.last_run_end.as_deref().and_then(bot::epoch_of) {
+        Some(at) => format!("last run {}", when(at, now)),
+        None => "no runs yet".into(),
+    });
+    s.push('\n');
+    s.push_str(&line.join(" · "));
+
     let services = crate::service::list(conn, Some(&b.name))?;
     if !services.is_empty() {
-        s.push_str("\nservices:");
+        s.push_str("\n\n<b>Services</b>");
         for svc in &services {
-            s.push_str(&format!("\n- {}", svc.summary(now)));
+            s.push('\n');
+            s.push_str(&service_line(svc, now, false));
         }
-        s.push_str(&format!("\nlogs: axe service logs <name> --bot {}", b.name));
     }
-    let schedules = crate::schedule::list(conn, &b.name)?;
+    let mut schedules: Vec<(Option<i64>, crate::schedule::Schedule)> =
+        crate::schedule::list(conn, &b.name)?
+            .into_iter()
+            .map(|sc| (sc.enabled.then(|| bot::epoch_of(&sc.next_at)).flatten(), sc))
+            .collect();
+    // Soonest first; paused (and unreadable) last, by name.
+    schedules.sort_by(|(a, x), (b, y)| (a.is_none(), a, &x.name).cmp(&(b.is_none(), b, &y.name)));
     if !schedules.is_empty() {
-        s.push_str("\nschedules:");
-        for sc in &schedules {
-            let next = match (sc.enabled, bot::epoch_of(&sc.next_at)) {
-                (false, _) => "paused".to_string(),
-                (true, Some(at)) => format!("next {}", fire_time(at, &sc.timezone, now)),
-                (true, None) => format!("next {}", sc.next_at),
+        s.push_str("\n\n<b>Schedules</b>");
+        for (at, sc) in &schedules {
+            let next = match at {
+                Some(at) => next_in(*at, now),
+                None if sc.enabled => "next unknown".into(),
+                None => "<i>paused</i>".into(),
             };
             s.push_str(&format!(
-                "\n- {}: {} {}, {next}",
-                sc.name, sc.cron, sc.timezone
+                "\n• {} · {} · {next}",
+                escape(&sc.name),
+                schedule_words(&sc.cron, &sc.timezone)
             ));
         }
     }
