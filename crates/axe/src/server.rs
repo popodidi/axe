@@ -1698,6 +1698,13 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             st.check_agent(|c| c.validate_agent(b.template.agent.as_deref()))?;
             let id = path.get(2).map(|id| task_id(id)).transpose()?;
             let mut conn = st.conn();
+            if let Some(r) = &b.template.repos {
+                let known = match id {
+                    Some(id) => routine::get(&conn, id)?.template.repos.unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                crate::repo::require_registered(&conn, r, &known)?;
+            }
             let id = routine::save(&mut conn, &b.who.actor(), id, &b.template, routine::now())?;
             ok(200, &routine::get(&conn, id)?)
         }
@@ -2192,6 +2199,9 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             let b: AddBody = req.json()?;
             st.check_agent(|c| c.validate_agent(b.agent.as_deref()))?;
             let mut conn = st.conn();
+            if let Some(r) = &b.repos {
+                crate::repo::require_registered(&conn, r, &[])?;
+            }
             let id = db::add_task_full(
                 &mut conn,
                 &b.who.actor(),
@@ -2231,6 +2241,10 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 remove_labels: b.remove_labels,
             };
             let mut conn = st.conn();
+            if let Some(r) = &c.repos {
+                let known = db::get_task(&conn, id)?.repos.unwrap_or_default();
+                crate::repo::require_registered(&conn, r, &known)?;
+            }
             let changed = db::set_task(&mut conn, &b.who.actor(), id, &c)?;
             ok(
                 200,
@@ -2934,9 +2948,17 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("PATCH", ["api", "bots", name]) => {
             let b: EditBody = req.json()?;
+            let mut conn = st.conn();
+            if let Some(r) = &b.edit.repos {
+                let known = bot::get(&conn, name)
+                    .ok()
+                    .and_then(|b| b.repos)
+                    .unwrap_or_default();
+                crate::repo::require_registered(&conn, r, &known)?;
+            }
             ok(
                 200,
-                &bot::edit(&mut st.conn(), &b.who.actor(), name, &b.edit, &b.why)?,
+                &bot::edit(&mut conn, &b.who.actor(), name, &b.edit, &b.why)?,
             )
         }
         ("PUT", ["api", "bots", name, "notes"]) => {

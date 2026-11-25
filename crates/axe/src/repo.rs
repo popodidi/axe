@@ -1,12 +1,15 @@
-//! The repo registry: the server's map from a repo name (as in a task's or
-//! bot's `repos`) to the Git URL its canonical clone is cloned from, so any
-//! machine running `axe workspace` or the node can clone a repo it has
-//! never seen without a `[repos.<name>] url` in its own config.
+//! The repo registry: the server's map from a repo name (as in a task's,
+//! bot's or routine's `repos`) to the Git URL its canonical clone is cloned
+//! from. It is the only source of clone URLs: any machine running
+//! `axe workspace` or the node clones a repo it has never seen from here
+//! (`worktree::clone_url`); a machine config keeps only `[repos.<name>] path`.
+//! The server refuses to store a repo name that is not registered
+//! ([`require_registered`]), so a missing registration surfaces when the repo
+//! is named, not on the first machine that needs to clone it.
 //!
-//! A local `[repos.<name>] url` still wins; `path` stays local-only
-//! (`worktree::clone_url`). URLs are checked like the config's
-//! ([`crate::config::validate_repo_url`]): never a leading `-`, never
-//! embedded credentials. Clones use each host's own Git credentials.
+//! URLs are checked by [`crate::config::validate_repo_url`]: never a leading
+//! `-`, never embedded credentials. Clones use each host's own Git
+//! credentials.
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -85,6 +88,30 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<Repo>> {
             row,
         )
         .optional()?)
+}
+
+/// Refuses `names` that are not registered, except those in `known` (what
+/// the record already held, so an edit never fails over a repo it keeps).
+pub fn require_registered(conn: &Connection, names: &[String], known: &[String]) -> Result<()> {
+    let names = db::names("repo", names)?;
+    let mut missing = Vec::new();
+    for n in &names {
+        if !known.contains(n) && get(conn, n)?.is_none() {
+            missing.push(n.clone());
+        }
+    }
+    match missing.as_slice() {
+        [] => Ok(()),
+        [one] => bail!(
+            "repo {one} is not registered: register its clone URL first with \
+             `axe repo add {one} <url>` (`axe repo ls` lists registered repos)"
+        ),
+        many => bail!(
+            "repos {} are not registered: register each clone URL first with \
+             `axe repo add <name> <url>` (`axe repo ls` lists registered repos)",
+            many.join(", ")
+        ),
+    }
 }
 
 /// Registers `name`, or replaces its URL and default branch.

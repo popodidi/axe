@@ -27,9 +27,8 @@
 //! the reason, when it is not.
 //!
 //! A repo whose canonical clone is missing is cloned first
-//! ([`worktree::ensure_clone_from`]) from `[repos.<name>] url`, else from the
-//! URL the server's repo registry holds for it (`axe repo add`, `repo.rs`),
-//! for a task or a bot alike; the run's `run_start` event lists it in
+//! ([`worktree::ensure_clone_from`]) from the URL the server's repo registry
+//! holds for it (`axe repo add`, `repo.rs`), for a task or a bot alike; the run's `run_start` event lists it in
 //! `repos_cloned`.
 //!
 //! `axe workspace` builds the same folder anywhere, through the same code in
@@ -54,7 +53,7 @@ const DOCS_MAX: usize = 200;
 /// Builds or refreshes the run workspace of `task` (no repos when it has
 /// none), with the docs and skills attached to its scopes from `store` (none when
 /// `None` or when the store cannot be read). Also returns the repos whose
-/// canonical clone was cloned first ([`worktree::ensure_clone`]). `skills`,
+/// canonical clone was cloned first ([`worktree::ensure_clone_from`]). `skills`,
 /// when set, is the only skills the folder gets (a routine's profile).
 pub fn build(
     cfg: &Config,
@@ -366,8 +365,8 @@ type Repos = Vec<(String, PathBuf)>;
 
 /// Creates `dir` and a worktree of each repo under `dir/repos/<name>` on
 /// `branch`, first cloning a missing canonical clone from its
-/// [`worktree::clone_url`] (`[repos.<name>] url`, else the server's repo
-/// registry through `store`); also returns the repos it cloned.
+/// [`worktree::clone_url`] (the server's repo registry through `store`);
+/// also returns the repos it cloned.
 fn checkout(
     cfg: &Config,
     dir: &Path,

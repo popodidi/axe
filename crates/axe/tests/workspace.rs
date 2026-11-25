@@ -135,7 +135,16 @@ impl Laptop {
         v.as_array().unwrap().len()
     }
 
+    /// Adds a task naming `repos`, registering any the server does not know
+    /// with its origin `<base>/<name>.git` first (the server refuses a task
+    /// naming an unregistered repo).
     fn task(&self, repos: &str) -> String {
+        for r in repos.split(',') {
+            if !self.axe(&["repo", "show", r]).status.success() {
+                let origin = self.base.join(format!("{r}.git"));
+                self.ok(&["repo", "add", r, origin.to_str().unwrap()]);
+            }
+        }
         self.ok(&[
             "add",
             "--project",
@@ -459,17 +468,32 @@ fn a_repo_registered_only_on_the_server_is_cloned_and_built() {
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-qm", "base"]);
     git(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+    // A retired machine-config url is ignored (and warned about), even one
+    // that would clone: only the server's registry is a source.
+    let mut cfg = std::fs::read_to_string(&l.config).unwrap();
+    cfg.push_str(&format!("[repos.three]\nurl = \"{}\"\n", origin.display()));
+    std::fs::write(&l.config, cfg).unwrap();
     let id = l.task("three");
+    l.ok(&["repo", "rm", "three"]);
 
-    // Unregistered: the gap says how to register it.
+    // Unregistered since the task named it: the gap says how to register it.
     let out = l.axe(&["workspace", &id]);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("repo three has no worktree base")
-            && err.contains("`axe repo add three <url>`"),
+            && err.contains("the server's repo registry has no clone URL for it")
+            && err.contains("`axe repo add three <url>`")
+            && !err.contains("machine's config"),
         "{err}"
     );
+    assert_eq!(
+        err.matches("`url` under [repos.three] is retired and ignored")
+            .count(),
+        1,
+        "{err}"
+    );
+    assert!(!l.base.join("ws/three").exists());
 
     l.ok(&["repo", "add", "three", origin.to_str().unwrap()]);
     let ls = l.ok(&["repo", "ls"]);

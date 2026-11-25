@@ -92,6 +92,16 @@ impl Rig {
         let out = dir.path().join("out");
         std::fs::create_dir_all(&out).unwrap();
         let srv = Server::start_with(dir.path(), &cfg, Some(TOKEN), &[], &[]);
+        // The server refuses a bot repo list naming an unregistered repo; the
+        // tests' repos have canonical clones, so these URLs are never cloned.
+        for r in ["one", "two", "three"] {
+            srv.ok(&[
+                "repo",
+                "add",
+                r,
+                &format!("https://example.invalid/{r}.git"),
+            ]);
+        }
         Rig {
             _dir: dir,
             srv,
@@ -1908,6 +1918,33 @@ fn bot_repo_list_is_set_shown_logged_and_cleared() {
         .unwrap();
     assert!(!out.status.success());
     assert_eq!(rig.bot()["repos"], json!(["one", "two"]));
+    // A repo the registry does not know is refused when named, and nothing
+    // is written; one the bot already has stays editable after `repo rm`.
+    let out = rig
+        .srv
+        .cli(&["bot", "edit", "b", "--repo", "one,ghost", "--why", "typo"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("repo ghost is not registered: register its clone URL first with `axe repo add ghost <url>`"),
+        "{err}"
+    );
+    assert_eq!(rig.bot()["repos"], json!(["one", "two"]));
+    rig.srv.ok(&["repo", "rm", "two"]);
+    rig.srv
+        .ok(&["bot", "edit", "b", "--repo", "two", "--why", "narrow"]);
+    assert_eq!(rig.bot()["repos"], json!(["two"]));
+    rig.srv.ok(&[
+        "bot",
+        "edit",
+        "b",
+        "--repo",
+        "one,two",
+        "--why",
+        "both again",
+    ]);
     rig.srv.ok(&[
         "bot",
         "edit",
@@ -1919,8 +1956,9 @@ fn bot_repo_list_is_set_shown_logged_and_cleared() {
     assert!(rig.bot()["repos"].is_null());
     let log = rig.srv.ok(&["bot", "log", "b"]);
     let repos: Vec<&str> = log.lines().filter(|l| l.contains(" repos: ")).collect();
-    assert_eq!(repos.len(), 2, "{log}");
+    assert_eq!(repos.len(), 4, "{log}");
     assert!(repos[0].contains("why: work in both"), "{log}");
+    assert!(log.contains("one,two -> two"), "{log}");
     assert!(log.contains("- -> one,two"), "{log}");
     assert!(log.contains("one,two -> -"), "{log}");
 }

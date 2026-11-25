@@ -58,7 +58,8 @@ enum Cmd {
     /// The repo registry: the Git URL each repo name is cloned from
     ///
     /// `axe workspace` and the node clone a repo missing on their
-    /// machine from it; a local `[repos.<name>] url` wins
+    /// machine from it, the only source of clone URLs. A task, bot or
+    /// routine naming an unregistered repo is refused
     Repo {
         #[command(subcommand)]
         command: RepoCmd,

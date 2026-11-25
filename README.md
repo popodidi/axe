@@ -82,17 +82,20 @@ One host, a loopback server, one task, using the built-in defaults.
    first task (`STARTER` in `crates/axe/src/config.rs`). Agents are
    `[agents.<name>]` tables (`cmd`, `resume_cmd`, `session`, `harness`,
    `bot_args`; `Agent` in `crates/axe/src/config.rs`); bots need `bot_args`.
-   Repos are `[repos.<name>]` (`path`, `url`); a clone URL can instead be
-   registered once on the server with `axe repo add <name> <url>`.
+   `[repos.<name>] path` places a repo's canonical clone on this machine;
+   clone URLs live only in the server's registry (`axe repo add <name>
+   <url>`). A `[repos.<name>] url` is retired: it is ignored and the config
+   load warns until it is removed.
 3. **Server**: `axe server`. On loopback it needs no token. It reads the
    config at start; `axe task add --agent` re-reads it for a name it does not
    know, so a new agent needs no restart (other config edits do).
-4. **A repo** (optional): a Git clone at `~/workspace/<name>` (or a clone
-   URL, from `axe repo add <name> <url>` or `[repos.<name>] url`, to clone on
-   first use) with an `origin` remote whose `origin/HEAD` is set
-   (`git remote set-head origin <branch>`; `worktree.rs`). Without it a run
-   naming the repo escalates with "has no worktree base". A project is only a
-   name: it needs no checkout.
+4. **A repo** (optional): register it once with `axe repo add <name> <url>`;
+   the server refuses a task, bot or routine naming a repo it does not know.
+   Each machine clones it to `~/workspace/<name>` on first use (or uses a
+   clone already there) with an `origin` remote whose `origin/HEAD` is set
+   (`git remote set-head origin <branch>`; `worktree.rs`). Without a clone or
+   a registered URL a run naming the repo escalates with "has no worktree
+   base". A project is only a name: it needs no checkout.
 5. **A task**: `axe task add --project <p> --title <t> [--repo <name>] --detail
    "## Outcome ..."` (add `--agent <name>` to pin one), then `axe node`
    (`--once` for one pass). Follow it with `axe task list --all` and `axe task log <id>`;
@@ -113,7 +116,10 @@ local agent, `axe skill install` writes the binary's own copy of
 A task has a project, a spec (`detail`) and a **state**, and optionally an
 `owner` (the bot or person who follows it up; its creator stays the first
 event), `repos` and free-form `labels` (`--owner`, `--repo`, `--label` on
-`axe task add` and `axe task set`; filters treat the project as a label). Once
+`axe task add` and `axe task set`; filters treat the project as a label). A
+repo must be registered (`axe repo add`) before a task, bot or routine names
+it; the server refuses an unregistered one at write time and lets an edit
+keep a repo the record already holds (`repo::require_registered`). Once
 dispatched, one agent session carries it from start to `done` and is resumed
 on every later run ([one agent per task](docs/design/one-agent-per-task.md)).
 There are no pipelines or transitions in code: the spec is the workflow, and the
@@ -266,12 +272,12 @@ When that clone is missing, the node clones it there on first use from
 its clone URL, with the host's own Git credentials (never a token in config
 or on the server), before building the worktree; concurrent first uses clone
 once, and the run's `run_start` event lists it in `repos_cloned`
-(`worktree::ensure_clone_from`). The URL is `[repos.<name>] url` when this
-machine's config sets one, else the server's repo registry
-(`worktree::clone_url`, `repo.rs`): `axe repo add <name> <url>
+(`worktree::ensure_clone_from`). The URL comes only from the server's repo
+registry (`worktree::clone_url`, `repo.rs`): `axe repo add <name> <url>
 [--default-branch B]`, `axe repo ls`, `axe repo show <name>`, `axe repo rm
 <name>` (writes need the token; a URL with embedded credentials or a leading
-`-` is refused, as in config). `path` stays local. A missing clone with no URL
+`-` is refused). `path` stays local; a retired `[repos.<name>] url` in a
+machine config is never read, and `Config::load` warns once while one is set. A missing clone with no URL
 stops the run with that reason, pointing at `axe repo add`; when the registry
 cannot be read, the reason says so.
 Worktrees are never reset. A task an older node started in
@@ -485,9 +491,9 @@ the machine it runs on, the folder a run of that task or bot gets, through
 the node's own builder (`run_workspace.rs`, `Mode::Local`): the same
 `AGENTS.md`, `skills/`, `docs/index.md`, skill links and `repos/<r>`
 worktrees of this machine's clones (`[repos.<name>] path`, else
-`<workspace_root>/<name>`, cloned on first use from the repo's clone URL:
-`[repos.<name>] url`, else the server's repo registry, so a machine with no
-`[repos]` entries works for any repo registered with `axe repo add`). The
+`<workspace_root>/<name>`, cloned on first use from the server's repo
+registry, so a machine with no `[repos]` entries works for any repo
+registered with `axe repo add`). The
 default folder is `~/axe/task-<id>` or `~/axe/bot-<name>`. It claims nothing
 and records no run, and refuses an `in_progress` task: hold it first. A
 missing task branch starts from `origin` when a run pushed it; worktrees are

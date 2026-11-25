@@ -101,6 +101,7 @@ harness = "claude-code"
         )
         .unwrap();
         let srv = Server::start_with(&base, &config, Some(TOKEN), &[], &[]);
+        srv.ok(&["repo", "add", "one", "https://example.invalid/one.git"]);
         Fixture {
             _dir: dir,
             base,
@@ -286,4 +287,23 @@ fn stopping_the_dispatcher_during_a_pre_check_returns_the_task_to_pending() {
             .contains("pre-check dispatcher stopped")),
         "{events:?}"
     );
+}
+
+#[test]
+fn routine_naming_an_unregistered_repo_is_refused_when_saved() {
+    let f = Fixture::new();
+    let t = json!({"name":"r", "project":"proj", "title":"t", "detail":"Outcome: x",
+        "cron":"0 0 1 1 *", "repos":["one","ghost"]});
+    let file = f.base.join("routine.json");
+    std::fs::write(&file, t.to_string()).unwrap();
+    let out = f
+        .srv
+        .run(&["routine", "save", "--file", file.to_str().unwrap()]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("repo ghost is not registered") && err.contains("`axe repo add ghost <url>`"),
+        "{err}"
+    );
+    assert_eq!(f.srv.get("/api/routines"), json!([]));
 }

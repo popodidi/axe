@@ -311,27 +311,37 @@ fn args(c: &[String]) -> Vec<&str> {
 }
 
 #[test]
-fn repo_url_is_optional_and_never_embeds_credentials() {
+fn retired_repo_url_loads_but_is_never_used_and_warns() {
     let cfg = Config::parse(
-        "[repos.a]\nurl = \"https://github.com/o/a.git\"\n[repos.b]\npath = \"/x/b\"\n[repos.c]\nurl = \"git@github.com:o/c.git\"",
+        "[repos.a]\nurl = \"https://github.com/o/a.git\"\n[repos.b]\npath = \"/x/b\"\n[repos.c]\nurl = \"git@github.com:o/c.git\"\npath = \"/x/c\"",
     )
     .unwrap();
-    assert_eq!(cfg.repo_url("a"), Some("https://github.com/o/a.git"));
-    assert_eq!(cfg.repo_url("b"), None);
-    assert_eq!(cfg.repo_url("c"), Some("git@github.com:o/c.git"));
-    assert_eq!(cfg.repo_url("unlisted"), None);
-    let back = Config::parse(&toml::to_string(&cfg).unwrap()).unwrap();
-    assert_eq!(back.repos, cfg.repos);
-    for bad in [
-        "https://user:ghp_secret@github.com/o/a.git",
-        "",
-        "--upload-pack=x",
-    ] {
-        let err = Config::parse(&format!("[repos.a]\nurl = \"{bad}\"")).unwrap_err();
-        assert!(format!("{err:#}").contains("repos.a"), "{bad}: {err:#}");
-    }
-    // A user name alone (no secret) is an ordinary remote.
-    Config::parse("[repos.a]\nurl = \"ssh://git@github.com/o/a.git\"").unwrap();
+    // `path` stays machine-local; a `url` only marks the config for the warning.
+    assert_eq!(cfg.repo_path("b"), std::path::PathBuf::from("/x/b"));
+    assert_eq!(cfg.repo_path("c"), std::path::PathBuf::from("/x/c"));
+    assert_eq!(cfg.retired_repo_urls(), vec!["a", "c"]);
+    let w = cfg
+        .retired_repo_url_warning(std::path::Path::new("/h/config.toml"))
+        .unwrap();
+    assert!(w.contains("/h/config.toml"), "{w}");
+    assert!(w.contains("[repos.a], [repos.c]"), "{w}");
+    assert!(w.contains("retired and ignored"), "{w}");
+    assert!(w.contains("`axe repo add <name> <url>`"), "{w}");
+    // Nothing to warn about without a url.
+    let clean = Config::parse("[repos.b]\npath = \"/x/b\"").unwrap();
+    assert!(clean.retired_repo_urls().is_empty());
+    assert!(clean
+        .retired_repo_url_warning(std::path::Path::new("/h/config.toml"))
+        .is_none());
+    // A written config drops the retired key.
+    let out = toml::to_string(&cfg).unwrap();
+    assert!(!out.contains("url"), "{out}");
+    assert_eq!(
+        Config::parse(&out).unwrap().repos["c"].path.as_deref(),
+        Some("/x/c")
+    );
+    // An old config with any url still loads, credentials or not: it is never used.
+    Config::parse("[repos.a]\nurl = \"https://user:ghp_secret@github.com/o/a.git\"").unwrap();
 }
 
 #[test]

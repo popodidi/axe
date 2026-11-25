@@ -155,7 +155,8 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktrees: Option<Worktrees>,
     /// `[repos.<name>]`: where each repo a task can name has its canonical
-    /// clone; a repo not listed is `<workspace_root>/<name>`.
+    /// clone on this machine; a repo not listed is `<workspace_root>/<name>`.
+    /// Clone URLs come only from the server's repo registry (`axe repo add`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub repos: BTreeMap<String, Repo>,
     /// Telegram gateway (server only); omitted means disabled.
@@ -817,32 +818,22 @@ impl Default for Worktrees {
     }
 }
 
-/// `[repos.<name>]`: one repo a task can work in.
+/// `[repos.<name>]`: where one repo's canonical clone lives on this machine.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Repo {
     /// Its canonical clone; omitted means `<workspace_root>/<name>`.
     pub path: Option<String>,
-    /// Where to clone it from when the canonical clone is missing on first
-    /// use (`worktree::ensure_clone`), with the host's own Git credentials;
-    /// omitted means the server's repo registry (`axe repo add`, `repo.rs`)
-    /// is asked. Never embeds a password.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Retired: clone URLs come only from the server's repo registry
+    /// (`axe repo add`, `repo.rs`). Still accepted so an old config loads,
+    /// but never read for cloning; [`Config::load`] warns once while any is
+    /// set ([`Config::retired_repo_urls`]).
+    #[serde(default, skip_serializing)]
     pub url: Option<String>,
 }
 
-impl Repo {
-    fn validate(&self) -> Result<()> {
-        match self.url.as_deref() {
-            Some(url) => validate_repo_url(url),
-            None => Ok(()),
-        }
-    }
-}
-
-/// A repo clone URL, from `[repos.<name>] url` or the server's repo registry
-/// (`repo.rs`): a Git remote that cannot be read as an option and embeds no
-/// credentials.
+/// A repo clone URL from the server's repo registry (`repo.rs`): a Git
+/// remote that cannot be read as an option and embeds no credentials.
 pub fn validate_repo_url(url: &str) -> Result<()> {
     if url.trim().is_empty() || url.starts_with('-') {
         bail!("url must be a Git remote URL");
@@ -1151,11 +1142,42 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Config::parse(&s).with_context(|| format!("config {}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+        let cfg = match std::fs::read_to_string(path) {
+            Ok(s) => Config::parse(&s).with_context(|| format!("config {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        if let Some(w) = cfg.retired_repo_url_warning(path) {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("{w}"));
         }
+        Ok(cfg)
+    }
+
+    /// The repos whose retired `[repos.<name>] url` is still set.
+    pub fn retired_repo_urls(&self) -> Vec<&str> {
+        self.repos
+            .iter()
+            .filter(|(_, r)| r.url.is_some())
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+
+    /// The warning [`Config::load`] prints once per process while a retired
+    /// `[repos.<name>] url` is set; `None` when there is none.
+    pub fn retired_repo_url_warning(&self, path: &Path) -> Option<String> {
+        let names = self.retired_repo_urls();
+        if names.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "axe: warning: {}: `url` under [repos.{}] is retired and ignored; clone URLs \
+             come only from the server's repo registry. Register each repo with \
+             `axe repo add <name> <url>` (`axe repo ls` lists them) and delete the `url` \
+             lines; `path` stays",
+            path.display(),
+            names.join("], [repos.")
+        ))
     }
 
     pub fn parse(s: &str) -> Result<Config> {
@@ -1192,9 +1214,6 @@ impl Config {
             bail!("poll_seconds must be >= 1");
         }
         self.services.validate()?;
-        for (name, r) in &self.repos {
-            r.validate().with_context(|| format!("repos.{name}"))?;
-        }
         for (name, a) in &self.agents {
             if a.resume_cmd.as_ref().is_some_and(|c| c.is_empty()) {
                 bail!("agents.{name}.resume_cmd is empty");
@@ -1309,10 +1328,6 @@ impl Config {
             Some(p) => expand_tilde(p),
             None => self.workspace_root().join(name),
         }
-    }
-    /// `[repos.<name>] url`: where a missing canonical clone is cloned from.
-    pub fn repo_url(&self, name: &str) -> Option<&str> {
-        self.repos.get(name).and_then(|r| r.url.as_deref())
     }
     /// Parent of task run workspaces (`[worktrees] run_root`).
     pub fn run_root(&self) -> PathBuf {
@@ -1460,7 +1475,8 @@ pub const STARTER: &str = r#"# axe config: `axe config` prints it resolved; ever
 # file; restart `axe server` after other edits.
 
 # Tasks without --repo run in <workspace_root>/<project>; repos default to
-# <workspace_root>/<name>.
+# <workspace_root>/<name> and are cloned there on first use from the URL
+# registered on the server (`axe repo add <name> <url>`).
 workspace_root = "~/workspace"
 
 # A stub agent: no model. It notes where it ran and marks its task done.

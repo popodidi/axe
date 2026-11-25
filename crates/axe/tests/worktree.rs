@@ -189,7 +189,7 @@ fn a_task_left_in_an_old_project_worktree_resumes_there() {
 }
 
 #[test]
-fn clone_url_resolution_order_and_gaps() {
+fn clone_url_comes_only_from_the_registry_and_names_the_gap() {
     use axe::worktree::{clone_url, repo_readiness_with, CloneUrl};
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
@@ -216,35 +216,42 @@ url = "https://example.com/local.git"
             _ => None,
         })
     };
-    // Local url wins, without asking the server.
+    // A retired config url is never used: the server's URL is.
     assert_eq!(
         clone_url(&cfg, "local", &server),
-        CloneUrl::Url("https://example.com/local.git".into())
+        CloneUrl::Url("https://server.example/local.git".into())
     );
-    assert_eq!(asked.get(), 0);
+    assert_eq!(asked.get(), 1);
     // An existing canonical clone needs no URL and asks nothing.
     assert_eq!(clone_url(&cfg, "here", &server), CloneUrl::None);
-    assert_eq!(asked.get(), 0);
-    // Else the server's.
+    assert_eq!(asked.get(), 1);
     assert_eq!(
         clone_url(&cfg, "remote", &server),
         CloneUrl::Url("https://server.example/remote.git".into())
     );
-    assert_eq!(asked.get(), 1);
-    // A registry URL is checked like a config one.
+    assert_eq!(asked.get(), 2);
+    // A registry URL with credentials is refused.
     assert!(matches!(
         clone_url(&cfg, "bad", &server),
         CloneUrl::Unknown(_)
     ));
-    // Neither: the gap names `axe repo add`.
+    // Not registered: the gap names only `axe repo add`.
     let none = clone_url(&cfg, "ghost", &server);
     assert_eq!(none, CloneUrl::None);
     let gap = repo_readiness_with(&cfg, "ghost", &none).unwrap_err();
     assert!(
         gap.starts_with("repo ghost has no worktree base: ")
-            && gap.contains("register one with `axe repo add ghost <url>`"),
+            && gap.contains("the server's repo registry has no clone URL for it: register one with `axe repo add ghost <url>`")
+            && !gap.contains("[repos.")
+            && !gap.contains("config"),
         "{gap}"
     );
+    // A retired config url does not fill the gap either.
+    let local = clone_url(&cfg, "local", &|_| Ok(None));
+    assert_eq!(local, CloneUrl::None);
+    assert!(repo_readiness_with(&cfg, "local", &local)
+        .unwrap_err()
+        .contains("`axe repo add local <url>`"));
     // An unreachable server: the gap names that cause.
     let down = |_: &str| -> anyhow::Result<Option<String>> {
         anyhow::bail!("cannot reach axe server at http://127.0.0.1:9: connection refused")
@@ -252,7 +259,7 @@ url = "https://example.com/local.git"
     let unknown = clone_url(&cfg, "ghost", &down);
     let gap = repo_readiness_with(&cfg, "ghost", &unknown).unwrap_err();
     assert!(
-        gap.contains("the server's repo registry could not be read: cannot reach axe server"),
+        gap.contains("the server's repo registry could not be read for its clone URL: cannot reach axe server"),
         "{gap}"
     );
 }

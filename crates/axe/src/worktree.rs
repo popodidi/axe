@@ -29,11 +29,12 @@ pub struct Ready {
 /// ([`clone_url`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloneUrl {
-    /// `[repos.<name>] url`, else the server's repo registry.
+    /// The server's repo registry URL.
     Url(String),
-    /// Neither has one, or the canonical clone exists and none was needed.
+    /// The repo is not registered, or the canonical clone exists and none
+    /// was needed.
     None,
-    /// No `[repos.<name>] url`, and the registry could not be read: why.
+    /// The registry could not be read: why.
     Unknown(String),
 }
 
@@ -46,17 +47,15 @@ impl CloneUrl {
     }
 }
 
-/// The clone URL of repo `name`: `[repos.<name>] url` wins; else, only when
-/// the canonical clone is missing, `registry` (the server's repo registry,
-/// `repo.rs`) is asked. A registry URL is checked like a config one.
+/// The clone URL of repo `name`: only when the canonical clone is missing,
+/// `registry` (the server's repo registry, `repo.rs`) is asked; it is the
+/// only source (a machine config's retired `[repos.<name>] url` is never
+/// read). The URL is checked by [`crate::config::validate_repo_url`].
 pub fn clone_url(
     cfg: &Config,
     name: &str,
     registry: &dyn Fn(&str) -> Result<Option<String>>,
 ) -> CloneUrl {
-    if let Some(u) = cfg.repo_url(name) {
-        return CloneUrl::Url(u.to_string());
-    }
     if std::fs::symlink_metadata(cfg.repo_path(name)).is_ok() {
         return CloneUrl::None;
     }
@@ -72,8 +71,7 @@ pub fn clone_url(
 
 /// Checks that repo `name` has a canonical clone with a known default branch:
 /// `[repos.<name>] path` (default `<workspace_root>/<name>`). The error names
-/// the gap. Only the local config's url counts here; see
-/// [`repo_readiness_with`].
+/// the gap; the registry is not asked here, see [`repo_readiness_with`].
 pub fn repo_readiness(cfg: &Config, name: &str) -> Result<Ready, String> {
     repo_readiness_with(cfg, name, &clone_url(cfg, name, &|_| Ok(None)))
 }
@@ -88,27 +86,21 @@ pub fn repo_readiness_with(cfg: &Config, name: &str, url: &CloneUrl) -> Result<R
             CloneUrl::Url(_) => {}
             CloneUrl::None => {
                 return Err(gap(format!(
-                    "{} does not exist and no clone URL is known: register one with \
-                     `axe repo add {name} <url>` (or set [repos.{name}] url in this \
-                     machine's config)",
+                    "{} does not exist and the server's repo registry has no clone URL \
+                     for it: register one with `axe repo add {name} <url>`",
                     canonical.display()
                 )))
             }
             CloneUrl::Unknown(why) => {
                 return Err(gap(format!(
-                    "{} does not exist, [repos.{name}] has no url, and the server's repo \
-                     registry could not be read: {why}",
+                    "{} does not exist and the server's repo registry could not be read \
+                     for its clone URL: {why}",
                     canonical.display()
                 )))
             }
         }
     }
     check(canonical, gap)
-}
-
-/// [`ensure_clone_from`] with `[repos.<name>] url` only.
-pub fn ensure_clone(cfg: &Config, name: &str) -> Result<bool> {
-    ensure_clone_from(cfg, name, cfg.repo_url(name))
 }
 
 /// Clones repo `name` from `url` (its [`clone_url`]) into its canonical path

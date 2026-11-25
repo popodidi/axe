@@ -42,6 +42,14 @@ fn ids(srv: &Server, args: &[&str]) -> Vec<i64> {
 fn owner_repos_and_labels_round_trip_through_cli_and_api() {
     let dir = tempfile::tempdir().unwrap();
     let srv = Server::start(dir.path());
+    for r in ["one", "two"] {
+        srv.ok(&[
+            "repo",
+            "add",
+            r,
+            &format!("https://example.invalid/{r}.git"),
+        ]);
+    }
     let a = srv.ok(&[
         "add",
         "--project",
@@ -267,24 +275,45 @@ path = "{two}"
         self.run_with(|_| {}, tasks)
     }
 
-    /// [`Fixture::run`] after `setup` (e.g. docs to attach) on the server.
+    /// [`Fixture::run`] after `setup` (e.g. docs to attach, repos to
+    /// register) on the server.
     fn run_with(&self, setup: impl FnOnce(&Server), tasks: &[&[&str]]) -> (Server, Vec<String>) {
-        let base = self.base();
-        let srv = Server::start_with(&base, &self.config, Some(TOKEN), &[], &[]);
+        let srv = Server::start_with(&self.base(), &self.config, Some(TOKEN), &[], &[]);
         setup(&srv);
+        let ids = self.add(&srv, tasks);
+        self.dispatch(&srv, tasks.len());
+        (srv, ids)
+    }
+
+    /// Adds tasks through the CLI. A repo they name that `setup` did not
+    /// register is registered first with its origin `<base>/<name>.git`, as
+    /// the server refuses a task naming an unregistered repo.
+    fn add(&self, srv: &Server, tasks: &[&[&str]]) -> Vec<String> {
         let mut ids = Vec::new();
         for args in tasks {
+            for w in args.windows(2).filter(|w| w[0] == "--repo") {
+                for r in w[1].split(',') {
+                    if !srv.run(&["repo", "show", r]).status.success() {
+                        let origin = self.base().join(format!("{r}.git"));
+                        srv.ok(&["repo", "add", r, origin.to_str().unwrap()]);
+                    }
+                }
+            }
             let mut a = vec!["add", "--title", "t", "--detail", "Outcome: x"];
             a.extend_from_slice(args);
             ids.push(srv.ok(&a).trim().to_string());
         }
-        let record = base.join("record");
+        ids
+    }
+
+    /// Runs `n` node passes.
+    fn dispatch(&self, srv: &Server, n: usize) {
+        let record = self.base().join("record");
         let env = [("RECORD", record.to_str().unwrap())];
-        for _ in tasks {
+        for _ in 0..n {
             let out = srv.dispatcher(&["--once"], &env).wait();
             assert!(out.status.success(), "{out:?}");
         }
-        (srv, ids)
     }
 
     fn record(&self, id: &str) -> String {
@@ -566,17 +595,74 @@ fn task_without_repos_runs_in_a_run_workspace_with_or_without_a_project_clone() 
 }
 
 #[test]
-fn missing_repo_escalates_the_claimed_task() {
+fn unregistered_repo_is_refused_when_named() {
+    let f = Fixture::new(&["proj", "one"]);
+    let srv = Server::start_with(&f.base(), &f.config, Some(TOKEN), &[], &[]);
+    let add = |args: &[&str]| {
+        let mut a = vec!["add", "--project", "proj", "--title", "t"];
+        a.extend_from_slice(args);
+        srv.run(&a)
+    };
+    // A canonical clone on this machine is not a registration.
+    for repos in ["ghost", "one", "ghost,one"] {
+        let out = add(&["--repo", repos]);
+        assert!(!out.status.success(), "{repos}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("not registered"), "{repos}: {err}");
+    }
+    let err = String::from_utf8_lossy(&add(&["--repo", "ghost"]).stderr).into_owned();
+    assert!(
+        err.contains("repo ghost is not registered: register its clone URL first with `axe repo add ghost <url>`"),
+        "{err}"
+    );
+    let err = String::from_utf8_lossy(&add(&["--repo", "one,ghost"]).stderr).into_owned();
+    assert!(err.contains("repos one, ghost are not registered"), "{err}");
+    // Through the API too, with a 400 and nothing written.
+    let r = ureq::post(&format!("{}/api/tasks", srv.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .send_json(json!({"project":"proj","title":"c","repos":["ghost"]}));
+    match r {
+        Err(ureq::Error::Status(400, resp)) => {
+            let body = resp.into_string().unwrap();
+            assert!(body.contains("axe repo add ghost <url>"), "{body}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(ids(&srv, &["--all"]), Vec::<i64>::new());
+
+    // Registered, it is accepted; `set` refuses a newly named unregistered
+    // repo but keeps one the task already has after its registration is gone.
+    srv.ok(&["repo", "add", "one", "https://example.invalid/one.git"]);
+    let id = srv.ok(&["add", "--project", "proj", "--title", "t", "--repo", "one"]);
+    let id = id.trim();
+    let out = srv.run(&["set", id, "--repo", "one,ghost"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("repo ghost is not registered"),
+        "{out:?}"
+    );
+    assert_eq!(show(&srv, id)["repos"], json!(["one"]));
+    srv.ok(&["repo", "rm", "one"]);
+    srv.ok(&["set", id, "--repo", "one", "--label", "kept"]);
+    assert_eq!(show(&srv, id)["repos"], json!(["one"]));
+}
+
+#[test]
+fn repo_unregistered_after_the_task_was_named_escalates_the_claimed_task() {
     let f = Fixture::new(&["proj"]);
-    let (srv, ids) = f.run(&[&["--project", "proj", "--repo", "ghost"]]);
+    let srv = Server::start_with(&f.base(), &f.config, Some(TOKEN), &[], &[]);
+    let ids = f.add(&srv, &[&["--project", "proj", "--repo", "ghost"]]);
+    srv.ok(&["repo", "rm", "ghost"]);
+    f.dispatch(&srv, 1);
     let t = show(&srv, &ids[0]);
     assert_eq!(t["state"], "escalated", "{t}");
     let log = srv.ok(&["log", &ids[0], "--full"]);
     assert!(log.contains("repo ghost has no worktree base"), "{log}");
     assert!(
-        log.contains("does not exist and no clone URL is known: register one with `axe repo add ghost <url>`"),
+        log.contains("does not exist and the server's repo registry has no clone URL for it: register one with `axe repo add ghost <url>`"),
         "{log}"
     );
+    assert!(!log.contains("machine's config"), "{log}");
 }
 
 #[test]
@@ -601,15 +687,15 @@ fn missing_clone_registered_on_the_server_is_cloned_by_the_dispatcher() {
 }
 
 #[test]
-fn local_url_wins_over_the_server_registry() {
+fn retired_config_url_is_never_used_to_clone() {
     let f = Fixture::new(&["proj"]);
     let origin = bare_origin(&f.base(), "seven");
-    f.append_config(&format!("[repos.seven]\nurl = \"{}\"\n", origin.display()));
-    // A registry URL that cannot be cloned: using it would fail the run.
+    // A retired config url that cannot be cloned: using it would fail the run.
     let nowhere = f.base().join("nowhere.git");
+    f.append_config(&format!("[repos.seven]\nurl = \"{}\"\n", nowhere.display()));
     let (srv, ids) = f.run_with(
         |srv| {
-            srv.ok(&["repo", "add", "seven", nowhere.to_str().unwrap()]);
+            srv.ok(&["repo", "add", "seven", origin.to_str().unwrap()]);
         },
         &[&["--project", "proj", "--repo", "seven"]],
     );
@@ -658,10 +744,14 @@ impl Fixture {
 fn missing_clone_with_url_is_cloned_then_worktree_built() {
     let f = Fixture::new(&["proj"]);
     let origin = bare_origin(&f.base(), "three");
-    f.append_config(&format!("[repos.three]\nurl = \"{}\"\n", origin.display()));
     let canonical = f.base().join("ws/three");
     assert!(!canonical.exists());
-    let (srv, ids) = f.run(&[&["--project", "proj", "--repo", "three"]]);
+    let (srv, ids) = f.run_with(
+        |srv| {
+            srv.ok(&["repo", "add", "three", origin.to_str().unwrap()]);
+        },
+        &[&["--project", "proj", "--repo", "three"]],
+    );
     assert_eq!(show(&srv, &ids[0])["state"], "done");
     // A canonical clone with its default branch, like a hand-made one.
     assert_eq!(
@@ -692,15 +782,17 @@ fn missing_clone_with_url_is_cloned_then_worktree_built() {
 fn existing_clone_with_url_is_left_untouched() {
     let f = Fixture::new(&["proj", "one"]);
     // A url that cannot be cloned: any clone attempt would fail the run.
-    f.append_config(&format!(
-        "[repos.one]\nurl = \"{}\"\n",
-        f.base().join("nowhere.git").display()
-    ));
+    let nowhere = f.base().join("nowhere.git");
     let canonical = f.base().join("ws/one");
     let marker = canonical.join("local-only.txt");
     std::fs::write(&marker, "keep\n").unwrap();
     let head = git(&canonical, &["rev-parse", "HEAD"]);
-    let (srv, ids) = f.run(&[&["--project", "proj", "--repo", "one"]]);
+    let (srv, ids) = f.run_with(
+        |srv| {
+            srv.ok(&["repo", "add", "one", nowhere.to_str().unwrap()]);
+        },
+        &[&["--project", "proj", "--repo", "one"]],
+    );
     assert_eq!(show(&srv, &ids[0])["state"], "done");
     assert_eq!(git(&canonical, &["rev-parse", "HEAD"]), head);
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "keep\n");
@@ -711,11 +803,13 @@ fn existing_clone_with_url_is_left_untouched() {
 #[test]
 fn failed_clone_escalates_and_leaves_no_partial_clone() {
     let f = Fixture::new(&["proj"]);
-    f.append_config(&format!(
-        "[repos.four]\nurl = \"{}\"\n",
-        f.base().join("nowhere.git").display()
-    ));
-    let (srv, ids) = f.run(&[&["--project", "proj", "--repo", "four"]]);
+    let nowhere = f.base().join("nowhere.git");
+    let (srv, ids) = f.run_with(
+        |srv| {
+            srv.ok(&["repo", "add", "four", nowhere.to_str().unwrap()]);
+        },
+        &[&["--project", "proj", "--repo", "four"]],
+    );
     assert_eq!(show(&srv, &ids[0])["state"], "escalated");
     let log = srv.ok(&["log", &ids[0], "--full"]);
     assert!(log.contains("clone repo four from"), "{log}");
@@ -735,18 +829,16 @@ fn concurrent_first_uses_clone_once() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let origin = bare_origin(&base, "five");
+    let origin = origin.to_str().unwrap();
     let cfg = axe::config::Config::parse(&format!(
         r#"
 workspace_root = "{ws}"
 log_dir = "{logs}"
 [agents.a]
 cmd = ["true"]
-[repos.five]
-url = "{origin}"
 "#,
         ws = base.join("ws").display(),
         logs = base.join("logs").display(),
-        origin = origin.display(),
     ))
     .unwrap();
     let barrier = std::sync::Barrier::new(4);
@@ -755,7 +847,7 @@ url = "{origin}"
             .map(|_| {
                 s.spawn(|| {
                     barrier.wait();
-                    axe::worktree::ensure_clone(&cfg, "five").unwrap()
+                    axe::worktree::ensure_clone_from(&cfg, "five", Some(origin)).unwrap()
                 })
             })
             .collect();
@@ -764,7 +856,7 @@ url = "{origin}"
     assert_eq!(cloned.iter().filter(|c| **c).count(), 1, "{cloned:?}");
     // Every caller finds the clone ready for worktrees.
     axe::worktree::repo_readiness(&cfg, "five").unwrap();
-    assert!(!axe::worktree::ensure_clone(&cfg, "five").unwrap());
+    assert!(!axe::worktree::ensure_clone_from(&cfg, "five", Some(origin)).unwrap());
 }
 
 /// Every path under `dir` outside `repos/`, sorted, a link with its target
