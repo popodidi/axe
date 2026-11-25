@@ -27,7 +27,7 @@
 //! - `[housekeeping.orphan_caches]`: cache-root entries no task path claims,
 //!   once unused for a while.
 //!
-//! Runs as a tick inside `axe dispatch` (`[dispatcher] housekeep`), or once
+//! Runs as a tick inside `axe node` (`[dispatcher] housekeep`), or once
 //! with `axe housekeeping --dry-run`. Each decision is one JSON line on stdout.
 
 use std::cell::RefCell;
@@ -1596,7 +1596,7 @@ impl Keeper {
         let minutes = (now - since) / 60;
         let note = format!(
             "Housekeeping: task admission has been paused on disk for about {minutes} min. \
-             Short retention and cache trim are already running; see the axe dispatch journal."
+             Short retention and cache trim are already running; see the axe node journal."
         );
         let _: Value = self.client.send(
             "POST",

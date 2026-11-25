@@ -193,7 +193,7 @@ pub struct Config {
     pub services: Services,
 }
 
-/// `[services]`: how `axe dispatch` supervises the services bots declare
+/// `[services]`: how `axe node` supervises the services bots declare
 /// (`axe service`). Every field has a default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -431,7 +431,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatcherSection {
-    /// Housekeeping tick inside the node; `axe dispatch --housekeep`
+    /// Housekeeping tick inside the node; `axe node --housekeep`
     /// overrides it.
     #[serde(default)]
     pub housekeep: Housekeep,
@@ -1457,7 +1457,7 @@ workspace_root = "~/workspace"
 
 # A stub agent: no model. It notes where it ran and marks its task done.
 #   axe task add --project demo --title "first task" --agent stub
-#   axe dispatch --once
+#   axe node --once
 # The built-in `claude` agent (unpinned tasks) needs the Claude Code CLI
 # installed and logged in on the node host.
 [agents.stub]
