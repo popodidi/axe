@@ -1,6 +1,6 @@
-@value bp-phone, bp-list-narrow, bp-list-medium from "../../app/styles/breakpoints.module.css";
+@value bp-list-narrow, bp-list-medium from "../../app/styles/breakpoints.module.css";
 
-/* Bots: a list like Routines, and a full-width detail page with tabs. */
+/* Bots: a list like Routines; a bot opens in the side pane with tabs. */
 .stack {
   display: grid;
   gap: var(--section-gap);
@@ -40,88 +40,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Paused is a label, attention uses the escalated state colors. */
-.status {
-  display: inline-block;
-  padding: var(--pill-padding);
-  border-radius: var(--radius-xs);
-  font-size: var(--text-caption);
-  line-height: var(--lh-caption);
-  font-weight: var(--weight-medium);
-  color: var(--state-done-fg);
-  background: var(--state-done-bg);
-  white-space: nowrap;
-}
-
-.status[data-status="paused"] {
-  color: var(--state-blocked-fg);
-  background: var(--state-blocked-bg);
-}
-
-.status[data-status="attention"] {
-  color: var(--state-escalated-fg);
-  background: var(--state-escalated-bg);
-}
-
-.header {
-  display: grid;
-  gap: var(--space-1);
-}
-
-.top {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.id {
-  font-family: var(--font-mono);
-  font-size: var(--text-caption);
-  color: var(--text-tertiary);
-}
-
-.back {
-  margin-left: auto;
-}
-
-.title {
-  font-size: var(--text-h2);
-  line-height: var(--lh-h2);
-}
-
-.facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--space-8)), 1fr));
-  gap: var(--space-snug) var(--space-2);
-  padding: var(--space-snug) var(--space-2);
-  background: var(--surface-2);
-  border-radius: var(--radius-md);
-}
-
-.facts dt {
-  font-size: var(--text-caption);
-  line-height: var(--lh-caption);
-  color: var(--text-tertiary);
-}
-
-.facts dd {
-  margin: 0;
-  font-size: var(--text-control);
-  line-height: var(--lh-control);
-  overflow-wrap: anywhere;
-}
-
-.block {
-  display: grid;
-  gap: var(--space-1);
-}
-
-.blockTitle {
-  font-size: var(--text-h3);
-  line-height: var(--lh-h3);
 }
 
 .note {
@@ -264,11 +182,5 @@
 @container bp-list-narrow {
   .optional {
     display: none;
-  }
-}
-
-@media bp-phone {
-  .facts {
-    grid-template-columns: minmax(0, 1fr);
   }
 }

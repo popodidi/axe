@@ -58,7 +58,7 @@ test("closing content is inert and unreachable by Tab during its exit", async ({
   await expect(page.locator(`${detail} h2[tabindex="-1"]`)).toBeVisible();
   await expect(pane).not.toHaveAttribute("data-phase", /.+/);
   await page.clock.pauseAt(new Date());
-  await page.getByRole("button", { name: /^Back/ }).click();
+  await page.getByRole("button", { name: /^Close Esc/ }).click();
   // Freeze the exit timer so the inert assertion cannot miss its 275ms window.
   await expect(pane).toHaveAttribute("inert", "");
   await expect(rowButton(page, 3)).toBeFocused();
@@ -282,7 +282,7 @@ test("phone: detail replaces the list and Back restores the invoking row", async
   await page.keyboard.press("Enter");
   await expect(page.locator(`${detail} h2[tabindex="-1"]`)).toBeFocused();
   await expect(page.locator('section[aria-label="Task workspace"]')).toBeHidden();
-  await page.getByRole("button", { name: /^Back/ }).click();
+  await page.getByRole("button", { name: /^Close Esc/ }).click();
   await expect(rowButton(page, 4)).toBeFocused();
 });
 

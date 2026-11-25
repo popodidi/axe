@@ -167,7 +167,7 @@ test("a saved width stays within bounds when the viewport changes", async ({
     await expect.poll(() => width(page, detail)).toBe(max);
     expect(await width(page, list)).toBeGreaterThanOrEqual(224);
     await noPageOverflow(page);
-    await expect(page.getByRole("button", { name: /Back/ })).toBeInViewport();
+    await expect(page.getByRole("button", { name: /^Close Esc/ })).toBeInViewport();
   }
   // Phone: detail takes the full width with Back to the list; no resizer.
   await page.setViewportSize({ width: 390, height: 844 });
@@ -175,7 +175,7 @@ test("a saved width stays within bounds when the viewport changes", async ({
   await expect.poll(() => width(page, detail)).toBe(390);
   await expect(page.locator(list)).toBeHidden();
   await noPageOverflow(page);
-  await page.getByRole("button", { name: /Back/ }).click();
+  await page.getByRole("button", { name: /^Close Esc/ }).click();
   await expect(page.locator(list)).toBeVisible();
   await noPageOverflow(page);
   // Back to desktop: the saved (clamped) width returns.

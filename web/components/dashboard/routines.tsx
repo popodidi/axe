@@ -5,7 +5,6 @@ import {
   Alert,
   Button,
   EmptyState,
-  Kbd,
   Panel,
   PanelHead,
   Skeleton,
@@ -16,6 +15,7 @@ import {
   Th,
 } from "../ui";
 import type { Task } from "../../lib/model";
+import { Facts, ItemPane, ListEmpty, PaneSection, StateBadge, type Tone } from "./side-pane";
 import styles from "./routines.module.css";
 type Routine = {
   id: number;
@@ -87,12 +87,9 @@ export function useRoutines(base: string, enabled: boolean): RoutinesState {
   return { rows, error };
 }
 // Paused and archived are labels, not faded rows.
+const tones: Record<string, Tone> = { Enabled: "ok", Paused: "warn", Archived: "neutral" };
 function StatusLabel({ r }: { r: Routine }) {
-  return (
-    <span className={styles.status} data-status={status(r).toLowerCase()}>
-      {status(r)}
-    </span>
-  );
+  return <StateBadge tone={tones[status(r)]}>{status(r)}</StateBadge>;
 }
 // The routine table: like Tasks, a row opens the routine in a side pane.
 export function RoutineList({
@@ -101,12 +98,14 @@ export function RoutineList({
   onOpen,
   onOpenTask,
   onOpenServices,
+  onClearFilters,
 }: {
   state: RoutinesState;
   params: URLSearchParams;
-  onOpen: (id: number) => void;
+  onOpen: (id: number, keyboard: boolean) => void;
   onOpenTask: (id: number) => void;
   onOpenServices?: () => void;
+  onClearFilters?: () => void;
 }) {
   const selected = params.get("routine");
   const q = (params.get("q") || "").toLowerCase();
@@ -159,7 +158,7 @@ export function RoutineList({
                   id={"routine-" + r.id}
                   data-interactive=""
                   aria-selected={String(r.id) === selected}
-                  onClick={() => onOpen(r.id)}
+                  onClick={(e) => onOpen(r.id, e.detail === 0)}
                 >
                   <Td data-label="Routine">
                     {/* Keyboard target; clicks bubble to the row. */}
@@ -198,7 +197,14 @@ export function RoutineList({
               ))}
             </tbody>
           </Table>
-          {!filtered?.length && <EmptyState>No matching routines</EmptyState>}
+          {!filtered?.length && (
+            <ListEmpty
+              total={rows.length}
+              noun="routines"
+              empty="No routines yet: create one with axe routine add"
+              onClear={onClearFilters}
+            />
+          )}
         </Panel>
       )}
     </div>
@@ -254,58 +260,33 @@ export function RoutinePane({
     };
   }, [base, id, before]);
   return (
-    <section
+    <ItemPane
       id="routine-detail"
-      className={styles.pane}
-      aria-label="Routine detail"
+      label="Routine detail"
+      kind={`Routine #${id}`}
+      badge={r && <StatusLabel r={r} />}
+      title={r?.name ?? `Routine #${id}`}
+      onClose={onClose}
     >
-      <header className={styles.paneHeader}>
-        <div className={styles.paneTop}>
-          <span className={styles.paneId}>Routine #{id}</span>
-          {r && <StatusLabel r={r} />}
-          <Button variant="ghost" className={styles.close} onClick={onClose}>
-            Close <Kbd>Esc</Kbd>
-          </Button>
-        </div>
-        {r && (
-          <h2 tabIndex={-1} className={styles.paneTitle}>
-            {r.name}
-          </h2>
-        )}
-      </header>
       {!rows ? (
         <Skeleton label="Loading routine…" lines={4} />
       ) : !r ? (
         <Alert>Routine not found</Alert>
       ) : (
         <>
-          <dl className={styles.facts}>
-            <div>
-              <dt>Schedule</dt>
-              <dd className={styles.mono}>{r.cron}</dd>
-            </div>
-            <div>
-              <dt>Timezone</dt>
-              <dd>{r.timezone}</dd>
-            </div>
-            <div>
-              <dt>Next trigger</dt>
-              <dd>{next(r)}</dd>
-            </div>
-            <div>
-              <dt>Project</dt>
-              <dd>{r.project}</dd>
-            </div>
-            <div className={styles.wide}>
-              <dt>Task title</dt>
-              <dd>{r.title}</dd>
-            </div>
-          </dl>
-          <section className={styles.block} aria-label="Routine history">
-            <h3 className={styles.blockTitle}>Routine history</h3>
-            <p className={styles.note}>
-              Template snapshots are retained on generated tasks
-            </p>
+          <Facts
+            items={[
+              { label: "Schedule", value: r.cron, mono: true },
+              { label: "Timezone", value: r.timezone },
+              { label: "Next trigger", value: next(r) },
+              { label: "Project", value: r.project },
+              { label: "Task title", value: r.title, wide: true },
+            ]}
+          />
+          <PaneSection
+            title="Routine history"
+            note="Template snapshots are retained on generated tasks"
+          >
             {error && (
               <Alert>
                 Unable to load history: {error}. Retrying automatically.
@@ -350,14 +331,13 @@ export function RoutinePane({
                 </Button>
               )}
             </div>
-          </section>
-          <section className={styles.block} aria-label="Template">
-            <h3 className={styles.blockTitle}>Template</h3>
+          </PaneSection>
+          <PaneSection title="Template">
             <Markdown body={r.detail} compact />
-          </section>
+          </PaneSection>
         </>
       )}
-    </section>
+    </ItemPane>
   );
 }
 // Task detail fact: the routine that generated this task, if any.

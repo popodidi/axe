@@ -1,4 +1,4 @@
-@value bp-phone, bp-list-narrow from "../../app/styles/breakpoints.module.css";
+@value bp-list-narrow from "../../app/styles/breakpoints.module.css";
 
 .stack {
   display: grid;
@@ -60,103 +60,7 @@
   color: var(--text-tertiary);
 }
 
-/* States are labels, like routine statuses. */
-.state {
-  display: inline-block;
-  padding: var(--pill-padding);
-  border-radius: var(--radius-xs);
-  font-size: var(--text-caption);
-  line-height: var(--lh-caption);
-  font-weight: var(--weight-medium);
-  white-space: nowrap;
-  color: var(--text-secondary);
-  background: var(--surface-2);
-}
-
-.state[data-tone="ok"] {
-  color: var(--state-done-fg);
-  background: var(--state-done-bg);
-}
-
-.state[data-tone="warn"] {
-  color: var(--state-blocked-fg);
-  background: var(--state-blocked-bg);
-}
-
-.state[data-tone="bad"] {
-  color: var(--state-escalated-fg);
-  background: var(--state-escalated-bg);
-}
-
-.detail {
-  display: grid;
-  gap: var(--space-2);
-  min-width: 0;
-  padding-top: var(--space-2);
-  border-top: var(--border-subtle);
-}
-
-.detailTop {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.detailTitle {
-  font-family: var(--font-mono);
-  font-size: var(--text-h3);
-  line-height: var(--lh-h3);
-  min-width: 0;
-}
-
-.close {
-  margin-left: auto;
-}
-
-.facts {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-snug) var(--space-2);
-  padding: var(--space-snug) var(--space-2);
-  background: var(--surface-2);
-  border-radius: var(--radius-md);
-}
-
-.facts dt {
-  font-size: var(--text-caption);
-  line-height: var(--lh-caption);
-  color: var(--text-tertiary);
-}
-
-.facts dd {
-  margin: 0;
-  font-size: var(--text-control);
-  line-height: var(--lh-control);
-  overflow-wrap: anywhere;
-}
-
-.wide {
-  grid-column: 1 / -1;
-}
-
-.block {
-  display: grid;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.blockTitle {
-  font-size: var(--text-h3);
-  line-height: var(--lh-h3);
-}
-
-.note {
-  font-size: var(--text-caption);
-  color: var(--text-tertiary);
-  overflow-wrap: anywhere;
-}
-
+/* The log scrolls inside the pane, never the pane past it. */
 .log {
   max-height: 28rem;
   overflow: auto;
@@ -166,11 +70,5 @@
 @container bp-list-narrow {
   .optional {
     display: none;
-  }
-}
-
-@media bp-phone {
-  .facts {
-    grid-template-columns: minmax(0, 1fr);
   }
 }

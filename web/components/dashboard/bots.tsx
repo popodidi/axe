@@ -3,14 +3,12 @@ import { useEffect, useMemo, useState } from "react";
 import Markdown from "../../app/markdown";
 import {
   Alert,
-  Button,
   Command,
   Commands,
   cx,
   DiffBlock,
   EmptyState,
   Filter,
-  Kbd,
   LiveDot,
   Panel,
   PanelHead,
@@ -44,6 +42,7 @@ import {
   botTabs,
   profileHistory,
 } from "../../lib/bots";
+import { Facts, ItemPane, ListEmpty, PaneSection, StateBadge } from "./side-pane";
 import styles from "./bots.module.css";
 // Generic bot monitoring. Read-only
 // and metadata-only: wakes arrive redacted, activity carries no message text.
@@ -78,14 +77,10 @@ function lastMessages(messages: MessageMeta[]) {
   return { in: last("in"), out: last("out") };
 }
 function Status({ bot }: { bot: Pick<BotSummary, "state" | "attention"> }) {
-  const label = botStatus(bot);
   return (
-    <span
-      className={styles.status}
-      data-status={bot.attention ? "attention" : bot.state}
-    >
-      {label}
-    </span>
+    <StateBadge tone={bot.attention ? "bad" : bot.state === "paused" ? "warn" : "ok"}>
+      {botStatus(bot)}
+    </StateBadge>
   );
 }
 export type BotListData = {
@@ -151,11 +146,14 @@ export function BotList({
   state: { bots, admission, live, last, error },
   params,
   onOpen,
+  onClearFilters,
 }: {
   state: BotListData;
   params: URLSearchParams;
-  onOpen: (name: string) => void;
+  onOpen: (name: string, keyboard: boolean) => void;
+  onClearFilters?: () => void;
 }) {
+  const selected = params.get("bot");
   const q = (params.get("q") || "").toLowerCase();
   const filtered = bots?.filter(
     (b) =>
@@ -207,7 +205,8 @@ export function BotList({
                     key={b.name}
                     id={"bot-" + b.name}
                     data-interactive=""
-                    onClick={() => onOpen(b.name)}
+                    aria-selected={b.name === selected}
+                    onClick={(e) => onOpen(b.name, e.detail === 0)}
                   >
                     <Td>
                       {/* Keyboard target; clicks bubble to the row. */}
@@ -276,9 +275,12 @@ export function BotList({
             </tbody>
           </Table>
           {!filtered?.length && (
-            <EmptyState>
-              {bots.length ? "No matching bots" : "No bots yet."}
-            </EmptyState>
+            <ListEmpty
+              total={bots.length}
+              noun="bots"
+              empty="No bots yet: create one with axe bot add"
+              onClear={onClearFilters}
+            />
           )}
         </Panel>
       )}
@@ -293,13 +295,15 @@ type Detail = {
   activity: Activity;
   schedules: BotSchedule[];
 };
-export function BotDetail({
+// One bot in the side pane: facts, commands, then its tabs (profile, wakes,
+// runs, events, stats).
+export function BotPane({
   base,
   name,
   params,
   revision,
   now,
-  onBack,
+  onClose,
   onChange,
   onWatch,
   onCopy,
@@ -309,7 +313,7 @@ export function BotDetail({
   params: URLSearchParams;
   revision: number;
   now: number;
-  onBack: () => void;
+  onClose: () => void;
   onChange: (patch: Record<string, string | null>) => void;
   onWatch: (run: number) => void;
   onCopy: (command: string) => void;
@@ -346,19 +350,14 @@ export function BotDetail({
   }, [base, name, revision]);
   const d = detail?.bot.name === name ? detail : null;
   return (
-    <section className={styles.stack} id="bot-detail" aria-label="Bot detail">
-      <header className={styles.header}>
-        <div className={styles.top}>
-          <span className={styles.id}>Bot</span>
-          {d && <Status bot={d.bot} />}
-          <Button variant="ghost" className={styles.back} onClick={onBack}>
-            Back to bots <Kbd>Esc</Kbd>
-          </Button>
-        </div>
-        <h2 className={styles.title} tabIndex={-1}>
-          {name}
-        </h2>
-      </header>
+    <ItemPane
+      id="bot-detail"
+      label="Bot detail"
+      kind="Bot"
+      badge={d && <Status bot={d.bot} />}
+      title={name}
+      onClose={onClose}
+    >
       {error && (
         <Alert>Unable to load bot: {error}. Retrying on the next change.</Alert>
       )}
@@ -366,42 +365,22 @@ export function BotDetail({
         !error && <Skeleton label="Loading bot…" lines={8} />
       ) : (
         <>
-          <dl className={styles.facts}>
-            <div>
-              <dt>Project</dt>
-              <dd>{d.bot.project}</dd>
-            </div>
-            <div>
-              <dt>Agent</dt>
-              <dd>{d.bot.agent}</dd>
-            </div>
-            <div>
-              <dt>Live run</dt>
-              <dd>{d.bot.live_run ? `#${d.bot.live_run}` : "Idle"}</dd>
-            </div>
-            <div>
-              <dt>Next wake</dt>
-              <dd>
-                {when(d.bot.next_wake)} · {d.bot.queued} queued
-              </dd>
-            </div>
-            <div>
-              <dt>Session</dt>
-              <dd>
-                {d.bot.session_id
+          <Facts
+            items={[
+              { label: "Project", value: d.bot.project },
+              { label: "Agent", value: d.bot.agent },
+              { label: "Live run", value: d.bot.live_run ? `#${d.bot.live_run}` : "Idle" },
+              { label: "Next wake", value: `${when(d.bot.next_wake)} · ${d.bot.queued} queued` },
+              {
+                label: "Session",
+                value: d.bot.session_id
                   ? `${d.bot.session_agent} · ${d.bot.resume_count} resumes`
-                  : "Fresh on next run"}
-              </dd>
-            </div>
-            <div>
-              <dt>Failures</dt>
-              <dd>{d.bot.failures}</dd>
-            </div>
-            <div>
-              <dt>Updated</dt>
-              <dd>{when(d.bot.updated_at)}</dd>
-            </div>
-          </dl>
+                  : "Fresh on next run",
+              },
+              { label: "Failures", value: d.bot.failures },
+              { label: "Updated", value: when(d.bot.updated_at) },
+            ]}
+          />
           <Commands>
             <Command
               label="show"
@@ -445,7 +424,7 @@ export function BotDetail({
           )}
         </>
       )}
-    </section>
+    </ItemPane>
   );
 }
 function Schedules({ schedules }: { schedules: BotSchedule[] }) {
@@ -487,10 +466,11 @@ function Profile({ bot, events }: { bot: Bot; events: BotEvent[] }) {
       {(["identity", "conduct", "notes"] as const).map((field) => {
         const history = profileHistory(events, field);
         return (
-          <section key={field} className={styles.block} aria-label={field}>
-            <h3 className={styles.blockTitle}>
-              {field[0].toUpperCase() + field.slice(1)}
-            </h3>
+          <PaneSection
+            key={field}
+            label={field}
+            title={field[0].toUpperCase() + field.slice(1)}
+          >
             {bot[field] ? (
               <Markdown compact body={bot[field]} />
             ) : (
@@ -510,7 +490,7 @@ function Profile({ bot, events }: { bot: Bot; events: BotEvent[] }) {
                 </article>
               ))}
             </details>
-          </section>
+          </PaneSection>
         );
       })}
     </>

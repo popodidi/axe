@@ -52,6 +52,7 @@ regenerate it from the repository root with
 | Page shell, URL state (`view`, `task`, `tab`, filters, pane scroll), keyboard shortcuts, live refresh | `app/dashboard.tsx`, `lib/use-pane-scroll.ts`, `lib/layout.ts` |
 | Task list and detail model, copyable commands | `lib/model.ts` (`lib/model.test.ts` pins the command strings) |
 | Views | `components/dashboard/` (`routines`, `services`, `bots`, `goals`, `stats`, `cost`) |
+| List/detail grammar: side pane header, state badge, field grid, sections, list empty state | `components/dashboard/side-pane.tsx` |
 | Services page model (state, uptime, per node) | `lib/services.ts` |
 | Run page: trace with event times, conversation replay and the details rail | `components/dashboard/run-log.tsx`, `lib/run-log.ts`, `lib/transcript.ts`, `lib/run-meta.ts` |
 | Stats, bot stats, cost and goal calculations | `lib/stats.ts`, `lib/bot-stats.ts`, `lib/cost.ts`, `lib/goals.ts` |

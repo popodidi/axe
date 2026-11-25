@@ -104,7 +104,7 @@ test("routine loading empty and error states", async ({ page }) => {
   });
   await page.goto("/?server=http://axe.test&view=routines");
   await expect(page.getByLabel("Loading routines…")).toBeVisible();
-  await expect(page.getByText("No matching routines")).toBeVisible();
+  await expect(page.getByText(/^No routines yet/)).toBeVisible();
   mode = "error";
   await page.reload();
   await expect(page.getByText(/Unable to load routines/)).toBeVisible();
@@ -173,7 +173,11 @@ test.describe("routine status filter", () => {
     await page.goto("/?server=http://axe.test&view=routines&status=archived&q=nightly");
     await expect(shown(page)).toHaveText(["Nightly archived"]);
     await page.goto("/?server=http://axe.test&view=routines&status=paused&project=orbit");
-    await expect(page.getByText("No matching routines")).toBeVisible();
+    await expect(page.getByText(/^No matching routines/)).toBeVisible();
+    // Clear filters keeps the view and drops its search and filters.
+    await page.getByRole("button", { name: "Clear filters" }).click();
+    await expect(page).toHaveURL(/view=routines/);
+    await expect(page).not.toHaveURL(/status=|project=/);
   });
   for (const width of [390, 320]) test(`fits and filters at phone width ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });

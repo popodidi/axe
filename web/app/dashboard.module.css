@@ -351,31 +351,10 @@
   }
 }
 
-.detailTitle:focus-visible {
-  outline-offset: var(--space-quarter);
-}
-
-/* Detail header: id and state, then the title. */
-.detailHeader {
-  display: grid;
-  gap: var(--space-1);
-  margin-bottom: var(--space-2);
-}
-
-.detailTop {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
 .detailId {
   font-family: var(--font-mono);
   font-size: var(--text-caption);
   color: var(--text-tertiary);
-}
-
-.back {
-  margin-left: auto;
 }
 
 /* Task opened from a Stats cluster: "Cluster (n) › #id". */
@@ -383,35 +362,6 @@
   display: flex;
   align-items: center;
   gap: var(--space-half);
-}
-
-.detailTitle {
-  font-size: var(--text-h2);
-  line-height: var(--lh-h2);
-}
-
-/* Key facts in one inset grid: label above value. */
-.facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(calc(var(--space-8) + var(--space-3)), 1fr));
-  gap: var(--space-snug) var(--space-2);
-  padding: var(--space-snug) var(--space-2);
-  margin-bottom: var(--space-2);
-  background: var(--surface-2);
-  border-radius: var(--radius-md);
-}
-
-.facts dt {
-  font-size: var(--text-caption);
-  line-height: var(--lh-caption);
-  color: var(--text-tertiary);
-}
-
-.facts dd {
-  margin: 0;
-  font-size: var(--text-control);
-  line-height: var(--lh-control);
-  overflow-wrap: anywhere;
 }
 
 /* Copyable commands in one bordered well. */
@@ -606,11 +556,11 @@
   }
 }
 
-/* Routines: list | routine pane | task pane. A stacked task pane leaves room
-   for the routine pane; narrower screens hide the list behind both panes. */
+/* Item views: list | item pane | task pane. A stacked task pane leaves room
+   for the item pane; narrower screens hide the list behind both panes. */
 .stacked .detailPane {
   max-width: calc(
-    100% - var(--list-min-width) - var(--routine-size, var(--routine-width))
+    100% - var(--list-min-width) - var(--item-size, var(--item-width))
   );
 }
 
@@ -621,14 +571,14 @@
 
   .stacked .detailPane {
     flex: 1;
-    max-width: calc(100% - var(--routine-size, var(--routine-width)));
+    max-width: calc(100% - var(--item-size, var(--item-width)));
   }
 }
 
 /* Attribute matching keeps the cross-module literal ID unscoped. */
 @media bp-phone {
-  .hasRoutine .listPane,
-  .stacked [id="routine-detail"] {
+  .hasItem .listPane,
+  .stacked [data-item-pane] {
     display: none;
   }
 

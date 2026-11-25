@@ -199,7 +199,7 @@ test("goal tasks Open/All switch at phone width", async ({ page }, info) => {
 test("goals empty state", async ({ page }) => {
   await mockGoals(page, []);
   await page.goto(base + "&view=goals");
-  await expect(page.getByRole("region", { name: "Goals", exact: true })).toContainText("No goals yet.");
+  await expect(page.getByRole("region", { name: "Goals", exact: true })).toContainText("No goals yet");
 });
 test("g o opens goals", async ({ page }) => {
   await mockGoals(page);
