@@ -223,7 +223,9 @@ runtime (`runtime::login_methods`):
 A login made this way is checked at once (`runtime::Registry::check_now`): the
 runtime is ok again when the check passes, and the owner gets a runtime card
 with the outcome. A runtime that needs a login is also rechecked every few
-minutes (`runtime::PROBE_EVERY`).
+minutes (`runtime::PROBE_EVERY`). Once a runtime is ok again its open cards
+close: their buttons go and the text gains a resolved line
+(`telegram::close_runtime_card`).
 
 **Session continuity.** Every later run resumes the first run's session with
 the agent's `resume_cmd`. A failed resume with no axe change

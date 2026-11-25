@@ -3759,6 +3759,135 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
 }
 
+/// Reports runtime states (name, harness, state) as node `d1` of generation `g`.
+fn report_runtimes(rig: &Rig, g: &str, states: &[(&str, &str, &str)]) {
+    let list: Vec<Value> = states
+        .iter()
+        .map(|(n, h, s)| {
+            json!({"name":n,"harness":h,"plan":null,"state":s,"healthy":*s == "ok",
+                   "until":null,"last_failure":null,"quota":null,"in_use":0})
+        })
+        .collect();
+    post(
+        rig,
+        "/api/dispatcher/admission",
+        json!({"id":"d1","generation":g,
+               "admission":{"runtimes":{"managed": true, "list": list}}}),
+    );
+}
+
+/// The runtime card's stored (text, flags), by Telegram message id.
+fn stored_card(rig: &Rig, tg: i64) -> (String, Value) {
+    let (text, flags): (String, String) = rig
+        .db()
+        .query_row(
+            "SELECT text, flags FROM bot_messages WHERE direction='out' AND message_id=?1",
+            [tg],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    (text, serde_json::from_str(&flags).unwrap())
+}
+
+#[test]
+fn runtime_cards_close_once_the_runtime_is_ok() {
+    let rig = Rig::new();
+    let g = post(
+        &rig,
+        "/api/dispatcher/register",
+        json!({"id":"d1","generation":""}),
+    );
+    let g = g["generation"].as_str().unwrap().to_string();
+    report_runtimes(
+        &rig,
+        &g,
+        &[
+            ("claude-1", "claude-code", "needs_login"),
+            ("codex-1", "codex", "needs_login"),
+        ],
+    );
+    let alert = |runtime: &str, harness: &str, state: &str, class: &str| {
+        post(
+            &rig,
+            "/api/dispatcher/runtime-alert",
+            json!({"runtime":runtime,"harness":harness,"state":state,
+                   "class":class,"message":"","until":null}),
+        )
+    };
+    let v = alert("claude-1", "claude-code", "needs_login", "auth_invalid");
+    assert_eq!(v["sent"], true, "{v}");
+    let claude = rig.messages().last().unwrap().3;
+    alert("codex-1", "codex", "needs_login", "auth_invalid");
+    let codex = rig.messages().last().unwrap().3;
+    assert_eq!(
+        stored_card(&rig, claude).1["buttons"],
+        json!([["Runtimes", "runtimes"]])
+    );
+
+    // A new login works: the needs-login card closes with a resolved line,
+    // and the ok message has no buttons.
+    report_runtimes(
+        &rig,
+        &g,
+        &[
+            ("claude-1", "claude-code", "ok"),
+            ("codex-1", "codex", "needs_login"),
+        ],
+    );
+    let v = alert("claude-1", "claude-code", "ok", "login_ok");
+    assert_eq!(v["sent"], true, "{v}");
+    let ok = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        ok["text"],
+        "Runtime claude-1 (claude-code): the new login works; the runtime is ok."
+    );
+    assert!(ok.get("reply_markup").is_none(), "{ok}");
+    let edits = rig.stub.calls("editMessageText");
+    assert_eq!(edits.len(), 1, "{edits:?}");
+    let e = &edits[0].params;
+    assert_eq!(e["message_id"], claude);
+    assert_eq!(e["reply_markup"], json!({"inline_keyboard": []}));
+    let text = e["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Runtime claude-1 (claude-code) needs a new login.")
+            && text.ends_with("\n\nResolved: runtime claude-1 is ok again."),
+        "{text}"
+    );
+    let (stored, flags) = stored_card(&rig, claude);
+    assert_eq!(stored, text);
+    assert_eq!(flags["closed"], "runtime claude-1 is ok");
+    assert!(flags.get("buttons").is_none(), "{flags}");
+    // The other runtime's card stays open.
+    assert!(stored_card(&rig, codex).1["closed"].is_null());
+
+    // A runtime the probe finds ok again (no card of its own): its card
+    // closes on the next inbox pass.
+    report_runtimes(
+        &rig,
+        &g,
+        &[
+            ("claude-1", "claude-code", "ok"),
+            ("codex-1", "codex", "ok"),
+        ],
+    );
+    rig.stub.push(text_msg(100, 200, OWNER, OWNER, "hi"));
+    rig.stub.wait_confirmed(100);
+    wait_for("the codex card to close", 20, || {
+        rig.stub.calls("editMessageText").len() == 2
+    });
+    assert_eq!(
+        stored_card(&rig, codex).1["closed"],
+        "runtime codex-1 is ok"
+    );
+    let edits = rig.stub.calls("editMessageText");
+    assert_eq!(edits.len(), 2, "{edits:?}");
+    assert_eq!(edits[1].params["message_id"], codex);
+    // Closed cards are not closed again.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(rig.stub.calls("editMessageText").len(), 2);
+    assert!(rig.stub.calls("editMessageReplyMarkup").is_empty());
+}
+
 /// `axe form ask` once the node is connected (it signs the form).
 fn form_ask(rig: &Rig, args: &[&str]) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
