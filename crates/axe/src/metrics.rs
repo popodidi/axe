@@ -68,6 +68,7 @@ pub fn route(path: &[String]) -> &'static str {
         | "register" | "operation"] => "/api/dispatcher/action",
         ["api", "config"] => "/api/config",
         ["api", "overview"] => "/api/overview",
+        ["api", "version"] => "/api/version",
         ["api", "admission"] => "/api/admission",
         ["api", "claim"] => "/api/claim",
         ["api", "stream"] => "/api/stream",

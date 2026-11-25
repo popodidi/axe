@@ -3,7 +3,8 @@
 //! release it follows. The commit comes from `$AXE_GIT_COMMIT` (the Docker
 //! build, which has no `.git`), else from `git rev-parse HEAD` in this source
 //! tree (a clone, or a `cargo install --git` checkout). A crates.io build has
-//! neither and reports the version alone.
+//! neither and reports the version alone. `AXE_COMMIT` is that whole commit
+//! (empty when unknown), which the server reports at `/api/version`.
 //!
 //! It also embeds `skills/axe` (`axe skill install`, `skill.rs`): it writes
 //! `$OUT_DIR/skill_files.rs`, the skill's files as `(relative path, bytes)`.
@@ -20,11 +21,13 @@ fn main() {
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty())
         .or_else(git_head);
-    let full = match commit {
+    let full = match &commit {
         Some(c) => format!("{version} ({})", &c[..c.len().min(12)]),
         None => version,
     };
     println!("cargo:rustc-env=AXE_VERSION={full}");
+    // The whole commit (empty when unknown), for the dashboard's link to it.
+    println!("cargo:rustc-env=AXE_COMMIT={}", commit.unwrap_or_default());
     embed_skill();
 }
 

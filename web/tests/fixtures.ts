@@ -190,6 +190,11 @@ export const manyTasks = [
     created_at: at(30 + i),
   })),
 ];
+/** `GET /api/version`: the server's build. */
+export const serverVersion = {
+  version: "0.5.3 (dfe3a939ab12)",
+  commit: "dfe3a939ab12cd34ef56ab78cd90ef12ab34cd56",
+};
 export async function mockDesk(page: Page, list: FixtureTask[] = tasks) {
   await page.route("http://axe.test/**", async (route) => {
     const url = new URL(route.request().url());
@@ -202,6 +207,8 @@ export async function mockDesk(page: Page, list: FixtureTask[] = tasks) {
     const result =
       url.pathname === "/api/tasks"
         ? list
+        : url.pathname === "/api/version"
+          ? serverVersion
         : url.pathname === "/api/stats/history"
           ? { events: [], routines: [], runs: [] }
           : url.pathname === "/api/overview"

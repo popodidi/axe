@@ -64,6 +64,7 @@ import {
 import { usePaneScroll, snapshotPaneScroll } from "../lib/use-pane-scroll";
 import { useTheme } from "../lib/theme";
 import { useNavCollapsed } from "../lib/layout";
+import { buildLine } from "../lib/version";
 import { motionMs, useMotionReady } from "../lib/motion";
 import {
   type Task,
@@ -150,6 +151,21 @@ export default function Dashboard() {
   // Bumped on every server change (SSE, or polling while disconnected) so views
   // with their own reads (Bots) reload with the task list.
   const [revision, setRevision] = useState(0);
+  // The server's build for the footer. Read again whenever the stream
+  // (re)connects, so a restarted server shows its new build.
+  const [build, setBuild] = useState<ReturnType<typeof buildLine>>(null);
+  const live = connection.startsWith("Live");
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(base + "/api/version", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((v) => {
+        const line = buildLine(v);
+        if (line) setBuild(line);
+      })
+      .catch(() => {}); // aborted, or an older server without the endpoint
+    return () => controller.abort();
+  }, [base, live]);
   const searchRef = useRef<HTMLInputElement>(null);
   const prefix = useRef(0);
   const reload = useRef<() => void>(() => {});
@@ -573,7 +589,6 @@ export default function Dashboard() {
   // An item list's "Clear filters": its search and filters, not the view.
   const clearFilters = () =>
     update({ q: null, project: null, status: null, sstate: null, goalstate: null });
-  const live = connection.startsWith("Live");
   const [light, toggleTheme] = useTheme();
   const [collapsed, toggleNav] = useNavCollapsed();
   const titles = new Map((data?.tasks || []).map((t) => [t.id, t.title]));
@@ -692,6 +707,33 @@ export default function Dashboard() {
           <span className={cx(styles.serverLine, styles.hideNarrow)} title={`server ${base}`}>
             <span className={styles.mono}>{host(base)}</span> · Read-only
           </span>
+          {build && (
+            <span
+              className={cx(styles.serverLine, styles.hideNarrow)}
+              data-testid="server-version"
+            >
+              axe <span className={styles.mono}>{build.release}</span>
+              {build.short && (
+                <>
+                  {" ("}
+                  {build.href ? (
+                    <a
+                      className={cx(styles.mono, styles.versionLink)}
+                      href={build.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Commit ${build.short} on GitHub`}
+                    >
+                      {build.short}
+                    </a>
+                  ) : (
+                    <span className={styles.mono}>{build.short}</span>
+                  )}
+                  )
+                </>
+              )}
+            </span>
+          )}
         </footer>
       </aside>
       {!collapsed && (

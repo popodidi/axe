@@ -303,4 +303,15 @@ timeout_seconds: number,
  */
 catch_up: boolean, };
 
+export type ServerVersion = { 
+/**
+ * What `axe --version` prints: the crate version, plus the short commit
+ * when the build knew it (`build.rs`).
+ */
+version: string, 
+/**
+ * The whole commit the binary was built from, when known.
+ */
+commit: string | null, };
+
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;

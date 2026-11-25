@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { mockDesk } from "./fixtures";
+import { mockDesk, serverVersion } from "./fixtures";
 const base = "/?server=http://axe.test";
 const detail = '[aria-label="Task detail"]';
 const list = '[aria-label="Task workspace"]';
@@ -18,6 +18,24 @@ async function openDetail(page: Page, url = base + "&view=tasks&task=3") {
   await page.goto(url);
   await expect(page.locator(`${detail} h2`).first()).toBeVisible();
 }
+test("the nav footer shows the server's version and links its commit", async ({
+  page,
+}) => {
+  await mockDesk(page);
+  await page.goto(base);
+  const line = page.getByTestId("server-version");
+  await expect(line).toHaveText("axe 0.5.3 (dfe3a939ab12)");
+  const commit = line.getByRole("link", { name: "dfe3a939ab12" });
+  await expect(commit).toHaveAttribute(
+    "href",
+    `https://github.com/popodidi/axe/commit/${serverVersion.commit}`,
+  );
+  await expect(commit).toHaveAttribute("target", "_blank");
+  // The collapsed rail hides it with the server line.
+  await page.getByRole("button", { name: "Collapse navigation" }).click();
+  await expect(line).toBeHidden();
+});
+
 test("navigation collapses, stays usable, and persists across reload", async ({
   page,
 }) => {

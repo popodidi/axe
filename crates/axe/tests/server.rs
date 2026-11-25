@@ -355,6 +355,7 @@ fn writes_and_reads_require_the_token() {
         "/api/runs",
         "/api/overview",
         "/api/config",
+        "/api/version",
         "/api/stream",
         "/api/bots",
         "/api/goals",
@@ -415,6 +416,37 @@ fn writes_and_reads_require_the_token() {
         cfg["config"]["server"]["cors_origins"],
         serde_json::json!([])
     );
+}
+
+/// `/api/version` reports the running build (task 1791): `axe --version`'s
+/// string and, when the build knew it, the whole commit it abbreviates.
+#[test]
+fn version_endpoint_reports_the_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    let v = srv.get("/api/version");
+    let cli = std::process::Command::new(BIN)
+        .arg("--version")
+        .output()
+        .unwrap();
+    let cli = String::from_utf8(cli.stdout).unwrap();
+    let version = v["version"].as_str().unwrap();
+    assert_eq!(format!("axe {version}\n"), cli);
+    assert!(version.starts_with(env!("CARGO_PKG_VERSION")));
+    match v["commit"].as_str() {
+        Some(c) => {
+            assert!(
+                !c.is_empty() && c.chars().all(|ch| ch.is_ascii_hexdigit()),
+                "{c}"
+            );
+            let short = &c[..c.len().min(12)];
+            assert!(version.ends_with(&format!(" ({short})")), "{version}");
+        }
+        None => {
+            assert!(v["commit"].is_null());
+            assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        }
+    }
 }
 
 #[test]
