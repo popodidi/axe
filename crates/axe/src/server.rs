@@ -513,6 +513,12 @@ fn body_limit(method: &str, path: &[String], authorized: bool) -> usize {
 /// cards), blobs and docs need the token, unlike other reads.
 fn private_read(path: &[String]) -> bool {
     (path.len() >= 4 && path[0] == "api" && path[1] == "bots" && path[3] == "tg")
+        // A service's log is its program's own output.
+        || (path.len() == 6
+            && path[0] == "api"
+            && path[1] == "bots"
+            && path[3] == "services"
+            && path[5] == "logs")
         || (path.len() >= 2
             && path[0] == "api"
             && matches!(
@@ -1593,6 +1599,9 @@ fn task_id(s: &str) -> Result<i64> {
 
 fn route(st: &State, req: &Request) -> Result<Response> {
     let path: Vec<&str> = req.path.iter().map(String::as_str).collect();
+    if let Some(r) = service_route(st, req, &path)? {
+        return Ok(r);
+    }
     if matches!(path.get(1), Some(&("bots" | "bot-runs"))) && path[0] == "api" {
         if let Some(r) = bot_route(st, req, &path)? {
             return Ok(r);
@@ -2274,6 +2283,14 @@ fn relay_log(
     query["after"] = json!(after);
     query["before"] = json!(before);
     query["generation"] = json!(req.query("generation"));
+    let mut response = relay(st, owner, query);
+    response["run"] = run;
+    ok(200, &response)
+}
+
+/// Asks dispatcher `owner` over its control socket; an unavailable or busy
+/// dispatcher answers `{"unavailable", "retryable": true}`.
+fn relay(st: &State, owner: Option<String>, query: serde_json::Value) -> serde_json::Value {
     let sender = st
         .relay
         .lock()
@@ -2282,26 +2299,121 @@ fn relay_log(
         .filter(|(id, _, _)| Some(id) == owner.as_ref())
         .map(|(_, _, s)| s.clone());
     let Some(sender) = sender else {
-        return ok(
-            200,
-            &json!({"run":run,"unavailable":"Dispatcher unavailable","retryable":true}),
-        );
+        return json!({"unavailable":"Dispatcher unavailable","retryable":true});
     };
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     if sender
         .try_send(remote::LogJob { query, reply: tx })
         .is_err()
     {
-        return ok(
-            200,
-            &json!({"run":run,"unavailable":"Dispatcher busy","retryable":true}),
-        );
+        return json!({"unavailable":"Dispatcher busy","retryable":true});
     }
-    let mut response = rx
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap_or_else(|_| json!({"unavailable":"Dispatcher unavailable","retryable":true}));
-    response["run"] = run;
-    ok(200, &response)
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| json!({"unavailable":"Dispatcher unavailable","retryable":true}))
+}
+
+/// Most log lines `GET .../services/<name>/logs` returns.
+const SERVICE_LOG_LINES_MAX: u64 = 2000;
+
+/// Services (`service.rs`): bot-owned declarations, and the dispatcher's sync
+/// and notices. `None`: not a service route.
+fn service_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response>> {
+    use crate::service;
+    #[derive(Deserialize)]
+    struct Put {
+        service: service::NewService,
+        #[serde(flatten)]
+        who: Who,
+    }
+    #[derive(Deserialize)]
+    struct Report {
+        id: String,
+        generation: String,
+        #[serde(default)]
+        statuses: std::collections::BTreeMap<String, service::Status>,
+    }
+    let r = match (req.method.as_str(), path) {
+        ("GET", ["api", "services"]) => ok(200, &service::list(&st.conn(), None)?),
+        ("GET", ["api", "bots", bot, "services"]) => {
+            ok(200, &service::list(&st.conn(), Some(bot))?)
+        }
+        ("GET", ["api", "bots", bot, "services", name]) => {
+            ok(200, &service::get(&st.conn(), bot, name)?)
+        }
+        ("PUT", ["api", "bots", bot, "services", name]) => {
+            let b: Put = req.json()?;
+            ok(
+                200,
+                &service::put(&mut st.conn(), &b.who.actor(), bot, name, &b.service)?,
+            )
+        }
+        ("POST", ["api", "bots", bot, "services", name, action @ ("start" | "stop")]) => {
+            let b: Who = req.json()?;
+            let on = *action == "start";
+            ok(
+                200,
+                &service::set_enabled(&mut st.conn(), &b.actor(), bot, name, on)?,
+            )
+        }
+        ("DELETE", ["api", "bots", bot, "services", name]) => {
+            let b: Who = req.json()?;
+            ok(
+                200,
+                &service::remove(&mut st.conn(), &b.actor(), bot, name)?,
+            )
+        }
+        ("GET", ["api", "bots", bot, "services", name, "logs"]) => {
+            let lines = match req.query("lines") {
+                Some(l) => l
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| (1..=SERVICE_LOG_LINES_MAX).contains(n))
+                    .ok_or_else(|| {
+                        HttpError(400, format!("lines must be 1..{SERVICE_LOG_LINES_MAX}"))
+                    })?,
+                None => 100,
+            };
+            let s = service::get(&st.conn(), bot, name)?;
+            let query = json!({"kind":"service_log","home":s.home,"service":s.name,"lines":lines});
+            let mut response = relay(st, s.status.dispatcher.clone(), query);
+            response["service"] = serde_json::to_value(&s)?;
+            ok(200, &response)
+        }
+        ("POST", ["api", "dispatcher", "services"]) => {
+            let b: Report = req.json()?;
+            ok(
+                200,
+                &service::report(&mut st.conn(), &b.id, &b.generation, &b.statuses)?,
+            )
+        }
+        ("POST", ["api", "dispatcher", "service-notice"]) => {
+            let n: service::Notice = req.json()?;
+            let mut done = serde_json::to_value(service::notify(&mut st.conn(), &n)?)?;
+            if let Some(text) = done["owner_text"].as_str().map(String::from) {
+                done["owner"] = owner_alert(st, &n.bot, &text);
+            }
+            ok(200, &done)
+        }
+        _ => return Ok(None),
+    };
+    r.map(Some)
+}
+
+/// Sends `text` to the owner from bot `bot` (else the ops bot), when the
+/// Telegram gateway is configured. Best effort: the result says what happened.
+#[cfg(feature = "telegram")]
+fn owner_alert(st: &State, bot: &str, text: &str) -> serde_json::Value {
+    match &st.telegram {
+        Some(gw) => gw
+            .owner_alert(st, bot, text)
+            .unwrap_or_else(|e| json!({"sent": false, "reason": format!("{e:#}")})),
+        None => json!({"sent": false, "reason": "telegram is not configured on this server"}),
+    }
+}
+
+#[cfg(not(feature = "telegram"))]
+fn owner_alert(_: &State, _: &str, _: &str) -> serde_json::Value {
+    json!({"sent": false, "reason": NO_TELEGRAM})
 }
 
 /// Public wake view: message text, attachments and the owner's Telegram

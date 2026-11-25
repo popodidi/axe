@@ -1528,6 +1528,36 @@ impl Gateway {
         Ok(json!({"sent": true, "bot": name, "id": id}))
     }
 
+    /// A message to the owner from bot `bot` (a service crash loop the bot
+    /// could not fix): sent by that bot when the gateway talks for it, else
+    /// by the ops bot.
+    pub fn owner_alert(&self, store: &dyn Store, bot: &str, text: &str) -> Result<Value> {
+        let name = match self.bot(bot) {
+            Ok(b) => b.name(),
+            Err(_) => match self.ops.as_deref().and_then(|o| self.bot(o).ok()) {
+                Some(b) => b.name(),
+                None => {
+                    return Ok(
+                        json!({"sent": false, "reason": format!("no telegram bot to alert the owner for {bot}")}),
+                    )
+                }
+            },
+        };
+        let chat = self
+            .bot(&name)?
+            .chats
+            .contains(&self.owner)
+            .then_some(self.owner);
+        let opts = SendOpts {
+            chat,
+            ..SendOpts::default()
+        };
+        let out = self.send(store, &name, text, &opts)?;
+        let id = out.last().and_then(|m| m["id"].as_i64());
+        store.changed();
+        Ok(json!({"sent": true, "bot": name, "id": id}))
+    }
+
     /// A press on a retro card (`flags.retro`): rates an item, accepts the
     /// recommendations of a page's unrated items, turns a page or dismisses
     /// the card, then re-renders it in place. A single rating wakes no bot;

@@ -26,6 +26,7 @@ pub mod run_workspace;
 pub mod schedule;
 pub mod sealed;
 pub mod server;
+pub mod service;
 pub mod skill;
 pub mod subscription;
 #[cfg(feature = "telegram")]

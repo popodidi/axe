@@ -305,6 +305,25 @@ code gains no branches for them.
   bot itself, named cron schedules (`schedule.rs`), task-event subscriptions
   (`subscription.rs`) and the Telegram gateway (`telegram.rs`, `board.rs`).
   Design: [docs/design/bots.md](docs/design/bots.md).
+- **Services** (`axe service`, `service.rs`, `dispatch/services.rs`) are
+  long-running processes a bot declares: name, shell command, cwd (default
+  the bot's run folder), env and restart policy (`always`, `on-failure`,
+  `never`). `axe service add <name> --command <cmd> [--cwd D] [--env K=V]
+  [--restart P]`, `list`, `start`, `stop`, `logs [-n N]` and `remove`, with
+  `--bot` defaulting to `$AXE_BOT`. The server stores the declarations; a
+  long-running `axe dispatch` runs every enabled one as its own child process
+  group (`sh -c`, with `AXE_BOT`, `AXE_SERVICE`, `AXE_SERVER` and the bot's
+  sealed values), its output in `<log_dir>/services/<bot>/<name>.log`
+  (rotated past `[services] log_bytes`, one old file kept). An exit is
+  restarted by the policy with a delay that doubles per quick crash; a crash
+  loop wakes the bot, and one still going `escalate_after_seconds` later
+  messages the owner too. Stopping the dispatcher sends SIGTERM to every
+  service and SIGKILL after `stop_grace_seconds` (keep it under the unit's
+  stop timeout); starting it starts every enabled service again. A drain
+  (SIGUSR1) first wakes each owning bot ("Services stop in N s") and keeps the
+  services running for `stop_warn_seconds`. No systemd unit or container per
+  service: they live and die with the dispatcher. `[services]` in
+  `config.rs` lists every knob and default.
 - **Goals** (`axe goal`, `goal.rs`, `goal_board.rs`) are durable outcomes
   bots share, with weekly budgets and an append-only trajectory. Design:
   [docs/design/goals.md](docs/design/goals.md).
@@ -494,15 +513,15 @@ With a token, every request needs `Authorization: Bearer <token>` or, for
 reads, a browser read session; `/healthz`, `/metrics` and signed `/b/` links
 are open, and a page without either gets the login page (`allowed` and
 `login_route` in `crates/axe/src/server.rs`). The session is an HttpOnly
-cookie that makes reads for 30 days, except Telegram message content, asks
-and forms, which stay token-only (`private_read`). A browser gets one from
+cookie that makes reads for 30 days, except Telegram message content, service
+logs, asks and forms, which stay token-only (`private_read`). A browser gets one from
 `axe web login-link` (a one-time code, `crates/axe/src/login.rs`), the token
 on `/login`, or `POST /api/session` with the token; `POST /api/session-end`
 clears it. The server refuses a non-loopback listen address without a token
 file. Expose it only on a trusted network: reads include full agent logs. Bodies are JSON, errors are
 `{"error": "..."}`, and `X-Axe-Request-Id` makes a write retry-safe.
 
-The route table is `route`, `bot_route`, `goal_route`, `doc_route` and `blob_api` in
+The route table is `route`, `service_route`, `bot_route`, `goal_route`, `doc_route` and `blob_api` in
 `crates/axe/src/server.rs`; dispatcher operations are in `remote.rs`. Response
 shapes are the serialized Rust types, exported to `web/lib/api.ts`. There is
 no version prefix.
