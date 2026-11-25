@@ -236,6 +236,13 @@ fn cli_verbs_enforce_the_worker_protocol() {
     let t = show(&id);
     assert_eq!(t["state"].as_str(), Some("pending"));
     assert_eq!(t["waiting_on"][0].as_i64(), other.parse().ok());
+    let deps_label = format!("blocked (deps #{other})");
+    let shown = srv.ok(&["show", &id]);
+    assert!(
+        shown.contains(&format!("state: {deps_label} (stored pending)\n")),
+        "{shown}"
+    );
+    assert!(srv.ok(&["list"]).contains(&deps_label));
 
     // Wait for a duration: pending, asleep, listed as waiting until <time>.
     srv.ok(&["deps", &id, "--remove", &other]);
@@ -243,8 +250,25 @@ fn cli_verbs_enforce_the_worker_protocol() {
     let t = show(&id);
     assert_eq!(t["state"].as_str(), Some("pending"));
     assert!(t["not_before"].as_str().is_some());
-    assert!(srv.ok(&["list"]).contains("waiting until "));
-    assert!(srv.ok(&["show", &id]).contains("not_before: "));
+    let wake = t["not_before"].as_str().unwrap();
+    assert!(srv.ok(&["list"]).contains(&format!("waiting until {wake}")));
+    let shown = srv.ok(&["show", &id]);
+    assert!(
+        shown.contains(&format!("state: waiting until {wake} (stored pending)\n")),
+        "{shown}"
+    );
+    assert!(!shown.contains("state: blocked"), "{shown}");
+    assert!(shown.contains("not_before: "));
+
+    // A timed wait with --until reads the same in show and list.
+    srv.ok(&["wait", &id, "--until", "+3h", "--note", "check again"]);
+    let wake = show(&id)["not_before"].as_str().unwrap().to_string();
+    assert!(srv.ok(&["list"]).contains(&format!("waiting until {wake}")));
+    let shown = srv.ok(&["show", &id]);
+    assert!(
+        shown.contains(&format!("state: waiting until {wake} (stored pending)\n")),
+        "{shown}"
+    );
 
     // --on and --until are exclusive, and one wait kind is required.
     assert!(!srv.run(&["wait", &id, "--note", "x"]).status.success());
