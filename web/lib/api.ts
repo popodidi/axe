@@ -116,7 +116,11 @@ at: string,
  */
 size: number, };
 
-export type Message = { id: number, kind: string, text: string, reply_to: number | null, edit_of: number | null, attachments: JsonValue, flags: JsonValue, at: string, };
+export type Message = { id: number, kind: string, text: string, reply_to: number | null, 
+/**
+ * Text of the stored message `reply_to` points at, when there is one.
+ */
+reply_text: string | null, edit_of: number | null, attachments: JsonValue, flags: JsonValue, at: string, };
 
 export type Wake = { id: number, kind: string, body: string, due_at: string, created_at: string, actor: string, run_id: number | null, delivered_via: string | null, redelivered: boolean, message: Message | null, };
 

@@ -363,6 +363,50 @@ fn edits_render_as_edit_of_the_original_message() {
 }
 
 #[test]
+fn replies_render_their_target_and_a_snippet_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+    bot::create(&mut conn, &Actor::new("human"), &new_bot("b"), T0).unwrap();
+    let mut card = message(5, "text", "Everyone transcribes on the server:\nvoice notes go through the same pipeline, then the blob store");
+    card.direction = "out".into();
+    let (card_id, _) = bot::record_message(&mut conn, "b", &card, T0).unwrap();
+    let mut reply = message(6, "text", "yes, do that");
+    reply.reply_to = Some(card_id);
+    let (reply_id, _) = bot::record_message(&mut conn, "b", &reply, T0 + 1).unwrap();
+    let mut orphan = message(7, "text", "and this one");
+    orphan.reply_to = Some(9999);
+    let (orphan_id, _) = bot::record_message(&mut conn, "b", &orphan, T0 + 1).unwrap();
+    let (plain_id, _) =
+        bot::record_message(&mut conn, "b", &message(8, "text", "unrelated"), T0 + 1).unwrap();
+    let c = claim(&mut conn, "b", T0 + 30).unwrap();
+    let prompt = bot::render_prompt(&c, true);
+    let line = |id: i64| {
+        prompt
+            .lines()
+            .find(|l| l.starts_with(&format!("- [message #{id} ")))
+            .unwrap_or_else(|| panic!("no line for #{id}: {prompt}"))
+            .to_string()
+    };
+    assert_eq!(
+        line(reply_id),
+        format!(
+            "- [message #{reply_id} re #{card_id} 08:00Z] (replying to: \"Everyone transcribes on the server: voice notes go through t…\") yes, do that"
+        ),
+        "{prompt}"
+    );
+    assert_eq!(
+        line(orphan_id),
+        format!("- [message #{orphan_id} re #9999 08:00Z] and this one"),
+        "{prompt}"
+    );
+    assert_eq!(
+        line(plain_id),
+        format!("- [message #{plain_id} 08:00Z] unrelated"),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn bot_system_prompt_lists_docs_attached_to_the_bot_its_project_and_global() {
     use std::io::Write;
     let rig = Rig::new(1);

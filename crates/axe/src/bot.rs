@@ -1022,6 +1022,9 @@ pub struct Message {
     pub kind: String,
     pub text: String,
     pub reply_to: Option<i64>,
+    /// Text of the stored message `reply_to` points at, when there is one.
+    #[serde(default)]
+    pub reply_text: Option<String>,
     pub edit_of: Option<i64>,
     pub attachments: Value,
     pub flags: Value,
@@ -1047,8 +1050,10 @@ pub struct Wake {
 fn wakes_where(conn: &Connection, clause: &str, p: impl rusqlite::Params) -> Result<Vec<Wake>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT w.id, w.kind, w.body, w.due_at, w.created_at, w.actor, w.run_id, w.delivered_via,
-           w.redelivered, m.id, m.kind, m.text, m.reply_to, m.edit_of, m.attachments, m.flags, m.at
+           w.redelivered, m.id, m.kind, m.text, m.reply_to, m.edit_of, m.attachments, m.flags, m.at,
+           t.text
          FROM bot_wakes w LEFT JOIN bot_messages m ON m.id=w.message_ref
+           LEFT JOIN bot_messages t ON t.id=m.reply_to AND t.bot_id=m.bot_id
          WHERE {clause} ORDER BY w.due_at, w.id"
     ))?;
     let rows = stmt.query_map(p, |r| {
@@ -1073,6 +1078,7 @@ fn wakes_where(conn: &Connection, clause: &str, p: impl rusqlite::Params) -> Res
                     kind: r.get(10)?,
                     text: r.get(11)?,
                     reply_to: r.get(12)?,
+                    reply_text: r.get(17)?,
                     edit_of: r.get(13)?,
                     attachments: parse(r.get(14)?),
                     flags: parse(r.get(15)?),
@@ -1673,6 +1679,24 @@ pub fn inbox(
     })
 }
 
+/// ` (replying to: "…")` for a stored reply target: its first 60 chars on one
+/// line; empty when the target is not stored or has no text.
+fn reply_snippet(text: Option<&str>) -> String {
+    let flat = text
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if flat.is_empty() {
+        return String::new();
+    }
+    let mut cut: String = flat.chars().take(60).collect();
+    if cut.len() < flat.len() {
+        cut.push('…');
+    }
+    format!(" (replying to: \"{cut}\")")
+}
+
 /// One wake as a prompt line (without the leading `- `).
 pub fn wake_line(w: &Wake) -> String {
     let Some(m) = &w.message else {
@@ -1699,7 +1723,14 @@ pub fn wake_line(w: &Wake) -> String {
             m.id,
             m.reply_to.map_or("?".into(), |i| i.to_string())
         ),
-        _ => format!("[message #{} {at_msg}] {text}", m.id),
+        _ => match m.reply_to {
+            Some(r) => format!(
+                "[message #{} re #{r} {at_msg}]{} {text}",
+                m.id,
+                reply_snippet(m.reply_text.as_deref())
+            ),
+            None => format!("[message #{} {at_msg}] {text}", m.id),
+        },
     };
     if let Some(list) = m.attachments.as_array().filter(|a| !a.is_empty()) {
         let parts: Vec<String> = list
