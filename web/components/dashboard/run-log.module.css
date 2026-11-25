@@ -107,8 +107,8 @@
   display: grid;
   grid-template-columns: var(--run-time-width) minmax(0, 1fr);
   column-gap: var(--space-snug);
-  padding: var(--space-half) var(--space-1);
-  margin-top: var(--space-half);
+  padding: var(--inset-padding);
+  margin-top: var(--inset-gap);
   min-width: 0;
   border-radius: var(--radius-sm);
 }
