@@ -55,6 +55,9 @@ pub const ACK_EMOJI: &str = "👀";
 /// About one message per second per chat.
 const SEND_INTERVAL: Duration = Duration::from_secs(1);
 const SEND_ATTEMPTS: usize = 3;
+/// Wait before the first retry of a transient send failure
+/// ([`ApiError::transient`]); it doubles for each later attempt.
+const SEND_RETRY: Duration = Duration::from_secs(1);
 /// Most messages one `send` may split into (sends are about 1 s apart).
 pub const MAX_PARTS: usize = 20;
 const MAX_RETRY_AFTER: u64 = 60;
@@ -103,6 +106,19 @@ pub struct ApiError {
     pub code: Option<i64>,
     pub description: String,
     pub retry_after: Option<u64>,
+    /// No HTTP response arrived: the connection failed, was reset or timed
+    /// out ([`Api::finish`]).
+    pub network: bool,
+}
+
+impl ApiError {
+    /// Worth sending again: no response arrived (a network error) or the
+    /// server answered 5xx. Any other answer, including one whose body could
+    /// not be read, is final, so a retried send never repeats a call Telegram
+    /// acknowledged.
+    pub fn transient(&self) -> bool {
+        self.network || self.code.is_some_and(|c| (500..600).contains(&c))
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -154,6 +170,7 @@ impl Api {
             code,
             description,
             retry_after,
+            network: false,
         };
         let body: Value = match r {
             Ok(resp) => resp.into_json().map_err(|e| {
@@ -163,11 +180,22 @@ impl Api {
                     None,
                 )
             })?,
-            Err(ureq::Error::Status(code, resp)) => resp
-                .into_json()
-                .unwrap_or_else(|_| json!({"ok":false,"error_code":code})),
+            Err(ureq::Error::Status(code, resp)) => {
+                let mut body = resp
+                    .into_json()
+                    .unwrap_or_else(|_| json!({"ok":false,"error_code":code}));
+                // A 5xx is transient whatever its body says.
+                if code >= 500 {
+                    body["error_code"] = json!(code);
+                }
+                body
+            }
             Err(ureq::Error::Transport(t)) => {
-                return Err(err(None, self.clean(&t.to_string()), None));
+                use ureq::ErrorKind::{ConnectionFailed, Dns, Io};
+                return Err(ApiError {
+                    network: matches!(t.kind(), Dns | ConnectionFailed | Io),
+                    ..err(None, self.clean(&t.to_string()), None)
+                });
             }
         };
         if body["ok"] == true {
@@ -243,6 +271,7 @@ impl Api {
             code: None,
             description: d,
             retry_after: None,
+            network: false,
         };
         let resp = match self.agent.get(&url).call() {
             Ok(r) => r,
@@ -800,7 +829,7 @@ impl Gateway {
     /// A server-originated message to the owner's private chat.
     fn notify_owner(&self, b: &TgBot, store: &dyn Store, text: &str) {
         let params = json!({"chat_id": self.owner, "text": text});
-        match b.paced(self.owner, || b.api.call("sendMessage", &params)) {
+        match b.paced(store, self.owner, || b.api.call("sendMessage", &params)) {
             Ok(sent) => {
                 if let Err(e) = record_out(
                     store,
@@ -1106,7 +1135,7 @@ impl Gateway {
             return Ok(());
         }
         if let Some(t) = tg_msg {
-            self.mark_selected(b, chat, t, target.as_ref(), &label);
+            self.mark_selected(b, store, chat, t, target.as_ref(), &label);
         }
         b.typing(chat, thread);
         Ok(())
@@ -1236,7 +1265,7 @@ impl Gateway {
         if !buttons.is_empty() {
             p["reply_markup"] = keyboard(&buttons, &[]);
         }
-        match b.paced(chat, || b.api.call("sendMessage", &p)) {
+        match b.paced(store, chat, || b.api.call("sendMessage", &p)) {
             Ok(sent) => {
                 let r = record_out(
                     store,
@@ -1279,7 +1308,7 @@ impl Gateway {
         if let (Some(f), Some(e)) = (flags.as_object_mut(), extra.as_object()) {
             f.extend(e.clone());
         }
-        match b.paced(chat, || b.api.call("sendMessage", &p)) {
+        match b.paced(store, chat, || b.api.call("sendMessage", &p)) {
             Ok(sent) => {
                 if let Err(e) = record_out(
                     store,
@@ -1359,7 +1388,7 @@ impl Gateway {
         if let Some(open) = open {
             p["reply_markup"] = form_keyboard(open);
         }
-        match b.paced(chat, || b.api.call("sendMessage", &p)) {
+        match b.paced(store, chat, || b.api.call("sendMessage", &p)) {
             Ok(sent) => {
                 let r = record_out(
                     store,
@@ -1425,7 +1454,7 @@ impl Gateway {
             "link_preview_options": {"is_disabled": true},
             "reply_markup": form_keyboard(&buttons),
         });
-        let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+        let sent = b.paced(store, chat, || b.api.call("sendMessage", &p))?;
         let id = record_out(
             store,
             &name,
@@ -1461,7 +1490,7 @@ impl Gateway {
                 "inline_keyboard": [[{"text": "Open sealed message", "web_app": {"url": link}}]],
             },
         });
-        let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+        let sent = b.paced(store, chat, || b.api.call("sendMessage", &p))?;
         let id = record_out(
             store,
             name,
@@ -1716,6 +1745,7 @@ impl Gateway {
     fn mark_selected(
         &self,
         b: &TgBot,
+        store: &dyn Store,
         chat: i64,
         tg_msg: i64,
         stored: Option<&StoredMessage>,
@@ -1735,14 +1765,14 @@ impl Gateway {
                 if html {
                     p["parse_mode"] = json!("HTML");
                 }
-                match b.api.call("editMessageText", &p) {
+                match b.paced(store, chat, || b.api.call("editMessageText", &p)) {
                     Ok(_) => return,
                     Err(e) => eprintln!("telegram: bot {}: {e}", b.name()),
                 }
             }
         }
         let p = json!({"chat_id": chat, "message_id": tg_msg, "reply_markup": none});
-        if let Err(e) = b.api.call("editMessageReplyMarkup", &p) {
+        if let Err(e) = b.paced(store, chat, || b.api.call("editMessageReplyMarkup", &p)) {
             eprintln!("telegram: bot {}: {e}", b.name());
         }
     }
@@ -1897,7 +1927,7 @@ impl Gateway {
         }
         // The command already committed: a failed reply must not make the
         // update redeliver and repeat it.
-        match b.paced(chat, || b.api.call("sendMessage", &params)) {
+        match b.paced(store, chat, || b.api.call("sendMessage", &params)) {
             Ok(sent) => {
                 if let Err(e) = record_out(
                     store,
@@ -2020,7 +2050,7 @@ impl Gateway {
             if i + 1 == parts.len() && !o.buttons.is_empty() {
                 p["reply_markup"] = keyboard(&o.buttons, &o.rows);
             }
-            let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+            let sent = b.paced(store, chat, || b.api.call("sendMessage", &p))?;
             let reply_local = if i == 0 {
                 reply.as_ref().map(|r| r.id)
             } else {
@@ -2089,7 +2119,7 @@ impl Gateway {
                 json!({"message_id": r.message_id}).to_string(),
             ));
         }
-        let sent = b.paced(chat, || {
+        let sent = b.paced(store, chat, || {
             b.api.upload(method, &fields, kind, file_name, bytes)
         })?;
         let files = attachments(&sent);
@@ -2162,7 +2192,7 @@ impl Gateway {
             None if buttons.is_some() => "editMessageReplyMarkup",
             None => bail!("nothing to edit: give text, buttons or clear-buttons"),
         };
-        let res = match b.paced(m.chat_id, || b.api.call(method, &p)) {
+        let res = match b.paced(store, m.chat_id, || b.api.call(method, &p)) {
             Ok(r) => r,
             // Telegram already shows this (for example clearing a keyboard an
             // older text edit dropped): record the state all the same.
@@ -2241,7 +2271,7 @@ impl Gateway {
         } else {
             "unpinChatMessage"
         };
-        b.paced(m.chat_id, || b.api.call(method, &p))?;
+        b.paced(store, m.chat_id, || b.api.call(method, &p))?;
         store.conn().execute(
             "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json(?1)) WHERE id=?2",
             params![json!(pin).to_string(), msg],
@@ -2465,7 +2495,7 @@ fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<
     let live = g.flags["deleted"] != true && b.allowed(g.chat_id).is_ok();
     if live && g.flags["pinned"] != false {
         let p = json!({"chat_id": g.chat_id, "message_id": g.message_id});
-        if let Err(e) = b.paced(g.chat_id, || b.api.call("unpinChatMessage", &p)) {
+        if let Err(e) = b.paced(store, g.chat_id, || b.api.call("unpinChatMessage", &p)) {
             skip_refused(b, store, "unpin goal board", g.id, e)?;
         }
         set_flag(store, g.id, "$.pinned", json!(false))?;
@@ -2473,7 +2503,7 @@ fn retire_goal_board(b: &TgBot, store: &dyn Store, g: &StoredMessage) -> Result<
     let text = board::merged_text();
     if live && g.text != text {
         let p = json!({"chat_id": g.chat_id, "message_id": g.message_id, "text": text});
-        match b.paced(g.chat_id, || b.api.call("editMessageText", &p)) {
+        match b.paced(store, g.chat_id, || b.api.call("editMessageText", &p)) {
             Ok(_) => {}
             Err(e) if e.description.contains("message is not modified") => {}
             Err(e) => skip_refused(b, store, "edit goal board", g.id, e)?,
@@ -2548,7 +2578,7 @@ fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> R
         if let Some(th) = thread {
             p["message_thread_id"] = json!(th);
         }
-        let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+        let sent = b.paced(store, chat, || b.api.call("sendMessage", &p))?;
         let id = record_out(
             store,
             &b.name(),
@@ -2574,7 +2604,9 @@ fn task_cards(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> R
         if b.allowed(m.chat_id).is_ok() {
             let p = json!({"chat_id": m.chat_id, "message_id": m.message_id,
                 "reply_markup": {"inline_keyboard": []}});
-            match b.paced(m.chat_id, || b.api.call("editMessageReplyMarkup", &p)) {
+            match b.paced(store, m.chat_id, || {
+                b.api.call("editMessageReplyMarkup", &p)
+            }) {
                 Ok(_) => {}
                 Err(e) if e.description.contains("message is not modified") => {}
                 Err(e) => skip_refused(b, store, "close card", msg, e)?,
@@ -2597,7 +2629,7 @@ fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
     for m in closed {
         if m.flags["deleted"] != true && b.allowed(m.chat_id).is_ok() {
             let p = json!({"chat_id": m.chat_id, "message_id": m.message_id});
-            if let Err(e) = b.paced(m.chat_id, || b.api.call("unpinChatMessage", &p)) {
+            if let Err(e) = b.paced(store, m.chat_id, || b.api.call("unpinChatMessage", &p)) {
                 skip_refused(b, store, "unpin card", m.id, e)?;
             }
         }
@@ -2615,7 +2647,7 @@ fn sync_pins(b: &TgBot, store: &dyn Store) -> Result<()> {
         }
         let p =
             json!({"chat_id": m.chat_id, "message_id": m.message_id, "disable_notification": true});
-        match b.paced(m.chat_id, || b.api.call("pinChatMessage", &p)) {
+        match b.paced(store, m.chat_id, || b.api.call("pinChatMessage", &p)) {
             Ok(_) => {
                 // One write, so a reader never sees a pin without its kind.
                 store.conn().execute(
@@ -2652,7 +2684,7 @@ fn retire_overview(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()
         let pinned = o.flags["pinned"] == true || (shown && o.flags["pinned"] != false);
         if live && pinned {
             let p = json!({"chat_id": o.chat_id, "message_id": o.message_id});
-            if let Err(e) = b.paced(o.chat_id, || b.api.call("unpinChatMessage", &p)) {
+            if let Err(e) = b.paced(store, o.chat_id, || b.api.call("unpinChatMessage", &p)) {
                 skip_refused(b, store, "unpin overview", o.id, e)?;
             }
         }
@@ -2660,7 +2692,7 @@ fn retire_overview(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()
             // An empty keyboard drops the pick buttons of older boards.
             let p = json!({"chat_id": o.chat_id, "message_id": o.message_id,
                 "text": board::RETIRED_TEXT, "reply_markup": {"inline_keyboard": []}});
-            match b.paced(o.chat_id, || b.api.call("editMessageText", &p)) {
+            match b.paced(store, o.chat_id, || b.api.call("editMessageText", &p)) {
                 Ok(_) => {}
                 Err(e) if e.description.contains("message is not modified") => {}
                 Err(e) => skip_refused(b, store, "edit overview", o.id, e)?,
@@ -2699,7 +2731,7 @@ fn goal_pin_event(store: &dyn Store, name: &str, msg: i64, goal: &str, action: &
 fn drop_goal_pin(b: &TgBot, store: &dyn Store, m: &StoredMessage) -> Result<()> {
     if m.flags["pinned"] == true && m.flags["deleted"] != true && b.allowed(m.chat_id).is_ok() {
         let p = json!({"chat_id": m.chat_id, "message_id": m.message_id});
-        if let Err(e) = b.paced(m.chat_id, || b.api.call("unpinChatMessage", &p)) {
+        if let Err(e) = b.paced(store, m.chat_id, || b.api.call("unpinChatMessage", &p)) {
             skip_refused(b, store, "unpin goal", m.id, e)?;
         }
     }
@@ -2749,7 +2781,7 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
                 if let Some(th) = thread {
                     p["message_thread_id"] = json!(th);
                 }
-                let sent = b.paced(chat, || b.api.call("sendMessage", &p))?;
+                let sent = b.paced(store, chat, || b.api.call("sendMessage", &p))?;
                 let id = record_out(
                     store,
                     &b.name(),
@@ -2770,7 +2802,7 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
             }
             let p = json!({"chat_id": m.chat_id, "message_id": m.message_id, "text": text,
                 "parse_mode": "HTML"});
-            match b.paced(m.chat_id, || b.api.call("editMessageText", &p)) {
+            match b.paced(store, m.chat_id, || b.api.call("editMessageText", &p)) {
                 Ok(_) => {}
                 // The text already matches (for example after a lost reply).
                 Err(e) if e.description.contains("message is not modified") => {}
@@ -2794,7 +2826,7 @@ fn goal_pins(b: &TgBot, store: &dyn Store, chat: i64, thread: Option<i64>) -> Re
             }
             let p = json!({"chat_id": m.chat_id, "message_id": m.message_id,
                 "disable_notification": true});
-            match b.paced(m.chat_id, || b.api.call("pinChatMessage", &p)) {
+            match b.paced(store, m.chat_id, || b.api.call("pinChatMessage", &p)) {
                 Ok(_) => set_flag(store, m.id, "$.pinned", json!(true))?,
                 Err(e) => {
                     skip_refused(b, store, "pin goal", m.id, e)?;
@@ -3041,10 +3073,13 @@ impl TgBot {
     }
 
     /// Runs one outbound call through the chat's queue: calls are serialized
-    /// per chat, spaced by [`SEND_INTERVAL`], and retried after a 429's
-    /// `retry_after`.
+    /// per chat, spaced by [`SEND_INTERVAL`], and retried, up to
+    /// [`SEND_ATTEMPTS`] calls in all, after a 429's `retry_after` or, for a
+    /// transient failure ([`ApiError::transient`]), after [`SEND_RETRY`]
+    /// doubling. Each retry is a `send_retry` bot event.
     fn paced<T>(
         &self,
+        store: &dyn Store,
         chat: i64,
         mut f: impl FnMut() -> Result<T, ApiError>,
     ) -> Result<T, ApiError> {
@@ -3070,10 +3105,48 @@ impl TgBot {
                 }
                 Err(e) if e.code == Some(429) && attempt < SEND_ATTEMPTS => {
                     let secs = e.retry_after.unwrap_or(1).clamp(1, MAX_RETRY_AFTER);
-                    *next = Instant::now() + Duration::from_secs(secs);
+                    let wait = Duration::from_secs(secs);
+                    self.send_retry(store, &e, attempt, wait);
+                    *next = Instant::now() + wait;
+                }
+                Err(e) if e.transient() && attempt < SEND_ATTEMPTS => {
+                    let wait = SEND_RETRY * (1 << (attempt - 1));
+                    self.send_retry(store, &e, attempt, wait);
+                    *next = Instant::now() + wait;
                 }
                 Err(e) => return Err(e),
             }
+        }
+    }
+
+    /// Records a `send_retry` bot event: call `attempt` failed with `e` and
+    /// is retried after `wait`. Best effort: the send goes on regardless.
+    fn send_retry(&self, store: &dyn Store, e: &ApiError, attempt: usize, wait: Duration) {
+        eprintln!(
+            "telegram: bot {}: {e} (attempt {attempt}/{SEND_ATTEMPTS}, retrying in {}s)",
+            self.name(),
+            wait.as_secs_f64()
+        );
+        let body = json!({
+            "method": e.method,
+            "attempt": attempt,
+            "error": e.to_string(),
+            "retry_in_ms": wait.as_millis() as u64,
+        });
+        let conn = store.conn();
+        let r = bot_id(&conn, &self.name()).and_then(|id| {
+            bot::event(
+                &conn,
+                id,
+                &Actor::new("telegram"),
+                "send_retry",
+                &body.to_string(),
+            )
+        });
+        drop(conn);
+        match r {
+            Ok(_) => store.changed(),
+            Err(e) => eprintln!("telegram: bot {}: send_retry event: {e:#}", self.name()),
         }
     }
 }
