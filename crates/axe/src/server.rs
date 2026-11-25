@@ -50,6 +50,25 @@ impl Gateway {
 const NO_TELEGRAM: &str = "this server was built without the telegram feature";
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8790";
+
+/// The running server's build (`GET /api/version`), which the dashboard shows.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "ServerVersion"))]
+pub struct Version {
+    /// What `axe --version` prints: the crate version, plus the short commit
+    /// when the build knew it (`build.rs`).
+    pub version: String,
+    /// The whole commit the binary was built from, when known.
+    pub commit: Option<String>,
+}
+
+pub fn version() -> Version {
+    let commit = env!("AXE_COMMIT");
+    Version {
+        version: env!("AXE_VERSION").to_string(),
+        commit: (!commit.is_empty()).then(|| commit.to_string()),
+    }
+}
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// `bot tg send-file` bodies carry the raw file (Telegram's 50 MB upload cap).
@@ -1766,6 +1785,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
         }
         ("DELETE", ["api", "repos", name]) => ok(200, &crate::repo::remove(&st.conn(), name)?),
         ("GET", ["healthz"]) => ok(200, &json!({ "ok": true })),
+        ("GET", ["api", "version"]) => ok(200, &version()),
         ("POST", ["api", "login-links"]) => {
             #[derive(Deserialize)]
             struct B {

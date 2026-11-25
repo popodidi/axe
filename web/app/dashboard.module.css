@@ -187,6 +187,11 @@
   white-space: nowrap;
 }
 
+/* The build's commit link stays as muted as its line; the underline marks it. */
+.versionLink {
+  color: inherit;
+}
+
 .connection[data-live="true"] {
   color: var(--live);
 }
