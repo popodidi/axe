@@ -366,12 +366,14 @@ fn goals_lists_the_bots_open_goals_with_budget_bars() {
     let (_d, mut c) = setup();
     assert_eq!(
         owner_views::goals(&c, "a", Some(WEB)).unwrap(),
-        "bot a: no open goals. Propose one: <code>axe goal propose</code>\n\
-         <a href=\"http://axe.example/?view=goals\">Open goals</a>"
+        format!(
+            "{}\n<a href=\"http://axe.example/?view=goals\">Open goals</a>",
+            owner_views::EMPTY_GOALS
+        )
     );
     assert_eq!(
         owner_views::goals(&c, "a", None).unwrap(),
-        "bot a: no open goals. Propose one: <code>axe goal propose</code>"
+        owner_views::EMPTY_GOALS
     );
     let g = |name: &str, cost: Option<f64>| axe::goal::NewGoal {
         name: name.into(),
@@ -465,8 +467,10 @@ fn services_lists_state_policy_and_last_exit() {
     let now = MON;
     assert_eq!(
         owner_views::services(&c, "a", Some(WEB), now).unwrap(),
-        "bot a: no services. Declare one: <code>axe service add</code>\n\
-         <a href=\"http://axe.example/?view=services&amp;q=a\">Open services</a>"
+        format!(
+            "{}\n<a href=\"http://axe.example/?view=services&amp;q=a\">Open services</a>",
+            owner_views::EMPTY_SERVICES
+        )
     );
     service(
         &mut c,
@@ -494,15 +498,15 @@ fn services_lists_state_policy_and_last_exit() {
     assert_eq!(
         out,
         "<b>bot a: 2 services</b>\n\
-         <b>feed</b> · running · restart always · up 2h · last exit 1\n\
-         <b>sync</b> · scheduled · <code>0 9 * * *</code> Asia/Taipei · last run 1h ago: exit 0 · next in 30m\n\
+         • <b>feed</b> · running · restart always · up 2h · last exit 1\n\
+         • <b>sync</b> · scheduled · daily 09:00 · last run 1h ago: exit 0 · next in 30m\n\
          <a href=\"http://axe.example/?view=services&amp;q=a\">Open services</a>"
     );
     // Declared, never reported, no public URL.
     let out = owner_views::services(&c, "b", None, now).unwrap();
     assert_eq!(
         out,
-        "<b>bot b: 1 service</b>\n<b>other</b> · pending · restart always · no exit yet"
+        "<b>bot b: 1 service</b>\n• <b>other</b> · pending · restart always · no exit yet"
     );
 }
 
@@ -521,7 +525,7 @@ fn routines_lists_the_bots_routines_with_next_fire() {
     let now = MON; // 08:00 in Taipei
     assert_eq!(
         owner_views::routines(&c, "a", None, now).unwrap(),
-        "bot a: no routines. Create one: <code>axe routine save</code> with \"owner\": \"bot:a\""
+        owner_views::EMPTY_ROUTINES
     );
     routine(&mut c, "morning", "bot:a", now);
     let paused = routine(&mut c, "digest", "bot:a", now);
@@ -533,55 +537,181 @@ fn routines_lists_the_bots_routines_with_next_fire() {
     assert_eq!(
         out,
         "<b>bot a: 2 routines</b>\n\
-         <b>digest</b> · <code>0 9 * * *</code> Asia/Taipei · paused\n\
-         <b>morning</b> · <code>0 9 * * *</code> Asia/Taipei · next Jan 5 09:00 (in 1h)\n\
+         • <b>digest</b> · daily 09:00 · <i>paused</i>\n\
+         • <b>morning</b> · daily 09:00 · next in 1h\n\
          <a href=\"http://axe.example/?view=routines\">Open routines</a>"
     );
 }
 
 #[test]
-fn status_lists_schedules_with_next_fire_or_paused() {
+fn empty_states_say_what_the_primitive_is_without_commands() {
+    for (text, word) in [
+        (owner_views::EMPTY_GOALS, "No open goals."),
+        (owner_views::EMPTY_SERVICES, "No services."),
+        (owner_views::EMPTY_ROUTINES, "No routines."),
+    ] {
+        assert!(text.starts_with(&format!("<b>{word}</b> ")), "{text}");
+        assert!(!text.contains('\n'), "one line: {text}");
+        for cmd in ["axe ", "<code>", " /", "--"] {
+            assert!(!text.contains(cmd), "no command ({cmd}): {text}");
+        }
+    }
+    assert!(owner_views::EMPTY_SERVICES.contains("restarts it if it stops"));
+    assert!(owner_views::EMPTY_ROUTINES.contains("on a schedule"));
+    assert!(owner_views::EMPTY_GOALS.contains("budget"));
+}
+
+#[test]
+fn cron_in_words_for_common_patterns_else_raw() {
+    let w = |c: &str| owner_views::cron_words(c);
+    for (cron, words) in [
+        ("0 9 * * *", "daily 09:00"),
+        ("30 2 * * *", "daily 02:30"),
+        ("0 9 * * 1-5", "weekdays 09:00"),
+        ("0 9 * * MON-FRI", "weekdays 09:00"),
+        ("0 10 * * 6,0", "weekends 10:00"),
+        ("0 10 * * 1,4", "Mon, Thu 10:00"),
+        ("0 10 * * thu,mon", "Mon, Thu 10:00"),
+        ("0 8 * * 7", "Sun 08:00"),
+        ("0 8 * * 0-6", "daily 08:00"),
+        ("0 9,17 * * *", "daily 09:00, 17:00"),
+        ("0 */6 * * *", "every 6h"),
+        ("15 */2 * * *", "every 2h at :15"),
+        ("0 * * * *", "hourly"),
+        ("5 * * * *", "hourly at :05"),
+        ("*/15 * * * *", "every 15m"),
+        ("0 9 1 * *", "monthly on day 1 09:00"),
+    ] {
+        assert_eq!(w(cron).as_deref(), Some(words), "{cron}");
+    }
+    for raw in [
+        "0 9 * 1 *",
+        "0 9 1 * 1",
+        "0 9-17 * * *",
+        "0 0 9 * * *",
+        "@daily",
+        "0 25 * * *",
+        "x y z w v",
+    ] {
+        assert_eq!(w(raw), None, "{raw}");
+    }
+    // The owner's zone is implied; another zone is named; raw cron in <code>.
+    assert_eq!(
+        owner_views::schedule_words("0 9 * * *", "Asia/Taipei"),
+        "daily 09:00"
+    );
+    assert_eq!(
+        owner_views::schedule_words("30 2 * * *", "UTC"),
+        "daily 02:30 UTC"
+    );
+    assert_eq!(
+        owner_views::schedule_words("0 9-17 * * *", "Asia/Taipei"),
+        "<code>0 9-17 * * *</code>"
+    );
+}
+
+#[test]
+fn relative_times_and_short_clock() {
+    let tz = owner_views::OWNER_TZ;
+    // MON is 08:00 in Taipei.
+    assert_eq!(owner_views::relative(MON + 35 * 60, MON), "in 35m");
+    assert_eq!(owner_views::relative(MON - 2 * 3600, MON), "2h ago");
+    assert_eq!(owner_views::relative(MON + 3 * DAY, MON), "in 3d");
+    assert_eq!(owner_views::clock(MON + 3600, tz, MON), "09:00");
+    assert_eq!(owner_views::clock(MON + DAY, tz, MON), "Tue 08:00");
+    assert_eq!(owner_views::clock(MON - 9 * 3600, tz, MON), "Sun 23:00");
+    assert_eq!(owner_views::clock(MON + 10 * DAY, tz, MON), "Jan 15 08:00");
+}
+
+#[test]
+fn status_is_a_headline_wakes_and_sorted_schedules() {
     let (_d, mut c) = setup();
-    let now = MON;
+    let now = MON; // 08:00 in Taipei
+                   // Not the creation wake (at the real time).
+    c.execute("DELETE FROM bot_wakes", []).unwrap();
     let out = owner_views::status(&c, "a", now).unwrap();
-    assert!(out.starts_with("bot a (p): active\nno live run\n"), "{out}");
-    assert!(!out.contains("schedules:"), "{out}");
+    assert_eq!(
+        out,
+        "<b>a · active</b> · idle\nNo wakes queued · no runs yet"
+    );
     let new = |name: &str, cron: &str, tz: &str| axe::schedule::NewSchedule {
         name: name.into(),
         cron: cron.into(),
         timezone: tz.into(),
         objective: "look".into(),
     };
-    axe::schedule::add(
-        &mut c,
-        &human(),
-        "a",
-        &new("review", "0 9 * * 1,4", "Asia/Taipei"),
-        "w",
-        now,
-    )
-    .unwrap();
-    axe::schedule::add(
-        &mut c,
-        &human(),
-        "a",
-        &new("nightly", "30 2 * * *", "UTC"),
-        "w",
-        now,
-    )
-    .unwrap();
+    for (name, cron, tz) in [
+        ("review", "0 10 * * 1,4", "Asia/Taipei"),
+        ("health", "0 */6 * * *", "Asia/Taipei"),
+        ("nightly", "30 2 * * *", "UTC"),
+        ("odd", "0 9-17 * * *", "Asia/Taipei"),
+    ] {
+        axe::schedule::add(&mut c, &human(), "a", &new(name, cron, tz), "w", now).unwrap();
+    }
     axe::schedule::change(&mut c, &human(), "a", "nightly", "pause", "w", now).unwrap();
+    // Two queued wakes, the earliest at 08:35; the last run ended 07:05.
+    bot::add_wake(&mut c, &human(), "a", now + 35 * 60, "x", None, now).unwrap();
+    bot::add_wake(&mut c, &human(), "a", now + 3600, "y", None, now).unwrap();
+    bot_run(&c, 1, 1, now - 3600, None);
+    c.execute(
+        "UPDATE bot_runs SET ended_at=?1",
+        params![ts(now - 55 * 60)],
+    )
+    .unwrap();
     let out = owner_views::status(&c, "a", now).unwrap();
+    assert_eq!(
+        out,
+        "<b>a · active</b> · idle\n\
+         Next wake 08:35 (in 35m) · 2 queued · last run 07:05 (55m ago)\n\
+         \n\
+         <b>Schedules</b>\n\
+         • odd · <code>0 9-17 * * *</code> · next in 1h\n\
+         • review · Mon, Thu 10:00 · next in 2h\n\
+         • health · every 6h · next in 4h\n\
+         • nightly · daily 02:30 UTC · <i>paused</i>"
+    );
     assert!(
-        out.ends_with(
-            "\nschedules:\n\
-             - nightly: 30 2 * * * UTC, paused\n\
-             - review: 0 9 * * 1,4 Asia/Taipei, next Jan 5 09:00 (in 1h)"
-        ),
-        "{out}"
+        !out.contains("Z ") && !out.contains("T0"),
+        "no RFC3339: {out}"
     );
     assert!(owner_views::status(&c, "b", now)
         .unwrap()
-        .find("schedules:")
+        .find("Schedules")
         .is_none());
+}
+
+#[test]
+fn status_shows_the_live_run_and_attention() {
+    let (_d, c) = setup();
+    let now = MON;
+    c.execute("DELETE FROM bot_wakes", []).unwrap();
+    c.execute(
+        "INSERT INTO bot_runs (id, bot_id, agent, mode, session_id, claim, dispatcher, generation,
+           started_at, log_path, current_activity)
+         VALUES (1, 1, 'claude', 'resume', 'b', 'c', 'd', 'g', ?1, 'x', 'reading <PR> 12')",
+        params![ts(now - 4 * 60)],
+    )
+    .unwrap();
+    let out = owner_views::status(&c, "a", now).unwrap();
+    assert!(
+        out.starts_with("<b>a · active</b> · running: reading &lt;PR&gt; 12, 4m\n"),
+        "{out}"
+    );
+    c.execute("UPDATE bot_runs SET ended_at=?1", params![ts(now - 60)])
+        .unwrap();
+    c.execute(
+        "UPDATE bots SET state='paused', failures=?1 WHERE name='a'",
+        params![bot::FAILURES_PAUSE],
+    )
+    .unwrap();
+    let out = owner_views::status(&c, "a", now).unwrap();
+    assert_eq!(
+        out,
+        format!(
+            "<b>a · paused</b> · idle\n\
+             Needs attention: {} failed runs in a row\n\
+             No wakes queued · last run 07:59 (1m ago)",
+            bot::FAILURES_PAUSE
+        )
+    );
 }

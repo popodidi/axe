@@ -171,7 +171,12 @@ allowlisted groups. `/tasks`, `/task N`, `/cost`, `/goals`, `/services` and
 web access (`owner_views.rs`): the bot's open tasks, one task's Outcome and
 latest notes, the bot's spend over the Cost view's last 7 days, its goals as
 their pins show them, its services, and the routines it owns, each one
-message linking to the web page. `/status` also lists the bot's schedules.
+message linking to the web page. `/status` is a phone-sized summary: a
+bold headline with the bot's state and live run, wakes and the last run as a
+Taipei clock plus how far off, then its services and schedules, cron in words
+where it can (`cron_words`). An empty `/goals`, `/services` or `/routines`
+says in plain words what the primitive is and to just ask the bot, with no
+commands.
 
 The owner's inbox is the bot chat's pinned list, rendered by the server
 (`board.rs`, `goal_board.rs`): one pinned card per open decision and one
