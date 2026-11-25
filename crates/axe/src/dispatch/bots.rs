@@ -215,8 +215,11 @@ impl Dispatcher {
         let system_file = dir.join("system.md");
         let system = bot::system_prompt(b, &crate::context::bot_prompt_parts(&attached))
             + &crate::context::prompt_section(&attached);
-        std::fs::write(&system_file, system)
+        std::fs::write(&system_file, &system)
             .with_context(|| format!("write {}", system_file.display()))?;
+        // `system.md` is rewritten every run; this run's copy is for the run
+        // page (`run_log::run_files`). Best effort.
+        let _ = std::fs::write(dir.join(format!("{}.system.md", c.run)), &system);
         let settings_file = dir.join("settings.json");
         // After an atomic binary replacement Linux reports "<path> (deleted)";
         // the hook must call the installed path.
@@ -386,6 +389,7 @@ impl Dispatcher {
                 continue;
             }
             run.log_len = len;
+            crate::run_log::note_growth(&run.log_path, len);
             if let Some(a) = activity::from_log(&run.log_path) {
                 if run.activity.as_ref() != Some(&a) {
                     self.store.request::<serde_json::Value>(
@@ -407,6 +411,10 @@ impl Dispatcher {
         note: Option<String>,
     ) -> Result<()> {
         kill_child(&mut run.child);
+        let len = std::fs::metadata(&run.log_path).map_or(0, |m| m.len());
+        if len != run.log_len {
+            crate::run_log::note_growth(&run.log_path, len);
+        }
         if let SessionMode::Jsonl(key) = &run.session_mode {
             if let Ok(text) = std::fs::read_to_string(&run.log_path) {
                 run.session_id = agent_proc::parse_jsonl_session(&text, key).or(run.session_id);

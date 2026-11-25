@@ -6,6 +6,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type MouseEvent,
+  type ReactNode,
 } from "react";
 import Markdown from "../../app/markdown";
 import type { Run } from "../../lib/model";
@@ -16,24 +18,60 @@ import {
   type LogLine,
   type LogPage,
 } from "../../lib/run-log";
+import {
+  clock,
+  count,
+  duration,
+  epochMs,
+  fullTime,
+  runtimeOf,
+  size,
+  usageTotals,
+  type RunFile,
+  type RunMeta,
+} from "../../lib/run-meta";
 import { buildTranscript, type TranscriptEntry } from "../../lib/transcript";
 import { Button, CodeBlock, Tag } from "../ui";
 import styles from "./run-log.module.css";
 
 // Bot runs (`kind="bot"`) use /api/bot-runs and carry `bot` instead of a task.
-type LogRun = Run & { bot?: string };
-type Reply = { run: LogRun; page?: LogPage; unavailable?: string; retryable?: boolean; log_complete?: boolean };
+type LogRun = Run & {
+  bot?: string;
+  dispatcher?: string;
+  stop_reason?: string | null;
+  claim?: string;
+};
+type Reply = {
+  run: LogRun;
+  page?: LogPage;
+  unavailable?: string;
+  retryable?: boolean;
+  log_complete?: boolean;
+};
 export function RunLog({
   id,
   base,
   kind = "task",
   onClose,
+  onOpen,
 }: {
   id: string;
   base: string;
   kind?: "task" | "bot";
   onClose: () => void;
+  /** Opens another dashboard view (URL parameters) from a panel link. */
+  onOpen?: (params: Record<string, string | null>) => void;
 }) {
+  // Undefined until mounted: the stylesheet decides where the details rail
+  // starts open (wide windows); after that the toggle owns it.
+  const [details, setDetails] = useState<boolean>();
+  const detailsRail = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const shown = !!detailsRail.current?.getClientRects().length;
+    setDetails(shown);
+  }, []);
+  const [meta, setMeta] = useState<RunMeta>();
+  const [metaError, setMetaError] = useState("");
   const [raw, setRaw] = useState(false);
   const [run, setRun] = useState<LogRun>();
   const [lines, setLines] = useState<LogLine[]>([]);
@@ -113,7 +151,8 @@ export function RunLog({
             setError(
               response.status === 404 && detail.startsWith("no route for ")
                 ? "API does not support run logs. Upgrade the axe server, then Retry."
-                : response.status === 404 && /^(bot )?run \d+ not found$/.test(detail)
+                : response.status === 404 &&
+                    /^(bot )?run \d+ not found$/.test(detail)
                   ? "Run not found. Check the run ID and API address, then Retry."
                   : `Log request failed (HTTP ${response.status}). Check API compatibility and access, then Retry.`,
             );
@@ -170,7 +209,8 @@ export function RunLog({
             end: direction === "older" ? (s.page?.end ?? p.end) : p.end,
           };
         }
-        s.finished = (reply.log_complete ?? !!reply.run.ended_at) && s.page.end >= p.size;
+        s.finished =
+          (reply.log_complete ?? !!reply.run.ended_at) && s.page.end >= p.size;
         setBeginning(s.page.start === 0);
         setLines(s.lines);
         setUnavailable("");
@@ -209,7 +249,42 @@ export function RunLog({
       older.current = () => {};
     };
   }, [base, id, kind, paused, full, revision]);
+  // The details panel: fetched once, and again when the run ends (its exit,
+  // usage and outcome are recorded then). Never blocks the log.
+  const ended = !!run?.ended_at;
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(
+      `${base}/api/${kind === "bot" ? "bot-runs" : "runs"}/${encodeURIComponent(id)}/meta`,
+      {
+        signal: AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(10000),
+        ]),
+      },
+    )
+      .then(async (r) => {
+        if (!r.ok)
+          throw Error(
+            r.status === 404
+              ? "this axe server predates run details"
+              : `HTTP ${r.status}`,
+          );
+        const m: RunMeta = await r.json();
+        if (!m || typeof m !== "object" || !m.run)
+          throw Error("unexpected reply");
+        setMeta(m);
+        setMetaError("");
+      })
+      .catch((e: unknown) => {
+        if (!controller.signal.aborted)
+          setMetaError(e instanceof Error ? e.message : String(e));
+      });
+    return () => controller.abort();
+  }, [base, id, kind, ended, revision]);
   const transcript = useMemo(() => buildTranscript(lines), [lines]);
+  const startMs = epochMs(run?.started_at);
+  const timed = transcript.some((e) => e.at !== undefined);
   const status = !run
     ? error
       ? "Run unavailable"
@@ -263,11 +338,6 @@ export function RunLog({
               ? ` · Bot ${run.bot} · ${run.agent}`
               : ` · Task #${run.task_id} · ${run.agent}`)}
         </h2>
-        {run && (
-          <span>
-            {run.started_at}
-          </span>
-        )}
         <Tag
           data-run-state={
             !run
@@ -283,7 +353,7 @@ export function RunLog({
         >
           {status}
         </Tag>
-        <span role="status">
+        <span role="status" className={styles.connection}>
           {error
             ? connection
             : unavailable
@@ -296,173 +366,280 @@ export function RunLog({
                     ? "History"
                     : connection}
         </span>
-        {(error || unavailable) && (
+        <span className={styles.actions}>
+          {(error || unavailable) && (
+            <Button
+              size="sm"
+              onClick={() => {
+                state.current.stopped = false;
+                state.current.failures = 0;
+                state.current.finished = false;
+                setError("");
+                setUnavailable("");
+                setConnection("Connecting");
+                setPaused(false);
+                setFull(false);
+                setRevision((n) => n + 1);
+              }}
+            >
+              Retry
+            </Button>
+          )}
+          {run && !run.ended_at && !error && !unavailable && (
+            <Button size="sm" onClick={() => setPaused(!paused)}>
+              {paused ? "Resume" : "Pause"}
+            </Button>
+          )}
           <Button
             size="sm"
             onClick={() => {
-              state.current.stopped = false;
-              state.current.failures = 0;
-              state.current.finished = false;
-              setError("");
-              setUnavailable("");
-              setConnection("Connecting");
+              follow.current = true;
+              if (full) {
+                state.current = {
+                  lines: [],
+                  busy: false,
+                  finished: false,
+                  failures: 0,
+                  stopped: false,
+                };
+                setLines([]);
+                setFull(false);
+                setRevision((n) => n + 1);
+              }
               setPaused(false);
-              setFull(false);
-              setRevision((n) => n + 1);
+              if (pane.current)
+                pane.current.scrollTop = pane.current.scrollHeight;
             }}
           >
-            Retry
+            Jump to latest
           </Button>
-        )}
-        {run && !run.ended_at && !error && !unavailable && (
-          <Button size="sm" onClick={() => setPaused(!paused)}>
-            {paused ? "Resume" : "Pause"}
+          <Button size="sm" aria-pressed={raw} onClick={() => setRaw(!raw)}>
+            {raw ? "Show conversation" : "Inspect raw events"}
           </Button>
-        )}
-        <Button
-          size="sm"
-          onClick={() => {
-            follow.current = true;
-            if (full) {
-              state.current = {
-                lines: [],
-                busy: false,
-                finished: false,
-                failures: 0,
-                stopped: false,
-              };
-              setLines([]);
-              setFull(false);
-              setRevision((n) => n + 1);
-            }
-            setPaused(false);
-            if (pane.current)
-              pane.current.scrollTop = pane.current.scrollHeight;
-          }}
-        >
-          Jump to latest
-        </Button>
-        <Button size="sm" aria-pressed={raw} onClick={() => setRaw(!raw)}>
-          {raw ? "Show conversation" : "Inspect raw events"}
-        </Button>
+          <Button
+            size="sm"
+            aria-expanded={!!details}
+            aria-controls="run-details"
+            onClick={() => setDetails(!details)}
+          >
+            {details ? "Hide details" : "Details"}
+          </Button>
+        </span>
       </header>
       <div
-        className={styles.scroll}
-        ref={pane}
-        tabIndex={0}
-        aria-label="Log output"
-        onScroll={() => {
-          const el = pane.current;
-          if (el)
-            follow.current =
-              el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-        }}
+        className={styles.body}
+        data-details={details === undefined ? "auto" : String(details)}
       >
-        {error && <p role="alert">{error}</p>}
-        {unavailable ? (
-          <p role="alert">{unavailable}. History unavailable.</p>
-        ) : (
-          <>
-            <Button
-              size="sm"
-              disabled={beginning || loading || !ready || !!error}
-              onClick={() => older.current()}
-            >
-              Load older history
-            </Button>
-            {beginning && <p>Beginning of log</p>}
-            {full && (
-              <p>
-                Bounded window reached. Load older history to move back; Jump to
-                latest to follow again.
-              </p>
-            )}
-            {!lines.length && !error && (
-              <p>
-                {loading
-                  ? "Loading log…"
-                  : run?.ended_at
-                    ? "No output recorded"
-                    : "Waiting for output"}
-              </p>
-            )}
-            {raw
-              ? lines.map((line) => <RawRecord key={line.start} line={line} />)
-              : transcript.map((entry) => (
-                  <ConversationEntry key={entry.key} entry={entry} />
-                ))}
-          </>
-        )}
+        <div
+          className={styles.scroll}
+          ref={pane}
+          tabIndex={0}
+          aria-label="Log output"
+          onScroll={() => {
+            const el = pane.current;
+            if (el)
+              follow.current =
+                el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          }}
+        >
+          {error && <p role="alert">{error}</p>}
+          {unavailable ? (
+            <p role="alert">{unavailable}. History unavailable.</p>
+          ) : (
+            <>
+              <Button
+                size="sm"
+                disabled={beginning || loading || !ready || !!error}
+                onClick={() => older.current()}
+              >
+                Load older history
+              </Button>
+              {beginning && <p className={styles.note}>Beginning of log</p>}
+              {full && (
+                <p className={styles.note}>
+                  Bounded window reached. Load older history to move back; Jump
+                  to latest to follow again.
+                </p>
+              )}
+              {!raw && transcript.length > 0 && !timed && (
+                <p className={styles.note}>
+                  Event times were not recorded for this run; runs started after
+                  per-event times were added show them.
+                </p>
+              )}
+              {!lines.length && !error && (
+                <p className={styles.note}>
+                  {loading
+                    ? "Loading log…"
+                    : run?.ended_at
+                      ? "No output recorded"
+                      : "Waiting for output"}
+                </p>
+              )}
+              {raw
+                ? lines.map((line) => (
+                    <RawRecord key={line.start} line={line} day={startMs} />
+                  ))
+                : transcript.map((entry) => (
+                    <ConversationEntry
+                      key={entry.key}
+                      entry={entry}
+                      day={startMs}
+                    />
+                  ))}
+            </>
+          )}
+        </div>
+        <aside
+          ref={detailsRail}
+          id="run-details"
+          className={styles.details}
+          aria-label="Run details"
+        >
+          <RunDetails
+            id={id}
+            kind={kind}
+            run={run}
+            meta={meta}
+            error={metaError}
+            timed={timed}
+            onOpen={onOpen}
+          />
+        </aside>
       </div>
     </section>
   );
 }
 
+/** An entry's time: short local time, the full timestamp on hover. */
+function Stamp({ at, day }: { at?: number; day?: number }) {
+  if (at === undefined) return <span className={styles.time} />;
+  const since =
+    day !== undefined && at >= day
+      ? ` · ${duration(at - day)} into the run`
+      : "";
+  return (
+    <time
+      className={styles.time}
+      dateTime={new Date(at).toISOString()}
+      title={fullTime(at) + since}
+    >
+      {clock(at, day)}
+    </time>
+  );
+}
+
 // Raw payloads are mounted only on request; signatures never enter the conversation.
-const RawRecord = memo(function RawRecord({ line }: { line: LogLine }) {
+const RawRecord = memo(function RawRecord({
+  line,
+  day,
+}: {
+  line: LogLine;
+  day?: number;
+}) {
   const [open, setOpen] = useState(false);
   return (
-    <details
-      className={styles.record}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-    >
-      <summary>Raw event · offset {line.start}</summary>
-      {open && <CodeBlock>{line.text}</CodeBlock>}
-    </details>
+    <div className={styles.record} data-kind="raw">
+      <Stamp at={line.at} day={day} />
+      <details
+        className={styles.content}
+        onToggle={(e) => setOpen(e.currentTarget.open)}
+      >
+        <summary>Raw event · offset {line.start}</summary>
+        {open && <CodeBlock>{line.text}</CodeBlock>}
+      </details>
+    </div>
   );
 });
+
+/** A tool label is `<name> · <short args>`. */
+function splitLabel(label: string) {
+  const n = label.indexOf(" · ");
+  return n < 0 ? [label, ""] : [label.slice(0, n), label.slice(n + 3)];
+}
+
 const ConversationEntry = memo(
-  function ConversationEntry({ entry }: { entry: TranscriptEntry }) {
+  function ConversationEntry({
+    entry,
+    day,
+  }: {
+    entry: TranscriptEntry;
+    day?: number;
+  }) {
+    const [name, args] = splitLabel(entry.label);
+    const took =
+      entry.at !== undefined &&
+      entry.endAt !== undefined &&
+      entry.endAt >= entry.at
+        ? duration(entry.endAt - entry.at)
+        : "";
     return (
       <article
         className={styles.record}
         data-offset={entry.offset}
         data-kind={entry.kind}
+        data-role={
+          entry.kind === "message" ? entry.label.toLowerCase() : undefined
+        }
         data-error={entry.error}
       >
-        {entry.kind === "message" ? (
-          <>
-            <h3>{entry.label}</h3>
-            <Markdown compact body={entry.body} />
-          </>
-        ) : entry.kind === "tool" ? (
-          <details>
-            <summary>
-              <span className={styles.toolLabel}>{entry.label}</span>
-              <span className={styles.toolStatus}>{entry.status}</span>
-            </summary>
-            {entry.input && (
-              <>
-                <h4>Input</h4>
-                <CodeBlock>{entry.input}</CodeBlock>
-              </>
-            )}
-            {entry.body && (
-              <>
-                <h4>Output</h4>
+        <Stamp at={entry.at} day={day} />
+        <div className={styles.content}>
+          {entry.kind === "message" ? (
+            <>
+              <h3 className={styles.role}>{entry.label}</h3>
+              <Markdown compact body={entry.body} />
+            </>
+          ) : entry.kind === "tool" ? (
+            <details>
+              <summary>
+                <span className={styles.toolName}>{name}</span>
+                {args && <span className={styles.toolArgs}>{args}</span>}
+                <span className={styles.toolStatus}>
+                  {entry.status}
+                  {took && ` · ${took}`}
+                </span>
+              </summary>
+              {entry.input && (
+                <>
+                  <h4>Input</h4>
+                  <CodeBlock>{entry.input}</CodeBlock>
+                </>
+              )}
+              {entry.body && (
+                <>
+                  <h4>Output</h4>
+                  <CodeBlock>{entry.body}</CodeBlock>
+                </>
+              )}
+              {!entry.body && <p>No output recorded in this window.</p>}
+            </details>
+          ) : entry.kind === "thinking" ? (
+            <details>
+              <summary>Thinking · available text</summary>
+              <Markdown compact body={entry.body} />
+            </details>
+          ) : entry.kind === "system" ? (
+            <p className={styles.system}>
+              <span className={styles.systemLabel}>{entry.label}</span>
+              {entry.body && (
+                <span className={styles.systemBody}>{entry.body}</span>
+              )}
+            </p>
+          ) : (
+            <>
+              <h3 className={styles.role}>{entry.label}</h3>
+              {entry.error ? (
                 <CodeBlock>{entry.body}</CodeBlock>
-              </>
-            )}
-            {!entry.body && <p>No output recorded in this window.</p>}
-          </details>
-        ) : entry.kind === "thinking" ? (
-          <details>
-            <summary>Thinking · available text</summary>
-            <Markdown compact body={entry.body} />
-          </details>
-        ) : (
-          <>
-            <h3>{entry.label}</h3>
-            {entry.error ? (
-              <CodeBlock>{entry.body}</CodeBlock>
-            ) : (
-              <details>
-                <summary>Inspect event</summary>
-                <CodeBlock>{entry.body}</CodeBlock>
-              </details>
-            )}
-          </>
-        )}
+              ) : (
+                <details>
+                  <summary>Inspect event</summary>
+                  <CodeBlock>{entry.body}</CodeBlock>
+                </details>
+              )}
+            </>
+          )}
+        </div>
       </article>
     );
   },
@@ -470,6 +647,7 @@ const ConversationEntry = memo(
     const a = before.entry,
       b = after.entry;
     return (
+      before.day === after.day &&
       a.key === b.key &&
       a.offset === b.offset &&
       a.kind === b.kind &&
@@ -477,7 +655,376 @@ const ConversationEntry = memo(
       a.body === b.body &&
       a.input === b.input &&
       a.status === b.status &&
-      a.error === b.error
+      a.error === b.error &&
+      a.at === b.at &&
+      a.endAt === b.endAt
     );
   },
 );
+
+type Fact = [string, ReactNode, string?];
+/** A rail group: a small label over aligned key/value rows; empty rows drop. */
+function Facts({ title, facts }: { title: string; facts: Fact[] }) {
+  const shown = facts.filter(
+    ([, v]) => v !== "" && v !== null && v !== undefined,
+  );
+  if (!shown.length) return null;
+  return (
+    <section className={styles.group}>
+      <h3 className={styles.groupLabel}>{title}</h3>
+      <dl className={styles.facts}>
+        {shown.map(([k, v, tip]) => (
+          <div key={k} className={styles.fact}>
+            <dt>{k}</dt>
+            <dd title={tip ?? (typeof v === "string" ? v : undefined)}>{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+const missing = (why: string) => <span className={styles.missing}>{why}</span>;
+const mono = (text: string) => <span className={styles.mono}>{text}</span>;
+
+/** A time with its full form on hover. */
+function When({ at }: { at?: string | null }) {
+  const ms = epochMs(at);
+  if (ms === undefined) return null;
+  return (
+    <time dateTime={at!} title={fullTime(ms)}>
+      {fullTime(ms)}
+    </time>
+  );
+}
+
+/** Same dashboard, other parameters: run links keep `?server=`. */
+function hrefWith(params: Record<string, string | null>) {
+  if (typeof window === "undefined") return "/";
+  const q = new URLSearchParams(window.location.search);
+  for (const [k, v] of Object.entries(params))
+    if (v === null) q.delete(k);
+    else q.set(k, v);
+  return "?" + q.toString();
+}
+
+function Link({
+  params,
+  onOpen,
+  children,
+}: {
+  params: Record<string, string | null>;
+  onOpen?: (params: Record<string, string | null>) => void;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      href={hrefWith(params)}
+      onClick={(e: MouseEvent) => {
+        if (!onOpen || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+        e.preventDefault();
+        onOpen(params);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+/** A prompt, folded; open, it shows in full (up to the recorded bound). */
+function Prompt({ title, file }: { title: string; file?: RunFile }) {
+  if (!file?.text && file?.text !== "")
+    return (
+      <div className={styles.prompt}>
+        <span className={styles.promptTitle}>{title}</span>
+        {missing(
+          file?.unavailable ? capitalize(file.unavailable) : "Not available",
+        )}
+      </div>
+    );
+  return (
+    <details className={styles.prompt}>
+      <summary>
+        <span className={styles.promptTitle}>{title}</span>
+        <span className={styles.promptSize}>
+          {size(file.bytes ?? file.text.length)}
+          {file.source === "current" && " · current, not this run's"}
+        </span>
+      </summary>
+      {file.source === "current" && (
+        <p className={styles.missing}>
+          This run predates per-run copies; this is the bot&apos;s latest system
+          prompt.
+        </p>
+      )}
+      <CodeBlock className={styles.promptText}>{file.text}</CodeBlock>
+      {file.truncated && (
+        <p className={styles.missing}>
+          Showing the first {size(file.text.length)} of {size(file.bytes ?? 0)};
+          the whole file is on the dispatcher.
+        </p>
+      )}
+    </details>
+  );
+}
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+function RunDetails({
+  id,
+  kind,
+  run,
+  meta,
+  error,
+  timed,
+  onOpen,
+}: {
+  id: string;
+  kind: "task" | "bot";
+  run?: LogRun;
+  meta?: RunMeta;
+  error: string;
+  timed: boolean;
+  onOpen?: (params: Record<string, string | null>) => void;
+}) {
+  const start = meta?.start ?? {};
+  const end = meta?.end ?? {};
+  const rt = runtimeOf(meta, run?.agent);
+  const startMs = epochMs(run?.started_at);
+  const endMs = epochMs(run?.ended_at);
+  // A live run's duration ticks; an ended one's is fixed.
+  const [now, setNow] = useState<number>();
+  useEffect(() => {
+    if (endMs !== undefined) return;
+    const tick = () => setNow(Date.now());
+    const first = setTimeout(tick, 0);
+    const timer = setInterval(tick, 1000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [endMs]);
+  const total = usageTotals(meta);
+  const files = meta?.files;
+  const filesMissing = files?.unavailable
+    ? capitalize(files.unavailable)
+    : files && !files.prompt
+      ? "Dispatcher predates run details"
+      : undefined;
+  const repos = meta?.task?.repos ?? meta?.bot?.repos;
+  const stopReason = run?.stop_reason;
+  const apiError = (end as { api_error?: { class?: string; message?: string } })
+    .api_error;
+  const exit =
+    run?.ended_at === null || !run
+      ? ""
+      : run.exit_code === null
+        ? "unknown"
+        : `code ${run.exit_code}`;
+  const reason = [
+    stopReason && stopReason !== "exit" ? stopReason : "",
+    apiError ? apiError.class || apiError.message || "" : "",
+    meta?.outcome?.note ?? "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const wakes = Object.entries(meta?.wakes ?? {})
+    .map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`)
+    .join(", ");
+  return (
+    <>
+      {error && !meta && (
+        <p className={styles.missing}>
+          Run details unavailable ({error}). The log still works.
+        </p>
+      )}
+      <Facts
+        title="Run"
+        facts={[
+          ["Run", mono(`#${id}`)],
+          kind === "task" && run
+            ? [
+                "Task",
+                <Link
+                  key="task"
+                  params={{
+                    run: null,
+                    botrun: null,
+                    view: "tasks",
+                    task: String(run.task_id),
+                    tab: "runs",
+                  }}
+                  onOpen={onOpen}
+                >
+                  #{run.task_id}
+                  {meta?.task?.title ? ` ${meta.task.title}` : ""}
+                </Link>,
+                meta?.task?.title,
+              ]
+            : ["Task", ""],
+          kind === "bot" && run?.bot
+            ? [
+                "Bot",
+                <Link
+                  key="bot"
+                  params={{
+                    run: null,
+                    botrun: null,
+                    view: "bots",
+                    bot: run.bot,
+                  }}
+                  onOpen={onOpen}
+                >
+                  {run.bot}
+                </Link>,
+                run.bot,
+              ]
+            : ["Bot", ""],
+          [
+            "Project",
+            meta?.task?.project ?? meta?.bot?.project ?? run?.project ?? "",
+          ],
+          ["Mode", run?.mode ?? ""],
+          [
+            "Started",
+            run?.started_at ? <When key="s" at={run.started_at} /> : "",
+            run?.started_at,
+          ],
+          [
+            "Ended",
+            run?.ended_at ? (
+              <When key="e" at={run.ended_at} />
+            ) : run ? (
+              missing("Still running")
+            ) : (
+              ""
+            ),
+            run?.ended_at ?? undefined,
+          ],
+          [
+            "Duration",
+            startMs !== undefined && (endMs ?? now) !== undefined
+              ? duration((endMs ?? now)! - startMs) + (endMs ? "" : " so far")
+              : "",
+          ],
+          ["Exit", exit],
+          ["Reason", reason],
+          [
+            "Task state",
+            meta?.task_state ? meta.task_state.replace("_", " ") : "",
+          ],
+          ["Wakes", wakes],
+        ]}
+      />
+      <Facts
+        title="Runtime"
+        facts={[
+          ["Runtime", rt.runtime],
+          ["Harness", rt.harness],
+          ["Version", rt.version],
+          ["Model", rt.model || (meta ? missing("Not recorded") : "")],
+          ["Effort", rt.effort || (meta ? missing("Harness default") : "")],
+          ["Rule", rt.rule],
+          ["Permission", rt.permission],
+          [
+            "Session",
+            run?.session_id ? mono(run.session_id) : "",
+            run?.session_id ?? undefined,
+          ],
+          [
+            "Dispatcher",
+            run?.dispatcher ? mono(run.dispatcher) : "",
+            run?.dispatcher,
+          ],
+          [
+            "Claim",
+            run?.claim ? mono(String(run.claim)) : "",
+            run?.claim ? String(run.claim) : undefined,
+          ],
+          [
+            "Event times",
+            timed
+              ? files?.times
+                ? "Recorded as the dispatcher saw each line"
+                : "From the harness's records"
+              : run
+                ? missing("Not recorded for this run")
+                : "",
+          ],
+        ]}
+      />
+      <Facts
+        title="Usage"
+        facts={
+          total
+            ? [
+                ["Cost", `$${total.cost.toFixed(2)}`],
+                ["Input", `${count(total.input)} tokens`],
+                ["Output", `${count(total.output)} tokens`],
+                ["Cache read", `${count(total.cache_read)} tokens`],
+                ["Cache write", `${count(total.cache_write)} tokens`],
+                [
+                  "Turns",
+                  meta?.usage?.turns != null ? String(meta.usage.turns) : "",
+                ],
+                ["Models", meta!.usage!.models.map((m) => m.model).join(", ")],
+              ]
+            : [
+                [
+                  "Usage",
+                  meta
+                    ? missing(
+                        run?.ended_at
+                          ? meta.usage?.reason
+                            ? `Not recorded (${meta.usage.reason.replace(/_/g, " ")})`
+                            : "Not recorded"
+                          : "Recorded when the run ends",
+                      )
+                    : "",
+                ],
+              ]
+        }
+      />
+      <Facts
+        title="Context"
+        facts={[
+          [
+            "Labels",
+            meta?.task?.labels?.length ? meta.task.labels.join(", ") : "",
+          ],
+          [
+            "Repos",
+            repos?.length ? repos.join(", ") : meta ? missing("None") : "",
+          ],
+          ["Owner", meta?.task?.owner ?? ""],
+          [
+            "Run folder",
+            typeof start.worktree === "string" ? mono(start.worktree) : "",
+            start.worktree as string | undefined,
+          ],
+          ["Log", run?.log_path ? mono(run.log_path) : "", run?.log_path],
+        ]}
+      />
+      {meta && (
+        <section className={styles.group}>
+          <h3 className={styles.groupLabel}>Prompts</h3>
+          {filesMissing ? (
+            <p className={styles.missing}>{filesMissing}</p>
+          ) : (
+            <>
+              <Prompt
+                title={
+                  kind === "bot"
+                    ? "System prompt"
+                    : "System prompt · run instructions"
+                }
+                file={files?.system_prompt}
+              />
+              <Prompt title="User prompt" file={files?.prompt} />
+            </>
+          )}
+        </section>
+      )}
+    </>
+  );
+}

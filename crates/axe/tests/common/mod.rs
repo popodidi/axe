@@ -278,6 +278,16 @@ impl LogRelay {
                         },
                         None => serde_json::json!({"unavailable":"unknown run"}),
                     }
+                } else if q["kind"] == "log_meta" {
+                    let entry = shared
+                        .lock()
+                        .unwrap()
+                        .get(&q["run"].as_i64().unwrap())
+                        .cloned();
+                    match entry {
+                        Some((path, _)) => axe::run_log::run_files(&path, None),
+                        None => serde_json::json!({"unavailable":"unknown run"}),
+                    }
                 } else {
                     serde_json::json!({"ok":true})
                 };
