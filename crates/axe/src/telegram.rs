@@ -3037,6 +3037,15 @@ fn status(conn: &Connection, name: &str) -> Result<String> {
         b.queued,
         b.last_run_end.as_deref().unwrap_or("-")
     ));
+    let services = crate::service::list(conn, Some(&b.name))?;
+    if !services.is_empty() {
+        let now = crate::remote::epoch();
+        s.push_str("\nservices:");
+        for svc in &services {
+            s.push_str(&format!("\n- {}", svc.summary(now)));
+        }
+        s.push_str(&format!("\nlogs: axe service logs <name> --bot {}", b.name));
+    }
     Ok(s)
 }
 

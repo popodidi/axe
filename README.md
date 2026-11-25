@@ -323,7 +323,10 @@ code gains no branches for them.
   (SIGUSR1) first wakes each owning bot ("Services stop in N s") and keeps the
   services running for `stop_warn_seconds`. No systemd unit or container per
   service: they live and die with the dispatcher. `[services]` in
-  `config.rs` lists every knob and default.
+  `config.rs` lists every knob and default. Bot `/status`, `axe bot show`
+  and the dashboard's Services page (per node, with recent logs) show each
+  service's kind, state (crash-looping included), restarts and uptime
+  (`Service::summary`, `web/lib/services.ts`).
 - **Goals** (`axe goal`, `goal.rs`, `goal_board.rs`) are durable outcomes
   bots share, with weekly budgets and an append-only trajectory. Design:
   [docs/design/goals.md](docs/design/goals.md).
@@ -513,8 +516,9 @@ With a token, every request needs `Authorization: Bearer <token>` or, for
 reads, a browser read session; `/healthz`, `/metrics` and signed `/b/` links
 are open, and a page without either gets the login page (`allowed` and
 `login_route` in `crates/axe/src/server.rs`). The session is an HttpOnly
-cookie that makes reads for 30 days, except Telegram message content, service
-logs, asks and forms, which stay token-only (`private_read`). A browser gets one from
+cookie that makes reads for 30 days, except Telegram message content, asks
+and forms, which stay token-only (`private_read`); it also reads the store
+(blobs, docs) and service logs (`store_read`). A browser gets one from
 `axe web login-link` (a one-time code, `crates/axe/src/login.rs`), the token
 on `/login`, or `POST /api/session` with the token; `POST /api/session-end`
 clears it. The server refuses a non-loopback listen address without a token

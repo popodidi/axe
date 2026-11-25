@@ -1,0 +1,176 @@
+@value bp-phone, bp-list-narrow from "../../app/styles/breakpoints.module.css";
+
+.stack {
+  display: grid;
+  gap: var(--section-gap);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.node {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.node + .node {
+  margin-top: var(--space-3);
+}
+
+.nodeHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+
+.stale {
+  font-size: var(--text-caption);
+  font-weight: var(--weight-regular);
+  color: var(--state-blocked-fg);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.rowButton {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sub {
+  margin-top: var(--space-quarter);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+/* States are labels, like routine statuses. */
+.state {
+  display: inline-block;
+  padding: var(--pill-padding);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+}
+
+.state[data-tone="ok"] {
+  color: var(--state-done-fg);
+  background: var(--state-done-bg);
+}
+
+.state[data-tone="warn"] {
+  color: var(--state-blocked-fg);
+  background: var(--state-blocked-bg);
+}
+
+.state[data-tone="bad"] {
+  color: var(--state-escalated-fg);
+  background: var(--state-escalated-bg);
+}
+
+.detail {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: var(--border-subtle);
+}
+
+.detailTop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.detailTitle {
+  font-family: var(--font-mono);
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+  min-width: 0;
+}
+
+.close {
+  margin-left: auto;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-snug) var(--space-2);
+  padding: var(--space-snug) var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+
+.facts dt {
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-tertiary);
+}
+
+.facts dd {
+  margin: 0;
+  font-size: var(--text-control);
+  line-height: var(--lh-control);
+  overflow-wrap: anywhere;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.block {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.blockTitle {
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+}
+
+.note {
+  font-size: var(--text-caption);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.log {
+  max-height: 28rem;
+  overflow: auto;
+  white-space: pre;
+}
+
+@container bp-list-narrow {
+  .optional {
+    display: none;
+  }
+}
+
+@media bp-phone {
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

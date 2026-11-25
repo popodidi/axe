@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use axe::{ask, bot, db, goal, schedule};
+use axe::{ask, bot, db, goal, schedule, service};
 use ts_rs::{Config, TS};
 
 fn bindings() -> String {
@@ -33,6 +33,8 @@ fn bindings() -> String {
         goal::Event::decl(&cfg),
         goal::LinkedTask::decl(&cfg),
         goal::Detail::decl(&cfg),
+        service::Service::decl(&cfg),
+        service::Status::decl(&cfg),
         serde_json::Value::decl(&cfg),
     ];
     let mut out = String::from(

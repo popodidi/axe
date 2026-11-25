@@ -46,6 +46,8 @@ import {
   routineStatuses,
   useRoutines,
 } from "../components/dashboard/routines";
+import { ServiceList, useServices } from "../components/dashboard/services";
+import { serviceStates } from "../lib/services";
 import { Cost } from "../components/dashboard/cost";
 import { Stats } from "../components/dashboard/stats";
 import { ClusterList } from "../components/dashboard/cluster-list";
@@ -92,9 +94,9 @@ const host = (base: string) => {
     return base;
   }
 };
-const views = ["tasks", "routines", "bots", "goals", "store", "stats", "cost"];
-const labels = ["Tasks", "Routines", "Bots", "Goals", "Store", "Stats", "Cost"];
-const keys = ["t", "r", "b", "o", "e", "s", "c"];
+const views = ["tasks", "routines", "services", "bots", "goals", "store", "stats", "cost"];
+const labels = ["Tasks", "Routines", "Services", "Bots", "Goals", "Store", "Stats", "Cost"];
+const keys = ["t", "r", "n", "b", "o", "e", "s", "c"];
 type Snapshot = {
   tasks: Task[];
 };
@@ -394,6 +396,7 @@ export default function Dashboard() {
   // Routines: the routine pane, with a task pane stacked on its right.
   const routineId = view === "routines" ? p.get("routine") : null;
   const routines = useRoutines(base, view === "routines");
+  const services = useServices(base, view === "services");
   const closeRoutine = useCallback(() => {
     const id = new URLSearchParams(location.search).get("routine");
     if (!id) return;
@@ -468,6 +471,7 @@ export default function Dashboard() {
           s: "stats",
           c: "cost",
           r: "routines",
+          n: "services",
           b: "bots",
           o: "goals",
           e: "store",
@@ -491,6 +495,8 @@ export default function Dashboard() {
         else if (q.get("view") === "stats" && q.has("cluster")) closeCluster();
         else if (q.get("view") === "routines" && q.has("routine"))
           closeRoutine();
+        else if (q.get("view") === "services" && q.has("service"))
+          update({ service: null });
         else if (q.has("bot")) closeBot();
         else if (q.has("goal")) closeGoal();
       }
@@ -712,12 +718,12 @@ export default function Dashboard() {
                 id="list-search"
                 ref={searchRef}
                 className={styles.search}
-                aria-label={`Search ${["routines", "bots", "goals"].includes(view) ? view : "tasks"}`}
-                placeholder={`Search ${["routines", "bots", "goals"].includes(view) ? view : "tasks"}…  /`}
+                aria-label={`Search ${["routines", "services", "bots", "goals"].includes(view) ? view : "tasks"}`}
+                placeholder={`Search ${["routines", "services", "bots", "goals"].includes(view) ? view : "tasks"}…  /`}
                 value={p.get("q") || ""}
                 onChange={(e) => changeFilter("q", e.target.value)}
               />
-              {(view === "tasks" ? ["project", "state"] : ["project"]).map(
+              {(view === "tasks" ? ["project", "state"] : view === "services" ? [] : ["project"]).map(
                 (k) => (
                   <Filter
                     key={k}
@@ -756,6 +762,15 @@ export default function Dashboard() {
                   value={p.get("goalstate") || ""}
                   onChange={(v) => changeFilter("goalstate", v)}
                   options={goalStateFilters}
+                />
+              )}
+              {view === "services" && (
+                <Filter
+                  label="state"
+                  aria-label="service state"
+                  value={p.get("sstate") || ""}
+                  onChange={(v) => changeFilter("sstate", v)}
+                  options={[{ value: "", label: "All" }, ...serviceStates.map((v) => ({ value: v, label: v }))]}
                 />
               )}
               {view === "routines" && (
@@ -837,6 +852,16 @@ export default function Dashboard() {
                   update({ routine: String(id), task: null, tab: null })
                 }
                 onOpenTask={(id) => update({ task: String(id), tab: null })}
+                onOpenServices={() => update({ view: "services", routine: null, task: null, tab: null })}
+              />
+            ) : view === "services" ? (
+              <ServiceList
+                base={base}
+                state={services}
+                params={p}
+                now={now}
+                onOpen={(key) => update({ service: key })}
+                onOpenRoutines={() => update({ view: "routines", service: null })}
               />
             ) : view === "store" ? (
               <Store

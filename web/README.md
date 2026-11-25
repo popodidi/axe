@@ -1,7 +1,7 @@
 # axe web dashboard
 
 Read-only Next.js / TypeScript dashboard for an axe server: Tasks, Routines,
-Bots, Goals, Store, Stats and Cost views over the server's GET API. All data
+Services, Bots, Goals, Store, Stats and Cost views over the server's GET API. All data
 stays in the server; the browser keeps no token and has no mutation UI. The
 Store view and store previews read private blobs and docs through a
 read-session cookie the owner unlocks with the token (same origin only, so
@@ -51,7 +51,8 @@ regenerate it from the repository root with
 |---|---|
 | Page shell, URL state (`view`, `task`, `tab`, filters, pane scroll), keyboard shortcuts, live refresh | `app/dashboard.tsx`, `lib/use-pane-scroll.ts`, `lib/layout.ts` |
 | Task list and detail model, copyable commands | `lib/model.ts` (`lib/model.test.ts` pins the command strings) |
-| Views | `components/dashboard/` (`routines`, `bots`, `goals`, `stats`, `cost`) |
+| Views | `components/dashboard/` (`routines`, `services`, `bots`, `goals`, `stats`, `cost`) |
+| Services page model (state, uptime, per node) | `lib/services.ts` |
 | Run log viewer and conversation replay | `components/dashboard/run-log.tsx`, `lib/run-log.ts`, `lib/transcript.ts` |
 | Stats, bot stats, cost and goal calculations | `lib/stats.ts`, `lib/bot-stats.ts`, `lib/cost.ts`, `lib/goals.ts` |
 | Store view, store previews and the read session | `components/dashboard/store.tsx`, `store-viewer.tsx`, `lib/store.ts` |
