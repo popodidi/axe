@@ -63,6 +63,26 @@ const typedDocs: Record<string, string> = {
     "<img src='x' onerror=\"document.body.dataset.ran = 'onerror'\">",
     "</body></html>",
   ].join(""),
+  // A long HTML doc: a title, five sections and a subsection, with the same
+  // attempts to run code; and one that brings its own contents.
+  "research/long.html": [
+    "<!doctype html><html><head><title>Long</title></head><body>",
+    "<h1>Long HTML</h1>",
+    ...Array.from({ length: 5 }, (_, i) => [
+      `<h2>Part ${i + 1}</h2>`,
+      i === 1 ? "<h3 id='part-2-detail'>Part 2 detail</h3>" : "",
+      ...Array.from({ length: 12 }, (_, j) => `<p>Part ${i + 1} paragraph ${j + 1}.</p>`),
+    ]).flat(),
+    "<script>document.body.dataset.ran = '1';",
+    "try { parent.document.title = 'escaped'; } catch (e) {}",
+    "try { document.body.dataset.cookie = document.cookie || 'none'; } catch (e) {}</script>",
+    "<img src='x' onerror=\"document.body.dataset.ran = 'onerror'\">",
+    "</body></html>",
+  ].join(""),
+  "research/own-toc.html": [
+    "<nav class='toc'><a href='#a'>A</a><a href='#b'>B</a><a href='#c'>C</a><a href='#d'>D</a></nav>",
+    "<h2 id='a'>A</h2><h2 id='b'>B</h2><h2 id='c'>C</h2><h2 id='d'>D</h2>",
+  ].join(""),
   "ops/config.json": '{"name":"axe","replicas":2,"tags":["a","b"]}',
   "ops/deploy.yaml": "kind: Deployment\nspec:\n  replicas: 2 # two\n",
   "src/main.rs": 'fn main() {\n    let n = 1;\n    println!("{n}");\n}\n',
@@ -551,7 +571,17 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   const meta = page.getByRole("complementary", { name: "Doc metadata" });
   const body = page.locator("article");
   const toc = page.getByRole("navigation", { name: "Contents" });
-  await expect(toc.getByRole("link")).toHaveCount(7);
+  // Five sections and a subsection, numbered; the title is not listed.
+  await expect(toc.getByRole("link")).toHaveCount(6);
+  await expect(toc.getByRole("link")).toHaveText([
+    "1.Section 1",
+    "2.Section 2",
+    "2.1Section 2 detail",
+    "3.Section 3",
+    "4.Section 4",
+    "5.Section 5",
+  ]);
+  await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
   // The title outranks the sections and the sections the text; a section
   // sits closer to its text than to the text before it.
   const size = (l: Locator) => l.evaluate((e) => parseFloat(getComputedStyle(e).fontSize));
@@ -576,36 +606,36 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   // The body is wider than the old single column (840px).
   expect(b!.width).toBeGreaterThan(860);
   // The first section is current at the top.
-  await expect(toc.getByRole("link", { name: "Long report" })).toHaveAttribute("aria-current", "location");
+  await expect(toc.getByRole("link", { name: "Section 1" })).toHaveAttribute("aria-current", "location");
   // Scrolling marks the section in view; the rails stay put.
   await page.getByRole("heading", { name: "Section 3" }).evaluate((e) =>
     window.scrollTo(0, e.getBoundingClientRect().top + scrollY - 40),
   );
   await expect(toc.getByRole("link", { name: "Section 3" })).toHaveAttribute("aria-current", "location");
   await expect(toc.locator("[aria-current]")).toHaveCount(1);
-  // The current entry's marker sits on its row, at one x for every level;
-  // the entry itself has no edge of its own.
-  const marker = () =>
-    toc.locator("ol").evaluate((ol) => {
-      const a = ol.querySelector<HTMLElement>("a[aria-current]")!;
-      const after = getComputedStyle(ol, "::after");
-      return {
-        x: ol.getBoundingClientRect().left + parseFloat(after.left),
-        top: parseFloat(ol.style.getPropertyValue("--toc-mark-top")),
-        row: a.offsetTop,
-        shown: ol.hasAttribute("data-marked"),
-        edge: parseFloat(getComputedStyle(a).borderLeftWidth),
-      };
+  // The current entry has the selected fill and semibold text; the others
+  // are plain.
+  const look = (name: string) =>
+    toc.getByRole("link", { name, exact: true }).evaluate((e) => {
+      const c = getComputedStyle(e);
+      return { bg: c.backgroundColor, weight: c.fontWeight };
     });
-  const onH2 = await marker();
-  expect(onH2).toMatchObject({ top: onH2.row, shown: true, edge: 0 });
+  const selected = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.style.background = "var(--surface-selected)";
+    document.body.append(probe);
+    const bg = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return bg;
+  });
+  await expect.poll(() => look("Section 3")).toEqual({ bg: selected, weight: "600" });
+  expect((await look("Section 1")).weight).not.toBe("600");
   await page.getByRole("heading", { name: "Section 2 detail" }).evaluate((e) =>
     window.scrollTo(0, e.getBoundingClientRect().top + scrollY - 40),
   );
   await expect(toc.getByRole("link", { name: "Section 2 detail" })).toHaveAttribute("aria-current", "location");
-  const onH3 = await marker();
-  expect(onH3).toMatchObject({ top: onH3.row, shown: true, edge: 0, x: onH2.x });
-  expect(onH3.row).toBeLessThan(onH2.row);
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: test.info().outputPath("doc-contents-mid-scroll.png") });
   // The h3 indents its text past the h2's.
   const pad = (name: string) =>
     toc.getByRole("link", { name, exact: true }).evaluate((e) => parseFloat(getComputedStyle(e).paddingLeft));
@@ -670,4 +700,71 @@ test("a doc that is not markdown has no contents", async ({ page }) => {
   await expect(page.getByText("doc · version cccccccccccc")).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Contents" })).toHaveCount(0);
   await expect(page.getByText("Contents", { exact: true })).toHaveCount(0);
+});
+
+test("a long HTML doc gets contents that follow its frame and stay sandboxed", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/doc?server=http://axe.test");
+  await page.evaluate(() => {
+    document.cookie = "axe_session=app-secret; path=/";
+  });
+  await page.goto("/doc?server=http://axe.test&path=research%2Flong.html");
+  const frame = page.locator("iframe[title='Rendered research/long.html']");
+  const inner = page.frameLocator("iframe[title='Rendered research/long.html']");
+  const toc = page.getByRole("navigation", { name: "Contents" });
+  await expect(toc.getByRole("link")).toHaveText([
+    "1.Part 1",
+    "2.Part 2",
+    "2.1Part 2 detail",
+    "3.Part 3",
+    "4.Part 4",
+    "5.Part 5",
+  ]);
+  // The frame runs only the page's scroll spy: still an opaque origin, and
+  // the doc's own script and handlers never ran.
+  const sandbox = (await frame.getAttribute("sandbox"))!.split(/\s+/);
+  expect(sandbox).toContain("allow-scripts");
+  expect(sandbox).not.toContain("allow-same-origin");
+  await expect(inner.getByRole("heading", { name: "Part 1" })).toBeVisible();
+  await expect(inner.locator("body")).not.toHaveAttribute("data-ran", /.*/);
+  await expect(inner.locator("body")).not.toHaveAttribute("data-cookie", /.*/);
+  expect(await page.title()).not.toBe("escaped");
+  expect(
+    await frame.evaluate((f: HTMLIFrameElement) => {
+      try {
+        return f.contentWindow!.document.cookie;
+      } catch {
+        return "blocked";
+      }
+    }),
+  ).toBe("blocked");
+  // The section in view follows the frame's scroll.
+  await expect(toc.getByRole("link", { name: "Part 1" })).toHaveAttribute("aria-current", "location");
+  await inner.getByRole("heading", { name: "Part 3" }).evaluate((e) =>
+    window.scrollTo(0, e.getBoundingClientRect().top + scrollY - 20),
+  );
+  await expect(toc.getByRole("link", { name: "Part 3" })).toHaveAttribute("aria-current", "location");
+  await expect(toc.locator("[aria-current]")).toHaveCount(1);
+  // A click scrolls the frame to the section.
+  await toc.getByRole("link", { name: "Part 5" }).click();
+  await expect(inner.getByRole("heading", { name: "Part 5" })).toBeInViewport();
+  await expect(toc.getByRole("link", { name: "Part 5" })).toHaveAttribute("aria-current", "location");
+  // The Source view has no contents.
+  await page.getByRole("tab", { name: "Source" }).click();
+  await expect(toc).toHaveCount(0);
+  await page.getByRole("tab", { name: "Rendered" }).click();
+  await expect(toc.getByRole("link")).toHaveCount(6);
+});
+
+test("an HTML doc with its own contents or few headings gets none", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  for (const path of ["research/own-toc.html", "research/report.html"]) {
+    await page.goto(`/doc?server=http://axe.test&path=${encodeURIComponent(path)}`);
+    const frame = page.locator(`iframe[title='Rendered ${path}']`);
+    await expect(frame).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Contents" })).toHaveCount(0);
+    expect(await frame.getAttribute("sandbox")).not.toContain("allow-scripts");
+  }
 });

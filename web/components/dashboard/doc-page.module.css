@@ -116,72 +116,6 @@
   font-weight: var(--weight-medium);
 }
 
-/* Contents: one line per h1-h3. A hairline track runs down the list's left
-   edge and a marker slides along it to the current entry, so the hint keeps
-   one x position whatever the entry's level; the level indents the text
-   only. The current entry is primary and semibold. */
-.toc {
-  --toc-indent: var(--space-snug);
-
-  position: relative;
-  display: grid;
-  gap: var(--space-quarter);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: var(--text-label);
-  line-height: var(--lh-label);
-}
-.toc::before,
-.toc::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-}
-.toc::before {
-  bottom: 0;
-  border-left: var(--border-subtle);
-}
-.toc::after {
-  width: var(--space-quarter);
-  height: var(--toc-mark-height, 0);
-  border-radius: var(--radius-xs);
-  background: var(--text-primary);
-  opacity: 0;
-  transform: translateY(var(--toc-mark-top, 0));
-  transition:
-    transform var(--transition-feedback),
-    height var(--transition-feedback),
-    opacity var(--transition-hover);
-}
-.toc[data-marked]::after {
-  opacity: 1;
-}
-.toc a {
-  display: block;
-  padding: var(--space-quarter) var(--space-1) var(--space-quarter) var(--toc-indent);
-  border-radius: var(--radius-xs);
-  color: var(--text-secondary);
-  text-decoration: none;
-  overflow-wrap: anywhere;
-  transition: color var(--transition-hover);
-}
-.toc a[data-level="1"] {
-  padding-left: calc(var(--toc-indent) + var(--space-snug));
-}
-.toc a[data-level="2"] {
-  padding-left: calc(var(--toc-indent) + var(--space-3));
-}
-.toc a:hover {
-  color: var(--text-primary);
-  background: var(--surface-hover);
-}
-.toc a.active {
-  color: var(--text-primary);
-  font-weight: var(--weight-semibold);
-}
 .railLabel {
   display: block;
   margin: 0 0 var(--space-half);
@@ -191,17 +125,10 @@
   font-weight: var(--weight-medium);
   color: var(--text-tertiary);
 }
-.tocRail {
+/* The contents (components/ui/toc.tsx): folded first on narrow windows,
+   a sticky rail on wide ones. */
+.layout .tocRail {
   display: none;
-}
-.tocFold summary {
-  font-size: var(--text-label);
-  font-weight: var(--weight-medium);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.tocFold[open] summary {
-  margin-bottom: var(--space-half);
 }
 
 @media bp-doc-rails {
@@ -220,7 +147,7 @@
      that shows only while the pointer is over it; the page keeps the one
      full-height scrollbar. */
   .meta,
-  .tocRail {
+  .layout .tocRail {
     position: sticky;
     top: var(--doc-rail-top);
     max-height: calc(100vh - var(--doc-rail-top) * 2);
@@ -230,10 +157,10 @@
     scrollbar-color: transparent transparent;
   }
   .meta:hover,
-  .tocRail:hover {
+  .layout .tocRail:hover {
     scrollbar-color: var(--border-control-color) transparent;
   }
-  .tocRail {
+  .layout .tocRail {
     display: block;
     grid-column: 1;
     grid-row: 1;
@@ -246,7 +173,7 @@
     grid-column: 3;
     grid-row: 1;
   }
-  .tocFold {
+  .layout .tocFold {
     display: none;
   }
 }

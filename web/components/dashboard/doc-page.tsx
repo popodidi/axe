@@ -1,12 +1,12 @@
 "use client";
-// A doc's full page (app/doc): a table of contents for markdown in a sticky
-// left rail, its metadata in a sticky right rail, the body in a wide center
+// A doc's full page (app/doc): a table of contents for a long markdown or
+// HTML doc (components/ui/toc.tsx) in a sticky left rail, its metadata in a sticky right rail, the body in a wide center
 // column. Narrower windows fold the contents into a "Contents" disclosure
 // first, then stack the metadata above the body. The page scrolls with the
 // window; a rail scrolls itself only when it is taller than the window.
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown from "../../app/markdown";
-import { activeHeading, TOC_LEVELS } from "../../lib/doc-toc";
+import { tocEntries } from "../../lib/doc-toc";
 import { docKind } from "../../lib/doc-render";
 import {
   docScopes,
@@ -17,17 +17,15 @@ import {
   type DocAttachment,
   type StoreDoc,
 } from "../../lib/store";
-import { Alert, cx, Skeleton } from "../ui";
-import { DocFile } from "./doc-file";
+import { Alert, cx, Skeleton, TocFold, TocRail, useHeadings, useScrollSpy } from "../ui";
+import { DocFile, type HtmlToc } from "./doc-file";
 import { Facts, fullDate, StoreUnlock, type DocBody, type DocVersion } from "./store-viewer";
 import styles from "./doc-page.module.css";
 
-// Only markdown (lib/doc-render.ts) gets the contents rail and frontmatter
-// in the metadata rail.
+// Markdown (lib/doc-render.ts) gets frontmatter in the metadata rail;
+// markdown and a single HTML doc get contents.
 const isMarkdown = (path: string, content: string, contentType?: string) =>
   docKind(path, content, contentType) === "markdown";
-
-type Heading = { id: string; level: number; text: string };
 
 // The store's listing row (null when the server lists none) and the scopes
 // the doc is attached under.
@@ -39,6 +37,7 @@ export function DocPage({ base, path }: { base: string; path: string }) {
   const [versions, setVersions] = useState<DocVersion[] | null>(null);
   const [store, setStore] = useState<StoreFacts | null>(null);
   const [error, setError] = useState("");
+  const [htmlToc, setHtmlToc] = useState<HtmlToc | null>(null);
   useEffect(() => {
     if (!session.read) return;
     let live = true;
@@ -84,6 +83,7 @@ export function DocPage({ base, path }: { base: string; path: string }) {
   return (
     <DocLayout
       markdown={markdown}
+      htmlToc={single ? htmlToc : null}
       bodyKey={doc.version}
       meta={
         <>
@@ -141,6 +141,7 @@ export function DocPage({ base, path }: { base: string; path: string }) {
             path={f.path || doc.path}
             content={f.content}
             contentType={single ? doc.content_type : undefined}
+            onHtmlToc={single ? setHtmlToc : undefined}
             markdown={(text) => (
               <MarkdownFile
                 text={split ? split.body : text}
@@ -210,80 +211,41 @@ function Clipped({ text, mono = false }: { text: string; mono?: boolean }) {
   );
 }
 
+const NO_ENTRIES: ReturnType<typeof tocEntries> = [];
+
 function DocLayout({
   meta,
   markdown,
+  htmlToc,
   bodyKey,
   children,
 }: {
   meta: ReactNode;
   markdown: boolean;
+  htmlToc: HtmlToc | null;
   bodyKey: string;
   children: ReactNode;
 }) {
   const body = useRef<HTMLElement>(null);
-  const [headings, setHeadings] = useState<Heading[]>([]);
-  const [active, setActive] = useState("");
-  // The rendered body is the source of the contents: its h1-h3 with ids.
+  // A markdown body is the source of its contents: its h1-h3 with ids.
+  const headings = useHeadings(body, bodyKey, markdown);
+  const entries = useMemo(() => tocEntries(headings), [headings]);
+  // The browser looked for the anchor before the doc loaded.
   useEffect(() => {
-    if (!markdown || !body.current) return;
-    const els = Array.from(
-      body.current.querySelectorAll<HTMLElement>(TOC_LEVELS.map((t) => `${t}[id]`).join(",")),
-    );
-    setHeadings(
-      els.map((e) => ({
-        id: e.id,
-        level: Number(e.tagName.slice(1)),
-        text: e.textContent || "",
-      })),
-    );
-    // The browser looked for the anchor before the doc loaded.
     const id = decodeURIComponent(location.hash.slice(1));
-    if (id) document.getElementById(id)?.scrollIntoView();
-  }, [markdown, bodyKey]);
-  // The current section follows the scroll.
-  useEffect(() => {
-    if (!headings.length) return;
-    let frame = 0;
-    const update = () => {
-      frame = 0;
-      const tops = headings.map(
-        (h) => document.getElementById(h.id)?.getBoundingClientRect().top ?? Infinity,
-      );
-      const root = document.scrollingElement!;
-      const atEnd = root.scrollTop > 0 && root.scrollTop + innerHeight >= root.scrollHeight - 2;
-      const i = activeHeading(tops, innerHeight * 0.2, atEnd);
-      setActive(i < 0 ? "" : headings[i].id);
-    };
-    const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(update);
-    };
-    update();
-    addEventListener("scroll", schedule, { passive: true });
-    addEventListener("resize", schedule);
-    return () => {
-      removeEventListener("scroll", schedule);
-      removeEventListener("resize", schedule);
-      cancelAnimationFrame(frame);
-    };
+    if (id && headings.length) document.getElementById(id)?.scrollIntoView();
   }, [headings]);
-  const toc = headings.length > 0 && <TocList headings={headings} active={active} />;
+  // The current section follows the window's scroll; an HTML doc's frame
+  // reports its own.
+  const spied = useScrollSpy(htmlToc ? NO_ENTRIES : entries);
+  const toc = htmlToc
+    ? { entries: htmlToc.entries, active: htmlToc.active, onJump: htmlToc.jump }
+    : { entries, active: spied };
+  const shown = toc.entries.length > 0;
   return (
-    <div className={cx(styles.layout, toc && styles.withToc)}>
-      {toc && (
-        <div className={styles.tocRail}>
-          <span className={styles.railLabel} aria-hidden="true">
-            Contents
-          </span>
-          <TocList headings={headings} active={active} follow />
-        </div>
-      )}
-      {toc && (
-        <details className={styles.tocFold}>
-          <summary>Contents</summary>
-          {toc}
-        </details>
-      )}
+    <div className={cx(styles.layout, shown && styles.withToc)}>
+      <TocRail {...toc} className={styles.tocRail} />
+      <TocFold {...toc} className={styles.tocFold} />
       <aside className={styles.meta} aria-label="Doc metadata">
         {meta}
       </aside>
@@ -291,63 +253,5 @@ function DocLayout({
         {children}
       </article>
     </div>
-  );
-}
-
-// The contents: one fixed track along the list's left edge with a marker
-// that slides to the current entry, so the hint never moves sideways; the
-// level indent applies to the text only. `follow` keeps the current entry in
-// view when the rail scrolls itself.
-function TocList({
-  headings,
-  active,
-  follow = false,
-}: {
-  headings: Heading[];
-  active: string;
-  follow?: boolean;
-}) {
-  const list = useRef<HTMLOListElement>(null);
-  const top = Math.min(...headings.map((h) => h.level));
-  useLayoutEffect(() => {
-    const ol = list.current;
-    if (!ol) return;
-    const place = () => {
-      const a = ol.querySelector<HTMLElement>("a[aria-current]");
-      const shown = !!a && a.offsetHeight > 0;
-      ol.toggleAttribute("data-marked", shown);
-      if (!a || !shown) return;
-      ol.style.setProperty("--toc-mark-top", `${a.offsetTop}px`);
-      ol.style.setProperty("--toc-mark-height", `${a.offsetHeight}px`);
-      const rail = follow ? ol.closest<HTMLElement>(`.${styles.tocRail}`) : null;
-      if (rail && rail.scrollHeight > rail.clientHeight) {
-        const [r, l] = [rail.getBoundingClientRect(), a.getBoundingClientRect()];
-        if (l.top < r.top) rail.scrollTop -= r.top - l.top;
-        else if (l.bottom > r.bottom) rail.scrollTop += l.bottom - r.bottom;
-      }
-    };
-    place();
-    // The folded list has no size until it opens; a wrap can move entries.
-    const seen = new ResizeObserver(place);
-    seen.observe(ol);
-    return () => seen.disconnect();
-  }, [active, headings, follow]);
-  return (
-    <nav aria-label="Contents">
-      <ol ref={list} className={styles.toc}>
-        {headings.map((h) => (
-          <li key={h.id}>
-            <a
-              href={`#${encodeURIComponent(h.id)}`}
-              data-level={h.level - top}
-              className={cx(h.id === active && styles.active)}
-              aria-current={h.id === active ? "location" : undefined}
-            >
-              {h.text}
-            </a>
-          </li>
-        ))}
-      </ol>
-    </nav>
   );
 }

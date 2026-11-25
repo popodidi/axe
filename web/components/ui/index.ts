@@ -11,3 +11,4 @@ export { EmptyState, Skeleton, Alert, Kbd, LiveDot } from "./feedback";
 export { Tabs } from "./tabs";
 export { Commands, Command, CopyButton, type CopyHandler } from "./command";
 export { cx } from "./cx";
+export { TocRail, TocFold, useHeadings, useScrollSpy } from "./toc";

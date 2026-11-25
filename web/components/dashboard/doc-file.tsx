@@ -3,7 +3,7 @@
 // HTML in a sandboxed frame with a Source toggle, highlighted code with line
 // numbers, images, CSV/TSV tables, and plain text for anything else. A
 // renderer that throws falls back to the plain text, never a blank body.
-import { Component, useMemo, useState, type ReactNode } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   codeLanguage,
   docKind,
@@ -12,6 +12,7 @@ import {
   parseDelimited,
   prettyJson,
 } from "../../lib/doc-render";
+import { markHtmlHeadings, tocEntries, type TocEntry } from "../../lib/doc-toc";
 import { CodeBlock, Table, Tabs } from "../ui";
 import styles from "./doc-file.module.css";
 
@@ -20,12 +21,15 @@ export function DocFile({
   content,
   contentType,
   markdown,
+  onHtmlToc,
 }: {
   path: string;
   content: string;
   contentType?: string;
   // How a markdown file renders (the page keeps its frontmatter handling).
   markdown: (text: string) => ReactNode;
+  // A rendered HTML file's contents, for the page's contents list.
+  onHtmlToc?: (toc: HtmlToc | null) => void;
 }) {
   const kind = docKind(path, content, contentType);
   return (
@@ -34,7 +38,7 @@ export function DocFile({
         {kind === "markdown" ? (
           markdown(content)
         ) : kind === "html" ? (
-          <HtmlDoc path={path} html={content} />
+          <HtmlDoc path={path} html={content} onToc={onHtmlToc} />
         ) : kind === "code" ? (
           <CodeFile path={path} text={content} contentType={contentType} />
         ) : kind === "image" ? (
@@ -182,15 +186,60 @@ function Binary({ path, content }: { path: string; content: string }) {
   );
 }
 
-// Stored HTML renders in a frame with no scripts and an opaque origin
-// (sandbox without allow-scripts or allow-same-origin), so it can never run
-// code or reach the app's cookies and storage. The markup is also cleaned
-// first: scripts, base and refresh tags go, a CSP forbids scripts, and
-// relative links and images (which have nothing to resolve against) become
-// inert. Links that do resolve open in a new tab.
-function HtmlDoc({ path, html }: { path: string; html: string }) {
+// A rendered HTML doc's contents: its entries, the one in view in the
+// frame, and a jump into the frame.
+export type HtmlToc = { entries: TocEntry[]; active: string; jump: (id: string) => void };
+
+// Stored HTML renders in a frame with an opaque origin (sandbox without
+// allow-same-origin), so nothing in it can reach the app's cookies and
+// storage. The markup is also cleaned first: scripts, base and refresh tags
+// go, relative links and images (which have nothing to resolve against)
+// become inert, and links that do resolve open in a new tab. A CSP forbids
+// every script but, for a doc with contents, the page's own scroll spy
+// (FRAME_SPY), pinned by a nonce; only then does the sandbox allow scripts.
+function HtmlDoc({
+  path,
+  html,
+  onToc,
+}: {
+  path: string;
+  html: string;
+  onToc?: (toc: HtmlToc | null) => void;
+}) {
   const [view, setView] = useState("Rendered");
-  const doc = useMemo(() => safeHtml(html), [html]);
+  const frame = useRef<HTMLIFrameElement>(null);
+  const { doc, entries } = useMemo(() => prepareHtml(html, !!onToc), [html, onToc]);
+  const [active, setActive] = useState("");
+  const spy = view === "Rendered" && entries.length > 0;
+  useEffect(() => {
+    if (!spy) return;
+    const ids = new Set(entries.map((e) => e.id));
+    const listen = (e: MessageEvent) => {
+      const d = e.data as { axeToc?: string; id?: string } | null;
+      if (e.source !== frame.current?.contentWindow || d?.axeToc !== "active") return;
+      if (typeof d.id === "string" && ids.has(d.id)) setActive(d.id);
+    };
+    addEventListener("message", listen);
+    return () => removeEventListener("message", listen);
+  }, [spy, entries]);
+  useEffect(() => {
+    if (!onToc) return;
+    onToc(
+      spy
+        ? {
+            entries,
+            active,
+            jump: (id) => {
+              const f = frame.current;
+              if (!f) return;
+              if (f.getBoundingClientRect().top < 0) f.scrollIntoView();
+              f.contentWindow?.postMessage({ axeToc: "jump", id }, "*");
+            },
+          }
+        : null,
+    );
+  }, [onToc, spy, entries, active]);
+  useEffect(() => () => onToc?.(null), [onToc]);
   return (
     <div className={styles.html}>
       <Tabs
@@ -201,8 +250,9 @@ function HtmlDoc({ path, html }: { path: string; html: string }) {
       />
       {view === "Rendered" ? (
         <iframe
+          ref={frame}
           className={styles.frame}
-          sandbox="allow-popups allow-popups-to-escape-sandbox"
+          sandbox={`${entries.length ? "allow-scripts " : ""}allow-popups allow-popups-to-escape-sandbox`}
           referrerPolicy="no-referrer"
           srcDoc={doc}
           title={`Rendered ${path}`}
@@ -214,6 +264,33 @@ function HtmlDoc({ path, html }: { path: string; html: string }) {
   );
 }
 
+// The frame's scroll spy: posts the heading in view (the last past a line
+// 20% down, the last at the end) to the page, and scrolls to a heading the
+// page asks for. It reads only the marked headings and knows nothing else.
+const FRAME_SPY = `(() => {
+  const hs = Array.from(document.querySelectorAll("[data-axe-toc]"));
+  let last = null, frame = 0;
+  const spy = () => {
+    frame = 0;
+    const root = document.scrollingElement, line = innerHeight * 0.2;
+    let i = 0;
+    hs.forEach((h, j) => { if (h.getBoundingClientRect().top <= line) i = j; });
+    if (root.scrollTop > 0 && root.scrollTop + innerHeight >= root.scrollHeight - 2) i = hs.length - 1;
+    const id = hs[i] ? hs[i].id : "";
+    if (id !== last) { last = id; parent.postMessage({ axeToc: "active", id }, "*"); }
+  };
+  const schedule = () => { if (!frame) frame = requestAnimationFrame(spy); };
+  addEventListener("scroll", schedule, { passive: true });
+  addEventListener("resize", schedule);
+  addEventListener("message", (e) => {
+    const d = e.data;
+    if (e.source !== parent || !d || d.axeToc !== "jump") return;
+    const el = hs.find((h) => h.id === d.id);
+    if (el) { el.scrollIntoView(); schedule(); }
+  });
+  spy();
+})();`;
+
 const CSP =
   "default-src 'none'; img-src data: http: https:; style-src 'unsafe-inline' data: http: https:; font-src data: http: https:; media-src data: http: https:";
 
@@ -222,6 +299,12 @@ const CSP =
 const resolvable = (url: string) => /^(https?:|data:|mailto:|#)/i.test(url.trim());
 
 export function safeHtml(html: string): string {
+  return prepareHtml(html, false).doc;
+}
+
+// The cleaned document and, when `toc` is asked for and the doc is long
+// enough, its contents with the scroll spy added.
+export function prepareHtml(html: string, toc: boolean): { doc: string; entries: TocEntry[] } {
   const d = new DOMParser().parseFromString(html, "text/html");
   d.querySelectorAll("script, noscript, base, object, embed, iframe, frame, frameset").forEach(
     (e) => e.remove(),
@@ -256,12 +339,22 @@ export function safeHtml(html: string): string {
       el.setAttribute("title", `${href} (not available here)`);
     } else if (href.startsWith("#")) el.setAttribute("target", "_self");
   });
+  const entries = toc ? tocEntries(markHtmlHeadings(d)) : [];
   const head = d.head;
   const meta = d.createElement("meta");
   meta.httpEquiv = "Content-Security-Policy";
-  meta.content = CSP;
   const target = d.createElement("base");
   target.target = "_blank";
   head.prepend(meta, target);
-  return "<!doctype html>" + d.documentElement.outerHTML;
+  if (entries.length) {
+    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+      b.toString(16).padStart(2, "0"),
+    ).join("");
+    meta.content = `${CSP}; script-src 'nonce-${nonce}'`;
+    const script = d.createElement("script");
+    script.setAttribute("nonce", nonce);
+    script.textContent = FRAME_SPY;
+    d.body.append(script);
+  } else meta.content = CSP;
+  return { doc: "<!doctype html>" + d.documentElement.outerHTML, entries };
 }
