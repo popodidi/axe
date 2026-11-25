@@ -21,6 +21,7 @@ use crate::runtime::{self, Registry};
 
 mod bots;
 mod pre_check;
+pub mod services;
 pub use bots::splice_bot_args;
 
 const TICK: Duration = Duration::from_secs(2);
@@ -136,6 +137,17 @@ pub struct Dispatcher {
     /// The sealed form key's public half (`sealed::Desk::public`), reported
     /// to the server; null when the key does not exist.
     form_key: Value,
+    /// Bot services (`dispatch/services.rs`); run only by a long-running
+    /// dispatcher (not `--once`).
+    services: services::Supervisor,
+    /// Service notices not yet accepted by the server, oldest first.
+    service_notices: Vec<crate::service::Notice>,
+    /// When services last synced with the server.
+    service_sync: Option<Instant>,
+    /// The last service sync or notice failed; logged once per streak.
+    service_sync_failed: bool,
+    /// A drain woke the owning bots: services keep running until then.
+    services_warned_until: Option<Instant>,
 }
 
 /// The public half of the sealed form key at `path`, when it exists (the
@@ -328,10 +340,9 @@ impl Dispatcher {
             Registry::load(&plain).expect("implicit runtimes always load")
         });
         Dispatcher {
-            cfg,
             store,
             runs: Vec::new(),
-            server_url: Some(url),
+            server_url: Some(url.clone()),
             gate,
             admission,
             deferred: Vec::new(),
@@ -350,6 +361,17 @@ impl Dispatcher {
             runtime_hold_logged: None,
             bots_held: BTreeMap::new(),
             form_key: form_key(&cfg_forms_path),
+            services: services::Supervisor::new(
+                cfg.services.clone(),
+                cfg.log_dir(),
+                cfg.run_root(),
+                Some(url),
+            ),
+            service_notices: Vec::new(),
+            service_sync: None,
+            service_sync_failed: false,
+            services_warned_until: None,
+            cfg,
         }
     }
 
@@ -783,6 +805,9 @@ impl Dispatcher {
             self.reap()?;
             self.reap_bots()?;
             self.update_activity()?;
+            if !once {
+                self.services_tick();
+            }
             let reopened = self.gate.as_mut().is_some_and(|g| g.tick());
             self.runtime_tick();
             self.report_admission();
@@ -794,8 +819,12 @@ impl Dispatcher {
                     self.stop_all()?;
                     return Ok(());
                 }
-                // Task runs may outlast the drain window: bots keep answering.
-                if !self.runs.is_empty() && Instant::now() >= next_bot_poll {
+                // Task runs may outlast the drain window, and bots warned of
+                // their services stopping prepare for it: bots keep answering.
+                let warning = self
+                    .services_warned_until
+                    .is_some_and(|t| Instant::now() < t);
+                if (!self.runs.is_empty() || warning) && Instant::now() >= next_bot_poll {
                     self.schedule_bots()?;
                     next_bot_poll = Instant::now() + TICK;
                 }
@@ -848,7 +877,7 @@ impl Dispatcher {
     fn drain_step(&mut self) -> Result<bool> {
         let now = Instant::now();
         let grace = Duration::from_secs(self.cfg.drain_abort_seconds);
-        let drain = self.drain.get_or_insert_with(|| {
+        self.drain.get_or_insert_with(|| {
             eprintln!(
                 "axe dispatcher: draining; aborting unprotected task runs after {}s",
                 grace.as_secs()
@@ -859,9 +888,14 @@ impl Dispatcher {
                 bots_until: None,
             }
         });
+        // Services keep running until their bots had the warning window.
+        let warned = self.warn_services_stop(now);
+        let drain = self.drain.as_mut().expect("drain set above");
         if self.runs.is_empty() && self.pre_checks.is_empty() {
-            let until = *drain.bots_until.get_or_insert(now + DRAIN_BOT_GRACE);
-            return Ok(self.bots.is_empty() || now >= until);
+            let until = *drain
+                .bots_until
+                .get_or_insert(now.max(warned) + DRAIN_BOT_GRACE);
+            return Ok(now >= warned && (self.bots.is_empty() || now >= until));
         }
         if now >= drain.abort_at && now >= drain.next_check {
             drain.next_check = now + DRAIN_CHECK;
@@ -1462,6 +1496,17 @@ impl Dispatcher {
     }
 
     fn stop_all(&mut self) -> Result<()> {
+        // Services first: SIGTERM, then SIGKILL to any still running after
+        // `stop_grace_seconds`; a plain stop (not a drain) tells their bots.
+        let stopping = self.services.alive_by_bot();
+        if self.services_warned_until.is_none() && !stopping.is_empty() {
+            for (bot, names) in &stopping {
+                self.service_notices
+                    .push(stop_notice(bot, names, 0, &self.generation_key()));
+            }
+        }
+        self.services.terminate_all(Instant::now());
+        self.stop_services_finish();
         self.stop_bots()?;
         self.stop_pre_checks("dispatcher stopped")?;
         let mut runs = std::mem::take(&mut self.runs);
@@ -1489,6 +1534,23 @@ impl Dispatcher {
             }
         }
         Ok(())
+    }
+}
+
+/// The wake that tells bot `bot` its services `names` stop in `secs` seconds.
+fn stop_notice(bot: &str, names: &[String], secs: u64, key: &str) -> crate::service::Notice {
+    let list = names.join(", ");
+    let text = if secs > 0 {
+        format!("Services stop in {secs} s: {list}. The dispatcher is draining for a restart or upgrade; they start again when it is back. Prepare now if they hold state.")
+    } else {
+        format!("Services stopped: {list}. The dispatcher is stopping; they start again when it is back.")
+    };
+    crate::service::Notice {
+        bot: bot.to_string(),
+        kind: "stopping".into(),
+        services: names.to_vec(),
+        text,
+        key: format!("{bot}:stop:{key}"),
     }
 }
 
@@ -1535,6 +1597,157 @@ fn refresh_activity(store: &Store, run: &mut Run) -> Result<()> {
     Ok(())
 }
 
+impl Dispatcher {
+    /// One key per dispatcher generation and second, for notice idempotency.
+    fn generation_key(&self) -> String {
+        let generation = self.store.journal.lock().unwrap().generation.clone();
+        format!("{generation}:{}", now_unix())
+    }
+
+    /// Syncs services with the server (at most every `TICK`), supervises
+    /// them and sends their notices. The server being unreachable changes
+    /// nothing that runs: the last declarations stay in force.
+    fn services_tick(&mut self) {
+        if !self.cfg.services.enabled {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .service_sync
+            .is_none_or(|t| now.duration_since(t) >= TICK)
+        {
+            self.service_sync = Some(now);
+            let (id, generation) = {
+                let j = self.store.journal.lock().unwrap();
+                (j.id.clone(), j.generation.clone())
+            };
+            let body = json!({"id":id,"generation":generation,"statuses":self.services.statuses()});
+            match self
+                .store
+                .client
+                .send_timeout::<Vec<crate::service::Service>>(
+                    "POST",
+                    "/api/dispatcher/services",
+                    body,
+                    Some(Duration::from_secs(10)),
+                ) {
+                Ok(decls) => {
+                    if self.service_sync_failed {
+                        eprintln!("axe dispatcher: services synced again");
+                    }
+                    self.service_sync_failed = false;
+                    // A draining dispatcher starts no new service and
+                    // restarts none for a changed definition.
+                    if !self.store.draining.load(Ordering::SeqCst) {
+                        self.services.apply(&decls, now);
+                    }
+                }
+                Err(e) => {
+                    if !self.service_sync_failed {
+                        eprintln!(
+                            "axe dispatcher: services sync failed (services keep running): {e:#}"
+                        );
+                    }
+                    self.service_sync_failed = true;
+                }
+            }
+        }
+        let notices = self.services.tick(now);
+        self.service_notices.extend(notices);
+        self.send_service_notices();
+    }
+
+    /// Sends queued notices, oldest first; a failure keeps the rest queued.
+    fn send_service_notices(&mut self) {
+        while let Some(n) = self.service_notices.first() {
+            match self.store.client.send_timeout::<Value>(
+                "POST",
+                "/api/dispatcher/service-notice",
+                serde_json::to_value(n).expect("notice serializes"),
+                Some(Duration::from_secs(10)),
+            ) {
+                Ok(v) => {
+                    eprintln!(
+                        "axe dispatcher: service notice {} to bot {} ({}): {v}",
+                        n.kind,
+                        n.bot,
+                        n.services.join(", ")
+                    );
+                    self.service_notices.remove(0);
+                }
+                Err(e) => {
+                    // An unknown bot (removed meanwhile) never accepts it.
+                    if !crate::client::retryable(&e) {
+                        eprintln!("axe dispatcher: service notice dropped: {e:#}");
+                        self.service_notices.remove(0);
+                        continue;
+                    }
+                    eprintln!("axe dispatcher: service notice not sent yet: {e:#}");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// On the first drain tick with live services: wakes each owning bot
+    /// ("services stop in N s"). Returns when the services may stop.
+    fn warn_services_stop(&mut self, now: Instant) -> Instant {
+        if let Some(t) = self.services_warned_until {
+            return t;
+        }
+        let alive = self.services.alive_by_bot();
+        let secs = self.cfg.services.stop_warn_seconds;
+        if alive.is_empty() || secs == 0 {
+            self.services_warned_until = Some(now);
+            return now;
+        }
+        let key = self.generation_key();
+        for (bot, names) in &alive {
+            self.service_notices
+                .push(stop_notice(bot, names, secs, &key));
+        }
+        eprintln!(
+            "axe dispatcher: draining; services stop in {secs}s ({} bots warned)",
+            alive.len()
+        );
+        self.send_service_notices();
+        let until = now + Duration::from_secs(secs);
+        self.services_warned_until = Some(until);
+        until
+    }
+
+    /// Waits for services to stop (SIGKILL after the grace period), then
+    /// reports their final state and sends pending notices, best effort.
+    fn stop_services_finish(&mut self) {
+        if self.services.alive() > 0 {
+            eprintln!(
+                "axe dispatcher: stopping {} services (SIGTERM, then SIGKILL after {}s)",
+                self.services.alive(),
+                self.cfg.services.stop_grace_seconds
+            );
+        }
+        self.services.stop_all();
+        if !self.cfg.services.enabled {
+            return;
+        }
+        let (id, generation) = {
+            let j = self.store.journal.lock().unwrap();
+            (j.id.clone(), j.generation.clone())
+        };
+        let statuses = self.services.statuses();
+        if !statuses.is_empty() {
+            let body = json!({"id":id,"generation":generation,"statuses":statuses});
+            let _ = self.store.client.send_timeout::<Value>(
+                "POST",
+                "/api/dispatcher/services",
+                body,
+                Some(Duration::from_secs(5)),
+            );
+        }
+        self.send_service_notices();
+    }
+}
+
 fn sleep_interruptible(d: Duration, stop: &AtomicBool) {
     let end = Instant::now() + d;
     while !stop.load(Ordering::SeqCst) {
@@ -1548,6 +1761,7 @@ fn sleep_interruptible(d: Duration, stop: &AtomicBool) {
 
 impl Drop for Dispatcher {
     fn drop(&mut self) {
+        self.services.kill_all();
         for run in &mut self.runs {
             kill_child(&mut run.child);
         }

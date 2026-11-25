@@ -70,6 +70,15 @@ enum Cmd {
         #[command(subcommand)]
         command: BotCmd,
     },
+    /// Services: long-running processes a bot declares, run by the dispatcher
+    ///
+    /// The dispatcher starts every declared, enabled service, restarts it by
+    /// its policy with backoff, wakes the bot on a crash loop and before a
+    /// restart stops it. --bot defaults to $AXE_BOT
+    Service {
+        #[command(subcommand)]
+        command: ServiceCmd,
+    },
     /// Goals: durable outcomes (intent, budget, trajectory) bots share
     ///
     /// Bots propose; the owner activates and edits (non-human actors need --owner-ref)
@@ -1832,6 +1841,182 @@ fn run_repo(c: &Client, command: RepoCmd) -> Result<()> {
             db::validate_name("repo", &name)?;
             let r: Repo = c.send("DELETE", &format!("/api/repos/{name}"), json!({}))?;
             println!("repo {} removed (was {})", r.name, r.url);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand, Clone)]
+enum ServiceCmd {
+    /// Declare a service, or replace its definition (a running one restarts
+    /// with it). A new service starts at once. Env values are stored on the
+    /// server in plain text: keep secrets in sealed forms ($AXE_SECRETS_DIR)
+    Add {
+        name: String,
+        /// The shell command (`sh -c`); it should run in the foreground
+        #[arg(long)]
+        command: String,
+        /// Working directory: absolute, or relative to the bot's run folder
+        /// (the default)
+        #[arg(long)]
+        cwd: Option<String>,
+        /// An environment variable, KEY=VALUE (repeat)
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        #[arg(long, default_value = "on-failure",
+            value_parser = PossibleValuesParser::new(crate::service::RESTARTS))]
+        restart: String,
+        #[arg(long, env = "AXE_BOT")]
+        bot: String,
+    },
+    /// A bot's services with their state (every bot's with --all or no bot)
+    #[command(alias = "ls")]
+    List {
+        #[arg(long, env = "AXE_BOT")]
+        bot: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn a service on: the dispatcher starts it
+    Start {
+        name: String,
+        #[arg(long, env = "AXE_BOT")]
+        bot: String,
+    },
+    /// Turn a service off: the dispatcher stops it (SIGTERM, then SIGKILL
+    /// after the grace period); it stays declared
+    Stop {
+        name: String,
+        #[arg(long, env = "AXE_BOT")]
+        bot: String,
+    },
+    /// The tail of a service's log, read from the dispatcher running it
+    Logs {
+        name: String,
+        #[arg(long, env = "AXE_BOT")]
+        bot: String,
+        /// Lines to show (1-2000)
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: u64,
+    },
+    /// Remove a service; the dispatcher stops it
+    #[command(alias = "rm")]
+    Remove {
+        name: String,
+        #[arg(long, env = "AXE_BOT")]
+        bot: String,
+    },
+}
+
+fn format_service(s: &crate::service::Service) -> String {
+    let st = &s.status;
+    let state = match (s.enabled, st.state.as_str()) {
+        (_, "") if s.enabled => "pending".to_string(),
+        (_, "") => "stopped".to_string(),
+        (_, state) => state.to_string(),
+    };
+    let mut line = format!("{}/{}\t{state}", s.bot, s.name);
+    if !s.enabled {
+        line.push_str(" (disabled)");
+    }
+    if let Some(pid) = st.pid {
+        line.push_str(&format!(" pid {pid}"));
+    }
+    if let Some(at) = &st.started_at {
+        line.push_str(&format!(" since {at}"));
+    }
+    if st.restarts > 0 {
+        line.push_str(&format!(" restarts {}", st.restarts));
+    }
+    if let Some(e) = &st.last_exit {
+        line.push_str(&format!(" last {e}"));
+    }
+    if let Some(at) = &st.next_start_at {
+        line.push_str(&format!(" next {at}"));
+    }
+    if let Some(at) = &st.crash_loop_since {
+        line.push_str(&format!(" CRASH LOOP since {at}"));
+    }
+    if let Some(e) = &st.error {
+        line.push_str(&format!(" error: {e}"));
+    }
+    line.push_str(&format!("\t{} [{}]", s.spec.command, s.spec.restart));
+    line
+}
+
+fn run_service(c: &Client, command: ServiceCmd) -> Result<()> {
+    use crate::service::{NewService, Service};
+    let path = |bot: &str, name: &str| -> Result<String> {
+        db::validate_name("service", name)?;
+        Ok(format!("/api/bots/{bot}/services/{name}"))
+    };
+    match command {
+        ServiceCmd::Add {
+            name,
+            command,
+            cwd,
+            env,
+            restart,
+            bot,
+        } => {
+            let mut vars = std::collections::BTreeMap::new();
+            for kv in env {
+                let Some((k, v)) = kv.split_once('=') else {
+                    anyhow::bail!("--env {kv:?}: use KEY=VALUE");
+                };
+                vars.insert(k.to_string(), v.to_string());
+            }
+            let new = NewService {
+                command,
+                cwd,
+                env: vars,
+                restart,
+            };
+            new.validate()?;
+            let s: Service = c.send("PUT", &path(&bot, &name)?, json!({"service": new}))?;
+            println!("{}", format_service(&s));
+        }
+        ServiceCmd::List { bot, all, json } => {
+            let services: Vec<Service> = match bot.filter(|_| !all) {
+                Some(b) => c.get(&format!("/api/bots/{b}/services"), &[])?,
+                None => c.get("/api/services", &[])?,
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&services)?);
+            } else if services.is_empty() {
+                println!("no services: declare one with `axe service add <name> --command <cmd>`");
+            } else {
+                for s in &services {
+                    println!("{}", format_service(s));
+                }
+            }
+        }
+        ServiceCmd::Start { name, bot } => {
+            let s: Service = c.send("POST", &format!("{}/start", path(&bot, &name)?), json!({}))?;
+            println!("{}", format_service(&s));
+        }
+        ServiceCmd::Stop { name, bot } => {
+            let s: Service = c.send("POST", &format!("{}/stop", path(&bot, &name)?), json!({}))?;
+            println!("{}", format_service(&s));
+        }
+        ServiceCmd::Logs { name, bot, lines } => {
+            let v: Value = c.get(
+                &format!("{}/logs", path(&bot, &name)?),
+                &[("lines", &lines.to_string())],
+            )?;
+            match v["text"].as_str() {
+                Some(t) => println!("{t}"),
+                None => anyhow::bail!(
+                    "logs unavailable: {}",
+                    v["unavailable"].as_str().unwrap_or("no answer")
+                ),
+            }
+        }
+        ServiceCmd::Remove { name, bot } => {
+            let s: Service = c.send("DELETE", &path(&bot, &name)?, json!({}))?;
+            println!("service {}/{} removed", s.bot, s.name);
         }
     }
     Ok(())
@@ -3870,7 +4055,9 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
 const HELP_SECTIONS: &[(&str, &[&str])] = &[
     (
         "Primitives",
-        &["task", "bot", "goal", "routine", "rule", "ask", "form"],
+        &[
+            "task", "bot", "service", "goal", "routine", "rule", "ask", "form",
+        ],
     ),
     ("Store", &["blob", "doc", "context", "workspace", "repo"]),
     (
@@ -4024,6 +4211,7 @@ fn run_cmd(cli: &Cli) -> Result<()> {
         Cmd::Ask { command } => run_ask(&client(), command)?,
         Cmd::Rule { command } => run_rule(&client(), command.clone())?,
         Cmd::Repo { command } => run_repo(&client(), command.clone())?,
+        Cmd::Service { command } => run_service(&client(), command.clone())?,
         Cmd::Form { command } => run_form(&client(), command.clone())?,
         Cmd::Web { command } => run_web(&client(), command.clone())?,
         Cmd::Routine { command } => {

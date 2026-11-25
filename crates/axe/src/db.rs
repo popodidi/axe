@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -171,16 +171,17 @@ pub fn default_path() -> Result<PathBuf> {
         .context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v21 schema, or migrates v8-v20 to v21. Older
+/// Opens the database: creates a fresh v22 schema, or migrates v8-v21 to v22. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
 /// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
 /// tables (`usage::SCHEMA`), v16 only adds goal tables and a nullable column
 /// (`goal::migrate`), v17 only adds the task field columns
 /// ([`migrate_task_fields`]), v18 only adds `bots.repos`
 /// ([`migrate_bot_repos`]), v19 only adds the rule tables (`rule::SCHEMA`) and
-/// v20 only adds `bots.retro` ([`migrate_bot_retro`]) and v21 only adds the
-/// repo registry table (`repo::SCHEMA`), so a database lowered to
-/// `user_version` 20, 19, 18, 17, 16, 15, 14, 13, 12 or 11
+/// v20 only adds `bots.retro` ([`migrate_bot_retro`]), v21 only adds the
+/// repo registry table (`repo::SCHEMA`) and v22 only adds the services table
+/// (`service::SCHEMA`), so a database lowered to
+/// `user_version` 21, 20, 19, 18, 17, 16, 15, 14, 13, 12 or 11
 /// still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -214,11 +215,12 @@ pub fn open(path: &Path) -> Result<Connection> {
         migrate_bot_repos(&tx)?;
         migrate_bot_retro(&tx)?;
         tx.execute_batch(crate::repo::SCHEMA)?;
+        tx.execute_batch(crate::service::SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=20).contains(&version) {
+    if (11..=21).contains(&version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(crate::rule::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
@@ -228,6 +230,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         migrate_bot_repos(&tx)?;
         migrate_bot_retro(&tx)?;
         tx.execute_batch(crate::repo::SCHEMA)?;
+        tx.execute_batch(crate::service::SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -252,6 +255,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         migrate_bot_repos(&tx)?;
         migrate_bot_retro(&tx)?;
         tx.execute_batch(crate::repo::SCHEMA)?;
+        tx.execute_batch(crate::service::SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -279,6 +283,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     migrate_bot_repos(&tx)?;
     migrate_bot_retro(&tx)?;
     tx.execute_batch(crate::repo::SCHEMA)?;
+    tx.execute_batch(crate::service::SCHEMA)?;
     let violations: i64 =
         tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)

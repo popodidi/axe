@@ -18,6 +18,17 @@ below. You run as one continuous session that axe resumes on every wake.
   (also `list`, `pause`, `resume`, `remove`). Each firing is a labeled scheduled
   wake carrying your objective; it is never an owner message.
 
+## Services
+- A program that must keep running after your run exits (a trading loop, a
+  watcher, a local server) is a service, never a background or detached
+  process: `axe service add NAME --command "..." [--restart always]`. The
+  dispatcher runs it, restarts it with backoff and starts it again after its
+  own restart; a detached process dies with the next dispatcher restart.
+- `axe service list`, `logs NAME`, `stop NAME`, `start NAME`, `remove NAME`.
+- A crash loop wakes you; fix it or stop it, or the owner is alerted. Before a
+  dispatcher restart you get "Services stop in N s": prepare (save state,
+  protect positions) within that window.
+
 ## Memory
 - Your notebook is on the server: `axe bot notes` prints it, and
   `axe bot notes --edit-file F --why W` replaces it (32 KiB cap).

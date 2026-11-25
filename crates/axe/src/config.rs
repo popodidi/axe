@@ -186,6 +186,70 @@ pub struct Config {
     /// `upgrade.rs`).
     #[serde(default)]
     pub cli: CliSection,
+    /// `[services]`: how the dispatcher runs bot services
+    /// (`dispatch/services.rs`).
+    #[serde(default)]
+    pub services: Services,
+}
+
+/// `[services]`: how `axe dispatch` supervises the services bots declare
+/// (`axe service`). Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Services {
+    /// Run declared services at all.
+    pub enabled: bool,
+    /// After SIGTERM, how long a stopping service has before SIGKILL. Keep
+    /// it under the unit's stop timeout (systemd `TimeoutStopSec`).
+    pub stop_grace_seconds: u64,
+    /// On a drain (SIGUSR1, an upgrade or restart), how long after waking
+    /// the owning bots ("services stop in N s") the services keep running.
+    pub stop_warn_seconds: u64,
+    /// The first restart delay after a crash; it doubles with each quick
+    /// crash in a row, up to `restart_max_seconds`.
+    pub restart_delay_seconds: u64,
+    pub restart_max_seconds: u64,
+    /// A process that ran this long was not a quick crash: the delay resets
+    /// and a crash loop ends.
+    pub stable_seconds: u64,
+    /// Quick crashes in a row that make a crash loop, which wakes the bot.
+    pub crash_loop_restarts: u32,
+    /// A crash loop still going this long after the bot's wake alerts the
+    /// owner too.
+    pub escalate_after_seconds: u64,
+    /// A service's log is rotated past this size; one rotated file is kept.
+    pub log_bytes: u64,
+}
+
+impl Default for Services {
+    fn default() -> Self {
+        Services {
+            enabled: true,
+            stop_grace_seconds: 10,
+            stop_warn_seconds: 30,
+            restart_delay_seconds: 1,
+            restart_max_seconds: 60,
+            stable_seconds: 60,
+            crash_loop_restarts: 5,
+            escalate_after_seconds: 900,
+            log_bytes: 1 << 20,
+        }
+    }
+}
+
+impl Services {
+    fn validate(&self) -> Result<()> {
+        if self.crash_loop_restarts == 0 {
+            bail!("services.crash_loop_restarts must be >= 1");
+        }
+        if self.restart_max_seconds < self.restart_delay_seconds {
+            bail!("services.restart_max_seconds must be >= restart_delay_seconds");
+        }
+        if self.log_bytes < 4096 {
+            bail!("services.log_bytes must be >= 4096");
+        }
+        Ok(())
+    }
 }
 
 /// `[cli]`: how the local `axe` keeps itself and its skill current. Both
@@ -1118,6 +1182,7 @@ impl Config {
         if self.poll_seconds == 0 {
             bail!("poll_seconds must be >= 1");
         }
+        self.services.validate()?;
         for (name, r) in &self.repos {
             r.validate().with_context(|| format!("repos.{name}"))?;
         }

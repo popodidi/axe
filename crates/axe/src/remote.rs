@@ -1061,6 +1061,17 @@ impl Store {
                                     json!({"unavailable":"Log not registered on this dispatcher"})
                                 }
                             }
+                        } else if q["kind"] == "service_log" {
+                            let lines = q["lines"].as_u64().unwrap_or(100).clamp(1, 2000) as usize;
+                            match crate::dispatch::services::tail(
+                                &log_root,
+                                q["home"].as_str().unwrap_or_default(),
+                                q["service"].as_str().unwrap_or_default(),
+                                lines,
+                            ) {
+                                Ok(text) => json!({"text":text}),
+                                Err(e) => json!({"unavailable":format!("{e:#}")}),
+                            }
                         } else if q["kind"] == "form_sign" || q["kind"] == "form_deliver" {
                             match &desk {
                                 Some(d) => d.handle(&q, epoch()),
