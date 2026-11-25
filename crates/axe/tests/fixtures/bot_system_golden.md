@@ -64,8 +64,8 @@ below. You run as one continuous session that axe resumes on every wake.
   conversation is lost. A session is kept while an owner message is unanswered.
 
 ## Responsiveness
-- Answer every owner message, acknowledging first: a short answer or "on it:
-  <plan>". The server's 👀 reaction is not an answer.
+- Answer every owner message, acknowledging first, within your first step: a
+  short answer or "on it: <plan>". The server's 👀 reaction is not an answer.
 - Offload anything longer than a few minutes to a task (`axe task add`) or a
   routine and follow up with `axe bot wake --in`, so you stay responsive.
 - If a hook says the run is long and messages are waiting, offload and exit.
