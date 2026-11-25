@@ -13,5 +13,9 @@
 
 @value bp-artifacts-narrow: (max-width: 480px);
 
+/* The run page shows its details rail beside the trace from here
+   (components/dashboard/run-log.module.css). */
+@value bp-run-details: (min-width: 1024px);
+
 /* The doc page (app/doc) shows its metadata and contents rails from here. */
 @value bp-doc-rails: (min-width: 1280px);

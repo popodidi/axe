@@ -1,4 +1,5 @@
 import { formatLog, type LogLine } from "./run-log";
+import { count, duration } from "./run-meta";
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {};
@@ -12,13 +13,74 @@ const contentText = (v: unknown): string =>
 export type TranscriptEntry = {
   key: string;
   offset: number;
-  kind: "message" | "tool" | "thinking" | "event";
+  kind: "message" | "tool" | "thinking" | "event" | "system";
   label: string;
   body: string;
   input?: string;
   status?: string;
   error?: boolean;
+  /** When the entry began (unix ms): the record's own timestamp, else when
+   * the dispatcher saw its line; absent when neither was recorded. */
+  at?: number;
+  /** When a tool's result arrived. */
+  endAt?: number;
 };
+type Fields = Omit<TranscriptEntry, "key" | "offset" | "at" | "endAt">;
+/** One-line harness events worth a place in the timeline; others stay out. */
+function systemEvent(
+  v: Obj,
+): Pick<TranscriptEntry, "label" | "body" | "error"> | undefined {
+  const join = (...parts: string[]) => parts.filter(Boolean).join(" · ");
+  switch (str(v.subtype)) {
+    case "init":
+      return {
+        label: "Session started",
+        body: join(
+          str(v.model),
+          v.claude_code_version
+            ? `Claude Code ${str(v.claude_code_version)}`
+            : "",
+          str(v.permissionMode),
+        ),
+      };
+    case "task_started":
+      return { label: "Background task started", body: str(v.description) };
+    case "task_notification":
+      return {
+        label: `Background task ${str(v.status) || "update"}`,
+        body: str(v.summary),
+      };
+    case "code_change_published":
+      return {
+        label: `Change ${str(v.action) || "published"}`,
+        body: join(str(v.url), str(v.branch)),
+      };
+    case "vcs_state_changed":
+      return { label: `Git ${str(v.kind) || "change"}`, body: str(v.cwd) };
+    case "permission_denied":
+      return {
+        label: `Permission denied${v.tool_name ? ` · ${str(v.tool_name)}` : ""}`,
+        body: str(v.message) || str(v.decision_reason),
+        error: true,
+      };
+    case "api_retry":
+      return {
+        label: `API retry ${String(v.attempt ?? "?")}/${String(v.max_retries ?? "?")}`,
+        body: join(
+          v.error_status ? `HTTP ${String(v.error_status)}` : "",
+          str(v.error),
+        ),
+      };
+    case "notification":
+      return { label: "Notification", body: str(v.text) };
+    case "compact_boundary":
+      return {
+        label: "Context compacted",
+        body: str(obj(v.compact_metadata).trigger),
+      };
+  }
+  return undefined;
+}
 // Replay the bounded window so prepends and retries produce the same transcript.
 // Coalesce only explicit protocol IDs, never identical message text.
 export function buildTranscript(lines: LogLine[]): TranscriptEntry[] {
@@ -26,14 +88,15 @@ export function buildTranscript(lines: LogLine[]): TranscriptEntry[] {
   let streamId = "";
   const streams = new Map<string, Obj>();
   const finalized = new Set<string>();
-  function put(
-    key: string,
-    line: LogLine,
-    value: Omit<TranscriptEntry, "key" | "offset">,
-  ) {
+  // The current record's time: its own `timestamp`, else when it was seen.
+  let now: number | undefined;
+  function put(key: string, line: LogLine, value: Fields, ended = false) {
+    const old = entries.get(key);
     entries.set(key, {
       key,
-      offset: entries.get(key)?.offset ?? line.start,
+      offset: old?.offset ?? line.start,
+      at: old?.at ?? now,
+      endAt: ended ? now : old?.endAt,
       ...value,
     });
   }
@@ -73,14 +136,20 @@ export function buildTranscript(lines: LogLine[]): TranscriptEntry[] {
     } else if (type === "tool_result") {
       const toolKey = str(c.tool_use_id) ? `tool:${c.tool_use_id}` : key;
       const old = entries.get(toolKey);
-      put(toolKey, line, {
-        kind: "tool",
-        label: old?.label ?? "Tool result · invocation outside loaded history",
-        input: old?.input,
-        body: contentText(c.content),
-        status: c.is_error ? "Failed" : "Completed",
-        error: !!c.is_error,
-      });
+      put(
+        toolKey,
+        line,
+        {
+          kind: "tool",
+          label:
+            old?.label ?? "Tool result · invocation outside loaded history",
+          input: old?.input,
+          body: contentText(c.content),
+          status: c.is_error ? "Failed" : "Completed",
+          error: !!c.is_error,
+        },
+        true,
+      );
     } else
       put(key, line, {
         kind: "event",
@@ -96,6 +165,9 @@ export function buildTranscript(lines: LogLine[]): TranscriptEntry[] {
       v = {};
     }
     const type = str(v.type);
+    const stamp =
+      typeof v.timestamp === "string" ? Date.parse(v.timestamp) : NaN;
+    now = Number.isFinite(stamp) ? stamp : line.at;
     const fallback = () =>
       formatLog(line).forEach((b, n) =>
         put(`raw:${line.start}:${n}`, line, {
@@ -211,24 +283,29 @@ export function buildTranscript(lines: LogLine[]): TranscriptEntry[] {
           item.status === "failed";
         const complete =
           type === "item.completed" || item.status === "completed";
-        put(key, line, {
-          kind: "tool",
-          label: command
-            ? `Command · ${str(item.command).slice(0, 160)}`
-            : `Tool · ${str(item.server)}.${str(item.tool)}`,
-          input: pretty(command ? item.command : item.arguments),
-          body: pretty(
-            command ? item.aggregated_output : (item.error ?? item.result),
-          ),
-          status: error
-            ? "Failed"
-            : complete
-              ? "Completed"
-              : item.status === "in_progress" || type === "item.started"
-                ? "Started"
-                : "Status unavailable",
-          error,
-        });
+        put(
+          key,
+          line,
+          {
+            kind: "tool",
+            label: command
+              ? `Command · ${str(item.command).slice(0, 160)}`
+              : `Tool · ${str(item.server)}.${str(item.tool)}`,
+            input: pretty(command ? item.command : item.arguments),
+            body: pretty(
+              command ? item.aggregated_output : (item.error ?? item.result),
+            ),
+            status: error
+              ? "Failed"
+              : complete
+                ? "Completed"
+                : item.status === "in_progress" || type === "item.started"
+                  ? "Started"
+                  : "Status unavailable",
+            error,
+          },
+          complete || error,
+        );
       } else fallback();
       continue;
     }
@@ -243,6 +320,19 @@ export function buildTranscript(lines: LogLine[]): TranscriptEntry[] {
     }
     if (type === "result") {
       const body = str(v.result);
+      const summary = [
+        typeof v.num_turns === "number" ? `${v.num_turns} turns` : "",
+        typeof v.duration_ms === "number" ? duration(v.duration_ms) : "",
+        typeof v.total_cost_usd === "number"
+          ? "$" + v.total_cost_usd.toFixed(2)
+          : "",
+      ].filter(Boolean);
+      if (!v.is_error && summary.length)
+        put(`system:${line.start}`, line, {
+          kind: "system",
+          label: "Finished",
+          body: summary.join(" · "),
+        });
       if (v.is_error)
         put(`error:${line.start}`, line, {
           kind: "event",
@@ -284,21 +374,40 @@ export function buildTranscript(lines: LogLine[]): TranscriptEntry[] {
         });
       continue;
     }
-    if (
-      [
-        "system",
-        "thread.started",
-        "turn.started",
-        "turn.completed",
-        "ping",
-      ].includes(type) &&
-      !v.error &&
-      !v.is_error
-    )
+    if (type === "system" && !v.error && !v.is_error) {
+      const s = systemEvent(v);
+      if (s) put(`system:${line.start}`, line, { kind: "system", ...s });
+      continue;
+    }
+    if (type === "thread.started" && !v.error) {
+      put(`system:${line.start}`, line, {
+        kind: "system",
+        label: "Session started",
+        body: str(v.thread_id) ? `thread ${str(v.thread_id)}` : "",
+      });
+      continue;
+    }
+    if (type === "turn.completed" && !v.error) {
+      const u = obj(v.usage);
+      const n = (k: string) =>
+        typeof u[k] === "number" ? (u[k] as number) : undefined;
+      const input = n("input_tokens"),
+        output = n("output_tokens");
+      put(`system:${line.start}`, line, {
+        kind: "system",
+        label: "Turn complete",
+        body:
+          input !== undefined || output !== undefined
+            ? `${count(input ?? 0)} in · ${count(output ?? 0)} out tokens`
+            : "",
+      });
+      continue;
+    }
+    if (["turn.started", "ping"].includes(type) && !v.error && !v.is_error)
       continue;
     fallback();
   }
   return [...entries.values()]
-    .filter((e) => e.body || e.kind === "tool")
+    .filter((e) => e.body || e.kind === "tool" || e.kind === "system")
     .sort((a, b) => a.offset - b.offset);
 }

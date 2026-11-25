@@ -1,5 +1,15 @@
-/* Opaque dialog surface; enters with at most 4px movement (200ms). */
+@value bp-run-details from "../../app/styles/breakpoints.module.css";
+@value bp-phone from "../../app/styles/breakpoints.module.css";
+
+/* The run page: an opaque dialog over the dashboard. A toolbar, then the
+   trace and, beside it, the run's details rail (like the doc page's
+   metadata rail). Narrow: the rail replaces the trace while it is open.
+   Enters with at most 4px movement (200ms). */
 .viewer {
+  --run-time-width: calc(var(--space-8) + var(--space-2));
+  --run-details-width: calc(var(--space-8) * 4 + var(--space-5));
+  --run-details-key: calc(var(--space-6) + var(--space-3));
+
   position: fixed;
   inset: 0;
   z-index: var(--z-toast);
@@ -29,63 +39,203 @@
   font-size: var(--text-h3);
   line-height: var(--lh-h3);
   margin: 0;
-}
-.header span {
   overflow-wrap: anywhere;
+}
+.connection {
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  overflow-wrap: anywhere;
+}
+/* Actions sit at the toolbar's end on wide screens and wrap below. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+.body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
 }
 .scroll {
   overflow: auto;
   padding: var(--pane-padding);
-  flex: 1;
   min-height: 0;
   overflow-anchor: none;
 }
-/* Records group by space; no rule between every message. */
+.details {
+  display: none;
+  overflow: auto;
+  min-height: 0;
+  padding: var(--pane-padding);
+  overscroll-behavior: contain;
+  background: var(--surface-nav);
+}
+.body[data-details="true"] .scroll {
+  display: none;
+}
+.body[data-details="true"] .details {
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+}
+
+@media bp-run-details {
+  .body:is([data-details="true"], [data-details="auto"]) {
+    grid-template-columns: minmax(0, 1fr) var(--run-details-width);
+  }
+  .body[data-details="true"] .scroll {
+    display: block;
+  }
+  .body[data-details="auto"] .details {
+    display: grid;
+    align-content: start;
+    gap: var(--space-3);
+  }
+}
+.note {
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+}
+
+/* One record: a time gutter, then its content. Records group by space;
+   no rule between messages. */
 .record {
-  padding: var(--inset-padding);
-  margin-top: var(--inset-gap);
+  display: grid;
+  grid-template-columns: var(--run-time-width) minmax(0, 1fr);
+  column-gap: var(--space-snug);
+  padding: var(--space-half) var(--space-1);
+  margin-top: var(--space-half);
+  min-width: 0;
+  border-radius: var(--radius-sm);
+}
+.time {
+  padding-top: var(--space-quarter);
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  line-height: var(--lh-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.content {
   min-width: 0;
 }
 .record h3,
 .record h4 {
   font-size: var(--text-label);
+  line-height: var(--lh-label);
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
-  margin: var(--space-half) 0;
+  margin: 0 0 var(--space-quarter);
   overflow-wrap: anywhere;
+}
+.record h4 {
+  font-weight: var(--weight-medium);
+  margin-top: var(--space-1);
 }
 .record pre {
   white-space: pre;
   overflow: auto;
   max-height: calc(var(--space-8) * 3);
   padding: var(--space-1);
+  margin: var(--space-half) 0 0;
 }
 .record summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-snug);
   cursor: pointer;
   color: var(--text-secondary);
   min-height: var(--control-min-height);
   line-height: var(--lh-body);
-  overflow-wrap: anywhere;
+  min-width: 0;
 }
+
+/* Assistant text is the main voice; the owner's or the harness's user
+   turns sit on a quiet fill so turns read apart at a glance. */
 .record[data-kind="message"] {
   padding-block: var(--space-1);
 }
-.record[data-kind="tool"],
-.record[data-kind="thinking"] {
-  padding-block: var(--space-half);
+.record[data-role="user"] {
+  background: var(--surface-1);
 }
-.toolLabel {
-  overflow-wrap: anywhere;
+.role {
+  letter-spacing: var(--tracking-label);
+}
+.record[data-role="assistant"] .role {
+  color: var(--text-primary);
+}
+
+/* Tool calls: name, short arguments, then status and time taken; the
+   input and output unfold. */
+.toolName {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+.toolArgs {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  color: var(--text-secondary);
 }
 .toolStatus {
-  color: var(--text-secondary);
-  margin-left: var(--space-1);
-  font-size: var(--text-label);
+  flex: none;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: var(--text-caption);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.record[data-kind="thinking"] summary {
+  font-style: italic;
+  color: var(--text-tertiary);
+}
+
+/* Harness events: one quiet line. */
+.system {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-snug);
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  padding-top: var(--space-quarter);
+}
+.systemLabel {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+.systemBody {
+  min-width: 0;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* Errors: danger text on a danger tint, wherever they appear. */
+.record[data-error="true"] {
+  background: var(--status-danger-bg);
+}
 .record[data-error="true"] h3,
-.record[data-error="true"] .toolStatus {
+.record[data-error="true"] .toolStatus,
+.record[data-error="true"] .systemLabel {
   color: var(--status-danger);
 }
+.record[data-error="true"] pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Run state labels use the task-state tints: running blue, completed teal,
    unknown amber, failed danger. */
 .header [data-run-state] {
@@ -114,7 +264,95 @@
   min-height: var(--control-min-height);
 }
 
-.record[data-error="true"] pre {
+/* The details rail: groups of a small label over aligned key/value rows,
+   as on the doc page. Long unbroken values wrap anywhere. */
+.group {
+  display: grid;
+  gap: var(--space-half);
+  min-width: 0;
+}
+.groupLabel {
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-weight: var(--weight-medium);
+  color: var(--text-tertiary);
+}
+.facts {
+  display: grid;
+  grid-template-columns: minmax(var(--run-details-key), max-content) minmax(
+      0,
+      1fr
+    );
+  gap: var(--space-half) var(--space-snug);
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.fact {
+  display: contents;
+}
+.facts dt {
+  color: var(--text-tertiary);
+}
+.facts dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.missing {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.prompt {
+  min-width: 0;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.prompt summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-snug);
+  min-height: var(--control-min-height);
+  cursor: pointer;
+}
+.promptTitle {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+.promptSize {
+  color: var(--text-tertiary);
+}
+.prompt:not(details) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-snug);
+  min-height: var(--control-min-height);
+  align-items: baseline;
+}
+.promptText {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  max-height: calc(var(--space-8) * 6);
+  overflow: auto;
+  margin: var(--space-half) 0 0;
+  padding: var(--space-1);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+
+@media bp-phone {
+  .record {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .time:empty {
+    display: none;
+  }
 }
