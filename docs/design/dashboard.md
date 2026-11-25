@@ -48,6 +48,9 @@ URL parameter (`task`, `routine`, `service`, `bot`, `goal`, `blob`/`doc`) is
 its deep link; `j`/`k` move between rows, Enter opens, Escape closes the
 topmost pane, and a task opened from an item stacks to its right. The shared
 pieces are `web/components/dashboard/side-pane.tsx`.
+Every side pane, the run page's details rail included, resizes with the
+shared `PaneResizer` (`web/components/dashboard/detail-resizer.tsx`) and keeps
+its width per browser.
 
 ## Interaction
 

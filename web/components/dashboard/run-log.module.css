@@ -3,11 +3,15 @@
 
 /* The run page: an opaque dialog over the dashboard. A toolbar, then the
    trace and, beside it, the run's details rail (like the doc page's
-   metadata rail). Narrow: the rail replaces the trace while it is open.
+   metadata rail). Wide: the rail is resizable like the side panes, 360px
+   up to the room left after a 360px trace (--run-details-size holds a
+   saved width). Narrow: the rail replaces the trace while it is open.
    Enters with at most 4px movement (200ms). */
 .viewer {
   --run-time-width: var(--space-7);
   --run-details-width: calc(var(--space-8) * 4 + var(--space-5));
+  --run-details-min-width: calc(var(--space-8) * 3);
+  --run-trace-min-width: calc(var(--space-8) * 3);
   --run-details-key: calc(var(--space-6) + var(--space-3));
 
   position: fixed;
@@ -82,9 +86,27 @@
   gap: var(--space-3);
 }
 
+/* The rail's resizer shows only while the rail sits beside the trace */
+.body > [role="separator"] {
+  display: none;
+}
+
 @media bp-run-details {
   .body:is([data-details="true"], [data-details="auto"]) {
-    grid-template-columns: minmax(0, 1fr) var(--run-details-width);
+    display: flex;
+  }
+  .body:is([data-details="true"], [data-details="auto"]) .scroll {
+    flex: 1 1 0;
+    min-width: var(--run-trace-min-width);
+  }
+  .body:is([data-details="true"], [data-details="auto"]) .details {
+    flex-shrink: 0;
+    width: var(--run-details-size, var(--run-details-width));
+    min-width: var(--run-details-min-width);
+    max-width: calc(100% - var(--run-trace-min-width));
+  }
+  .body:is([data-details="true"], [data-details="auto"]) > [role="separator"] {
+    display: block;
   }
   .body[data-details="true"] .scroll {
     display: block;
@@ -335,6 +357,38 @@
   gap: var(--space-snug);
   min-height: var(--control-min-height);
   align-items: baseline;
+}
+/* Raw / Rendered, like the goal page's task filter */
+.promptView {
+  display: flex;
+  gap: var(--space-half);
+  margin: var(--space-half) 0;
+}
+.promptView button {
+  min-height: var(--control-min-height);
+  padding: 0 var(--space-half);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--transition-hover);
+}
+.promptView button:hover {
+  color: var(--text-primary);
+}
+.promptView button[aria-pressed="true"] {
+  background: var(--surface-selected);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+.promptRendered {
+  max-height: calc(var(--space-8) * 6);
+  overflow: auto;
+  padding: var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
 }
 .promptText {
   white-space: pre-wrap;

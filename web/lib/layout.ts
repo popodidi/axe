@@ -7,6 +7,7 @@ type Saved = {
   detail?: number;
   item?: number;
   navWidth?: number;
+  run?: number;
 };
 const event = "axe-layout";
 function read(): Saved {

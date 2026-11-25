@@ -31,7 +31,9 @@ import {
   type RunMeta,
 } from "../../lib/run-meta";
 import { buildTranscript, type TranscriptEntry } from "../../lib/transcript";
+import { usePromptView, type PromptKind } from "../../lib/prompt-view";
 import { Button, CodeBlock, Tag } from "../ui";
+import { PaneResizer } from "./detail-resizer";
 import styles from "./run-log.module.css";
 
 // Bot runs (`kind="bot"`) use /api/bot-runs and carry `bot` instead of a task.
@@ -490,6 +492,11 @@ export function RunLog({
             </>
           )}
         </div>
+        <PaneResizer
+          controls="run-details"
+          label="Resize run details"
+          pane="run"
+        />
         <aside
           ref={detailsRail}
           id="run-details"
@@ -731,8 +738,18 @@ function Link({
   );
 }
 
-/** A prompt, folded; open, it shows in full (up to the recorded bound). */
-function Prompt({ title, file }: { title: string; file?: RunFile }) {
+/** A prompt, folded; open, it shows in full (up to the recorded bound),
+ * rendered as Markdown or as its raw text. */
+function Prompt({
+  title,
+  kind,
+  file,
+}: {
+  title: string;
+  kind: PromptKind;
+  file?: RunFile;
+}) {
+  const [view, setView] = usePromptView(kind);
   if (!file?.text && file?.text !== "")
     return (
       <div className={styles.prompt}>
@@ -751,13 +768,35 @@ function Prompt({ title, file }: { title: string; file?: RunFile }) {
           {file.source === "current" && " · current, not this run's"}
         </span>
       </summary>
+      <div
+        className={styles.promptView}
+        role="group"
+        aria-label={`${title} view`}
+      >
+        {(["rendered", "raw"] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            aria-pressed={view === v}
+            onClick={() => setView(v)}
+          >
+            {v === "raw" ? "Raw" : "Rendered"}
+          </button>
+        ))}
+      </div>
       {file.source === "current" && (
         <p className={styles.missing}>
           This run predates per-run copies; this is the bot&apos;s latest system
           prompt.
         </p>
       )}
-      <CodeBlock className={styles.promptText}>{file.text}</CodeBlock>
+      {view === "raw" ? (
+        <CodeBlock className={styles.promptText}>{file.text}</CodeBlock>
+      ) : (
+        <div className={styles.promptRendered}>
+          <Markdown body={file.text} compact />
+        </div>
+      )}
       {file.truncated && (
         <p className={styles.missing}>
           Showing the first {size(file.text.length)} of {size(file.bytes ?? 0)};
@@ -1018,9 +1057,10 @@ function RunDetails({
                     ? "System prompt"
                     : "System prompt · run instructions"
                 }
+                kind="system"
                 file={files?.system_prompt}
               />
-              <Prompt title="User prompt" file={files?.prompt} />
+              <Prompt title="User prompt" kind="user" file={files?.prompt} />
             </>
           )}
         </section>
