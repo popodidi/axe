@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { byNode, serviceKind, serviceState, serviceTime, span, staleFor, type Service } from "./services";
+import { byNode, lastRun, scheduleText, serviceKind, serviceState, serviceTime, span, staleFor, type Service } from "./services";
 
 const NOW = 1_800_000_000;
 const ts = (epoch: number) => new Date(epoch * 1000).toISOString();
@@ -24,9 +24,29 @@ describe("services", () => {
     expect(serviceState(svc({}, { state: "backoff", crash_loop_since: ts(NOW) }))).toBe("crash-looping");
     expect(serviceState(svc({ enabled: false }, { state: "stopping", crash_loop_since: ts(NOW) }))).toBe("stopping");
   });
-  it("is long-running until a schedule exists", () => {
+  it("is scheduled with a schedule", () => {
     expect(serviceKind(svc())).toBe("long-running");
-    expect(serviceKind({ ...svc(), schedule: "0 * * * *" } as Service)).toBe("scheduled");
+    expect(scheduleText(svc())).toBeNull();
+    const sched = { cron: "*/5 * * * *", timezone: "UTC", timeout_seconds: 60, catch_up: true };
+    expect(serviceKind(svc({ schedule: sched }))).toBe("scheduled");
+    expect(scheduleText(svc({ schedule: sched }))).toBe("*/5 * * * * UTC");
+  });
+  it("shows a scheduled service's next run and last run like Service::summary", () => {
+    const schedule = { cron: "*/5 * * * *", timezone: "UTC", timeout_seconds: 60, catch_up: true };
+    const idle = svc(
+      { schedule, restart: "never" },
+      { state: "scheduled", started_at: ts(NOW - 180), last_exit: "exit 0", next_run_at: ts(NOW + 120) },
+    );
+    expect(serviceState(idle)).toBe("scheduled");
+    expect(serviceTime(idle, NOW)).toBe("next run in 2m");
+    expect(lastRun(idle, NOW)).toBe("exit 0, 3m ago");
+    const running = svc({ schedule }, { state: "running", started_at: ts(NOW - 5), next_run_at: ts(NOW + 120) });
+    expect(serviceTime(running, NOW)).toBe("running 5s");
+    expect(serviceTime(svc({ schedule, enabled: false }, { state: "stopped", next_run_at: ts(NOW) }), NOW)).toBe("—");
+    expect(lastRun(svc({ schedule }, { state: "scheduled", started_at: ts(NOW - 60), error: "cwd x" }), NOW)).toBe(
+      "start failed, 1m ago",
+    );
+    expect(lastRun(svc({}, { last_exit: "exit 2" }), NOW)).toBe("exit 2");
   });
   it("shows uptime or the next restart", () => {
     expect(serviceTime(svc({}, { state: "running", started_at: ts(NOW - 7500) }), NOW)).toBe("up 2h 5m");

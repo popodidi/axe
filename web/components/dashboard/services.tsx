@@ -19,6 +19,8 @@ import {
 import { getJson, useStoreSession } from "../../lib/store";
 import {
   byNode,
+  lastRun,
+  scheduleText,
   serviceKey,
   serviceKind,
   serviceState,
@@ -78,9 +80,6 @@ function StateLabel({ s }: { s: Service }) {
     </StateBadge>
   );
 }
-
-// Last run for a long-running service: how its last process ended.
-const lastExit = (s: Service) => s.status.last_exit || "—";
 
 export function ServiceList({
   state: { rows, error },
@@ -185,16 +184,17 @@ export function ServiceList({
                         </Td>
                         <Td data-label="Kind" className={styles.optional}>
                           {serviceKind(s)}
+                          {s.schedule && <div className={styles.sub}>{scheduleText(s)}</div>}
                         </Td>
                         <Td data-label="State">
                           <StateLabel s={s} />
                         </Td>
                         <Td data-label="Restarts" numeric zero={!s.status.restarts} className={styles.optional}>
-                          {s.status.restarts}
+                          {s.schedule ? "—" : s.status.restarts}
                         </Td>
                         <Td data-label="Uptime / next">{serviceTime(s, secs)}</Td>
                         <Td data-label="Last exit" mono className={styles.optional}>
-                          {lastExit(s)}
+                          {lastRun(s, secs)}
                         </Td>
                       </tr>
                     ))}
@@ -259,12 +259,24 @@ function serviceFacts(s: Service, now: number): Fact[] {
     { label: "Bot", value: s.bot },
     { label: "Node", value: s.status.dispatcher || "—", mono: true },
     { label: "Kind", value: serviceKind(s) },
-    { label: "Restart policy", value: s.restart },
-    { label: "Restarts", value: String(s.status.restarts) },
-    { label: "Uptime / next", value: serviceTime(s, now) },
-    { label: "Last exit", value: lastExit(s), mono: true },
+    ...(s.schedule
+      ? [
+          { label: "Schedule", value: scheduleText(s) || "", wide: true },
+          { label: "Timeout", value: span(s.schedule.timeout_seconds) },
+          { label: "Catch-up", value: s.schedule.catch_up ? "one run after node downtime" : "off" },
+          { label: "Next run", value: serviceTime(s, now) },
+        ]
+      : [
+          { label: "Restart policy", value: s.restart },
+          { label: "Restarts", value: String(s.status.restarts) },
+          { label: "Uptime / next", value: serviceTime(s, now) },
+        ]),
+    { label: "Last exit", value: lastRun(s, now), mono: true },
     { label: "PID", value: s.status.pid ? String(s.status.pid) : "—" },
-    { label: "Started", value: time(s.status.started_at) },
+    { label: s.schedule ? "Last run" : "Started", value: time(s.status.started_at) },
+    ...(s.schedule && s.status.finished_at
+      ? [{ label: "Ended", value: time(s.status.finished_at) }]
+      : []),
     {
       label: "Last report",
       value: s.status.reported_at

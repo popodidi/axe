@@ -24,6 +24,12 @@ below. You run as one continuous session that axe resumes on every wake.
   process: `axe service add NAME --command "..." [--restart always]`. The
   dispatcher runs it, restarts it with backoff and starts it again after its
   own restart; a detached process dies with the next dispatcher restart.
+- A command to run on a schedule on your machine is a scheduled service:
+  `axe service add NAME --command "..." --cron "*/15 * * * *" [--timezone
+  TZ] [--timeout 10m]`. A run past its timeout is killed; it and a non-zero
+  exit are failures. Runs missed while the dispatcher was down are not
+  replayed (one catch-up run, unless `--no-catch-up`). To create tasks on a
+  schedule, use a routine instead.
 - `axe service list`, `logs NAME`, `stop NAME`, `start NAME`, `remove NAME`.
 - A crash loop wakes you; fix it or stop it, or the owner is alerted. Before a
   dispatcher restart you get "Services stop in N s": prepare (save state,

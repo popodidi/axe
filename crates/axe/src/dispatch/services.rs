@@ -12,8 +12,23 @@
 //! `stop_grace_seconds`. On a drain (an upgrade or restart) the owning bots
 //! are woken first and the services keep running for `stop_warn_seconds`.
 //!
+//! A scheduled service (one with a `Schedule`) is `scheduled` between runs
+//! and starts at each cron time in its time zone. There is one run at a
+//! time: a run time that comes while the last run is still going is skipped
+//! (with a line in the log). A run still going `timeout_seconds` after its
+//! start gets SIGTERM, then SIGKILL after `stop_grace_seconds`; it counts as
+//! a failure, as a non-zero exit or a failed start, and none is retried
+//! before the next run time. When the supervisor first sees a scheduled
+//! service (the node started, or the service is new) and a run time passed
+//! since its last run (the start the server last stored), or since its
+//! declaration if it never ran, it runs once at once: the one catch-up, so
+//! however many run times the node missed while down, none is replayed
+//! beyond it. `catch_up: false` turns it off. A draining node starts no
+//! scheduled run.
+//!
 //! [`Supervisor`] holds the processes and takes the time as an argument, so
-//! tests drive it with their own clock; the dispatcher syncs it with the
+//! tests drive it with their own clock ([`Supervisor::with_clock`] maps it
+//! to wall time for schedules); the dispatcher syncs it with the
 //! server ([`Supervisor::apply`], [`Supervisor::statuses`]) and sends the
 //! notices it returns.
 use std::collections::BTreeMap;
@@ -124,26 +139,87 @@ struct Proc {
     /// alerted.
     crash_loop: Option<(Instant, i64)>,
     escalated: bool,
+    /// A scheduled service: the next run time (epoch seconds), and whether
+    /// the live run is past its timeout.
+    next_run: Option<i64>,
+    timed_out: bool,
 }
 
 impl Proc {
-    fn new(svc: Service, now: Instant) -> Self {
+    /// First sight of `svc` at `now` (wall `epoch`): a long-running service
+    /// starts at once, a scheduled one waits for its next run time, or runs
+    /// once at once to catch up ([`catch_up`]). A scheduled service keeps
+    /// its last run as the server stored it.
+    fn new(svc: Service, now: Instant, epoch: i64) -> Self {
         let want = svc.enabled;
-        Proc {
-            svc,
+        let mut status = Status {
+            state: if want { "starting" } else { "stopped" }.into(),
+            ..Status::default()
+        };
+        if svc.spec.schedule.is_some() {
+            status.started_at = svc.status.started_at.clone();
+            status.finished_at = svc.status.finished_at.clone();
+            status.last_exit = svc.status.last_exit.clone();
+        }
+        let mut p = Proc {
             want,
             child: None,
             started: None,
-            status: Status {
-                state: if want { "starting" } else { "stopped" }.into(),
-                ..Status::default()
-            },
+            status,
             quick: 0,
-            next_start: want.then_some(now),
+            next_start: None,
             term_at: None,
             pending: None,
             crash_loop: None,
             escalated: false,
+            next_run: None,
+            timed_out: false,
+            svc,
+        };
+        if want {
+            p.arm(now, epoch);
+            if catch_up(&p.svc, epoch) {
+                p.next_run = Some(epoch);
+            }
+        }
+        p
+    }
+
+    fn scheduled(&self) -> bool {
+        self.svc.spec.schedule.is_some()
+    }
+
+    /// Ready to run its definition: a long-running service starts at `now`,
+    /// a scheduled one waits for its next run time after `epoch`.
+    fn arm(&mut self, now: Instant, epoch: i64) {
+        self.status.next_start_at = None;
+        if self.scheduled() {
+            self.next_start = None;
+            self.status.state = "scheduled".into();
+            self.plan(epoch);
+        } else {
+            self.next_run = None;
+            self.status.next_run_at = None;
+            self.next_start = Some(now);
+            self.status.state = "starting".into();
+        }
+    }
+
+    /// The next run time after `epoch`.
+    fn plan(&mut self, epoch: i64) {
+        let Some(sch) = &self.svc.spec.schedule else {
+            return;
+        };
+        match sch.next_after(epoch) {
+            Ok(t) => {
+                self.next_run = Some(t);
+                self.status.next_run_at = Some(crate::bot::ts(t));
+            }
+            Err(e) => {
+                self.next_run = None;
+                self.status.next_run_at = None;
+                self.status.error = Some(format!("schedule: {e:#}"));
+            }
         }
     }
 
@@ -163,6 +239,8 @@ impl Proc {
     /// Sends SIGTERM once; SIGKILL follows after the grace period ([`Supervisor::tick`]).
     fn terminate(&mut self, now: Instant) {
         self.next_start = None;
+        self.next_run = None;
+        self.status.next_run_at = None;
         if self.alive() && self.term_at.is_none() {
             self.signal(libc::SIGTERM);
             self.term_at = Some(now);
@@ -182,12 +260,36 @@ impl Proc {
     }
 }
 
+/// Whether a scheduled service seen for the first time at `epoch` runs once
+/// at once: catch-up is on and a run time passed since its last run start
+/// (or, never run, its last declaration change), so a run was missed.
+fn catch_up(svc: &Service, epoch: i64) -> bool {
+    let Some(sch) = svc.spec.schedule.as_ref().filter(|s| s.catch_up) else {
+        return false;
+    };
+    let since = svc
+        .status
+        .started_at
+        .as_deref()
+        .unwrap_or(svc.updated_at.as_str());
+    match (crate::bot::epoch_of(since), sch.latest_at(epoch)) {
+        (Some(since), Ok(last)) => last > since,
+        _ => false,
+    }
+}
+
 pub struct Supervisor {
     cfg: Cfg,
     log_root: PathBuf,
     run_root: PathBuf,
     server_url: Option<String>,
     procs: BTreeMap<String, Proc>,
+    /// For tests: this instant is this wall time (epoch seconds). None: the
+    /// real wall clock.
+    clock: Option<(Instant, i64)>,
+    /// The node is draining: no scheduled run starts (it would be stopped
+    /// in moments); a run time missed meanwhile is caught up at its start.
+    hold: bool,
 }
 
 impl Supervisor {
@@ -198,6 +300,29 @@ impl Supervisor {
             run_root,
             server_url,
             procs: BTreeMap::new(),
+            clock: None,
+            hold: false,
+        }
+    }
+
+    /// While `hold`, no scheduled run starts (a drain).
+    pub fn hold_runs(&mut self, hold: bool) {
+        self.hold = hold;
+    }
+
+    /// Reads instant `at` as wall time `epoch` (and the rest relative to
+    /// it), for schedules driven by a test clock.
+    pub fn with_clock(mut self, at: Instant, epoch: i64) -> Self {
+        self.clock = Some((at, epoch));
+        self
+    }
+
+    /// The wall time (epoch seconds) at `now`.
+    fn epoch(&self, now: Instant) -> i64 {
+        match self.clock {
+            Some((at, epoch)) if now >= at => epoch + now.duration_since(at).as_secs() as i64,
+            Some((at, epoch)) => epoch - at.duration_since(now).as_secs() as i64,
+            None => crate::remote::epoch(),
         }
     }
 
@@ -228,13 +353,16 @@ impl Supervisor {
     /// Follows the declarations: starts new and enabled services, stops
     /// disabled and removed ones, and restarts a service whose definition
     /// changed.
+    /// A scheduled service's changed definition waits for the end of its
+    /// current run.
     pub fn apply(&mut self, decls: &[Service], now: Instant) {
+        let epoch = self.epoch(now);
         let mut seen = std::collections::BTreeSet::new();
         for d in decls {
             let key = d.key();
             seen.insert(key.clone());
             let Some(p) = self.procs.get_mut(&key) else {
-                self.procs.insert(key, Proc::new(d.clone(), now));
+                self.procs.insert(key, Proc::new(d.clone(), now, epoch));
                 continue;
             };
             let changed = p.svc.spec != d.spec || p.svc.home != d.home;
@@ -246,8 +374,7 @@ impl Supervisor {
                     p.pending = Some(d.clone());
                 } else if !p.alive() {
                     p.svc = d.clone();
-                    p.next_start = Some(now);
-                    p.status.state = "starting".into();
+                    p.arm(now, epoch);
                 }
             } else if !d.enabled && p.want {
                 p.want = false;
@@ -256,13 +383,15 @@ impl Supervisor {
                 p.terminate(now);
             } else if changed && p.want {
                 p.clear_loop();
-                if p.alive() {
+                if p.alive() && p.scheduled() {
+                    // Its run goes on; the definition applies after it.
+                    p.pending = Some(d.clone());
+                } else if p.alive() {
                     p.pending = Some(d.clone());
                     p.terminate(now);
                 } else {
                     p.svc = d.clone();
-                    p.next_start = Some(now);
-                    p.status.state = "starting".into();
+                    p.arm(now, epoch);
                 }
             }
             if !p.alive() && p.pending.is_none() {
@@ -290,8 +419,13 @@ impl Supervisor {
         let cfg = self.cfg.clone();
         let grace = Duration::from_secs(cfg.stop_grace_seconds);
         let stable = Duration::from_secs(cfg.stable_seconds);
+        let epoch = self.epoch(now);
         let keys: Vec<String> = self.procs.keys().cloned().collect();
         for key in keys {
+            if self.procs[&key].scheduled() {
+                self.tick_scheduled(&key, now, epoch);
+                continue;
+            }
             let p = self.procs.get_mut(&key).expect("key from map");
             // Reap.
             let exited = match p.child.as_mut().map(|c| c.try_wait()) {
@@ -313,8 +447,7 @@ impl Supervisor {
                     match p.pending.take() {
                         Some(next) if p.want => {
                             p.svc = next;
-                            p.next_start = Some(now);
-                            p.status.state = "starting".into();
+                            p.arm(now, epoch);
                         }
                         _ => {
                             p.status.state = "stopped".into();
@@ -418,6 +551,118 @@ impl Supervisor {
         notices
     }
 
+    /// [`Self::tick`] for a scheduled service: reaps its run, stops it past
+    /// its timeout or kills it past the grace period, and starts the run
+    /// that is due (or skips it while the last one goes on).
+    fn tick_scheduled(&mut self, key: &str, now: Instant, epoch: i64) {
+        let grace = Duration::from_secs(self.cfg.stop_grace_seconds);
+        let log_bytes = self.cfg.log_bytes;
+        let (log_root, run_root) = (&self.log_root, &self.run_root);
+        let server_url = self.server_url.as_deref();
+        let hold = self.hold;
+        let p = self.procs.get_mut(key).expect("key from map");
+        let exited = match p.child.as_mut().map(|c| c.try_wait()) {
+            Some(Ok(Some(st))) => Some(st),
+            Some(Err(e)) => {
+                eprintln!("axe dispatcher: service {key}: wait failed: {e}");
+                None
+            }
+            _ => None,
+        };
+        if let Some(st) = exited {
+            p.child = None;
+            p.status.pid = None;
+            let how = match &p.svc.spec.schedule {
+                Some(s) if p.timed_out => {
+                    format!("timeout after {}s ({})", s.timeout_seconds, exit_text(st))
+                }
+                _ => exit_text(st),
+            };
+            note_exit(log_root, &p.svc, &how);
+            p.status.last_exit = Some(how);
+            let stopped = p.term_at.take().is_some() && !p.timed_out;
+            if !stopped {
+                // A run that ended by itself or by its timeout.
+                p.status.finished_at = Some(crate::bot::ts(epoch));
+                if p.timed_out || !st.success() {
+                    p.status.failures += 1;
+                }
+            }
+            p.timed_out = false;
+            match p.pending.take() {
+                Some(next) if p.want => {
+                    p.svc = next;
+                    p.arm(now, epoch);
+                }
+                _ if p.want && !stopped => p.status.state = "scheduled".into(),
+                _ => p.status.state = "stopped".into(),
+            }
+            if !p.scheduled() {
+                // Now long-running: the general tick runs it.
+                return;
+            }
+        }
+        let timeout = p
+            .svc
+            .spec
+            .schedule
+            .as_ref()
+            .map_or(u64::MAX, |s| s.timeout_seconds);
+        // Past its timeout: SIGTERM (SIGKILL after the grace period, below).
+        if p.alive()
+            && p.term_at.is_none()
+            && p.started
+                .is_some_and(|s| now.duration_since(s) >= Duration::from_secs(timeout))
+        {
+            log_line(
+                log_root,
+                &p.svc,
+                &format!("timeout after {timeout}s: SIGTERM"),
+            );
+            p.signal(libc::SIGTERM);
+            p.term_at = Some(now);
+            p.timed_out = true;
+        }
+        if p.alive() && p.term_at.is_some_and(|t| now.duration_since(t) >= grace) {
+            p.signal(libc::SIGKILL);
+        }
+        // Due: run, or skip while the last run goes on. Either way the next
+        // run time is the first one after now, so missed ones collapse.
+        if let Some(due) = p.next_run.filter(|t| p.want && !hold && epoch >= *t) {
+            if p.alive() {
+                let what = format!(
+                    "skipped the run of {}: the last run is still going",
+                    crate::bot::ts(due)
+                );
+                log_line(log_root, &p.svc, &what);
+            } else {
+                match spawn(&p.svc, log_root, run_root, server_url) {
+                    Ok((child, log)) => {
+                        p.status.pid = Some(child.id());
+                        p.status.state = "running".into();
+                        p.status.started_at = Some(crate::bot::ts(epoch));
+                        p.status.error = None;
+                        p.status.log = Some(log.display().to_string());
+                        p.child = Some(child);
+                        p.started = Some(now);
+                    }
+                    Err(e) => {
+                        eprintln!("axe dispatcher: service {key}: start failed: {e:#}");
+                        p.status.error = Some(format!("{e:#}"));
+                        p.status.failures += 1;
+                        p.status.started_at = Some(crate::bot::ts(epoch));
+                        p.status.finished_at = Some(crate::bot::ts(epoch));
+                        p.status.last_exit = None;
+                    }
+                }
+            }
+            p.plan(epoch);
+        }
+        if p.alive() {
+            rotate(&log_path(log_root, &p.svc.home, &p.svc.name), log_bytes);
+        }
+    }
+
     /// Sends SIGTERM to every service (none restarts after it).
     pub fn terminate_all(&mut self, now: Instant) {
         for p in self.procs.values_mut() {
@@ -502,9 +747,14 @@ fn self_schedule(p: &mut Proc, cfg: &Cfg, now: Instant, notices: &mut Vec<Notice
 
 /// Appends a line saying how the process ended to its log.
 fn note_exit(log_root: &Path, svc: &Service, how: &str) {
+    log_line(log_root, svc, how);
+}
+
+/// Appends `--- axe: <now> <what> ---` to the service's log, if it has one.
+fn log_line(log_root: &Path, svc: &Service, what: &str) {
     let path = log_path(log_root, &svc.home, &svc.name);
     if let Ok(mut f) = OpenOptions::new().append(true).open(path) {
-        let _ = writeln!(f, "--- axe: {} {how} ---", wall());
+        let _ = writeln!(f, "--- axe: {} {what} ---", wall());
     }
 }
 
@@ -630,6 +880,7 @@ mod tests {
                 cwd: None,
                 env: BTreeMap::from([("GREETING".to_string(), "hi".to_string())]),
                 restart: restart.into(),
+                schedule: None,
             },
             enabled: true,
             status: Status::default(),
@@ -902,6 +1153,218 @@ mod tests {
         let n = r.sup.tick(r.at(1.0));
         assert_eq!(n.len(), 1);
         assert!(n[0].text.contains("not a directory"), "{}", n[0].text);
+    }
+
+    /// Wall time at fake instant 0: 30 s past a minute.
+    const E0: i64 = 1_800_000_030;
+
+    fn cron(command: &str, timeout: u64) -> Service {
+        let mut s = svc("s", command, "never");
+        s.spec.schedule = Some(crate::service::Schedule {
+            cron: "* * * * *".into(),
+            timezone: "UTC".into(),
+            timeout_seconds: timeout,
+            catch_up: true,
+        });
+        // Declared long before: catch-up reads the last run, then this.
+        s.updated_at = crate::bot::ts(E0 - 15);
+        s
+    }
+
+    fn timed(cfg: Cfg) -> Rig {
+        let mut r = Rig::new(cfg);
+        r.sup = Supervisor::new(
+            r.sup.cfg.clone(),
+            r.dir.path().join("logs"),
+            r.dir.path().join("runs"),
+            None,
+        )
+        .with_clock(r.t0, E0);
+        r
+    }
+
+    #[test]
+    fn a_scheduled_service_runs_at_each_cron_time_and_records_the_run() {
+        let mut r = timed(cfg());
+        r.sup
+            .apply(&[cron("echo run-$AXE_SERVICE; exit 4", 60)], r.at(0.0));
+        r.sup.tick(r.at(0.0));
+        let st = r.state("b/s");
+        assert_eq!(st.state, "scheduled");
+        assert_eq!(st.next_run_at, Some(crate::bot::ts(E0 + 30)));
+        r.sup.tick(r.at(29.0));
+        assert_eq!(r.state("b/s").state, "scheduled", "not before its time");
+        assert!(r.state("b/s").started_at.is_none());
+        // Its time: a run, which exits 4.
+        r.sup.tick(r.at(30.0));
+        let st = r.state("b/s");
+        assert_eq!(st.state, "running");
+        assert_eq!(st.started_at, Some(crate::bot::ts(E0 + 30)));
+        assert_eq!(st.next_run_at, Some(crate::bot::ts(E0 + 90)));
+        r.until(31.0, |s| s.state == "scheduled");
+        let st = r.state("b/s");
+        assert_eq!(st.last_exit.as_deref(), Some("exit 4"));
+        assert_eq!(st.finished_at, Some(crate::bot::ts(E0 + 31)));
+        assert_eq!(
+            (st.failures, st.restarts),
+            (1, 0),
+            "a failed run, no restart"
+        );
+        assert!(r.log().contains("run-s") && r.log().contains("exit 4 ---"));
+        // Not retried before the next run time; then it runs again.
+        r.sup.tick(r.at(89.0));
+        assert_eq!(r.state("b/s").started_at, Some(crate::bot::ts(E0 + 30)));
+        r.sup.tick(r.at(90.0));
+        assert_eq!(r.state("b/s").started_at, Some(crate::bot::ts(E0 + 90)));
+        r.until(90.0, |s| s.state == "scheduled");
+        assert_eq!(r.state("b/s").failures, 2);
+        assert_eq!(r.log().matches("run-s").count(), 2);
+    }
+
+    #[test]
+    fn a_scheduled_run_past_its_timeout_is_stopped_and_counts_as_failed() {
+        let mut r = timed(cfg());
+        r.sup.apply(&[cron("echo begin; sleep 30", 2)], r.at(0.0));
+        r.sup.tick(r.at(30.0));
+        assert_eq!(r.state("b/s").state, "running");
+        r.sup.tick(r.at(31.9));
+        assert_eq!(r.state("b/s").state, "running", "within its timeout");
+        r.until(32.0, |s| s.state == "scheduled");
+        let st = r.state("b/s");
+        assert_eq!(
+            st.last_exit.as_deref(),
+            Some("timeout after 2s (signal 15)")
+        );
+        assert_eq!(st.failures, 1);
+        assert!(st.finished_at.is_some());
+        assert!(r.log().contains("timeout after 2s: SIGTERM"), "{}", r.log());
+        // A run ignoring SIGTERM is killed after the grace period (10 s).
+        let mut r = timed(cfg());
+        let cmd = "trap 'echo got-term' TERM; while :; do sleep 0.05; done";
+        r.sup.apply(&[cron(cmd, 2)], r.at(0.0));
+        r.sup.tick(r.at(30.0));
+        std::thread::sleep(Duration::from_millis(100));
+        r.sup.tick(r.at(32.0));
+        for t in [33.0, 41.9] {
+            std::thread::sleep(Duration::from_millis(50));
+            r.sup.tick(r.at(t));
+            assert_eq!(r.state("b/s").state, "running", "at {t}");
+        }
+        r.until(42.0, |s| s.state == "scheduled");
+        assert_eq!(
+            r.state("b/s").last_exit.as_deref(),
+            Some("timeout after 2s (signal 9)")
+        );
+        assert!(r.log().contains("got-term"));
+    }
+
+    #[test]
+    fn a_run_time_during_a_run_is_skipped_and_a_new_definition_waits_for_its_end() {
+        let mut r = timed(cfg());
+        let flag = r.dir.path().join("done");
+        let cmd = format!("while [ ! -e {} ]; do sleep 0.05; done", flag.display());
+        let s = cron(&cmd, 600);
+        r.sup.apply(std::slice::from_ref(&s), r.at(0.0));
+        r.sup.tick(r.at(30.0));
+        let pid = r.state("b/s").pid;
+        r.sup.tick(r.at(90.0));
+        let st = r.state("b/s");
+        assert_eq!((st.state.as_str(), st.pid), ("running", pid));
+        assert_eq!(st.next_run_at, Some(crate::bot::ts(E0 + 150)));
+        assert!(r.log().contains("skipped the run of"), "{}", r.log());
+        // A changed definition: the run goes on, the new one applies after.
+        let mut s2 = s.clone();
+        s2.spec.command = "echo second".into();
+        r.sup.apply(&[s2], r.at(91.0));
+        r.sup.tick(r.at(91.0));
+        assert_eq!(r.state("b/s").pid, pid);
+        std::fs::write(&flag, "").unwrap();
+        r.until(92.0, |s| s.state == "scheduled");
+        assert_eq!(r.state("b/s").last_exit.as_deref(), Some("exit 0"));
+        r.sup.tick(r.at(150.0));
+        r.until(150.0, |s| s.state == "scheduled");
+        assert!(r.log().contains("second"), "{}", r.log());
+    }
+
+    #[test]
+    fn a_node_restart_runs_one_catch_up_and_replays_no_missed_run() {
+        // The server last stored a run 10 minutes back: ten run times passed
+        // while the node was down. One run at once, then the schedule.
+        let mut r = timed(cfg());
+        let mut s = cron("echo run", 60);
+        s.status.started_at = Some(crate::bot::ts(E0 - 600));
+        s.status.last_exit = Some("exit 0".into());
+        r.sup.apply(&[s.clone()], r.at(0.0));
+        assert_eq!(r.state("b/s").started_at, s.status.started_at, "kept");
+        r.sup.tick(r.at(0.0));
+        assert_eq!(r.state("b/s").started_at, Some(crate::bot::ts(E0)));
+        r.until(0.0, |s| s.state == "scheduled");
+        for t in [1.0, 10.0, 29.0] {
+            r.sup.tick(r.at(t));
+        }
+        assert_eq!(r.log().matches("start: echo run").count(), 1, "{}", r.log());
+        assert_eq!(r.state("b/s").next_run_at, Some(crate::bot::ts(E0 + 30)));
+        r.sup.tick(r.at(30.0));
+        assert_eq!(r.log().matches("start: echo run").count(), 2);
+        r.sup.kill_all();
+        // Its last run after the last run time: nothing was missed.
+        let mut r = timed(cfg());
+        s.status.started_at = Some(crate::bot::ts(E0 - 20));
+        r.sup.apply(&[s.clone()], r.at(0.0));
+        r.sup.tick(r.at(0.0));
+        assert_eq!(r.state("b/s").state, "scheduled");
+        // Catch-up off: no run before the next run time.
+        let mut r = timed(cfg());
+        s.status.started_at = Some(crate::bot::ts(E0 - 600));
+        s.spec.schedule.as_mut().unwrap().catch_up = false;
+        r.sup.apply(&[s.clone()], r.at(0.0));
+        r.sup.tick(r.at(0.0));
+        assert_eq!(r.state("b/s").state, "scheduled");
+        assert_eq!(r.state("b/s").started_at, Some(crate::bot::ts(E0 - 600)));
+        // Never run and declared after the last run time: no catch-up.
+        let mut r = timed(cfg());
+        let mut s = cron("echo run", 60);
+        s.updated_at = crate::bot::ts(E0 - 5);
+        r.sup.apply(&[s], r.at(0.0));
+        r.sup.tick(r.at(0.0));
+        assert_eq!(r.state("b/s").state, "scheduled");
+    }
+
+    #[test]
+    fn a_draining_node_starts_no_scheduled_run() {
+        let mut r = timed(cfg());
+        r.sup.apply(&[cron("echo run", 60)], r.at(0.0));
+        r.sup.hold_runs(true);
+        r.sup.tick(r.at(30.0));
+        assert_eq!(r.state("b/s").state, "scheduled");
+        assert!(r.state("b/s").started_at.is_none());
+        r.sup.hold_runs(false);
+        r.sup.tick(r.at(31.0));
+        assert_eq!(r.state("b/s").started_at, Some(crate::bot::ts(E0 + 31)));
+        r.sup.kill_all();
+    }
+
+    #[test]
+    fn a_turned_off_scheduled_service_stops_its_run_and_runs_no_more() {
+        let mut r = timed(cfg());
+        let mut s = cron("sleep 30", 600);
+        r.sup.apply(&[s.clone()], r.at(0.0));
+        r.sup.tick(r.at(30.0));
+        assert_eq!(r.state("b/s").state, "running");
+        s.enabled = false;
+        r.sup.apply(&[s.clone()], r.at(31.0));
+        r.until(31.0, |s| s.state == "stopped");
+        let st = r.state("b/s");
+        assert_eq!((st.failures, st.next_run_at.clone()), (0, None));
+        r.sup.tick(r.at(200.0));
+        assert_eq!(r.sup.alive(), 0);
+        // On again: waits for its next run time (no catch-up).
+        s.enabled = true;
+        r.sup.apply(&[s], r.at(201.0));
+        r.sup.tick(r.at(201.0));
+        let st = r.state("b/s");
+        assert_eq!(st.state, "scheduled");
+        assert_eq!(st.next_run_at, Some(crate::bot::ts(E0 + 210)));
     }
 
     #[test]

@@ -1656,6 +1656,8 @@ impl Dispatcher {
                 }
             }
         }
+        self.services
+            .hold_runs(self.store.draining.load(Ordering::SeqCst));
         let notices = self.services.tick(now);
         self.service_notices.extend(notices);
         self.send_service_notices();
