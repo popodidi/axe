@@ -9,6 +9,7 @@ const steps: Record<string, [number, number, string]> = {
   "6h": [6 * 3600, 60, "raw"],
   "24h": [86400, 300, "rollup"],
   "7d": [7 * 86400, 1800, "rollup"],
+  "14d": [14 * 86400, 3600, "rollup"],
   "30d": [30 * 86400, 7200, "rollup"],
 };
 

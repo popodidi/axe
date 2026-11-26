@@ -40,6 +40,7 @@ const point = (t: number, runs: Partial<Record<"task" | "bot" | "service" | "sch
 describe("node view model", () => {
   it("reads the range from the URL, 6h by default", () => {
     expect(nodeRange(new URLSearchParams("range=30d"))).toBe("30d");
+    expect(nodeRange(new URLSearchParams("range=14d"))).toBe("14d");
     expect(nodeRange(new URLSearchParams("range=2h"))).toBe("6h");
     expect(nodeRange(new URLSearchParams())).toBe("6h");
     expect(nodePath("1h")).toBe("/api/node/metrics?range=1h");
