@@ -13,6 +13,11 @@
 //! - disk: free (`f_bavail`) and total of the filesystem holding the run
 //!   workspaces (`Config::run_root`, or its nearest existing parent).
 //!
+//! Each sample also names the node binary's version (`axe --version` of the
+//! running node) and the version of the `axe` CLI on the node host, which
+//! can differ until the node restarts (`$PATH`, else `~/.local/bin/axe`; read
+//! every [`CLI_VERSION_EVERY`]). The server adds its own ([`Series::server_version`]).
+//!
 //! Running runs ([`Runs`]) follow the node's own pools: task runs (agent
 //! sessions and routine pre-checks) per project, bot runs per bot, and the
 //! bot services with a live process per owning bot, long-running services
@@ -139,6 +144,12 @@ pub struct Sample {
     pub disk_path: String,
     #[serde(default)]
     pub runs: Runs,
+    /// The node binary's `axe --version` string, e.g. `0.5.4 (5437bf3602b8)`.
+    #[serde(default)]
+    pub node_version: Option<String>,
+    /// `axe --version` of the CLI on the node host; null when not found.
+    #[serde(default)]
+    pub cli_version: Option<String>,
 }
 
 /// Raw host readings for one sample; `None` where the read failed.
@@ -151,11 +162,16 @@ pub struct Readings {
     pub disk: Option<(u64, u64)>,
 }
 
-/// Builds samples on the node; keeps the previous CPU counters.
+/// How often the node re-reads the host CLI's version.
+pub const CLI_VERSION_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Builds samples on the node; keeps the previous CPU counters and the last
+/// CLI version read.
 #[derive(Debug, Clone)]
 pub struct Sampler {
     disk_path: PathBuf,
     prev_cpu: Option<CpuTimes>,
+    cli: Option<(std::time::Instant, Option<String>)>,
 }
 
 impl Sampler {
@@ -163,6 +179,7 @@ impl Sampler {
         Sampler {
             disk_path,
             prev_cpu: None,
+            cli: None,
         }
     }
 
@@ -173,7 +190,16 @@ impl Sampler {
     /// Reads the host and builds a sample.
     pub fn sample(&mut self, runs: Runs) -> Sample {
         let r = read_host(&self.disk_path);
-        self.build(r, runs)
+        if self
+            .cli
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= CLI_VERSION_EVERY)
+        {
+            self.cli = Some((std::time::Instant::now(), cli_version()));
+        }
+        let mut s = self.build(r, runs);
+        s.cli_version = self.cli.as_ref().and_then(|c| c.1.clone());
+        s
     }
 
     /// A sample from `r`: CPU is the busy share since the previous readings.
@@ -200,8 +226,40 @@ impl Sampler {
             disk_total_bytes: r.disk.map(|d| d.1),
             disk_path: self.disk_path.display().to_string(),
             runs,
+            node_version: Some(env!("AXE_VERSION").to_string()),
+            cli_version: None,
         }
     }
+}
+
+/// The version an `axe --version` line names: `axe 0.5.4 (5437bf3602b8)`
+/// gives `0.5.4 (5437bf3602b8)`.
+pub fn parse_cli_version(out: &str) -> Option<String> {
+    let line = out.lines().next()?.trim();
+    let v = line.strip_prefix("axe ").unwrap_or(line).trim();
+    (!v.is_empty() && v.len() <= 80).then(|| v.to_string())
+}
+
+/// `axe --version` of the CLI on this host: the first `axe` on `$PATH`, else
+/// `~/.local/bin/axe` (where the installer puts it). Its update check and
+/// skill refresh are off for this call.
+pub fn cli_version() -> Option<String> {
+    let run = |bin: &std::ffi::OsStr| {
+        std::process::Command::new(bin)
+            .arg("--version")
+            .env("AXE_UPDATE_CHECK", "0")
+            .env("AXE_SKILL_REFRESH", "0")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_cli_version(&String::from_utf8_lossy(&o.stdout)))
+    };
+    run("axe".as_ref()).or_else(|| {
+        let local = dirs::home_dir()?.join(".local/bin/axe");
+        run(local.as_os_str())
+    })
 }
 
 /// Reads `/proc` and `statvfs`; a failed read is `None`.
@@ -268,6 +326,11 @@ pub fn record(conn: &Connection, node: &str, at: i64, s: Sample, cfg: &Cfg) -> R
         runs: s.runs.bounded(),
         ..s
     };
+    for v in [&mut s.node_version, &mut s.cli_version] {
+        if v.as_ref().is_some_and(|v| v.len() > 80) {
+            *v = None;
+        }
+    }
     s.disk_path.truncate(
         (0..=s.disk_path.len().min(512))
             .rev()
@@ -407,6 +470,8 @@ pub struct Series {
     pub points: Vec<Point>,
     /// The newest sample, whatever the range.
     pub current: Option<Sample>,
+    /// This server's `axe --version` string.
+    pub server_version: String,
 }
 
 /// The points of `range` (one of [`RANGES`]) ending at `now`.
@@ -485,6 +550,7 @@ pub fn query(conn: &Connection, range: &str, now: i64, cfg: &Cfg) -> Result<Seri
         sample_seconds: cfg.sample_seconds,
         points,
         current: latest(conn)?,
+        server_version: crate::server::version().version,
     })
 }
 
@@ -514,6 +580,22 @@ mod tests {
         CpuTimes {
             fields: [busy, 0, 0, idle, 0, 0, 0, 0],
         }
+    }
+
+    #[test]
+    fn cli_version_is_the_version_line() {
+        assert_eq!(
+            parse_cli_version("axe 0.5.4 (5437bf3602b8)\n").as_deref(),
+            Some("0.5.4 (5437bf3602b8)")
+        );
+        assert_eq!(parse_cli_version("").as_deref(), None);
+        assert_eq!(parse_cli_version(&"x".repeat(100)), None);
+    }
+
+    #[test]
+    fn samples_name_the_node_binary() {
+        let s = Sampler::new("/".into()).build(Readings::default(), Runs::default());
+        assert_eq!(s.node_version.as_deref(), Some(env!("AXE_VERSION")));
     }
 
     #[test]

@@ -11,6 +11,9 @@ for (const theme of ["dark", "light"]) for (const width of [1440, 390]) {
     await page.getByRole("button", { name: "Node", exact: true }).click();
     await expect(page).toHaveURL(/view=node/);
     await expect(page.getByRole("heading", { name: "Node", level: 1 })).toBeVisible();
+    const versions = page.getByLabel("Versions");
+    for (const v of ["axe server 0.5.4 (5437bf3602b8)", "node 0.5.4 (5437bf3602b8)", "CLI 0.5.3 (7467135d8cb8)"])
+      await expect(versions).toContainText(v);
     const kpis = page.getByRole("region", { name: "Current values" });
     await expect(kpis).toContainText("23%");
     await expect(kpis).toContainText("6.2 GiB");

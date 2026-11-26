@@ -54,6 +54,7 @@ export function nodeSeries(range: string, now: number) {
     to,
     now,
     sample_seconds: 15,
+    server_version: "0.5.4 (5437bf3602b8)",
     points,
     current: {
       at: now - 7,
@@ -66,6 +67,8 @@ export function nodeSeries(range: string, now: number) {
       disk_free_bytes: 120.4 * GIB,
       disk_total_bytes: 500 * GIB,
       disk_path: "/srv/axe/.runs",
+      node_version: "0.5.4 (5437bf3602b8)",
+      cli_version: "0.5.3 (7467135d8cb8)",
       runs: {
         task: { harvis: 2, tiktape: 1 },
         bot: { cos: 1 },

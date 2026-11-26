@@ -96,3 +96,20 @@
 .tipLabel {
   color: var(--text-secondary);
 }
+
+/* Versions line in the header: server, node binary, host CLI. */
+.versions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-half) var(--space-snug);
+  margin-top: var(--space-half);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  color: var(--text-secondary);
+}
+
+.versions code {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-primary);
+}

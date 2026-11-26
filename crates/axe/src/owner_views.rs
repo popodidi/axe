@@ -768,13 +768,30 @@ fn node_runs_line(kind: &str, by: &std::collections::BTreeMap<String, u32>) -> S
     line
 }
 
+/// `/node` versions line: this server, the node binary and the CLI on the
+/// node host, each `version (short commit)`.
+fn node_versions(s: Option<&crate::node_metrics::Sample>) -> String {
+    let v = |x: Option<&str>| match x {
+        Some(x) => format!("<code>{}</code>", escape(x)),
+        None => "<code>?</code>".into(),
+    };
+    format!(
+        "axe server {} · node {} · CLI {}",
+        v(Some(&crate::server::version().version)),
+        v(s.and_then(|s| s.node_version.as_deref())),
+        v(s.and_then(|s| s.cli_version.as_deref())),
+    )
+}
+
 /// `/node`, HTML for a phone: the node's newest sample (`node_metrics.rs`),
-/// CPU, memory, disk and its running runs by kind.
+/// a versions line ([`node_versions`]), CPU, memory, disk and its running
+/// runs by kind.
 pub fn node(conn: &Connection, web: Option<&str>, now: i64) -> Result<String> {
     let link = view_link(web, "view=node", "Open node");
     let Some(s) = crate::node_metrics::latest(conn)? else {
         return Ok(format!(
-            "<b>Node · no samples yet</b>\nThe node reports every <code>[node_metrics] sample_seconds</code>.{link}"
+            "<b>Node · no samples yet</b>\n{}\nThe node reports every <code>[node_metrics] sample_seconds</code>.{link}",
+            node_versions(None)
         ));
     };
     let age = now - s.at;
@@ -788,6 +805,8 @@ pub fn node(conn: &Connection, web: Option<&str>, now: i64) -> Result<String> {
     } else {
         format!("<b>Node · {running} running</b>")
     };
+    out.push('\n');
+    out.push_str(&node_versions(Some(&s)));
     let mut cpu = match s.cpu_percent {
         Some(c) => format!("\nCPU <code>{c:.0}%</code>"),
         None => "\nCPU <code>?</code>".into(),

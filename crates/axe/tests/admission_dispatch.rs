@@ -1156,6 +1156,12 @@ fn node_samples_ride_on_the_admission_report() {
     assert_eq!(cur["runs"]["task"]["a"], 1, "{m}");
     assert!(cur["mem_total_bytes"].as_u64().unwrap() > 0, "{cur}");
     assert!(cur["disk_total_bytes"].as_u64().unwrap() > 0, "{cur}");
+    // The node names its binary; the server adds its own version.
+    assert!(
+        cur["node_version"].as_str().is_some_and(|v| !v.is_empty()),
+        "{cur}"
+    );
+    assert_eq!(m["server_version"], axe::server::version().version);
     assert_eq!(m["points"][0]["task_max"], 1.0, "{m}");
     // The next sample waits for the interval: polls in between send none.
     d.poll().unwrap();
