@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   age,
+  diskUsedPercent,
   gib,
   niceMax,
   nodePath,
@@ -69,6 +70,15 @@ describe("node view model", () => {
     expect(stale(s)).toBe(false);
     expect(stale({ ...s, current: { ...s.current!, at: 900 } })).toBe(true);
     expect(stale({ ...s, current: null })).toBe(true);
+  });
+
+  it("reads disk used as a percent of the total", () => {
+    expect(diskUsedPercent(120, 480)).toBe(75);
+    expect(diskUsedPercent(0, 480)).toBe(100);
+    expect(diskUsedPercent(500, 480)).toBe(0);
+    expect(diskUsedPercent(null, 480)).toBeNull();
+    expect(diskUsedPercent(120, null)).toBeNull();
+    expect(diskUsedPercent(120, 0)).toBeNull();
   });
 
   it("formats values and ages", () => {

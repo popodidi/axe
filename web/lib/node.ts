@@ -45,6 +45,16 @@ export const load = (n: number | null | undefined) =>
 export const count = (n: number) =>
   Number.isInteger(n) ? String(n) : n.toFixed(1);
 
+/**
+ * Disk used as a percent of `total`: `total - free`, like `/node`'s "disk N%"
+ * (owner_views.rs). Rollups keep only the bucket's least free space
+ * (`disk_free_min`), so history is drawn against the current total.
+ */
+export function diskUsedPercent(free: number | null | undefined, total: number | null | undefined): number | null {
+  if (free === null || free === undefined || !total) return null;
+  return (100 * Math.max(0, total - free)) / total;
+}
+
 export const runTotal = (by: Record<string, number> | undefined) =>
   Object.values(by ?? {}).reduce((a, b) => a + b, 0);
 
