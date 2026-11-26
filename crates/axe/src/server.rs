@@ -402,6 +402,8 @@ fn reason(status: u16) -> &'static str {
         201 => "Created",
         202 => "Accepted",
         204 => "No Content",
+        206 => "Partial Content",
+        302 => "Found",
         303 => "See Other",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -410,6 +412,7 @@ fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         411 => "Length Required",
         413 => "Payload Too Large",
+        416 => "Range Not Satisfiable",
         431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
         _ => "Internal Server Error",
@@ -796,7 +799,9 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
     };
     let metric_route = crate::metrics::route(&req.path);
     let observe = |status| st.metrics.observe(&req.method, metric_route, status, start);
-    let is_link = req.method == "GET" && req.path.first().is_some_and(|p| p == "b");
+    // HEAD answers a link with GET's headers (media players probe with it).
+    let is_link =
+        matches!(req.method.as_str(), "GET" | "HEAD") && req.path.first().is_some_and(|p| p == "b");
     // The blob site (`[blobs] link_url`) serves signed links and nothing
     // else: no API, no sign-in, and it never reads or sets a cookie.
     if st
@@ -1101,23 +1106,110 @@ fn replayable(st: &State, req: &Request, id: &str) -> Response {
 /// `GET /api/bots/<name>/tg/file/<msg>[/<n>]`: streams an inbound attachment
 /// through the server (nothing is stored). The file name is in
 /// `X-Axe-File-Name`, percent-encoded.
-/// Writes a blob's bytes after a 200 head with `extra` headers.
+/// A request's `Range` against a body of `size` bytes.
+#[derive(Debug, PartialEq)]
+enum ByteRange {
+    /// No usable range: the whole body, 200.
+    Full,
+    /// Inclusive first and last byte, 206.
+    Part(u64, u64),
+    /// 416.
+    Unsatisfiable,
+}
+
+/// One `bytes=` range (`a-b`, `a-`, `-n`). A multi-range or malformed
+/// header is ignored (the whole body), as RFC 9110 allows.
+fn byte_range(header: Option<&str>, size: u64) -> ByteRange {
+    let Some(h) = header.map(str::trim) else {
+        return ByteRange::Full;
+    };
+    let Some(spec) = h
+        .get(..6)
+        .filter(|u| u.eq_ignore_ascii_case("bytes="))
+        .map(|_| h[6..].trim())
+    else {
+        return ByteRange::Full;
+    };
+    let Some((a, b)) = spec.split_once('-').filter(|_| !spec.contains(',')) else {
+        return ByteRange::Full;
+    };
+    let num = |s: &str| {
+        (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()))
+            .then(|| s.parse::<u64>().ok())
+            .flatten()
+    };
+    let (a, b) = (a.trim(), b.trim());
+    match (a.is_empty(), num(a), num(b)) {
+        // `-n`: the last n bytes.
+        (true, _, Some(n)) => match size.min(n) {
+            0 => ByteRange::Unsatisfiable,
+            n => ByteRange::Part(size - n, size - 1),
+        },
+        (false, Some(first), last) if b.is_empty() || last.is_some_and(|l| l >= first) => {
+            if first >= size {
+                ByteRange::Unsatisfiable
+            } else {
+                ByteRange::Part(first, last.map_or(size - 1, |l| l.min(size - 1)))
+            }
+        }
+        _ => ByteRange::Full,
+    }
+}
+
+/// Writes a blob after a head with `extra` headers: the requested byte
+/// range (206, or 416 past the end) or the whole body (200), and only the
+/// head for HEAD. Returns the status.
 fn send_blob(
     w: &mut TcpStream,
+    req: &Request,
     meta: &blob::Meta,
     mut body: Box<dyn Read + Send>,
     extra: &str,
-) -> Result<()> {
+) -> Result<u16> {
+    let extra = format!(
+        "X-Axe-Sha256: {}\r\nAccept-Ranges: bytes\r\n{extra}",
+        meta.sha256
+    );
+    let (status, first, len, range) =
+        match byte_range(req.headers.get("range").map(String::as_str), meta.size) {
+            ByteRange::Full => (200, 0, meta.size, String::new()),
+            ByteRange::Part(a, b) => (
+                206,
+                a,
+                b - a + 1,
+                format!("Content-Range: bytes {a}-{b}/{}\r\n", meta.size),
+            ),
+            ByteRange::Unsatisfiable => {
+                write_head(
+                    w,
+                    416,
+                    "text/plain",
+                    Some(0),
+                    None,
+                    &format!("Content-Range: bytes */{}\r\n{extra}", meta.size),
+                )?;
+                w.flush()?;
+                return Ok(416);
+            }
+        };
     write_head(
         w,
-        200,
+        status,
         &meta.content_type,
-        Some(meta.size as usize),
+        Some(len as usize),
         None,
-        &format!("X-Axe-Sha256: {}\r\n{extra}", meta.sha256),
+        &format!("{range}{extra}"),
     )?;
-    std::io::copy(&mut body, w)?;
-    Ok(w.flush()?)
+    if req.method != "HEAD" {
+        // Both backends stream from the start; skip to the range.
+        let skipped = std::io::copy(&mut (&mut body).take(first), &mut std::io::sink())?;
+        if skipped != first {
+            anyhow::bail!("blob {} ended before byte {first}", meta.sha256);
+        }
+        std::io::copy(&mut body.take(len), w)?;
+    }
+    w.flush()?;
+    Ok(status)
 }
 
 /// `/api/blobs` routes (the caller checked the token): upload, list, download
@@ -1200,15 +1292,15 @@ fn blob_api(
                 let Some((meta, body)) = st.blobs.open_blob(sha)? else {
                     return Err(HttpError(404, format!("blob {sha} not found")).into());
                 };
-                observe(200);
                 // A browser may open this with a read session: never as
                 // active content on the server's origin.
-                send_blob(
+                observe(send_blob(
                     w,
+                    req,
                     &meta,
                     body,
                     "X-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n",
-                )?;
+                )?);
                 Ok(None)
             }
             ("POST", ["api", "blobs", sha, "link"]) => {
@@ -1299,7 +1391,6 @@ fn blob_link_get(
     })();
     match result {
         Ok((meta, body, name)) => {
-            observe(200);
             let file = name
                 .map(|n| {
                     let ascii: String = n
@@ -1318,8 +1409,9 @@ fn blob_link_get(
                     )
                 })
                 .unwrap_or_default();
-            send_blob(
+            let status = send_blob(
                 w,
+                req,
                 &meta,
                 body,
                 &format!(
@@ -1333,11 +1425,24 @@ fn blob_link_get(
                         "sandbox".to_string()
                     }
                 ),
-            )
+            )?;
+            observe(status);
+            Ok(())
         }
         Err(e) => {
             let r = blob_error(&e);
             observe(r.status);
+            if req.method == "HEAD" {
+                write_head(
+                    w,
+                    r.status,
+                    "application/json",
+                    Some(r.body.len()),
+                    None,
+                    "",
+                )?;
+                return Ok(w.flush()?);
+            }
             Ok(write_response(w, &r, None)?)
         }
     }
@@ -1345,12 +1450,14 @@ fn blob_link_get(
 
 /// The blob site's policy: scripts run in an opaque-origin sandbox (no
 /// `allow-same-origin`). The page may load scripts, styles, fonts and images
-/// over https (CDNs, web fonts), but may not make requests of its own
-/// (fetch, XHR, WebSocket, form posts).
+/// over https (CDNs, web fonts) and audio or video from the blob site itself
+/// (`media-src 'self'`: a video link opens as a media document that loads its
+/// own URL), but may not make requests of its own (fetch, XHR, WebSocket,
+/// form posts).
 const LINK_SITE_CSP: &str = "sandbox allow-scripts; default-src 'none'; \
      script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; \
-     font-src https: data:; img-src https: data:; connect-src 'none'; \
-     form-action 'none'";
+     font-src https: data:; img-src https: data:; media-src 'self'; \
+     connect-src 'none'; form-action 'none'";
 
 /// Request problems carry an [`HttpError`]; any other blob error is the
 /// store's (disk, S3), so a 500.
@@ -3836,4 +3943,46 @@ fn connect_dispatcher(
         *relay = None;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{byte_range, reason, ByteRange::*};
+
+    #[test]
+    fn blob_statuses_have_their_reason() {
+        assert_eq!(reason(206), "Partial Content");
+        assert_eq!(reason(302), "Found");
+        assert_eq!(reason(416), "Range Not Satisfiable");
+    }
+
+    #[test]
+    fn byte_ranges() {
+        for (h, size, want) in [
+            (None, 10, Full),
+            (Some("bytes=0-1"), 10, Part(0, 1)),
+            (Some("bytes=0-"), 10, Part(0, 9)),
+            (Some("BYTES= 2-4 "), 10, Part(2, 4)),
+            (Some("bytes=5-100"), 10, Part(5, 9)),
+            (Some("bytes=9-9"), 10, Part(9, 9)),
+            (Some("bytes=-3"), 10, Part(7, 9)),
+            (Some("bytes=-30"), 10, Part(0, 9)),
+            (Some("bytes=10-"), 10, Unsatisfiable),
+            (Some("bytes=10-20"), 10, Unsatisfiable),
+            (Some("bytes=-0"), 10, Unsatisfiable),
+            (Some("bytes=0-"), 0, Unsatisfiable),
+            (Some("bytes=-5"), 0, Unsatisfiable),
+            // Ignored: the whole body.
+            (Some("bytes=4-2"), 10, Full),
+            (Some("bytes=0-1,4-5"), 10, Full),
+            (Some("bytes=-"), 10, Full),
+            (Some("bytes=a-b"), 10, Full),
+            (Some("bytes=+1-2"), 10, Full),
+            (Some("items=0-1"), 10, Full),
+            (Some("bytes"), 10, Full),
+            (Some(""), 10, Full),
+        ] {
+            assert_eq!(byte_range(h, size), want, "{h:?} of {size}");
+        }
+    }
 }
