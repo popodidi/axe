@@ -326,7 +326,11 @@ from: number, to: number, now: number, sample_seconds: number, points: Array<Nod
 /**
  * The newest sample, whatever the range.
  */
-current: NodeSample | null, };
+current: NodeSample | null, 
+/**
+ * This server's `axe --version` string.
+ */
+server_version: string, };
 
 export type NodePoint = { t: number, 
 /**
@@ -342,7 +346,15 @@ cpu_percent: number | null, mem_used_bytes: number | null, mem_total_bytes: numb
 /**
  * Free and total bytes of the run workspaces' filesystem (`disk_path`).
  */
-disk_free_bytes: number | null, disk_total_bytes: number | null, disk_path: string, runs: NodeRuns, };
+disk_free_bytes: number | null, disk_total_bytes: number | null, disk_path: string, runs: NodeRuns, 
+/**
+ * The node binary's `axe --version` string, e.g. `0.5.4 (5437bf3602b8)`.
+ */
+node_version: string | null, 
+/**
+ * `axe --version` of the CLI on the node host; null when not found.
+ */
+cli_version: string | null, };
 
 export type NodeRuns = { 
 /**

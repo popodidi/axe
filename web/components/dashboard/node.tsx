@@ -59,6 +59,15 @@ function useNodeSeries(base: string, range: NodeRange) {
   return state;
 }
 
+/** The server, the node binary and the CLI on the node host (`node_metrics.rs`). */
+function versions(s: NodeSeries): [string, string | null][] {
+  return [
+    ["axe server", s.server_version],
+    ["node", s.current?.node_version ?? null],
+    ["CLI", s.current?.cli_version ?? null],
+  ];
+}
+
 /** What the points are, for chart subtitles. */
 function source(s: NodeSeries): string {
   const step = s.step_seconds;
@@ -97,6 +106,15 @@ export function Node({
             <p className={stats.lede}>
               Host load and running runs of the axe node. Times are UTC.
             </p>
+            {s && (
+              <p className={styles.versions} aria-label="Versions">
+                {versions(s).map(([label, v]) => (
+                  <span key={label}>
+                    {label} <code>{v ?? "?"}</code>
+                  </span>
+                ))}
+              </p>
+            )}
           </div>
         </div>
         <div className={stats.filters}>
