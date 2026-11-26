@@ -89,7 +89,7 @@ axe task wait 42 --for 15m --note "run 123 still queued; recheck, green -> merge
 | The owner needs the web portal (every page and read needs a sign-in) | `axe web login-link` prints a one-time link (10m, `--ttl` up to 1h) that sets a 30-day session in the browser that opens it; `--tg --bot <sender>` sends it sealed instead (as `axe form send`). Never send the token |
 | Which logins (runtimes) the node has and their health | `axe runtimes` (`--json`): each runtime's harness, state (ok, limited until T, needs_login, degraded, disabled), last failure and quota; Telegram `/runtimes` (with a *Log in* button per runtime: a sealed form for a token or API key, or a Codex device code) |
 | Cheaper routine runs | Routine template fields `pre_check` (a command; exit 0 marks the task done with no agent), `model`, `effort` and `skills` (the only skills in the run folder): [references/routines.md](references/routines.md) |
-| Attached knowledge | `axe doc attach <path> <global\|label:l\|owner:o\|repo:r>`; a run folder holds each attached skill whole under `skills/<name>/` and lists docs by name and description (load a body with `axe doc get <path>`); `axe context explain <id>` shows what a task's run includes and why |
+| Attached knowledge | `axe doc attach <path> <global\|label:l\|owner:o\|repo:r>`; a run folder holds each attached skill whole under `skills/<name>/` and lists docs by name and description (load a body with `axe doc get <path>`); `axe context explain <id>` shows what a task's run includes and why; `axe doc rm <path> [--detach]` removes a doc or folder (history kept) |
 
 Escalation classes: `decision` is a legitimate human call (product, risk,
 authorization); `capability` means the worker lacked tooling, context,

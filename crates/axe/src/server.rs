@@ -379,7 +379,9 @@ fn error_response(e: &anyhow::Error) -> Response {
         h.0
     } else if e.downcast_ref::<db::Forbidden>().is_some() {
         403
-    } else if e.downcast_ref::<doc::Conflict>().is_some() {
+    } else if e.downcast_ref::<doc::Conflict>().is_some()
+        || e.downcast_ref::<doc::StillAttached>().is_some()
+    {
         409
     } else if e.downcast_ref::<doc::Invalid>().is_some() {
         400
@@ -1533,6 +1535,20 @@ fn doc_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
                 200,
                 &docs.attach(&b.path, &scope, *verb == "attach", &actor)?,
             )
+        }
+        ("POST", ["api", "docs", "rm"]) => {
+            #[derive(Deserialize)]
+            struct Rm {
+                path: String,
+                /// Also detach it (and paths under it) from every scope.
+                #[serde(default)]
+                detach: bool,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: Rm = req.json()?;
+            let actor = b.who.actor().name;
+            ok(200, &docs.remove(&b.path, b.detach, &actor)?)
         }
         _ => Err(HttpError(404, "no such doc route".into()).into()),
     }

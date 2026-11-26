@@ -81,6 +81,60 @@ impl std::fmt::Display for Invalid {
 
 impl std::error::Error for Invalid {}
 
+/// A removal the store refuses because scopes still attach the path, or a
+/// doc or folder inside it (HTTP 409). `inside` names attached folders that
+/// hold the path: removing it would change them, and `--detach` does not
+/// detach a folder it does not remove.
+#[derive(Debug)]
+pub struct StillAttached {
+    pub path: String,
+    /// Attachments at or under the path.
+    pub attached: Vec<Attachment>,
+    /// Attached folders that hold the path.
+    pub inside: Vec<Attachment>,
+}
+
+impl std::fmt::Display for StillAttached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let list = |v: &[Attachment]| {
+            v.iter()
+                .map(|a| format!("{} ({})", a.path, a.scope))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !self.inside.is_empty() {
+            return write!(
+                f,
+                "{} is inside attached folder {}; detach that folder first",
+                self.path,
+                list(&self.inside)
+            );
+        }
+        write!(
+            f,
+            "{} is still attached: {}; detach it, or remove with --detach",
+            self.path,
+            list(&self.attached)
+        )
+    }
+}
+
+impl std::error::Error for StillAttached {}
+
+/// A removal: the tombstone version and the attachments it dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Removed {
+    pub path: String,
+    /// The removal's version (a commit with the path deleted; `log` lists it).
+    pub version: String,
+    /// The doc's version before the removal.
+    pub previous: String,
+    /// Files the removal deleted (paths in the store).
+    pub files: Vec<String>,
+    /// Attachments the removal dropped (`detach`).
+    pub detached: Vec<Attachment>,
+}
+
 fn invalid<T>(msg: impl Into<String>) -> Result<T> {
     Err(Invalid(msg.into()).into())
 }
@@ -889,6 +943,123 @@ impl Store {
         })
     }
 
+    /// Removes a doc, or a folder with every doc under it, as one commit by
+    /// `author` that deletes the files: a tombstone. History stays (`log`
+    /// lists the removal, `get --version` reads an older version) and `list`
+    /// no longer shows the files. A path that scopes still attach (it, or a
+    /// path under it) is refused with [`StillAttached`] unless `detach`, which
+    /// drops those attachments in the same commit. A path inside an attached
+    /// folder is always refused.
+    pub fn remove(&self, path: &str, detach: bool, author: &str) -> Result<Removed> {
+        let path = check_path(path)?;
+        let tp = format!("docs/{path}");
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let not_found = || anyhow::anyhow!("doc {path} not found");
+        let head = self.head()?.ok_or_else(not_found)?;
+        if self.kind_at(&head, &tp)?.is_none() {
+            return Err(not_found());
+        }
+        let previous = self.last_change(&head, &tp)?.ok_or_else(not_found)?;
+        let files: Vec<String> = self
+            .git(
+                &["ls-tree", "-r", "-z", "--name-only", &head, "--", &tp],
+                None,
+            )?
+            .split('\0')
+            .filter(|f| !f.is_empty())
+            .map(|f| f.trim_start_matches("docs/").to_string())
+            .collect();
+        // Attachments per scope file, split into those the removal covers
+        // (at or under the path) and attached folders holding the path.
+        let under = format!("{path}/");
+        // Scope files the removal changes, with what they keep.
+        let mut keep: Vec<(String, Vec<String>)> = Vec::new();
+        let (mut attached, mut inside) = (Vec::new(), Vec::new());
+        let names = self.git(
+            &["ls-tree", "-r", "-z", "--name-only", &head, "--", "attach"],
+            None,
+        )?;
+        for f in names.split('\0').filter(|f| !f.is_empty()) {
+            let Some(scope) = Scope::from_file(f) else {
+                continue;
+            };
+            let list = self.attach_list(&head, f)?;
+            let before = list.len();
+            let mut rest = Vec::new();
+            for p in list {
+                let covered = p == path || p.starts_with(&under);
+                if covered || path.starts_with(&format!("{p}/")) {
+                    let a = Attachment {
+                        scope: scope.to_string(),
+                        exists: self.kind_at(&head, &format!("docs/{p}"))?.is_some(),
+                        path: p.clone(),
+                    };
+                    if covered {
+                        attached.push(a);
+                        continue;
+                    }
+                    inside.push(a);
+                }
+                rest.push(p);
+            }
+            if rest.len() != before {
+                keep.push((f.to_string(), rest));
+            }
+        }
+        if !inside.is_empty() || (!attached.is_empty() && !detach) {
+            return Err(StillAttached {
+                path,
+                attached,
+                inside,
+            }
+            .into());
+        }
+        let msg = if attached.is_empty() {
+            format!("remove {path}")
+        } else {
+            format!("remove {path} (detached from {})", {
+                let mut s: Vec<&str> = attached.iter().map(|a| a.scope.as_str()).collect();
+                s.dedup();
+                s.join(", ")
+            })
+        };
+        let commit = self
+            .commit(Some(&head), author, &msg, |idx| {
+                for f in &files {
+                    idx.git(
+                        &["update-index", "--force-remove", "--", &format!("docs/{f}")],
+                        None,
+                    )?;
+                }
+                for (file, list) in &keep {
+                    if list.is_empty() {
+                        idx.git(&["update-index", "--force-remove", "--", file], None)?;
+                        continue;
+                    }
+                    let body = format!("{}\n", list.join("\n"));
+                    let blob = idx.git(&["hash-object", "-w", "--stdin"], Some(body.as_bytes()))?;
+                    idx.git(
+                        &[
+                            "update-index",
+                            "--add",
+                            "--cacheinfo",
+                            &format!("100644,{},{file}", blob.trim()),
+                        ],
+                        None,
+                    )?;
+                }
+                Ok(())
+            })?
+            .context("the removal changed nothing")?;
+        Ok(Removed {
+            path,
+            version: commit,
+            previous,
+            files,
+            detached: attached,
+        })
+    }
+
     /// Moves every attachment of scope `from` to scope `to` (merged with
     /// what `to` holds) in one commit, as a rename of what the scope names
     /// does. Returns the paths moved; none: no commit.
@@ -1022,5 +1193,135 @@ mod tests {
         assert!(s
             .put("a.md/x", &Body::Doc("y".into()), None, "a", "")
             .is_err());
+    }
+
+    fn paths(s: &Store) -> Vec<String> {
+        s.list(None).unwrap().into_iter().map(|e| e.path).collect()
+    }
+
+    fn folder(files: &[(&str, &str)]) -> Body {
+        Body::Folder(
+            files
+                .iter()
+                .map(|(p, c)| File {
+                    path: p.to_string(),
+                    content: c.to_string(),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn remove_a_doc_keeps_its_history() {
+        let (_d, s) = store();
+        let w = s
+            .put("n/a.md", &Body::Doc("one\n".into()), None, "alice", "")
+            .unwrap();
+        s.put("n/b.md", &Body::Doc("b\n".into()), None, "alice", "")
+            .unwrap();
+        let r = s.remove("/n/a.md", false, "bob").unwrap();
+        assert_eq!(r.path, "n/a.md");
+        assert_eq!(r.previous, w.version);
+        assert_eq!(r.files, vec!["n/a.md"]);
+        assert!(r.detached.is_empty());
+        // Gone from the list and the current read, kept in history.
+        assert_eq!(paths(&s), vec!["n/b.md"]);
+        assert_eq!(s.version("n/a.md").unwrap(), None);
+        let e = s.get("n/a.md", None).unwrap_err();
+        assert!(e.to_string().ends_with("not found"), "{e}");
+        let log = s.log("n/a.md").unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].version, r.version);
+        assert_eq!(log[0].author, "bob");
+        assert_eq!(log[0].message, "remove n/a.md");
+        assert_eq!(log[1].version, w.version);
+        let old = s.get("n/a.md", Some(&w.version)).unwrap();
+        assert_eq!(old.content.as_deref(), Some("one\n"));
+        // Removing again: not found. A path can be written again after.
+        let e = s.remove("n/a.md", false, "bob").unwrap_err();
+        assert!(e.to_string().ends_with("not found"), "{e}");
+        assert!(s.remove("nope.md", false, "bob").is_err());
+        s.put("n/a.md", &Body::Doc("two\n".into()), Some(""), "c", "")
+            .unwrap();
+        assert_eq!(s.log("n/a.md").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn remove_a_folder_by_prefix() {
+        let (_d, s) = store();
+        s.put(
+            "skills/x",
+            &folder(&[("SKILL.md", "s"), ("references/r.md", "r")]),
+            None,
+            "a",
+            "",
+        )
+        .unwrap();
+        s.put("skills/xy.md", &Body::Doc("keep".into()), None, "a", "")
+            .unwrap();
+        s.put("skills/y/SKILL.md", &Body::Doc("y".into()), None, "a", "")
+            .unwrap();
+        let r = s.remove("skills/x", false, "a").unwrap();
+        assert_eq!(
+            r.files,
+            vec!["skills/x/SKILL.md", "skills/x/references/r.md"]
+        );
+        // A prefix matches whole segments: skills/xy.md stays.
+        assert_eq!(paths(&s), vec!["skills/xy.md", "skills/y/SKILL.md"]);
+        assert!(s.list(Some("skills/x")).unwrap().is_empty());
+        assert_eq!(s.log("skills/x").unwrap()[0].message, "remove skills/x");
+        assert_eq!(
+            s.log("skills/x/references/r.md").unwrap()[0].version,
+            r.version
+        );
+    }
+
+    #[test]
+    fn remove_refuses_an_attached_path_unless_detach() {
+        let (_d, s) = store();
+        s.put("b/one/prompt.md", &Body::Doc("p".into()), None, "a", "")
+            .unwrap();
+        s.put("b/two/prompt.md", &Body::Doc("q".into()), None, "a", "")
+            .unwrap();
+        let bot = Scope::parse("owner:bot:x").unwrap();
+        let label = Scope::parse("label:l").unwrap();
+        s.attach("b/one/prompt.md", &bot, true, "a").unwrap();
+        s.attach("b/one", &label, true, "a").unwrap();
+        s.attach("b/two/prompt.md", &label, true, "a").unwrap();
+        // The folder holds two attached paths: refused, nothing changes.
+        let head = s.head().unwrap();
+        let e = s.remove("b/one", false, "a").unwrap_err();
+        let sa = e.downcast_ref::<StillAttached>().unwrap();
+        assert_eq!(sa.attached.len(), 2);
+        assert!(e.to_string().contains("--detach"), "{e}");
+        assert_eq!(s.head().unwrap(), head);
+        // A doc inside an attached folder is refused even with --detach.
+        let e = s.remove("b/one/prompt.md", true, "a").unwrap_err();
+        let sa = e.downcast_ref::<StillAttached>().unwrap();
+        assert_eq!(sa.inside.len(), 1);
+        assert_eq!(sa.inside[0].path, "b/one");
+        assert_eq!(s.head().unwrap(), head);
+        // --detach drops both attachments in the removal's one commit.
+        let r = s.remove("b/one", true, "a").unwrap();
+        assert_eq!(r.detached.len(), 2);
+        assert_eq!(
+            s.git(&["rev-parse", &format!("{}^", r.version)], None)
+                .unwrap()
+                .trim(),
+            head.unwrap()
+        );
+        let left = s.attachments(None).unwrap();
+        assert_eq!(
+            left,
+            vec![Attachment {
+                scope: "label:l".into(),
+                path: "b/two/prompt.md".into(),
+                exists: true,
+            }]
+        );
+        // The bot scope's list went with its last attachment.
+        assert!(s.attachments(Some(&bot)).unwrap().is_empty());
+        assert_eq!(paths(&s), vec!["b/two/prompt.md"]);
+        assert!(s.log("b/one").unwrap()[0].message.contains("detached from"));
     }
 }
