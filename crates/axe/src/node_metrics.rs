@@ -414,11 +414,12 @@ pub fn latest(conn: &Connection) -> Result<Option<Sample>> {
 /// grouped to (`None`: the sample interval, raw; otherwise at least the
 /// rollup width). 1h and 6h read raw samples; 24h and longer read rollups,
 /// since 24h of raw samples is several times the points a chart can show.
-pub const RANGES: [(&str, i64, Source, i64); 5] = [
+pub const RANGES: [(&str, i64, Source, i64); 6] = [
     ("1h", 3600, Source::Raw, 0),
     ("6h", 6 * 3600, Source::Raw, 60),
     ("24h", 86400, Source::Rollup, 0),
     ("7d", 7 * 86400, Source::Rollup, 1800),
+    ("14d", 14 * 86400, Source::Rollup, 3600),
     ("30d", 30 * 86400, Source::Rollup, 7200),
 ];
 
@@ -818,6 +819,12 @@ mod tests {
         assert_eq!(full.n, 120);
         assert_eq!(full.cpu_avg, Some(20.0));
         assert_eq!(full.task_max, 1.0);
+        let fortnight = query(&c, "14d", now, &cfg).unwrap();
+        assert_eq!(
+            (fortnight.source.as_str(), fortnight.step_seconds),
+            ("rollup", 3600)
+        );
+        assert_eq!(fortnight.points.last().unwrap().cpu_max, Some(80.0));
         // The last hour is busier: its max shows in the 2 h point.
         let month = query(&c, "30d", now, &cfg).unwrap();
         assert_eq!(month.step_seconds, 7200);

@@ -5,13 +5,14 @@ import type { NodePoint, NodeRuns, NodeSample, NodeSeries } from "./api";
 export type { NodePoint, NodeRuns, NodeSample, NodeSeries };
 
 /** The server's ranges (`node_metrics::RANGES`); 1h and 6h are raw samples, longer ranges rollups. */
-export const NODE_RANGES = ["1h", "6h", "24h", "7d", "30d"] as const;
+export const NODE_RANGES = ["1h", "6h", "24h", "7d", "14d", "30d"] as const;
 export type NodeRange = (typeof NODE_RANGES)[number];
 export const nodeRangeOptions: { value: NodeRange; label: string }[] = [
   { value: "1h", label: "Last hour" },
   { value: "6h", label: "Last 6 hours" },
   { value: "24h", label: "Last 24 hours" },
   { value: "7d", label: "Last 7 days" },
+  { value: "14d", label: "Last 14 days" },
   { value: "30d", label: "Last 30 days" },
 ];
 export const nodeRange = (p: URLSearchParams): NodeRange =>
