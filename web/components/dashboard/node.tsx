@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   age,
   count,
+  diskUsedPercent,
   gib,
   load,
   nodePath,
@@ -79,6 +80,18 @@ function source(s: NodeSeries): string {
     : `5-minute rollups, averaged per ${per}; band to the peak`;
 }
 
+/** The disk chart's subtitle: each point is its span's least free space, so the peak used. */
+function diskSource(s: NodeSeries, total: number): string {
+  const step = s.step_seconds;
+  const per = step < 60 ? `${step} s` : step < 3600 ? `${step / 60} min` : `${step / 3600} h`;
+  const of = `of the current ${gib(total)}`;
+  return s.source === "raw"
+    ? step <= s.sample_seconds
+      ? `Raw ${s.sample_seconds} s samples, ${of}`
+      : `Raw samples, peak per ${per}, ${of}`
+    : `5-minute rollups, peak per ${per}, ${of}`;
+}
+
 export function Node({
   base,
   params,
@@ -95,6 +108,8 @@ export function Node({
   const loading = state?.range !== range;
   const cur = s?.current ?? null;
   const memTotal = cur?.mem_total_bytes ?? null;
+  const diskTotal = cur?.disk_total_bytes ?? null;
+  const diskFree = cur?.disk_free_bytes ?? null;
   return (
     <div className={stats.desk}>
       <Panel aria-label="Node scope" className={stats.header}>
@@ -160,9 +175,13 @@ export function Node({
               }
             />
             <Kpi
-              label="Disk free"
-              value={gib(cur.disk_free_bytes)}
-              detail={`of ${gib(cur.disk_total_bytes)} · ${cur.disk_path || "run volume"}`}
+              label="Disk used"
+              value={pct(diskUsedPercent(diskFree, diskTotal))}
+              detail={
+                diskTotal && diskFree !== null
+                  ? `${gib(Math.max(0, diskTotal - diskFree))} of ${gib(diskTotal)} · ${cur.disk_path || "run volume"}`
+                  : `total unknown · ${cur.disk_path || "run volume"}`
+              }
             />
             <Kpi
               label="Running runs"
@@ -218,6 +237,29 @@ export function Node({
                 yLabel="GiB"
               />
             </Panel>
+            {diskTotal ? (
+              <Panel>
+                <TimeChart
+                  title="Disk used"
+                  subtitle={diskSource(s, diskTotal)}
+                  points={s.points}
+                  step={s.step_seconds}
+                  from={s.from}
+                  to={s.to}
+                  yMax={100}
+                  series={[
+                    {
+                      label: "Disk used",
+                      slot: 1,
+                      values: s.points.map((p) => diskUsedPercent(p.disk_free_min, diskTotal)),
+                    },
+                  ]}
+                  format={pct}
+                  tick={(n) => `${n}%`}
+                  yLabel="Used %"
+                />
+              </Panel>
+            ) : null}
             <Panel className={styles.wide}>
               <TimeChart
                 title="Running runs by kind"
