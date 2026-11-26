@@ -70,14 +70,16 @@ export function age(secs: number): string {
 }
 
 /**
- * Index runs of points with no missing step between them; a missing bucket
- * (the node was down) splits lines and areas, never drawn as zero.
+ * Index runs of points without an outage between them: a hole wider than
+ * 2.5 steps (the node was down) splits lines and areas, never drawn as zero.
+ * One empty bucket is not an outage: the node's interval drifts a little
+ * past `sample_seconds`, so raw 15 s buckets now and then miss a sample.
  */
 export function segments(points: { t: number }[], step: number): number[][] {
   const out: number[][] = [];
   points.forEach((p, i) => {
     const last = out.at(-1);
-    if (last && p.t - points[last.at(-1)!].t <= step * 1.5) last.push(i);
+    if (last && p.t - points[last.at(-1)!].t <= step * 2.5) last.push(i);
     else out.push([i]);
   });
   return out;

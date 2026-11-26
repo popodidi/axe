@@ -45,9 +45,9 @@ describe("node view model", () => {
     expect(nodePath("1h")).toBe("/api/node/metrics?range=1h");
   });
 
-  it("splits lines at missing steps, never bridging a gap", () => {
-    const pts = [0, 15, 30, 90, 105].map((t) => ({ t }));
-    expect(segments(pts, 15)).toEqual([[0, 1, 2], [3, 4]]);
+  it("splits lines at outages, not at one empty bucket", () => {
+    const pts = [0, 15, 30, 90, 105, 135].map((t) => ({ t }));
+    expect(segments(pts, 15)).toEqual([[0, 1, 2], [3, 4, 5]]);
     expect(segments([], 15)).toEqual([]);
   });
 
