@@ -259,6 +259,64 @@ fn attach_and_detach_to_each_scope() {
 }
 
 #[test]
+fn rm_tombstones_a_doc_or_folder_and_refuses_attached_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    let v1 = put(&srv, "smoke/a.md", "a\n", &[]);
+    put(&srv, "smoke/b.md", "b\n", &[]);
+    put(&srv, "bundles/x/prompt.md", "p\n", &[]);
+    put(&srv, "keep.md", "k\n", &[]);
+    srv.ok(&["doc", "attach", "bundles/x/prompt.md", "owner:bot:x"]);
+
+    // A file: gone from ls, kept in log, its old version readable.
+    let out = srv.ok(&["doc", "rm", "smoke/a.md"]);
+    assert!(out.contains("smoke/a.md removed (1 file)"), "{out}");
+    let ls = json(&srv.ok(&["doc", "ls", "--json"]));
+    let paths: Vec<&str> = ls
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["bundles/x/prompt.md", "keep.md", "smoke/b.md"]);
+    let log = json(&srv.ok(&["doc", "log", "smoke/a.md", "--json"]));
+    assert_eq!(log.as_array().unwrap().len(), 2);
+    assert_eq!(log[0]["message"], "remove smoke/a.md");
+    assert_eq!(log[1]["version"], v1["version"]);
+    let out = srv.run(&["doc", "get", "smoke/a.md"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not found"));
+    let v = v1["version"].as_str().unwrap();
+    assert_eq!(srv.ok(&["doc", "get", "smoke/a.md", "--version", v]), "a\n");
+    let (status, _) = post(&srv, "/api/docs/rm", json!({"path": "smoke/a.md"}));
+    assert_eq!(status, 404);
+
+    // A folder by its prefix.
+    let r = json(&srv.ok(&["doc", "rm", "smoke", "--json"]));
+    assert_eq!(r["files"], json!(["smoke/b.md"]));
+    assert_eq!(get(&srv, "/api/docs?prefix=smoke"), json!([]));
+
+    // Attached: 409 and nothing removed, until --detach.
+    let (status, e) = post(&srv, "/api/docs/rm", json!({"path": "bundles"}));
+    assert_eq!(status, 409, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("owner:bot:x"), "{e}");
+    let out = srv.run(&["doc", "rm", "bundles/x/prompt.md"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("still attached"));
+    assert_eq!(srv.ok(&["doc", "get", "bundles/x/prompt.md"]), "p\n");
+    let out = srv.ok(&["doc", "rm", "bundles/x/prompt.md", "--detach"]);
+    assert!(
+        out.contains("detached bundles/x/prompt.md from owner:bot:x"),
+        "{out}"
+    );
+    let v = json(&srv.ok(&["doc", "ls", "--scope", "owner:bot:x", "--json"]));
+    assert_eq!(v, json!([]));
+    assert_eq!(get(&srv, "/api/docs/attachments"), json!([]));
+    let ls = json(&srv.ok(&["doc", "ls", "--json"]));
+    assert_eq!(ls.as_array().unwrap().len(), 1);
+    assert_eq!(ls[0]["path"], "keep.md");
+}
+
+#[test]
 fn concurrent_writes_conflict_instead_of_losing_changes() {
     let dir = tempfile::tempdir().unwrap();
     let srv = Server::start(dir.path());

@@ -449,7 +449,7 @@ see only the sender, purpose, expiry and ciphertext.
 
 ## Docs
 
-`axe doc put/get/ls/log/diff/attach/detach` (`doc.rs`) keeps versioned text
+`axe doc put/get/ls/log/diff/attach/detach/rm` (`doc.rs`) keeps versioned text
 documents on the server: skills, docs, memory, conduct and bundles. A doc is a
 path (`notes/plan.md`); a folder of docs is a path too, so a skill is a folder
 with `SKILL.md` and its files, and a bundle is any folder. Every change is a
@@ -459,6 +459,11 @@ commit in a bare git repository (`docs.git` next to the database, or
 `label:<name>`, `owner:<name>` or `repo:<name>`; `axe doc ls --scope` lists
 what a scope has. A write may name the version it edits (`--base`, or
 `--new` for a new doc) and is refused with a conflict if the doc moved since.
+`axe doc rm <path>` removes a doc, or a folder with everything under it, as
+one more commit (a tombstone): `ls` and the dashboard Store stop showing it,
+while `log` and `get --version` keep its history. It refuses a path a scope
+still attaches unless `--detach`, which detaches it from every scope in the
+same commit, and always refuses a path inside an attached folder.
 Back the repository up with git (`git clone --mirror`); `axe backup` covers
 the database only.
 

@@ -612,6 +612,17 @@ enum DocCmd {
     },
     /// Detach a doc or folder from a scope
     Detach { path: String, scope: String },
+    /// Remove a doc, or a folder and every doc under it: a new version that
+    /// deletes it, so `axe doc log` keeps its history. Refused while a scope
+    /// attaches it (or a path under it) unless --detach
+    Rm {
+        path: String,
+        /// Also detach it, and paths under it, from every scope
+        #[arg(long)]
+        detach: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Files of a folder write: every non-hidden file under `dir`.
@@ -810,6 +821,30 @@ fn run_doc(c: &Client, command: &DocCmd) -> Result<()> {
                 v["path"].as_str().unwrap_or(""),
                 v["scope"].as_str().unwrap_or("")
             );
+        }
+        DocCmd::Rm { path, detach, json } => {
+            let v: Value = c.send(
+                "POST",
+                "/api/docs/rm",
+                json!({"path": path, "detach": detach}),
+            )?;
+            if *json {
+                return print_json(&v);
+            }
+            let files = v["files"].as_array().map_or(0, Vec::len);
+            println!(
+                "{} removed ({files} file{}) at {}",
+                v["path"].as_str().unwrap_or(""),
+                if files == 1 { "" } else { "s" },
+                short(&v["version"])
+            );
+            for a in v["detached"].as_array().into_iter().flatten() {
+                println!(
+                    "  detached {} from {}",
+                    a["path"].as_str().unwrap_or(""),
+                    a["scope"].as_str().unwrap_or("")
+                );
+            }
         }
     }
     Ok(())
