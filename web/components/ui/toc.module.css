@@ -55,30 +55,161 @@
   min-width: 0;
 }
 
+/* The rail: a header ("Contents" and the pin button) over the list. Pinned
+   it is the list in the page's flow, as wide as its column. Collapsed it is
+   a slim column of ticks, one per heading: shorter and further in by level,
+   the current section's in primary text. Hovered or keyboard focused it
+   opens the list over the content on an overlay surface. Unpinned, every
+   row keeps one 24px line (a long title ends in an ellipsis), so each
+   tick's title opens in place beside it and the pointer stays on its entry.
+   The consumer's column follows the collapsed and pinned widths. */
+.rail {
+  --toc-collapsed-width: var(--space-4);
+  --toc-open-width: calc(var(--space-8) * 2 - var(--space-2));
+
+  position: sticky;
+  top: 0;
+  align-self: start;
+  justify-self: start;
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-md);
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition:
+    width var(--transition-feedback),
+    background-color var(--transition-feedback),
+    box-shadow var(--transition-feedback);
+}
+.rail:hover {
+  scrollbar-color: var(--border-control-color) transparent;
+}
+.rail:not([data-pinned]) {
+  width: var(--toc-collapsed-width);
+}
+.rail[data-open] {
+  z-index: calc(var(--z-sticky) + 1);
+  width: var(--toc-open-width);
+  /* Rows stay level with their ticks: padding only to the sides and below
+     (a sticky rail ignores a negative top margin). */
+  padding: 0 var(--space-half) var(--space-half);
+  margin-inline: calc(var(--space-half) * -1);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-overlay);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-half);
+  margin: 0 0 var(--space-half);
+}
 .label {
   display: block;
-  margin: 0 0 var(--space-half);
   padding-left: var(--space-1);
   font-size: var(--text-caption);
   line-height: var(--lh-caption);
   font-weight: var(--weight-medium);
   color: var(--text-tertiary);
 }
-
-/* The rail sticks to the top of its scrolling box. A rail taller than the
-   box scrolls itself, with a thin scrollbar shown only while hovered. */
-.rail {
-  position: sticky;
-  top: 0;
-  align-self: start;
-  max-height: 100%;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+.pin {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--space-3);
+  height: var(--space-3);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-hover),
+    color var(--transition-hover);
 }
-.rail:hover {
-  scrollbar-color: var(--border-control-color) transparent;
+.pin:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.pin[aria-pressed="true"] {
+  color: var(--text-secondary);
+}
+.pin svg {
+  width: var(--space-2);
+  height: var(--space-2);
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tick {
+  display: none;
+}
+.rail:not([data-pinned]) .head {
+  min-height: var(--space-3);
+}
+.rail:not([data-pinned]) .list {
+  gap: 0;
+}
+.rail:not([data-pinned]) .list a {
+  box-sizing: border-box;
+  height: var(--space-3);
+  padding-block: 0;
+  align-items: center;
+  white-space: nowrap;
+}
+.rail:not([data-pinned]) .text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail:not([data-pinned], [data-open]) .label {
+  display: none;
+}
+.rail:not([data-pinned], [data-open]) .head {
+  justify-content: flex-start;
+}
+.rail:not([data-pinned], [data-open]) .list a {
+  padding-inline: var(--space-1);
+  background: none;
+}
+.rail:not([data-pinned], [data-open]) .tick {
+  display: block;
+  flex: none;
+  width: var(--space-2);
+  height: var(--space-quarter);
+  border-radius: var(--space-quarter);
+  background: var(--text-tertiary);
+  opacity: 0.55;
+  transition:
+    background-color var(--transition-hover),
+    opacity var(--transition-hover);
+}
+.rail:not([data-pinned], [data-open]) a[data-depth="1"] .tick {
+  width: var(--space-snug);
+  margin-left: var(--space-half);
+}
+.rail:not([data-pinned], [data-open]) a[data-depth="2"] .tick {
+  width: var(--space-1);
+  margin-left: var(--space-1);
+}
+.rail:not([data-pinned], [data-open]) a.active .tick {
+  background: var(--text-primary);
+  opacity: 1;
+}
+.rail:not([data-pinned], [data-open]) :is(.number, .text) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .fold summary {

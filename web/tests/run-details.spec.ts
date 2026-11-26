@@ -451,6 +451,13 @@ test("a long rendered prompt has contents that follow its scroll", async ({
   await expect(rail).toBeVisible();
   await expect(details.locator("summary", { hasText: "Contents" })).toBeHidden();
   const heading = details.getByRole("heading", { name: "Spec" });
+  // Collapsed to ticks by default; pinned open, the text moves over.
+  const box = rail.locator("..");
+  expect((await box.boundingBox())!.width).toBeLessThanOrEqual(32);
+  const textX = (await heading.boundingBox())!.x;
+  await box.getByRole("button", { name: "Pin contents open" }).click();
+  await expect(box.getByRole("button", { name: "Collapse contents" })).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(async () => (await heading.boundingBox())!.x).toBeGreaterThan(textX + 100);
   const [r, h] = [(await rail.boundingBox())!, (await heading.boundingBox())!];
   expect(r.x + r.width).toBeLessThan(h.x);
   await expect(rail.getByRole("link", { name: "Spec" })).toHaveAttribute(
@@ -459,6 +466,7 @@ test("a long rendered prompt has contents that follow its scroll", async ({
   );
   // A click scrolls the prompt's box, not the rail, to the section; the
   // list stays in view and marks it.
+  await rail.scrollIntoViewIfNeeded();
   const before = await details.evaluate((e) => e.scrollTop);
   await rail.getByRole("link", { name: "Verify" }).click();
   await expect(rail.getByRole("link", { name: "Verify" })).toHaveAttribute(
