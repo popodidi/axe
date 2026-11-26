@@ -2,11 +2,22 @@
 // The one table of contents (the doc page, rendered run prompts): a compact
 // numbered list of a body's headings with the section in view highlighted.
 // `TocRail` is the sticky side list, `TocFold` the "Contents" disclosure for
-// narrow space; the consumer's CSS shows one of them. Entries come from
+// narrow space; the consumer's CSS shows one of them. The rail is collapsed
+// to a column of ticks, one per heading, until hovered or focused (the list
+// then opens over the content) or pinned open (lib/toc-pin.ts); a consumer
+// widens its column for a pinned rail with `:has([data-pinned])`. Entries come from
 // lib/doc-toc.ts (`tocEntries`); a short body has none, and both render
 // nothing.
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FocusEvent,
+  type MouseEvent,
+} from "react";
 import { activeHeading, TOC_LEVELS, type TocEntry, type TocHeading } from "../../lib/doc-toc";
+import { useTocPinned } from "../../lib/toc-pin";
 import { cx } from "./cx";
 import styles from "./toc.module.css";
 
@@ -42,10 +53,12 @@ function TocList({ entries, active, onJump, follow = false }: TocProps & { follo
             <a
               href={`#${encodeURIComponent(h.id)}`}
               data-depth={h.depth}
+              title={h.text}
               className={cx(h.id === active && styles.active)}
               aria-current={h.id === active ? "location" : undefined}
               onClick={(e) => click(e, h.id)}
             >
+              <span className={styles.tick} aria-hidden="true" />
               {h.number && (
                 <span className={styles.number} aria-hidden="true">
                   {h.depth ? h.number : `${h.number}.`}
@@ -60,14 +73,68 @@ function TocList({ entries, active, onJump, follow = false }: TocProps & { follo
   );
 }
 
-// The sticky side list under a small "Contents" label.
+// The sticky side list. Collapsed it is a column of ticks; pointer hover or
+// keyboard focus opens the full list over the content (Escape closes it),
+// and the pin button keeps it open in the page's flow.
 export function TocRail({ className, ...props }: TocProps & { className?: string }) {
+  const [pinned, setPinned] = useTocPinned();
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const open = !pinned && (hover || focus) && props.entries.length > 0;
+  // Escape closes the open list wherever focus is (a hovered rail need not
+  // hold it); focus stays where it was.
+  useEffect(() => {
+    if (!open) return;
+    const key = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setHover(false);
+      setFocus(false);
+    };
+    document.addEventListener("keydown", key, true);
+    return () => document.removeEventListener("keydown", key, true);
+  }, [open]);
   if (!props.entries.length) return null;
+  // Keyboard focus only: a clicked entry keeps focus, and the list should
+  // still close when the pointer leaves.
+  const focusIn = (e: FocusEvent<HTMLDivElement>) => {
+    if (e.target.matches(":focus-visible")) setFocus(true);
+  };
+  const focusOut = (e: FocusEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocus(false);
+  };
+  const label = pinned ? "Collapse contents" : "Pin contents open";
   return (
-    <div className={cx(styles.rail, className)}>
-      <span className={styles.label} aria-hidden="true">
-        Contents
-      </span>
+    <div
+      className={cx(styles.rail, className)}
+      data-toc-rail=""
+      data-pinned={pinned ? "" : undefined}
+      data-open={open ? "" : undefined}
+      onPointerEnter={(e) => e.pointerType === "mouse" && setHover(true)}
+      onPointerLeave={() => setHover(false)}
+      onFocus={focusIn}
+      onBlur={focusOut}
+    >
+      <div className={styles.head}>
+        <span className={styles.label} aria-hidden="true">
+          Contents
+        </span>
+        <button
+          type="button"
+          className={styles.pin}
+          aria-pressed={pinned}
+          aria-label={label}
+          title={label}
+          onClick={() => {
+            setPinned(!pinned);
+            setHover(false);
+          }}
+        >
+          <svg aria-hidden="true" viewBox="0 0 16 16">
+            <path d={pinned ? "M10 4L6 8l4 4" : "M3 4h10M3 8h7M3 12h10"} />
+          </svg>
+        </button>
+      </div>
       <TocList {...props} follow />
     </div>
   );

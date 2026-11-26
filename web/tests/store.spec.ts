@@ -581,7 +581,76 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
     "4.Section 4",
     "5.Section 5",
   ]);
+  // Collapsed by default: a slim column of ticks beside the body, one per
+  // heading, shorter by level, the current section's in primary text.
+  const rail = toc.locator("..");
+  const pin = rail.getByRole("button", { name: "Pin contents open" });
+  await expect(pin).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
+  const collapsed = (await rail.boundingBox())!;
+  expect(collapsed.width).toBeLessThanOrEqual(32);
+  const ticks = toc.locator("a > span:first-child");
+  await expect(ticks).toHaveCount(6);
+  const tickWidth = (i: number) => ticks.nth(i).evaluate((e) => e.getBoundingClientRect().width);
+  expect(await tickWidth(2)).toBeLessThan(await tickWidth(1));
+  const tickColor = (i: number) => ticks.nth(i).evaluate((e) => getComputedStyle(e).backgroundColor);
+  const primary = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.style.color = "var(--text-primary)";
+    document.body.append(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  });
+  await expect.poll(() => tickColor(0)).toBe(primary);
+  expect(await tickColor(1)).not.toBe(primary);
+  const bodyCollapsed = (await body.boundingBox())!;
+  const rowTops = () => toc.getByRole("link").evaluateAll((as) => as.map((a) => Math.round(a.getBoundingClientRect().top)));
+  const tickRows = await rowTops();
+  await page.screenshot({ path: test.info().outputPath("doc-contents-collapsed.png") });
+  // Hovering opens the list over the content; the body does not move.
+  await rail.hover();
   await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
+  await expect(toc.getByRole("link", { name: "Section 3" })).toBeVisible();
+  await page.waitForTimeout(300);
+  const opened = (await rail.boundingBox())!;
+  expect(opened.width).toBeGreaterThan(200);
+  expect(opened.x + opened.width).toBeGreaterThan(bodyCollapsed.x);
+  expect((await body.boundingBox())!.x).toBe(bodyCollapsed.x);
+  // Each tick's title opens level with it, under the pointer.
+  expect(await rowTops()).toEqual(tickRows);
+  await page.screenshot({ path: test.info().outputPath("doc-contents-hover.png") });
+  // Escape closes it; leaving the rail closes it.
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
+  await page.mouse.move(700, 600);
+  // A click on a tick jumps to its section, and the list closes once the
+  // pointer leaves.
+  await rail.hover();
+  await toc.getByRole("link", { name: "Section 4" }).click();
+  await expect(page).toHaveURL(/#section-4$/);
+  await page.mouse.move(700, 600);
+  await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
+  await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
+  // The keyboard reaches the rail: focus opens it, Enter on the pin button
+  // keeps it open, and the choice survives a reload.
+  await pin.focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await expect(pin).toBeFocused();
+  await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
+  await page.keyboard.press("Enter");
+  const unpin = rail.getByRole("button", { name: "Collapse contents" });
+  await expect(unpin).toHaveAttribute("aria-pressed", "true");
+  await expect(unpin).toBeFocused();
+  expect(await page.evaluate(() => localStorage.getItem("axe-toc-pinned"))).toBe("1");
+  await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
+  await expect(unpin).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
+  await page.mouse.move(700, 600);
+  // Pinned, the column widens and the body gives way.
+  expect((await body.boundingBox())!.x).toBeGreaterThan(bodyCollapsed.x + 100);
+  await page.screenshot({ path: test.info().outputPath("doc-contents-pinned.png") });
   // The title outranks the sections and the sections the text; a section
   // sits closer to its text than to the text before it.
   const size = (l: Locator) => l.evaluate((e) => parseFloat(getComputedStyle(e).fontSize));
