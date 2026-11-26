@@ -106,11 +106,26 @@ fn exercise(srv: &Server, dir: &Path) {
     assert_eq!(fetch(&url.replace("sig=", "sig=0")).0, 403);
     assert_eq!(fetch(&format!("{}/b/{psha}", srv.url)).0, 403);
 
-    // An expired link is rejected.
-    let short = json(&srv.ok(&["blob", "link", &psha, "--ttl", "1s", "--json"]));
+    // An expired link is rejected. The server's `exp` is whole epoch seconds
+    // plus the ttl, so a link is valid for (ttl - 1, ttl] seconds: a 1s ttl
+    // could expire before the first fetch. Use a few seconds, then sleep until
+    // the link's own `exp` has passed rather than for a fixed time.
+    let short = json(&srv.ok(&["blob", "link", &psha, "--ttl", "5s", "--json"]));
     let short = short["url"].as_str().unwrap();
     assert_eq!(fetch(short).0, 200);
-    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let exp: u64 = short
+        .split_once("exp=")
+        .unwrap()
+        .1
+        .split('&')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let expiry = std::time::UNIX_EPOCH + std::time::Duration::from_secs(exp);
+    if let Ok(left) = expiry.duration_since(std::time::SystemTime::now()) {
+        std::thread::sleep(left + std::time::Duration::from_millis(100));
+    }
     let (status, r) = fetch(short);
     assert_eq!(status, 403);
     assert!(String::from_utf8(body(r)).unwrap().contains("expired"));
