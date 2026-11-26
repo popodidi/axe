@@ -1021,7 +1021,20 @@ impl Store {
                         first = false;
                     }
                     while !stop.load(Ordering::SeqCst) {
-                        let message = ws.read()?;
+                        let message = match ws.read() {
+                            Ok(m) => m,
+                            // A child's exit (SIGCHLD: an agent, a service,
+                            // `axe --version` for node samples) interrupts a
+                            // socket read that has a timeout even under
+                            // SA_RESTART (signal(7)). Nothing was read: read
+                            // again instead of dropping the connection.
+                            Err(tungstenite::Error::Io(e))
+                                if e.kind() == std::io::ErrorKind::Interrupted =>
+                            {
+                                continue
+                            }
+                            Err(e) => return Err(e.into()),
+                        };
                         if !message.is_text() {
                             continue;
                         }
