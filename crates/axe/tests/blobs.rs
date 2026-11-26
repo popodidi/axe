@@ -449,8 +449,8 @@ fn blob_site_serves_links_with_scripts_redirects_and_takes_no_cookie() {
             h["content-security-policy"],
             "sandbox allow-scripts; default-src 'none'; \
              script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; \
-             font-src https: data:; img-src https: data:; connect-src 'none'; \
-             form-action 'none'"
+             font-src https: data:; img-src https: data:; media-src 'self'; \
+             connect-src 'none'; form-action 'none'"
         );
         assert_eq!(h["x-content-type-options"], "nosniff");
         assert_eq!(h["access-control-allow-origin"], "*");
@@ -515,6 +515,129 @@ fn blob_site_serves_links_with_scripts_redirects_and_takes_no_cookie() {
     );
     assert_eq!(status, 404);
     assert!(!h.contains_key("set-cookie"));
+}
+
+/// Video links play in Safari (iOS needs byte ranges) and media players
+/// probe with HEAD: links and the API answer one `bytes=` range with 206,
+/// past the end with 416, and HEAD with GET's headers and no body.
+#[test]
+fn links_serve_byte_ranges_and_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[blobs]\npublic_url = \"http://axe.test/\"\nlink_url = \"http://blobs.test/\"\n",
+    )
+    .unwrap();
+    let srv = Server::start_with(dir.path(), &config, Some(TOKEN), &[], &[]);
+    let video = "0123456789abcdefghij";
+    let f = dir.path().join("clip.webm");
+    std::fs::write(&f, video).unwrap();
+    let sha = srv
+        .ok(&["blob", "put", f.to_str().unwrap()])
+        .trim()
+        .to_string();
+    let link = json(&srv.ok(&["blob", "link", &sha, "--name", "clip.webm", "--json"]));
+    let target = link["path"].as_str().unwrap().to_string();
+    let get = |range: &str| {
+        raw_get(
+            &srv,
+            "blobs.test",
+            &target,
+            &if range.is_empty() {
+                String::new()
+            } else {
+                format!("Range: {range}\r\n")
+            },
+        )
+    };
+
+    let (status, h, body) = get("");
+    assert_eq!(status, 200);
+    assert_eq!(body, video);
+    assert_eq!(h["accept-ranges"], "bytes");
+    assert_eq!(h["content-type"], "video/webm");
+    assert!(!h.contains_key("content-range"));
+
+    for (range, part, content_range) in [
+        ("bytes=0-1", "01", "bytes 0-1/20"),
+        ("bytes=10-", "abcdefghij", "bytes 10-19/20"),
+        ("bytes=-3", "hij", "bytes 17-19/20"),
+        ("bytes=15-99", "fghij", "bytes 15-19/20"),
+    ] {
+        let (status, h, body) = get(range);
+        assert_eq!(status, 206, "{range}");
+        assert_eq!(body, part, "{range}");
+        assert_eq!(h["content-range"], content_range, "{range}");
+        assert_eq!(h["content-length"], part.len().to_string(), "{range}");
+        assert_eq!(h["accept-ranges"], "bytes");
+        assert_eq!(h["content-type"], "video/webm");
+        // The sandbox and its media rule hold on partial responses too.
+        assert!(h["content-security-policy"].contains("media-src 'self'"));
+        assert_eq!(h["x-content-type-options"], "nosniff");
+    }
+    // A multi-range is served whole.
+    let (status, _, body) = get("bytes=0-1,4-5");
+    assert_eq!((status, body.as_str()), (200, video));
+
+    let (status, h, body) = get("bytes=20-");
+    assert_eq!(status, 416);
+    assert_eq!(h["content-range"], "bytes */20");
+    assert_eq!(h["content-length"], "0");
+    assert_eq!(body, "");
+
+    // HEAD: GET's headers, no body.
+    let head = |range: &str| {
+        raw(
+            &srv,
+            &format!("HEAD {target} HTTP/1.1\r\nHost: blobs.test\r\n{range}\r\n"),
+        )
+    };
+    let (status, hh, body) = head("");
+    assert_eq!(status, 200);
+    assert_eq!(body, "");
+    let (_, gh, _) = get("");
+    for k in [
+        "content-type",
+        "content-length",
+        "accept-ranges",
+        "content-security-policy",
+        "content-disposition",
+        "x-content-type-options",
+        "access-control-allow-origin",
+        "x-axe-sha256",
+    ] {
+        assert_eq!(hh.get(k), gh.get(k), "{k}");
+    }
+    let (status, hh, body) = head("Range: bytes=0-1\r\n");
+    assert_eq!((status, body.as_str()), (206, ""));
+    assert_eq!(hh["content-range"], "bytes 0-1/20");
+    assert_eq!(hh["content-length"], "2");
+    let bad = target.replace("sig=", "sig=0");
+    let (status, _, body) = raw(
+        &srv,
+        &format!("HEAD {bad} HTTP/1.1\r\nHost: blobs.test\r\n\r\n"),
+    );
+    assert_eq!((status, body.as_str()), (403, ""));
+    // The server's host still redirects HEAD to the blob site.
+    let (status, h, _) = raw(
+        &srv,
+        &format!("HEAD {target} HTTP/1.1\r\nHost: axe.test\r\n\r\n"),
+    );
+    assert_eq!(status, 302);
+    assert_eq!(h["location"], format!("http://blobs.test{target}"));
+
+    // The token API serves ranges as well.
+    let bearer = format!("Authorization: Bearer {TOKEN}\r\n");
+    let (status, h, body) = raw_get(
+        &srv,
+        "axe.test",
+        &format!("/api/blobs/{sha}"),
+        &format!("{bearer}Range: bytes=2-4\r\n"),
+    );
+    assert_eq!((status, body.as_str()), (206, "234"));
+    assert_eq!(h["content-range"], "bytes 2-4/20");
+    assert_eq!(h["content-security-policy"], "sandbox");
 }
 
 /// `?refs=1` names blobs and their tasks from signed links and link-map docs;
