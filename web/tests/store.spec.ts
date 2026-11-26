@@ -605,32 +605,80 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   await expect.poll(() => tickColor(0)).toBe(primary);
   expect(await tickColor(1)).not.toBe(primary);
   const bodyCollapsed = (await body.boundingBox())!;
-  const rowTops = () => toc.getByRole("link").evaluateAll((as) => as.map((a) => Math.round(a.getBoundingClientRect().top)));
-  const tickRows = await rowTops();
+  // A dense strip: the ticks sit 6px apart.
+  const centers = () =>
+    ticks.evaluateAll((ts) =>
+      ts.map((t) => {
+        const r = t.getBoundingClientRect();
+        return { y: r.top + r.height / 2, x: r.left, w: r.width, h: r.height };
+      }),
+    );
+  const rest = await centers();
+  for (let i = 1; i < rest.length; i++) expect(rest[i].y - rest[i - 1].y).toBeCloseTo(6, 0);
+  // The toggle's mark sits on the ticks' left edge, as long as a top-level tick.
+  const mark = (await pin.locator("svg").boundingBox())!;
+  expect(Math.abs(mark.x - rest[0].x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(mark.width - rest[0].w)).toBeLessThanOrEqual(1);
   await page.screenshot({ path: test.info().outputPath("doc-contents-collapsed.png") });
-  // Hovering opens the list over the content; the body does not move.
-  await rail.hover();
-  await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
-  await expect(toc.getByRole("link", { name: "Section 3" })).toBeVisible();
-  await page.waitForTimeout(300);
-  const opened = (await rail.boundingBox())!;
-  expect(opened.width).toBeGreaterThan(200);
-  expect(opened.x + opened.width).toBeGreaterThan(bodyCollapsed.x);
-  expect((await body.boundingBox())!.x).toBe(bodyCollapsed.x);
-  // Each tick's title opens level with it, under the pointer.
-  expect(await rowTops()).toEqual(tickRows);
-  await page.screenshot({ path: test.info().outputPath("doc-contents-hover.png") });
-  // Escape closes it; leaving the rail closes it.
-  await page.keyboard.press("Escape");
+  // Hovering magnifies like a dock: the tick under the pointer grows longest
+  // and thickest, its neighbours less by distance, and the rows around it
+  // open; the list does not open and the body does not move.
+  const peek = rail.locator("[popover]");
+  const names = ["1. Section 1", "2. Section 2", "2.1 Section 2 detail", "3. Section 3", "4. Section 4", "5. Section 5"];
+  // Move the pointer down the strip, as a reader does, until the dock names
+  // tick `i`; the tick under the pointer is the one magnified.
+  const hoverTick = async (i: number) => {
+    const top = rest[0].y - 3;
+    for (let y = top; y < top + 120; y += 2) {
+      await page.mouse.move(rest[0].x + 4, y);
+      await page.waitForTimeout(20);
+      if ((await peek.textContent()) === names[i] && (await peek.isVisible())) break;
+    }
+    await page.waitForTimeout(300);
+    await expect(peek).toHaveText(names[i]);
+  };
+  await page.mouse.move(rest[3].x + 4, rest[3].y);
+  await expect(peek).toBeVisible();
+  await hoverTick(3);
+  const zoomed = await centers();
+  expect(zoomed[3].w).toBeGreaterThan(rest[3].w * 1.4);
+  expect(zoomed[3].h).toBeGreaterThan(rest[3].h * 1.5);
+  expect(zoomed[4].w / rest[4].w).toBeLessThan(zoomed[3].w / rest[3].w);
+  expect(zoomed[4].w / rest[4].w).toBeGreaterThan(1.1);
+  expect(zoomed[2].w / rest[2].w).toBeGreaterThan(1.1);
+  expect(zoomed[4].y - zoomed[3].y).toBeGreaterThan(12);
+  // The title is level with its tick, just right of the rail.
+  const label = (await peek.boundingBox())!;
+  expect(Math.abs(label.y + label.height / 2 - zoomed[3].y)).toBeLessThan(2);
+  expect(label.x).toBeGreaterThanOrEqual(collapsed.x + collapsed.width);
   await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
+  expect((await rail.boundingBox())!.width).toBeLessThanOrEqual(32);
+  expect((await body.boundingBox())!.x).toBe(bodyCollapsed.x);
+  await page.screenshot({ path: test.info().outputPath("doc-contents-hover.png") });
+  // Moving down follows the pointer to the next tick.
+  await hoverTick(4);
+  // Leaving eases everything back.
   await page.mouse.move(700, 600);
-  // A click on a tick jumps to its section, and the list closes once the
-  // pointer leaves.
-  await rail.hover();
-  await toc.getByRole("link", { name: "Section 4" }).click();
+  await expect(peek).toBeHidden();
+  await expect
+    .poll(async () => (await centers()).map((c) => [Math.round(c.y), Math.round(c.w)]))
+    .toEqual(rest.map((c) => [Math.round(c.y), Math.round(c.w)]));
+  // A click on a tick jumps to its section.
+  await hoverTick(4);
+  await page.mouse.down();
+  await page.mouse.up();
   await expect(page).toHaveURL(/#section-4$/);
   await page.mouse.move(700, 600);
-  await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
+  // With reduced motion the hovered tick is only highlighted and named.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.mouse.move(rest[2].x + 4, rest[2].y);
+  await expect(peek).toHaveText("2.1 Section 2 detail");
+  expect(await tickColor(2)).toBe(primary);
+  expect((await centers()).map((c) => [Math.round(c.y), Math.round(c.w)])).toEqual(
+    rest.map((c) => [Math.round(c.y), Math.round(c.w)]),
+  );
+  await page.mouse.move(700, 600);
+  await page.emulateMedia({ reducedMotion: null });
   await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
   // The keyboard reaches the rail: focus opens it, Enter on the pin button
   // keeps it open, and the choice survives a reload.
