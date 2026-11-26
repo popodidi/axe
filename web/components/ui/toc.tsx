@@ -185,6 +185,9 @@ const peekOf = (rail: HTMLElement | null) => rail?.querySelector<HTMLElement>(`.
 export function TocRail({ className, ...props }: TocProps & { className?: string }) {
   const [pinned, setPinned] = useTocPinned();
   const [focus, setFocus] = useState(false);
+  // Set by the toggle: a pin the reader just made fades in; one restored on
+  // load does not.
+  const [reveal, setReveal] = useState(false);
   const rail = useRef<HTMLDivElement>(null);
   const open = !pinned && focus && props.entries.length > 0;
   const dock = useDock(rail, !pinned && !open);
@@ -216,6 +219,7 @@ export function TocRail({ className, ...props }: TocProps & { className?: string
       data-toc-rail=""
       data-pinned={pinned ? "" : undefined}
       data-open={open ? "" : undefined}
+      data-reveal={reveal ? "" : undefined}
       onPointerMove={dock.move}
       onPointerLeave={dock.leave}
       onFocus={focusIn}
@@ -234,11 +238,15 @@ export function TocRail({ className, ...props }: TocProps & { className?: string
           onClick={() => {
             setPinned(!pinned);
             setFocus(false);
+            setReveal(true);
           }}
         >
-          {/* Collapsed, three ticks: the rail's own mark. */}
+          {/* A side panel, its strip filled while pinned open: a glyph
+              unlike the ticks below it. */}
           <svg aria-hidden="true" viewBox="0 0 16 16">
-            <path d={pinned ? "M10 4L6 8l4 4" : "M1 2h14M1 8h14M1 14h14"} />
+            <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
+            <path d="M6 2.5v11" />
+            {pinned && <rect x="1.5" y="2.5" width="4.5" height="11" rx="1" fill="currentColor" />}
           </svg>
         </button>
       </div>
