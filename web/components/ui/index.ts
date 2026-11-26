@@ -12,3 +12,4 @@ export { Tabs } from "./tabs";
 export { Commands, Command, CopyButton, type CopyHandler } from "./command";
 export { cx } from "./cx";
 export { TocRail, TocFold, useHeadings, useScrollSpy } from "./toc";
+export { ThemeToggle } from "./theme-toggle";

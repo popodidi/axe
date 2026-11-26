@@ -176,11 +176,6 @@
   stroke-linejoin: round;
 }
 
-.footIconFill {
-  fill: currentcolor;
-  stroke: none;
-}
-
 .serverLine {
   overflow: hidden;
   text-overflow: ellipsis;

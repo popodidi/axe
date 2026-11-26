@@ -28,6 +28,7 @@ import {
   Td,
   Th,
   choices,
+  ThemeToggle,
   cx,
 } from "../components/ui";
 import { ArtifactTable } from "../components/dashboard/artifact-table";
@@ -63,7 +64,6 @@ import {
   PaneResizer,
 } from "../components/dashboard/detail-resizer";
 import { usePaneScroll, snapshotPaneScroll } from "../lib/use-pane-scroll";
-import { useTheme } from "../lib/theme";
 import { useNavCollapsed } from "../lib/layout";
 import { buildLine } from "../lib/version";
 import { motionMs, useMotionReady } from "../lib/motion";
@@ -591,7 +591,6 @@ export default function Dashboard() {
   // An item list's "Clear filters": its search and filters, not the view.
   const clearFilters = () =>
     update({ q: null, project: null, status: null, sstate: null, goalstate: null });
-  const [light, toggleTheme] = useTheme();
   const [collapsed, toggleNav] = useNavCollapsed();
   const titles = new Map((data?.tasks || []).map((t) => [t.id, t.title]));
   return (
@@ -691,19 +690,7 @@ export default function Dashboard() {
                   <path d="M13 2.5V5h-2.5" />
                 </svg>
               </Button>
-              <Button
-                variant="ghost"
-                icon
-                aria-label="Light theme"
-                aria-pressed={light}
-                title={light ? "Switch to dark theme" : "Switch to light theme"}
-                onClick={toggleTheme}
-              >
-                <svg aria-hidden viewBox="0 0 16 16" className={styles.footIcon}>
-                  <circle cx="8" cy="8" r="5.5" />
-                  <path d="M8 2.5a5.5 5.5 0 0 1 0 11z" className={styles.footIconFill} />
-                </svg>
-              </Button>
+              <ThemeToggle />
             </span>
           </div>
           <span className={cx(styles.serverLine, styles.hideNarrow)} title={`server ${base}`}>
