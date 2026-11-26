@@ -5,7 +5,17 @@
    224px when pinned open), body up to 1080px, metadata rail 240px, the
    rails sticky while the window scrolls. */
 .page {
+  position: relative;
   padding: var(--pane-padding);
+}
+/* The theme toggle: one icon at the top right. Narrow, its own row above
+   the doc; wide, out of the flow in the page's corner, so the sticky rails
+   start where they stick and the metadata rail keeps its top clear of it
+   (above the rail, which can reach the corner). */
+.bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--space-1);
 }
 .layout {
   --doc-meta-width: calc(var(--space-8) * 2);
@@ -179,5 +189,15 @@
   }
   .layout .tocFold {
     display: none;
+  }
+  .bar {
+    position: absolute;
+    top: var(--space-snug);
+    right: var(--space-2);
+    z-index: 1;
+    margin: 0;
+  }
+  .meta {
+    padding-top: calc(var(--control-min-height) + var(--space-1));
   }
 }

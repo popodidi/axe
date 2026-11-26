@@ -913,3 +913,29 @@ test("an HTML doc with its own contents or few headings gets none", async ({ pag
     expect(await frame.getAttribute("sandbox")).not.toContain("allow-scripts");
   }
 });
+
+test("the doc page's theme toggle is the portal's, on the same saved choice", async ({ page }) => {
+  await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/doc?server=http://axe.test&path=harvis/docs/reference/brand-guide.md");
+  await expect(page.getByLabel("Doc details")).toBeVisible();
+  const toggle = page.getByRole("button", { name: "Light theme" });
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  // Top right, clear of the doc's rails.
+  const box = (await toggle.boundingBox())!;
+  expect(box.x + box.width).toBeGreaterThan(1440 - 48);
+  expect(box.y).toBeLessThan(48);
+  const head = (await page.getByLabel("Doc metadata").locator("header").boundingBox())!;
+  expect(box.y + box.height).toBeLessThanOrEqual(head.y);
+  await toggle.click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await page.evaluate(() => localStorage.getItem("axe-theme"))).toBe("light");
+  // The portal follows, and its toggle switches the doc page back.
+  await page.goto("/?server=http://axe.test&view=store");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByRole("button", { name: "Light theme" }).click();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme", "light");
+  await page.goto("/doc?server=http://axe.test&path=harvis/docs/reference/brand-guide.md");
+  await expect(page.getByRole("button", { name: "Light theme" })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme", "light");
+});
