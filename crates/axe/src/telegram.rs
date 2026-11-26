@@ -2304,7 +2304,9 @@ impl Gateway {
         Ok(json!({"id": msg, "buttons": left}))
     }
 
-    /// Pins or unpins one of the bot's own messages.
+    /// Pins or unpins one of the bot's own messages. A manual pin or unpin
+    /// takes the message over from the inbox pass: it drops `flags.card_pin`,
+    /// so a closed card the bot pinned is not unpinned again.
     pub fn pin(
         &self,
         store: &dyn Store,
@@ -2329,7 +2331,7 @@ impl Gateway {
         };
         b.paced(store, m.chat_id, || b.api.call(method, &p))?;
         store.conn().execute(
-            "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json(?1)) WHERE id=?2",
+            "UPDATE bot_messages SET flags=json_remove(json_set(flags,'$.pinned',json(?1)),'$.card_pin') WHERE id=?2",
             params![json!(pin).to_string(), msg],
         )?;
         store.changed();

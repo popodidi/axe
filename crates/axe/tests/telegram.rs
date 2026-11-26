@@ -2458,6 +2458,57 @@ fn cards_are_pinned_and_unpinned_when_closed() {
 }
 
 #[test]
+fn manual_pin_of_a_closed_card_stays_pinned() {
+    let rig = Rig::new();
+    rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
+    make_board(&rig);
+    let sent = |text: &str| -> i64 {
+        let out = rig.tg_ok(&["send", "--buttons", "Go=go", text]);
+        out.trim().trim_start_matches("sent #").parse().unwrap()
+    };
+
+    // An answered card is unpinned by the inbox pass.
+    let card = sent("Ship it?");
+    let card_tg = tg_id(&rig, card);
+    wait_for("card pinned", 20, || flags_of(&rig, card)["pinned"] == true);
+    rig.stub.push(press(500, card_tg, "go"));
+    rig.stub.wait_confirmed(500);
+    wait_for("card unpinned", 20, || {
+        flags_of(&rig, card)["pinned"] == false
+    });
+
+    // A manual pin of it takes it over from the inbox pass.
+    assert_eq!(
+        rig.tg_ok(&["pin", &card.to_string()]),
+        format!("pinned #{card}\n")
+    );
+    assert!(flags_of(&rig, card)["card_pin"].is_null());
+    let unpins = |rig: &Rig| {
+        rig.stub
+            .calls("unpinChatMessage")
+            .iter()
+            .filter(|c| c.params["message_id"] == card_tg)
+            .count()
+    };
+    let before = unpins(&rig);
+    // A later change runs another inbox pass; the manual pin stays.
+    let other = sent("Another?");
+    wait_for("other card pinned", 20, || {
+        flags_of(&rig, other)["pinned"] == true
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(flags_of(&rig, card)["pinned"], true);
+    assert_eq!(unpins(&rig), before, "a manual pin is never unpinned");
+
+    // The inbox pass still unpins its own pin when that card closes.
+    rig.tg_ok(&["edit", &other.to_string(), "--clear-buttons"]);
+    wait_for("other card unpinned", 20, || {
+        flags_of(&rig, other)["pinned"] == false
+    });
+    assert_eq!(flags_of(&rig, card)["pinned"], true);
+}
+
+#[test]
 fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
     let mut rig = Rig::new();
     rig.srv().ok(&["bot", "subscribe", "cos", "--why", "test"]);
