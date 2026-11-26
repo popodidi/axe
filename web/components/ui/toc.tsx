@@ -3,9 +3,11 @@
 // numbered list of a body's headings with the section in view highlighted.
 // `TocRail` is the sticky side list, `TocFold` the "Contents" disclosure for
 // narrow space; the consumer's CSS shows one of them. The rail is collapsed
-// to a column of ticks, one per heading, until hovered or focused (the list
-// then opens over the content) or pinned open (lib/toc-pin.ts); a consumer
-// widens its column for a pinned rail with `:has([data-pinned])`. Entries come from
+// to a dense strip of ticks, one per heading, that magnifies under the
+// pointer like a dock (lib/toc-dock.ts) and names the tick it is on; keyboard
+// focus opens the list over the content, and the toggle pins it open
+// (lib/toc-pin.ts); a consumer widens its column for a pinned rail with
+// `:has([data-pinned])`. Entries come from
 // lib/doc-toc.ts (`tocEntries`); a short body has none, and both render
 // nothing.
 import {
@@ -15,8 +17,12 @@ import {
   useState,
   type FocusEvent,
   type MouseEvent,
+  type PointerEvent,
+  type RefObject,
 } from "react";
 import { activeHeading, TOC_LEVELS, type TocEntry, type TocHeading } from "../../lib/doc-toc";
+import { motionMs } from "../../lib/motion";
+import { dockFocus, dockLayout } from "../../lib/toc-dock";
 import { useTocPinned } from "../../lib/toc-pin";
 import { cx } from "./cx";
 import styles from "./toc.module.css";
@@ -73,30 +79,129 @@ function TocList({ entries, active, onJump, follow = false }: TocProps & { follo
   );
 }
 
-// The sticky side list. Collapsed it is a column of ticks; pointer hover or
-// keyboard focus opens the full list over the content (Escape closes it),
-// and the pin button keeps it open in the page's flow.
+// The dock: while the pointer is on the collapsed rail's ticks, the tick
+// under it grows and the rows around it open (lib/toc-dock.ts), following
+// the pointer each frame; leaving eases them back. The magnification eases
+// in and out over the feedback duration (none with reduced motion: the tick
+// is only highlighted). The tick under the pointer is marked `data-dock` and
+// its title shows in the rail's peek, a popover beside it. Each row's size
+// and zoom are written as custom properties; the CSS uses them only when
+// collapsed. The rows touch, so their tops follow in the flow.
+function useDock(rail: RefObject<HTMLDivElement | null>, on: boolean) {
+  // y: the pointer's clientY; u: the focus (lib/toc-dock.ts); h: the
+  // magnification now, eased toward target; last: the previous frame's time
+  // while easing.
+  const dock = useRef({ y: 0, u: 0, h: 0, target: 0, frame: 0, last: 0, hovered: -1 });
+  const clear = () => {
+    const s = dock.current;
+    cancelAnimationFrame(s.frame);
+    Object.assign(s, { h: 0, target: 0, frame: 0, last: 0, hovered: -1 });
+    const ol = rail.current?.querySelector("ol");
+    ol?.querySelectorAll("li").forEach((li) => {
+      for (const p of ["--dock-size", "--dock-zoom"]) li.style.removeProperty(p);
+    });
+    ol?.querySelector("[data-dock]")?.removeAttribute("data-dock");
+    const label = peekOf(rail.current);
+    if (label?.matches(":popover-open")) label.hidePopover();
+  };
+  const step = (now: number) => {
+    const s = dock.current;
+    s.frame = 0;
+    const ol = rail.current?.querySelector("ol");
+    if (!ol) return;
+    const pitch = parseFloat(getComputedStyle(ol).getPropertyValue("--toc-pitch")) || 6;
+    const tau = motionMs("--duration-feedback") / 3;
+    const dt = s.last ? now - s.last : 16;
+    s.last = now;
+    s.h = tau ? s.h + (s.target - s.h) * (1 - Math.exp(-dt / tau)) : 0;
+    if (Math.abs(s.target - s.h) < 0.005) s.h = tau ? s.target : 0;
+    const items = ol.querySelectorAll("li");
+    const o = ol.getBoundingClientRect();
+    if (s.target) s.u = dockFocus((s.y - o.top) / pitch, s.h);
+    const { rows } = dockLayout(items.length, s.u, s.h);
+    if (!s.target && !s.h) return clear();
+    items.forEach((li, i) => {
+      li.style.setProperty("--dock-size", `${rows[i].size * pitch}px`);
+      li.style.setProperty("--dock-zoom", rows[i].zoom.toFixed(3));
+    });
+    const hovered = s.target ? Math.min(items.length - 1, Math.max(0, Math.floor(s.u))) : -1;
+    if (hovered !== s.hovered) {
+      ol.querySelector("[data-dock]")?.removeAttribute("data-dock");
+      items[hovered]?.querySelector("a")?.setAttribute("data-dock", "");
+      s.hovered = hovered;
+    }
+    const label = peekOf(rail.current);
+    if (label && hovered >= 0) {
+      const a = items[hovered].querySelector("a")!;
+      label.textContent = [styles.number, styles.text]
+        .map((c) => a.querySelector(`.${c}`)?.textContent)
+        .filter(Boolean)
+        .join(" ");
+      label.style.left = `${rail.current!.getBoundingClientRect().right}px`;
+      label.style.top = `${o.top + (rows[hovered].top + rows[hovered].size / 2) * pitch}px`;
+      if (!label.matches(":popover-open")) label.showPopover();
+    } else if (label?.matches(":popover-open")) label.hidePopover();
+    if (s.h !== s.target) s.frame = requestAnimationFrame(step);
+    else s.last = 0;
+  };
+  const schedule = () => {
+    if (!dock.current.frame) dock.current.frame = requestAnimationFrame(step);
+  };
+  const move = (e: PointerEvent<HTMLDivElement>) => {
+    const ol = rail.current?.querySelector("ol");
+    if (!on || e.pointerType !== "mouse" || !ol) return;
+    const o = ol.getBoundingClientRect();
+    const s = dock.current;
+    s.y = e.clientY;
+    s.target = s.y >= o.top && s.y < o.bottom ? 1 : 0;
+    schedule();
+  };
+  const leave = () => {
+    dock.current.target = 0;
+    schedule();
+  };
+  // Off (pinned, or the list open) or gone: the rows return to rest at once.
+  // On, a scroll under a still pointer moves the focus too.
+  useEffect(() => {
+    if (!on) return clear();
+    const scroll = () => dock.current.target && schedule();
+    document.addEventListener("scroll", scroll, { capture: true, passive: true });
+    return () => {
+      document.removeEventListener("scroll", scroll, { capture: true });
+      clear();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [on]);
+  return { move, leave };
+}
+
+// The rail's popover naming the hovered tick.
+const peekOf = (rail: HTMLElement | null) => rail?.querySelector<HTMLElement>(`.${styles.peek}`);
+
+// The sticky side list. Collapsed it is a dense strip of ticks that
+// magnifies under the pointer (useDock); keyboard focus opens the full list
+// over the content (Escape closes it), and the toggle keeps it open in the
+// page's flow.
 export function TocRail({ className, ...props }: TocProps & { className?: string }) {
   const [pinned, setPinned] = useTocPinned();
-  const [hover, setHover] = useState(false);
   const [focus, setFocus] = useState(false);
-  const open = !pinned && (hover || focus) && props.entries.length > 0;
-  // Escape closes the open list wherever focus is (a hovered rail need not
-  // hold it); focus stays where it was.
+  const rail = useRef<HTMLDivElement>(null);
+  const open = !pinned && focus && props.entries.length > 0;
+  const dock = useDock(rail, !pinned && !open);
+  // Escape closes the open list wherever focus is; focus stays where it was.
   useEffect(() => {
     if (!open) return;
     const key = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.stopPropagation();
-      setHover(false);
       setFocus(false);
     };
     document.addEventListener("keydown", key, true);
     return () => document.removeEventListener("keydown", key, true);
   }, [open]);
   if (!props.entries.length) return null;
-  // Keyboard focus only: a clicked entry keeps focus, and the list should
-  // still close when the pointer leaves.
+  // Keyboard focus only: a clicked entry keeps focus, and the strip should
+  // stay a strip.
   const focusIn = (e: FocusEvent<HTMLDivElement>) => {
     if (e.target.matches(":focus-visible")) setFocus(true);
   };
@@ -106,12 +211,13 @@ export function TocRail({ className, ...props }: TocProps & { className?: string
   const label = pinned ? "Collapse contents" : "Pin contents open";
   return (
     <div
+      ref={rail}
       className={cx(styles.rail, className)}
       data-toc-rail=""
       data-pinned={pinned ? "" : undefined}
       data-open={open ? "" : undefined}
-      onPointerEnter={(e) => e.pointerType === "mouse" && setHover(true)}
-      onPointerLeave={() => setHover(false)}
+      onPointerMove={dock.move}
+      onPointerLeave={dock.leave}
       onFocus={focusIn}
       onBlur={focusOut}
     >
@@ -127,15 +233,17 @@ export function TocRail({ className, ...props }: TocProps & { className?: string
           title={label}
           onClick={() => {
             setPinned(!pinned);
-            setHover(false);
+            setFocus(false);
           }}
         >
+          {/* Collapsed, three ticks: the rail's own mark. */}
           <svg aria-hidden="true" viewBox="0 0 16 16">
-            <path d={pinned ? "M10 4L6 8l4 4" : "M3 4h10M3 8h7M3 12h10"} />
+            <path d={pinned ? "M10 4L6 8l4 4" : "M1 2h14M1 8h14M1 14h14"} />
           </svg>
         </button>
       </div>
       <TocList {...props} follow />
+      <span className={styles.peek} popover="manual" aria-hidden="true" />
     </div>
   );
 }
