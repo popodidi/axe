@@ -1,7 +1,7 @@
 # axe web dashboard
 
 Read-only Next.js / TypeScript dashboard for an axe server: Tasks, Routines,
-Services, Bots, Goals, Store, Stats and Cost views over the server's GET API. All data
+Services, Bots, Goals, Store, Stats, Cost and Node views over the server's GET API. All data
 stays in the server; the browser keeps no token and has no mutation UI. The
 Store view and store previews read private blobs and docs through a
 read-session cookie the owner unlocks with the token (same origin only, so
@@ -55,6 +55,7 @@ regenerate it from the repository root with
 | List/detail grammar: side pane header, state badge, field grid, sections, list empty state | `components/dashboard/side-pane.tsx` |
 | Services page model (state, uptime, per node) | `lib/services.ts` |
 | Run page: trace with event times, conversation replay and the details rail | `components/dashboard/run-log.tsx`, `lib/run-log.ts`, `lib/transcript.ts`, `lib/run-meta.ts` |
+| Node view: ranges, run kinds, time-series chart | `lib/node.ts`, `components/dashboard/node.tsx`, `node-chart.tsx` |
 | Stats, bot stats, cost and goal calculations | `lib/stats.ts`, `lib/bot-stats.ts`, `lib/cost.ts`, `lib/goals.ts` |
 | Store view, store previews and the read session | `components/dashboard/store.tsx`, `store-viewer.tsx`, `lib/store.ts` |
 | A doc's full page (`/doc?path=`): metadata and contents rails | `app/doc/page.tsx`, `components/dashboard/doc-page.tsx`, `lib/doc-toc.ts` |

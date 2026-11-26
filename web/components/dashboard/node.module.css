@@ -1,0 +1,98 @@
+/* Node view: current values, then time-series charts (node-chart.tsx). */
+.body {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  transition: opacity var(--transition-feedback);
+}
+
+/* Refetch keeps the frame: the previous range stays, dimmed. */
+.loading {
+  opacity: 0.6;
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--space-8) * 4)), 1fr));
+  gap: var(--space-2);
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.plot {
+  position: relative;
+}
+
+.layer {
+  fill: currentcolor;
+  fill-opacity: 0.85;
+  stroke: var(--card-bg);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.reference {
+  stroke: var(--text-tertiary);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.labelKey {
+  stroke: currentcolor;
+  stroke-width: 2;
+}
+
+.directLabel {
+  fill: var(--text-secondary);
+  font-family: var(--font-body);
+}
+
+.tooltip {
+  position: absolute;
+  top: var(--space-1);
+  display: grid;
+  gap: var(--space-quarter);
+  min-width: calc(var(--space-8) + var(--space-5));
+  margin-left: var(--space-1);
+  padding: var(--space-1) var(--space-snug);
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-overlay);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.tooltipLeft {
+  transform: translateX(calc(-100% - var(--space-2)));
+}
+
+.tipTime {
+  color: var(--text-tertiary);
+}
+
+.tipRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-half);
+  white-space: nowrap;
+}
+
+.tipRow strong {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.tipKey {
+  width: var(--space-snug);
+  height: 0;
+  border-top: var(--space-quarter) solid currentcolor;
+}
+
+.tipLabel {
+  color: var(--text-secondary);
+}
