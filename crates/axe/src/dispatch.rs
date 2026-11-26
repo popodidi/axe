@@ -16,6 +16,7 @@ use crate::agent_proc::{self, kill_child, kill_tree};
 pub use crate::agent_proc::{otel_resource_attributes, parse_jsonl_session, render};
 use crate::config::{Config, Prompts, SessionMode, Strategy};
 use crate::db::{self, Changes, Claim, Task};
+use crate::node_metrics;
 use crate::rule::{self, Use};
 use crate::runtime::{self, Registry};
 
@@ -71,6 +72,8 @@ struct Run {
     resume_count: u64,
     resumed: bool,
     task_id: i64,
+    /// The task's project, for the node's run counts.
+    project: String,
     claim: String,
     session_mode: SessionMode,
     session_id: Option<String>,
@@ -150,6 +153,11 @@ pub struct Dispatcher {
     service_sync_failed: bool,
     /// A drain woke the owning bots: services keep running until then.
     services_warned_until: Option<Instant>,
+    /// Node observability samples (`node_metrics.rs`); `None` when
+    /// `[node_metrics] sample_seconds` is 0.
+    node_sampler: Option<node_metrics::Sampler>,
+    /// When the next sample is due.
+    next_sample: Instant,
 }
 
 /// The public half of the sealed form key at `path`, when it exists (the
@@ -394,6 +402,9 @@ impl Dispatcher {
             service_sync: None,
             service_sync_failed: false,
             services_warned_until: None,
+            node_sampler: (cfg.node_metrics.sample_seconds > 0)
+                .then(|| node_metrics::Sampler::new(cfg.run_root())),
+            next_sample: Instant::now(),
             cfg,
         }
     }
@@ -722,6 +733,35 @@ impl Dispatcher {
         })
     }
 
+    /// Running runs by kind, for node samples (`node_metrics::Runs`).
+    pub fn running(&self) -> node_metrics::Runs {
+        let mut r = node_metrics::Runs::default();
+        let projects = self
+            .runs
+            .iter()
+            .map(|x| &x.project)
+            .chain(self.pre_checks.iter().map(|p| &p.project));
+        for p in projects {
+            *r.task.entry(p.clone()).or_default() += 1;
+        }
+        for b in &self.bots {
+            *r.bot.entry(b.name.clone()).or_default() += 1;
+        }
+        (r.service, r.scheduled) = self.services.alive_by_kind();
+        r
+    }
+
+    /// A node sample when one is due (every `[node_metrics] sample_seconds`).
+    fn node_sample(&mut self) -> Option<node_metrics::Sample> {
+        if self.node_sampler.is_none() || Instant::now() < self.next_sample {
+            return None;
+        }
+        let runs = self.running();
+        let every = Duration::from_secs(self.cfg.node_metrics.sample_seconds);
+        self.next_sample = Instant::now() + every;
+        self.node_sampler.as_mut().map(|s| s.sample(runs))
+    }
+
     /// Fresh-session fallbacks waiting for resource admission.
     pub fn deferred(&self) -> usize {
         self.deferred.len()
@@ -759,9 +799,13 @@ impl Dispatcher {
         let hold = self.hold();
         let runtimes = self.runtimes.heartbeat(|n| self.in_use(n), now_unix());
         let held = json!([hold.json(), runtimes]);
-        if self.reported.as_ref().is_some_and(|(n, u, h, at)| {
-            *n == samples && *u == used && *h == held && at.elapsed() < REPORT_EVERY
-        }) {
+        // A due node sample rides on the report (`node_metrics.rs`).
+        let sample = self.node_sample();
+        if sample.is_none()
+            && self.reported.as_ref().is_some_and(|(n, u, h, at)| {
+                *n == samples && *u == used && *h == held && at.elapsed() < REPORT_EVERY
+            })
+        {
             return;
         }
         let (id, generation) = {
@@ -773,7 +817,10 @@ impl Dispatcher {
         view["pools"] = self.pools();
         view["runtimes"] = runtimes;
         view["forms"] = self.form_key.clone();
-        let body = json!({"id":id,"generation":generation,"admission":view});
+        let mut body = json!({"id":id,"generation":generation,"admission":view});
+        if let Some(s) = sample {
+            body["sample"] = json!(s);
+        }
         let failed = self
             .store
             .client
@@ -1386,6 +1433,7 @@ impl Dispatcher {
             resume_count,
             resumed: resume.is_some(),
             task_id: task.id,
+            project: task.project.clone(),
             claim: claim.to_string(),
             session_mode,
             session_id,

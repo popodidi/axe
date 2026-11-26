@@ -331,6 +331,17 @@ impl Supervisor {
         self.procs.values().filter(|p| p.alive()).count()
     }
 
+    /// Live processes per owning bot: long-running services, then
+    /// scheduled (cron) service runs.
+    pub fn alive_by_kind(&self) -> (BTreeMap<String, u32>, BTreeMap<String, u32>) {
+        let (mut long, mut cron) = (BTreeMap::new(), BTreeMap::new());
+        for p in self.procs.values().filter(|p| p.alive()) {
+            let m = if p.scheduled() { &mut cron } else { &mut long };
+            *m.entry(p.svc.bot.clone()).or_default() += 1;
+        }
+        (long, cron)
+    }
+
     /// Each bot's services with a live process.
     pub fn alive_by_bot(&self) -> BTreeMap<String, Vec<String>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();

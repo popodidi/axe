@@ -165,6 +165,9 @@ pub struct Config {
     pub otel: Otel,
     #[serde(default)]
     pub metrics: MetricsConfig,
+    /// `[node_metrics]`: node observability samples (`node_metrics.rs`).
+    #[serde(default)]
+    pub node_metrics: NodeMetrics,
     #[serde(default)]
     pub prompts: Prompts,
     /// `[dispatcher]`, also accepted as `[node]` (the dispatcher's new name).
@@ -657,6 +660,56 @@ pub struct MetricsConfig {
     /// project is reported as `other`, so labels stay bounded.
     #[serde(default)]
     pub projects: Vec<String>,
+}
+
+/// `[node_metrics]`: node observability (`node_metrics.rs`). The node reads
+/// `sample_seconds`; the server reads the rest. Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NodeMetrics {
+    /// How often the node samples its host and running runs and reports
+    /// them (default 15 s); 0 turns sampling off.
+    pub sample_seconds: u64,
+    /// How long the server keeps raw samples (default 48 h).
+    pub raw_retention_hours: u64,
+    /// The width of a rollup bucket, avg and max of its raw samples
+    /// (default 300 s). Changing it leaves stored rollups at their old width.
+    pub rollup_seconds: u64,
+    /// How long the server keeps rollups (default 90 days).
+    pub rollup_retention_days: u64,
+    /// How often the server prunes expired samples and rollups (default
+    /// hourly).
+    pub prune_seconds: u64,
+}
+
+impl Default for NodeMetrics {
+    fn default() -> Self {
+        NodeMetrics {
+            sample_seconds: 15,
+            raw_retention_hours: 48,
+            rollup_seconds: 300,
+            rollup_retention_days: 90,
+            prune_seconds: 3600,
+        }
+    }
+}
+
+impl NodeMetrics {
+    fn validate(&self) -> Result<()> {
+        if self.rollup_seconds < 60 || 86400 % self.rollup_seconds != 0 {
+            bail!("node_metrics.rollup_seconds must be >= 60 and divide a day");
+        }
+        if self.raw_retention_hours * 3600 < self.rollup_seconds {
+            bail!("node_metrics.raw_retention_hours must cover one rollup bucket");
+        }
+        if self.rollup_retention_days == 0 {
+            bail!("node_metrics.rollup_retention_days must be >= 1");
+        }
+        if self.prune_seconds < 60 {
+            bail!("node_metrics.prune_seconds must be >= 60");
+        }
+        Ok(())
+    }
 }
 
 /// `[prompts]`: the node's task prompts. `{id}` and `{project}` are
@@ -1193,6 +1246,7 @@ impl Config {
             bail!("poll_seconds must be >= 1");
         }
         self.services.validate()?;
+        self.node_metrics.validate()?;
         for (name, r) in &self.repos {
             r.validate().with_context(|| format!("repos.{name}"))?;
         }

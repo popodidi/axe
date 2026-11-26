@@ -1134,3 +1134,40 @@ fn admission_hold_and_release_cli_round_trip() {
     let out = s.ok(&["admission", "release"]);
     assert!(out.starts_with("no admission hold was set"), "{out}");
 }
+
+/// The node's admission report carries a node sample (`node_metrics.rs`):
+/// the server stores it with the running task run counted under its
+/// project, and serves it at `GET /api/node/metrics`.
+#[test]
+fn node_samples_ride_on_the_admission_report() {
+    let (env, cfg) = env(2, WAIT_AGENT);
+    let mut conn = env.conn();
+    let id = add(&mut conn, "pending", &[]);
+    let rig = Rig::default();
+    let gate = warm_gate(&rig);
+    let mut d = live(&env, cfg, gate);
+    d.poll().unwrap();
+    assert_eq!(d.live(), 1, "the task run started");
+    assert_eq!(d.running().task.get("a"), Some(&1));
+    let m = d.srv.get("/api/node/metrics?range=1h");
+    assert_eq!(m["source"], "raw", "{m}");
+    assert_eq!(m["sample_seconds"], 15);
+    let cur = &m["current"];
+    assert_eq!(cur["runs"]["task"]["a"], 1, "{m}");
+    assert!(cur["mem_total_bytes"].as_u64().unwrap() > 0, "{cur}");
+    assert!(cur["disk_total_bytes"].as_u64().unwrap() > 0, "{cur}");
+    assert_eq!(m["points"][0]["task_max"], 1.0, "{m}");
+    // The next sample waits for the interval: polls in between send none.
+    d.poll().unwrap();
+    let n: i64 = env
+        .conn()
+        .query_row("SELECT count(*) FROM node_samples", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+    env.go();
+    while task(&env, id).state == "in_progress" {
+        d.poll().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    d.shutdown().unwrap();
+}

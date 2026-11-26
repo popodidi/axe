@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -171,7 +171,7 @@ pub fn default_path() -> Result<PathBuf> {
         .context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v23 schema, or migrates v8-v22 to v23. Older
+/// Opens the database: creates a fresh v24 schema, or migrates v8-v23 to v24. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
 /// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
 /// tables (`usage::SCHEMA`), v16 only adds goal tables and a nullable column
@@ -180,9 +180,10 @@ pub fn default_path() -> Result<PathBuf> {
 /// ([`migrate_bot_repos`]), v19 only adds the rule tables (`rule::SCHEMA`) and
 /// v20 only adds `bots.retro` ([`migrate_bot_retro`]), v21 only adds the
 /// repo registry table (`repo::SCHEMA`), v22 only adds the services table
-/// (`service::SCHEMA`) and v23 only adds `services.schedule`
-/// (`service::migrate`), so a database lowered to
-/// `user_version` 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12 or 11
+/// (`service::SCHEMA`), v23 only adds `services.schedule`
+/// (`service::migrate`) and v24 only adds the node metrics tables
+/// (`node_metrics::SCHEMA`), so a database lowered to
+/// `user_version` 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12 or 11
 /// still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -218,11 +219,12 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::repo::SCHEMA)?;
         tx.execute_batch(crate::service::SCHEMA)?;
         crate::service::migrate(&tx)?;
+        tx.execute_batch(crate::node_metrics::SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=22).contains(&version) {
+    if (11..=23).contains(&version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(crate::rule::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
@@ -234,6 +236,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::repo::SCHEMA)?;
         tx.execute_batch(crate::service::SCHEMA)?;
         crate::service::migrate(&tx)?;
+        tx.execute_batch(crate::node_metrics::SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -260,6 +263,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.execute_batch(crate::repo::SCHEMA)?;
         tx.execute_batch(crate::service::SCHEMA)?;
         crate::service::migrate(&tx)?;
+        tx.execute_batch(crate::node_metrics::SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         return Ok(conn);
@@ -289,6 +293,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     tx.execute_batch(crate::repo::SCHEMA)?;
     tx.execute_batch(crate::service::SCHEMA)?;
     crate::service::migrate(&tx)?;
+    tx.execute_batch(crate::node_metrics::SCHEMA)?;
     let violations: i64 =
         tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)

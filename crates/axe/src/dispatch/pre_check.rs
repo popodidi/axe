@@ -27,6 +27,7 @@ const NOTE_MAX: u64 = 3000;
 
 pub(super) struct PreCheck {
     task_id: i64,
+    pub(super) project: String,
     claim: String,
     pick: Pick,
     child: Child,
@@ -105,6 +106,7 @@ impl Dispatcher {
             .context("spawn sh for the pre-check")?;
         self.pre_checks.push(PreCheck {
             task_id: task.id,
+            project: task.project.clone(),
             claim: claim.to_string(),
             pick: pick.clone(),
             child,

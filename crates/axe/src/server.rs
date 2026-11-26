@@ -25,6 +25,7 @@ use crate::db::{self, Actor, Changes, Claim, Filter, NewTask, RunFilter};
 use crate::doc;
 use crate::form;
 use crate::goal;
+use crate::node_metrics;
 use crate::remote;
 use crate::routine;
 use crate::schedule;
@@ -2149,6 +2150,23 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             )?;
             *st.admission.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some((b["admission"].clone(), Instant::now()));
+            // A node sample (`node_metrics.rs`); a bad one never fails the report.
+            if b["sample"].is_object() {
+                let stored = serde_json::from_value(b["sample"].clone())
+                    .map_err(anyhow::Error::from)
+                    .and_then(|s| {
+                        node_metrics::record(
+                            &st.conn(),
+                            remote::field(&b, "id")?,
+                            remote::epoch(),
+                            s,
+                            &st.cfg.node_metrics,
+                        )
+                    });
+                if let Err(e) = stored {
+                    eprintln!("axe server: node sample: {e:#}");
+                }
+            }
             ok(200, &json!({"ok":true}))
         }
         ("POST", ["api", "dispatcher", "adopt-logs"]) => {
@@ -2187,6 +2205,16 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             ok(200, &v)
         }
         ("GET", ["api", "admission"]) => ok(200, &st.admission()),
+        ("GET", ["api", "node", "metrics"]) => ok(
+            200,
+            &node_metrics::query(
+                &st.conn(),
+                req.query("range").unwrap_or("1h"),
+                remote::epoch(),
+                &st.cfg.node_metrics,
+            )
+            .map_err(|e| HttpError(400, format!("{e:#}")))?,
+        ),
         ("GET", ["api", "runtimes"]) => ok(200, &crate::runtime::view(&st.admission())),
         // A runtime turned needs_login or limited: one card to the owner.
         ("POST", ["api", "dispatcher", "runtime-alert"]) => {
@@ -3398,6 +3426,7 @@ const GOAL_IDLE_EVERY: Duration = Duration::from_secs(60);
 fn housekeeping_loop(st: &State) {
     let mut last_metrics = Instant::now();
     let mut last_idle: Option<Instant> = None;
+    let mut last_prune: Option<Instant> = None;
     while !st.stop.load(Ordering::SeqCst) {
         let started = Instant::now();
         match routine::tick(&mut st.conn(), routine::now()) {
@@ -3423,6 +3452,17 @@ fn housekeeping_loop(st: &State) {
                 eprintln!("metrics snapshot: {e:#}");
             }
             last_metrics = Instant::now();
+        }
+        let prune_every = Duration::from_secs(st.cfg.node_metrics.prune_seconds);
+        if last_prune.is_none_or(|t| t.elapsed() >= prune_every) {
+            match node_metrics::prune(&st.conn(), remote::epoch(), &st.cfg.node_metrics) {
+                Ok((0, 0)) => {}
+                Ok((raw, rolled)) => {
+                    eprintln!("axe server: pruned {raw} node samples and {rolled} rollups")
+                }
+                Err(e) => eprintln!("node metrics prune: {e:#}"),
+            }
+            last_prune = Some(Instant::now());
         }
         std::thread::sleep(Duration::from_secs(1).saturating_sub(started.elapsed()));
     }

@@ -57,6 +57,7 @@ pub fn route(path: &[String]) -> &'static str {
         ["api", "bot-runs", _] => "/api/bot-runs/:id",
         ["api", "bot-runs", _, "log"] => "/api/bot-runs/:id/log",
         ["api", "bot-runs", _, "meta"] => "/api/bot-runs/:id/meta",
+        ["api", "node", "metrics"] => "/api/node/metrics",
         ["api", "stats", "history"] => "/api/stats/history",
         ["api", "stats", "flow"] => "/api/stats/flow",
         ["api", "runs"] => "/api/runs",

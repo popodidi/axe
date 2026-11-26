@@ -1,5 +1,5 @@
 //! The read-only owner commands `/tasks`, `/task N`, `/cost`, `/goals`,
-//! `/services`, `/routines` and `/status` (`owner_views`): which tasks a bot
+//! `/services`, `/routines`, `/status` and `/node` (`owner_views`): which tasks a bot
 //! lists and in what order, the empty and truncated replies, one task's view,
 //! the 7-day cost of one bot, its goals, services, routines and schedules.
 use axe::bot::{self, ts, NewBot};
@@ -713,5 +713,30 @@ fn status_shows_the_live_run_and_attention() {
              No wakes queued · last run 07:59 (1m ago)",
             bot::FAILURES_PAUSE
         )
+    );
+}
+
+/// `/node` with no sample says so; an old sample is marked stale.
+#[test]
+fn node_view_without_a_fresh_sample() {
+    let (_d, c) = setup();
+    let empty = owner_views::node(&c, Some(WEB), now()).unwrap();
+    assert!(empty.starts_with("<b>Node · no samples yet</b>"), "{empty}");
+    assert!(empty.ends_with("<a href=\"http://axe.example/?view=node\">Open node</a>"));
+    let s = axe::node_metrics::Sample {
+        cpu_percent: Some(5.0),
+        runs: axe::node_metrics::Runs {
+            bot: [("a".to_string(), 1)].into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let at = now() - 3 * 3600;
+    axe::node_metrics::record(&c, "n1", at, s, &Default::default()).unwrap();
+    let stale = owner_views::node(&c, None, now()).unwrap();
+    assert_eq!(
+        stale,
+        "<b>Node · stale</b> · last sample 3h ago\nCPU <code>5%</code>\n\n<b>Running</b>\n\
+         Tasks <code>0</code>\nBots <code>1</code>: a\nServices <code>0</code>\nScheduled <code>0</code>"
     );
 }
