@@ -67,7 +67,8 @@
    ticks' left edge, its mark a side-panel glyph as wide as a top-level
    tick (unlike the ticks, so it does not read as one). Keyboard focus opens
    the list over the content on an overlay surface, one 24px line per row.
-   The consumer's column follows the collapsed and pinned widths. */
+   The consumer's column follows the collapsed and pinned widths, or holds
+   a fixed rail (data-fixed) at one width either way (below). */
 .rail {
   --toc-collapsed-width: var(--space-4);
   --toc-open-width: calc(var(--space-8) * 2 - var(--space-2));
@@ -91,8 +92,7 @@
    side: tweening the width would lay the labels out in a box too narrow for
    them, so they reflow as it grows. A pinned rail restored on load does not
    animate (data-reveal is set only by the toggle). */
-.rail[data-open],
-.rail[data-pinned][data-reveal] {
+.rail:not([data-fixed]):is([data-open], [data-pinned][data-reveal]) {
   animation: rail-in var(--transition-disclosure) both;
 }
 
@@ -115,6 +115,60 @@
   margin-inline: calc(var(--space-half) * -1);
   background: var(--surface-overlay);
   box-shadow: var(--shadow-overlay);
+}
+
+/* A fixed rail: as wide as its column collapsed, open or pinned, so the
+   page around it never moves. Open by focus it shows the list in place, as
+   pinned, with no overlay (there is nothing under it to cover). The strip
+   keeps its own width at the rail's left edge. Between the strip and the
+   list the content slides (transform and opacity, clipped by the rail's
+   scroll box; never a width tween, so no label reflows): the list in from
+   the left edge, out to it while leaving, then the strip back in. With
+   reduced motion they swap at once. */
+.rail[data-fixed] {
+  width: 100%;
+}
+.rail[data-fixed][data-open] {
+  padding: 0;
+  margin-inline: 0;
+  background: none;
+  box-shadow: none;
+}
+.rail[data-fixed]:not([data-pinned], [data-open]) > :not(.peek) {
+  width: var(--toc-collapsed-width);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rail[data-fixed] > :not(.peek) {
+    transition:
+      opacity var(--transition-layout),
+      transform var(--transition-layout);
+  }
+  .rail[data-fixed][data-leaving] > :not(.peek) {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  .rail[data-fixed]:is([data-open], [data-pinned][data-reveal]):not([data-leaving]) > :not(.peek) {
+    animation: rail-slide-in var(--transition-layout) backwards;
+  }
+  .rail[data-fixed][data-reveal]:not([data-pinned], [data-open]) > :not(.peek) {
+    animation: rail-strip-in var(--transition-layout) backwards;
+  }
+}
+
+/* Two names for one motion, so the strip's slide restarts after the list's. */
+@keyframes rail-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes rail-strip-in {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
 }
 
 .head {

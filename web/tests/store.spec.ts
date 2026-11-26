@@ -581,14 +581,18 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
     "4.Section 4",
     "5.Section 5",
   ]);
-  // Collapsed by default: a slim column of ticks beside the body, one per
-  // heading, shorter by level, the current section's in primary text.
+  // Collapsed by default: a slim strip of ticks at the left of the rail's
+  // column, one per heading, shorter by level, the current section's in
+  // primary text. The rail itself keeps its open width (a fixed rail).
   const rail = toc.locator("..");
   const pin = rail.getByRole("button", { name: "Pin contents open" });
   await expect(pin).toHaveAttribute("aria-pressed", "false");
   await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
-  const collapsed = (await rail.boundingBox())!;
+  const railCollapsed = (await rail.boundingBox())!;
+  expect(railCollapsed.width).toBeGreaterThan(200);
+  const collapsed = (await toc.boundingBox())!;
   expect(collapsed.width).toBeLessThanOrEqual(32);
+  expect(collapsed.x).toBe(railCollapsed.x);
   const ticks = toc.locator("a > span:first-child");
   await expect(ticks).toHaveCount(6);
   const tickWidth = (i: number) => ticks.nth(i).evaluate((e) => e.getBoundingClientRect().width);
@@ -654,8 +658,17 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   expect(Math.abs(label.y + label.height / 2 - zoomed[3].y)).toBeLessThan(2);
   expect(label.x).toBeGreaterThanOrEqual(collapsed.x + collapsed.width);
   await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
-  expect((await rail.boundingBox())!.width).toBeLessThanOrEqual(32);
+  expect((await toc.boundingBox())!.width).toBeLessThanOrEqual(32);
+  expect((await rail.boundingBox())!.width).toBe(railCollapsed.width);
   expect((await body.boundingBox())!.x).toBe(bodyCollapsed.x);
+  // Off the strip, in the rail's empty width, the dock rests.
+  await page.mouse.move(700, 600);
+  await expect(peek).toBeHidden();
+  await page.mouse.move(collapsed.x + 120, rest[3].y);
+  await page.waitForTimeout(200);
+  await expect(peek).toBeHidden();
+  await page.mouse.move(rest[3].x + 4, rest[3].y);
+  await expect(peek).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("doc-contents-hover.png") });
   // Moving down follows the pointer to the next tick.
   await hoverTick(4);
@@ -689,15 +702,19 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   await page.keyboard.press("Tab");
   await expect(pin).toBeFocused();
   await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
-  // It opens at its full width at once and only fades in: no width tween
-  // that would lay the labels out too narrow, so no label wraps.
+  // It opens in place at the rail's one width and the list slides in: no
+  // width tween that would lay the labels out too narrow, so no label wraps,
+  // and no overlay over the body.
   const opened = await rail.evaluate((e) => ({
     width: e.getBoundingClientRect().width,
     tween: getComputedStyle(e).transitionProperty.includes("width"),
-    fades: getComputedStyle(e).animationName !== "none",
+    slides: getComputedStyle(e.querySelector("nav")!).animationName,
+    shadow: getComputedStyle(e).boxShadow,
   }));
-  expect(opened).toMatchObject({ tween: false, fades: true });
-  expect(opened.width).toBeGreaterThan(200);
+  expect(opened).toMatchObject({ tween: false, shadow: "none" });
+  expect(opened.slides).toMatch(/rail-slide-in/);
+  expect(opened.width).toBe(railCollapsed.width);
+  expect((await body.boundingBox())!.x).toBe(bodyCollapsed.x);
   const rowHeights = await toc.getByRole("link").evaluateAll((as) => as.map((a) => a.getBoundingClientRect().height));
   expect(new Set(rowHeights).size).toBe(1);
   await page.keyboard.press("Enter");
@@ -709,11 +726,78 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   await expect(unpin).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
   // Restored on load, the pinned rail does not animate.
-  expect(await rail.evaluate((e) => getComputedStyle(e).animationName)).toBe("none");
+  const motion = () =>
+    rail.evaluate((e) =>
+      Array.from(e.querySelectorAll(":scope > :not([popover])"), (c) => getComputedStyle(c).animationName),
+    );
+  expect(await motion()).toEqual(["none", "none"]);
   await page.mouse.move(700, 600);
-  // Pinned, the column widens and the body gives way.
-  expect((await body.boundingBox())!.x).toBeGreaterThan(bodyCollapsed.x + 100);
+  // Pinned, the rail keeps its width and the body does not move.
+  expect((await rail.boundingBox())!.width).toBe(railCollapsed.width);
+  expect((await body.boundingBox())!.x).toBe(bodyCollapsed.x);
   await page.screenshot({ path: test.info().outputPath("doc-contents-pinned.png") });
+  // Collapsing and pinning by the toggle slide the content (transform and
+  // opacity) inside a rail of one width; every frame keeps the rail's width
+  // and the body's place, and no label wraps. The list slides out first,
+  // the strip back in after it.
+  const frames = (n: number) =>
+    page.evaluate(
+      (n) =>
+        new Promise<{ rail: number; body: number; moving: boolean; wraps: number; leaving: boolean }[]>((done) => {
+          const rail = document.querySelector<HTMLElement>("[data-toc-rail]")!;
+          const body = document.querySelector("article")!;
+          const out: { rail: number; body: number; moving: boolean; wraps: number; leaving: boolean }[] = [];
+          const step = () => {
+            const nav = rail.querySelector("nav")!;
+            out.push({
+              rail: rail.getBoundingClientRect().width,
+              body: body.getBoundingClientRect().x,
+              moving: getComputedStyle(nav).transform !== "none" && getComputedStyle(nav).transform !== "matrix(1, 0, 0, 1, 0, 0)",
+              wraps: rail.hasAttribute("data-pinned")
+                ? Array.from(nav.querySelectorAll("a .text")).filter((t) => t.getClientRects().length > 1).length
+                : 0,
+              leaving: rail.hasAttribute("data-leaving"),
+            });
+            if (out.length < n) requestAnimationFrame(step);
+            else done(out);
+          };
+          requestAnimationFrame(step);
+        }),
+      n,
+    );
+  const toggle = async () => {
+    const f = frames(40);
+    await rail.getByRole("button").click();
+    return f;
+  };
+  const steady = (fs: Awaited<ReturnType<typeof frames>>) => {
+    expect(new Set(fs.map((f) => f.rail))).toEqual(new Set([railCollapsed.width]));
+    expect(new Set(fs.map((f) => f.body))).toEqual(new Set([bodyCollapsed.x]));
+    expect(fs.every((f) => f.wraps === 0)).toBe(true);
+    expect(fs.some((f) => f.moving)).toBe(true);
+  };
+  const out = await toggle();
+  steady(out);
+  expect(out.some((f) => f.leaving)).toBe(true);
+  await expect(rail).not.toHaveAttribute("data-pinned");
+  await expect(page.getByText("Contents", { exact: true }).first()).toBeHidden();
+  steady(await toggle());
+  await expect(rail).toHaveAttribute("data-pinned");
+  // A second press while it slides out reverses it: still pinned.
+  await rail.getByRole("button").click();
+  await expect(rail).toHaveAttribute("data-leaving");
+  await rail.getByRole("button").click();
+  await expect(rail).not.toHaveAttribute("data-leaving");
+  await expect(rail.getByRole("button")).toHaveAttribute("aria-pressed", "true");
+  // With reduced motion they swap at once, with nothing moving.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const still = await toggle();
+  expect(still.every((f) => !f.moving && !f.leaving)).toBe(true);
+  await expect(rail).not.toHaveAttribute("data-pinned");
+  await rail.getByRole("button").click();
+  await expect(rail).toHaveAttribute("data-pinned");
+  await page.emulateMedia({ reducedMotion: null });
+  await page.mouse.move(700, 600);
   // The title outranks the sections and the sections the text; a section
   // sits closer to its text than to the text before it.
   const size = (l: Locator) => l.evaluate((e) => parseFloat(getComputedStyle(e).fontSize));
@@ -728,6 +812,20 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   // Text keeps a reading measure; code uses the whole column.
   const [text, code] = await Promise.all([box(para(1)), box(body.locator("pre"))]);
   expect(text.width).toBeLessThan(code.width);
+  // The measure is 76ch to a 1200px window, then a little wider, at most
+  // 83ch: about 4% more here at 1440px, more on a large screen.
+  const ch = await para(1).evaluate((e) => {
+    const probe = document.createElement("span");
+    probe.style.cssText = "display:inline-block;width:1ch";
+    e.append(probe);
+    const w = probe.getBoundingClientRect().width;
+    probe.remove();
+    return w;
+  });
+  expect(text.width / ch).toBeCloseTo(76 + 240 / 10 / ch, 0);
+  await page.setViewportSize({ width: 1920, height: 900 });
+  expect((await box(para(1))).width / ch).toBeCloseTo(83, 0);
+  await page.setViewportSize({ width: 1440, height: 900 });
   // The rail shows; the narrow layout's fold does not.
   await expect(page.locator("summary", { hasText: "Contents" })).toBeHidden();
   // Contents left, body center, metadata right, on one row.

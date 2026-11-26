@@ -7,7 +7,8 @@
 // pointer like a dock (lib/toc-dock.ts) and names the tick it is on; keyboard
 // focus opens the list over the content, and the toggle pins it open
 // (lib/toc-pin.ts); a consumer widens its column for a pinned rail with
-// `:has([data-pinned])`. Entries come from
+// `:has([data-pinned])`, or passes `fixed` for a rail of one width either
+// way that slides between the strip and the list. Entries come from
 // lib/doc-toc.ts (`tocEntries`); a short body has none, and both render
 // nothing.
 import {
@@ -137,7 +138,7 @@ function useDock(rail: RefObject<HTMLDivElement | null>, on: boolean) {
         .map((c) => a.querySelector(`.${c}`)?.textContent)
         .filter(Boolean)
         .join(" ");
-      label.style.left = `${rail.current!.getBoundingClientRect().right}px`;
+      label.style.left = `${o.right}px`;
       label.style.top = `${o.top + (rows[hovered].top + rows[hovered].size / 2) * pitch}px`;
       if (!label.matches(":popover-open")) label.showPopover();
     } else if (label?.matches(":popover-open")) label.hidePopover();
@@ -153,7 +154,8 @@ function useDock(rail: RefObject<HTMLDivElement | null>, on: boolean) {
     const o = ol.getBoundingClientRect();
     const s = dock.current;
     s.y = e.clientY;
-    s.target = s.y >= o.top && s.y < o.bottom ? 1 : 0;
+    // On the ticks only: a fixed rail is wider than its strip.
+    s.target = s.y >= o.top && s.y < o.bottom && e.clientX < o.right ? 1 : 0;
     schedule();
   };
   const leave = () => {
@@ -181,16 +183,24 @@ const peekOf = (rail: HTMLElement | null) => rail?.querySelector<HTMLElement>(`.
 // The sticky side list. Collapsed it is a dense strip of ticks that
 // magnifies under the pointer (useDock); keyboard focus opens the full list
 // over the content (Escape closes it), and the toggle keeps it open in the
-// page's flow.
-export function TocRail({ className, ...props }: TocProps & { className?: string }) {
+// page's flow. A `fixed` rail keeps one width (its column's) collapsed or
+// open; the toggle slides the list in from the strip and, unpinning, out
+// again before the strip slides back (`leaving`: the choice is stored at
+// once, the pinned list stays shown for the slide; a second press reverses
+// it). Reduced motion swaps them at once.
+export function TocRail({ className, fixed = false, ...props }: TocProps & { className?: string; fixed?: boolean }) {
   const [pinned, setPinned] = useTocPinned();
   const [focus, setFocus] = useState(false);
-  // Set by the toggle: a pin the reader just made fades in; one restored on
-  // load does not.
+  // Set by the toggle (and, on a fixed rail, by keyboard focus): a pin the
+  // reader just made fades in; one restored on load does not.
   const [reveal, setReveal] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const leave = useRef(0);
+  useEffect(() => () => clearTimeout(leave.current), []);
   const rail = useRef<HTMLDivElement>(null);
-  const open = !pinned && focus && props.entries.length > 0;
-  const dock = useDock(rail, !pinned && !open);
+  const shown = pinned || leaving;
+  const open = !shown && focus && props.entries.length > 0;
+  const dock = useDock(rail, !shown && !open);
   // Escape closes the open list wherever focus is; focus stays where it was.
   useEffect(() => {
     if (!open) return;
@@ -206,7 +216,9 @@ export function TocRail({ className, ...props }: TocProps & { className?: string
   // Keyboard focus only: a clicked entry keeps focus, and the strip should
   // stay a strip.
   const focusIn = (e: FocusEvent<HTMLDivElement>) => {
-    if (e.target.matches(":focus-visible")) setFocus(true);
+    if (!e.target.matches(":focus-visible")) return;
+    setFocus(true);
+    if (fixed) setReveal(true);
   };
   const focusOut = (e: FocusEvent<HTMLDivElement>) => {
     if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocus(false);
@@ -217,7 +229,9 @@ export function TocRail({ className, ...props }: TocProps & { className?: string
       ref={rail}
       className={cx(styles.rail, className)}
       data-toc-rail=""
-      data-pinned={pinned ? "" : undefined}
+      data-fixed={fixed ? "" : undefined}
+      data-pinned={shown ? "" : undefined}
+      data-leaving={leaving ? "" : undefined}
       data-open={open ? "" : undefined}
       data-reveal={reveal ? "" : undefined}
       onPointerMove={dock.move}
@@ -236,9 +250,13 @@ export function TocRail({ className, ...props }: TocProps & { className?: string
           aria-label={label}
           title={label}
           onClick={() => {
+            clearTimeout(leave.current);
             setPinned(!pinned);
             setFocus(false);
             setReveal(true);
+            const ms = fixed && pinned ? motionMs("--duration-layout") : 0;
+            setLeaving(ms > 0);
+            if (ms) leave.current = window.setTimeout(() => setLeaving(false), ms);
           }}
         >
           {/* A side panel, its strip filled while pinned open: a glyph
