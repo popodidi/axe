@@ -619,6 +619,8 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   const mark = (await pin.locator("svg").boundingBox())!;
   expect(Math.abs(mark.x - rest[0].x)).toBeLessThanOrEqual(1);
   expect(Math.abs(mark.width - rest[0].w)).toBeLessThanOrEqual(1);
+  // Its glyph is a side panel, not stacked lines that read as more ticks.
+  await expect(pin.locator("svg rect")).toHaveCount(1);
   await page.screenshot({ path: test.info().outputPath("doc-contents-collapsed.png") });
   // Hovering magnifies like a dock: the tick under the pointer grows longest
   // and thickest, its neighbours less by distance, and the rows around it
@@ -687,6 +689,17 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   await page.keyboard.press("Tab");
   await expect(pin).toBeFocused();
   await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
+  // It opens at its full width at once and only fades in: no width tween
+  // that would lay the labels out too narrow, so no label wraps.
+  const opened = await rail.evaluate((e) => ({
+    width: e.getBoundingClientRect().width,
+    tween: getComputedStyle(e).transitionProperty.includes("width"),
+    fades: getComputedStyle(e).animationName !== "none",
+  }));
+  expect(opened).toMatchObject({ tween: false, fades: true });
+  expect(opened.width).toBeGreaterThan(200);
+  const rowHeights = await toc.getByRole("link").evaluateAll((as) => as.map((a) => a.getBoundingClientRect().height));
+  expect(new Set(rowHeights).size).toBe(1);
   await page.keyboard.press("Enter");
   const unpin = rail.getByRole("button", { name: "Collapse contents" });
   await expect(unpin).toHaveAttribute("aria-pressed", "true");
@@ -695,6 +708,8 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
   await expect(unpin).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("Contents", { exact: true }).first()).toBeVisible();
+  // Restored on load, the pinned rail does not animate.
+  expect(await rail.evaluate((e) => getComputedStyle(e).animationName)).toBe("none");
   await page.mouse.move(700, 600);
   // Pinned, the column widens and the body gives way.
   expect((await body.boundingBox())!.x).toBeGreaterThan(bodyCollapsed.x + 100);
@@ -722,6 +737,14 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   expect(Math.abs(m!.y - b!.y)).toBeLessThan(4);
   // The body is wider than the old single column (840px).
   expect(b!.width).toBeGreaterThan(860);
+  // The text's measure is centred in the body: as far from the contents
+  // rail as from the metadata, the headings on the text's left edge.
+  const railBox = (await rail.boundingBox())!;
+  const left = text.x - (railBox.x + railBox.width);
+  const right = m!.x - (text.x + text.width);
+  expect(Math.abs(left - right)).toBeLessThanOrEqual(2);
+  expect(left).toBeGreaterThan(100);
+  expect(Math.abs((await box(h2)).x - text.x)).toBeLessThanOrEqual(1);
   // The first section is current at the top.
   await expect(toc.getByRole("link", { name: "Section 1" })).toHaveAttribute("aria-current", "location");
   // Scrolling marks the section in view; the rails stay put.
@@ -799,6 +822,11 @@ test("a narrow doc page stacks the metadata and folds the contents", async ({ pa
   expect(m!.y + m!.height).toBeLessThanOrEqual(b!.y);
   const sizes = await page.evaluate(() => ({ sw: document.scrollingElement!.scrollWidth, w: innerWidth }));
   expect(sizes.sw).toBeLessThanOrEqual(sizes.w);
+  // On a phone the body has matching gutters left and right.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const para = (await body.getByText("Paragraph 1 of the long report.", { exact: true }).boundingBox())!;
+  expect(Math.abs(para.x - (390 - para.x - para.width))).toBeLessThanOrEqual(1);
+  await page.setViewportSize({ width: 1024, height: 900 });
   // One contents list, folded until opened.
   const toc = page.getByRole("navigation", { name: "Contents" });
   await expect(toc).toHaveCount(0);

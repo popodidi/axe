@@ -64,7 +64,8 @@
    each tick grows with its --dock-zoom (0-1), up to half again as long and
    nearly twice as thick; the hovered tick (data-dock) is in primary text and
    its title shows in a popover beside the rail. The toggle sits on the
-   ticks' left edge, its mark three full-length ticks. Keyboard focus opens
+   ticks' left edge, its mark a side-panel glyph as wide as a top-level
+   tick (unlike the ticks, so it does not read as one). Keyboard focus opens
    the list over the content on an overlay surface, one 24px line per row.
    The consumer's column follows the collapsed and pinned widths. */
 .rail {
@@ -84,10 +85,22 @@
   border-radius: var(--radius-md);
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
-  transition:
-    width var(--transition-feedback),
-    background-color var(--transition-feedback),
-    box-shadow var(--transition-feedback);
+}
+/* Opening (keyboard focus) or pinning by the toggle shows the list at its
+   final width from the first frame and only fades it in from the rail's
+   side: tweening the width would lay the labels out in a box too narrow for
+   them, so they reflow as it grows. A pinned rail restored on load does not
+   animate (data-reveal is set only by the toggle). */
+.rail[data-open],
+.rail[data-pinned][data-reveal] {
+  animation: rail-in var(--transition-disclosure) both;
+}
+
+@keyframes rail-in {
+  from {
+    opacity: 0;
+    transform: translateX(calc(var(--motion-distance) * -1));
+  }
 }
 .rail:hover {
   scrollbar-color: var(--border-control-color) transparent;
@@ -190,9 +203,6 @@
 }
 .rail:not([data-pinned], [data-open]) .pin:not(:hover) {
   opacity: 0.8;
-}
-.rail:not([data-pinned], [data-open]) .pin svg {
-  stroke-width: 2;
 }
 .rail:not([data-pinned], [data-open]) .list li {
   height: var(--dock-size, var(--toc-pitch));
