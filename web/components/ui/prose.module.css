@@ -136,11 +136,12 @@
 
 /* A doc on its own page: text blocks keep a reading measure, centred in
    the column so the text sits as far from the contents rail as from the
-   metadata rail, while code and tables use the full column; headings step down in size and sit closer to
-   what follows than to what precedes; a lead-in paragraph stays with its
-   list and the paragraph after a list starts a new group. */
-/* Registered as a length so 76ch resolves once, at the body text's size,
-   and headings share the text's measure and left edge. */
+   metadata rail, while code and tables use the full column; headings step
+   down in size and sit closer to what follows than to what precedes; a
+   lead-in paragraph stays with its list and the paragraph after a list
+   starts a new group. The measure is registered as a length so 76ch
+   resolves once, at the body text's size, and headings share the text's
+   measure and left edge. */
 @property --doc-measure {
   syntax: "<length>";
   inherits: true;
