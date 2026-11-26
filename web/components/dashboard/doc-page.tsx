@@ -244,7 +244,7 @@ function DocLayout({
   const shown = toc.entries.length > 0;
   return (
     <div className={cx(styles.layout, shown && styles.withToc)}>
-      <TocRail {...toc} className={styles.tocRail} />
+      <TocRail {...toc} fixed className={styles.tocRail} />
       <TocFold {...toc} className={styles.tocFold} />
       <aside className={styles.meta} aria-label="Doc metadata">
         {meta}

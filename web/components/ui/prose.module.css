@@ -139,9 +139,12 @@
    metadata rail, while code and tables use the full column; headings step
    down in size and sit closer to what follows than to what precedes; a
    lead-in paragraph stays with its list and the paragraph after a list
-   starts a new group. The measure is registered as a length so 76ch
-   resolves once, at the body text's size, and headings share the text's
-   measure and left edge. */
+   starts a new group. The measure is 76ch up to a 1200px window and then
+   grows a tenth of the extra width, to at most 83ch (about 4% wider at
+   1440px, 9% at 1920px): a little more room on large screens, still a
+   comfortable line. It is registered as a length so it resolves once, at
+   the body text's size, and headings share the text's measure and left
+   edge. */
 @property --doc-measure {
   syntax: "<length>";
   inherits: true;
@@ -149,7 +152,7 @@
 }
 
 .document {
-  --doc-measure: 76ch;
+  --doc-measure: clamp(76ch, 76ch + (100vw - var(--space-8) * 10) / 10, 83ch);
 }
 
 .document > :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, dl) {

@@ -1,9 +1,9 @@
 @value bp-doc-rails from "../../app/styles/breakpoints.module.css";
 
 /* The doc page (app/doc). Narrow: one column, the contents folded first,
-   then the metadata above the body. Wide: the contents rail (32px of ticks,
-   224px when pinned open), body up to 1080px, metadata rail 240px, the
-   rails sticky while the window scrolls. */
+   then the metadata above the body. Wide: the contents rail (224px, the
+   same collapsed or pinned open, so the body never moves), body up to
+   1080px, metadata rail 240px, the rails sticky while the window scrolls. */
 .page {
   position: relative;
   padding: var(--pane-padding);
@@ -19,7 +19,7 @@
 }
 .layout {
   --doc-meta-width: calc(var(--space-8) * 2);
-  --doc-toc-width: var(--space-4);
+  --doc-toc-width: calc(var(--space-8) * 2 - var(--space-2));
   --doc-body-max: calc(var(--space-8) * 9);
   --doc-rail-top: var(--space-snug);
   --doc-meta-key: var(--space-5);
@@ -137,10 +137,8 @@
   color: var(--text-tertiary);
 }
 /* The contents (components/ui/toc.tsx): folded first on narrow windows,
-   a sticky rail on wide ones, its column as wide as the rail. */
-.layout:has(> .tocRail[data-pinned]) {
-  --doc-toc-width: calc(var(--space-8) * 2 - var(--space-2));
-}
+   a sticky rail on wide ones in a column of one width (a fixed rail), so
+   pinning or collapsing it never moves the body. */
 .layout .tocRail {
   display: none;
 }
