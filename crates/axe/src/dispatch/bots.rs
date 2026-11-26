@@ -19,7 +19,7 @@ use crate::rule;
 
 pub(super) struct BotRun {
     run_id: i64,
-    name: String,
+    pub(super) name: String,
     pub(super) agent: String,
     session_mode: SessionMode,
     session_id: Option<String>,

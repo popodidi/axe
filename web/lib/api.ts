@@ -314,4 +314,52 @@ version: string,
  */
 commit: string | null, };
 
+export type NodeSeries = { range: string, 
+/**
+ * `raw` or `rollup`.
+ */
+source: string, step_seconds: number, 
+/**
+ * Points cover `[from, to)`, server time.
+ */
+from: number, to: number, now: number, sample_seconds: number, points: Array<NodePoint>, 
+/**
+ * The newest sample, whatever the range.
+ */
+current: NodeSample | null, };
+
+export type NodePoint = { t: number, 
+/**
+ * Raw samples behind the point.
+ */
+n: number, cpu_avg: number | null, cpu_max: number | null, mem_used_avg: number | null, mem_used_max: number | null, mem_total: number | null, load1_avg: number | null, load1_max: number | null, disk_free_min: number | null, task_avg: number, task_max: number, bot_avg: number, bot_max: number, service_avg: number, service_max: number, scheduled_avg: number, scheduled_max: number, };
+
+export type NodeSample = { at: number, 
+/**
+ * Busy CPU percent since the previous sample; null on the first.
+ */
+cpu_percent: number | null, mem_used_bytes: number | null, mem_total_bytes: number | null, load1: number | null, load5: number | null, load15: number | null, 
+/**
+ * Free and total bytes of the run workspaces' filesystem (`disk_path`).
+ */
+disk_free_bytes: number | null, disk_total_bytes: number | null, disk_path: string, runs: NodeRuns, };
+
+export type NodeRuns = { 
+/**
+ * Task runs (agent sessions and routine pre-checks) per project.
+ */
+task: { [key in string]: number }, 
+/**
+ * Bot runs per bot.
+ */
+bot: { [key in string]: number }, 
+/**
+ * Long-running services with a live process, per owning bot.
+ */
+service: { [key in string]: number }, 
+/**
+ * Scheduled (cron) service runs in progress, per owning bot.
+ */
+scheduled: { [key in string]: number }, };
+
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;

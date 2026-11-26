@@ -740,6 +740,94 @@ pub fn status(conn: &Connection, name: &str, now: i64) -> Result<String> {
     Ok(s)
 }
 
+/// A sample older than this reads as stale in `/node`.
+const NODE_STALE_SECONDS: i64 = 120;
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1}", bytes as f64 / (1u64 << 30) as f64)
+}
+
+/// One `/node` run line: the kind, its total, then each name (with its count
+/// when above one), largest first.
+fn node_runs_line(kind: &str, by: &std::collections::BTreeMap<String, u32>) -> String {
+    let total: u32 = by.values().sum();
+    let mut line = format!("{kind} <code>{total}</code>");
+    let mut names: Vec<(&String, &u32)> = by.iter().collect();
+    names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let names: Vec<String> = names
+        .into_iter()
+        .map(|(n, c)| match c {
+            1 => escape(n),
+            c => format!("{} <code>{c}</code>", escape(n)),
+        })
+        .collect();
+    if !names.is_empty() {
+        line.push_str(": ");
+        line.push_str(&names.join(", "));
+    }
+    line
+}
+
+/// `/node`, HTML for a phone: the node's newest sample (`node_metrics.rs`),
+/// CPU, memory, disk and its running runs by kind.
+pub fn node(conn: &Connection, web: Option<&str>, now: i64) -> Result<String> {
+    let link = view_link(web, "view=node", "Open node");
+    let Some(s) = crate::node_metrics::latest(conn)? else {
+        return Ok(format!(
+            "<b>Node · no samples yet</b>\nThe node reports every <code>[node_metrics] sample_seconds</code>.{link}"
+        ));
+    };
+    let age = now - s.at;
+    let [task, bots, services, scheduled] = s.runs.totals();
+    let running = task + bots + services + scheduled;
+    let mut out = if age > NODE_STALE_SECONDS {
+        format!(
+            "<b>Node · stale</b> · last sample {} ago",
+            crate::board::age(age)
+        )
+    } else {
+        format!("<b>Node · {running} running</b>")
+    };
+    let mut cpu = match s.cpu_percent {
+        Some(c) => format!("\nCPU <code>{c:.0}%</code>"),
+        None => "\nCPU <code>?</code>".into(),
+    };
+    if let (Some(a), Some(b), Some(c)) = (s.load1, s.load5, s.load15) {
+        cpu.push_str(&format!(" · load <code>{a:.2} {b:.2} {c:.2}</code>"));
+    }
+    out.push_str(&cpu);
+    if let (Some(used), Some(total)) = (s.mem_used_bytes, s.mem_total_bytes) {
+        let pct = 100.0 * used as f64 / total.max(1) as f64;
+        out.push_str(&format!(
+            "\nMemory <code>{} / {} GiB</code> · <code>{pct:.0}%</code>",
+            gib(used),
+            gib(total)
+        ));
+    }
+    if let (Some(free), Some(total)) = (s.disk_free_bytes, s.disk_total_bytes) {
+        out.push_str(&format!(
+            "\nDisk free <code>{} GiB</code> of <code>{} GiB</code>",
+            gib(free),
+            gib(total)
+        ));
+    }
+    if age <= NODE_STALE_SECONDS {
+        out.push_str(&format!("\nSampled {} ago", crate::board::age(age)));
+    }
+    out.push_str("\n\n<b>Running</b>");
+    for (kind, by) in [
+        ("Tasks", &s.runs.task),
+        ("Bots", &s.runs.bot),
+        ("Services", &s.runs.service),
+        ("Scheduled", &s.runs.scheduled),
+    ] {
+        out.push('\n');
+        out.push_str(&node_runs_line(kind, by));
+    }
+    out.push_str(&link);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

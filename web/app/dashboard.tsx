@@ -46,6 +46,7 @@ import {
   routineStatuses,
   useRoutines,
 } from "../components/dashboard/routines";
+import { Node } from "../components/dashboard/node";
 import { ServiceList, ServicePane, useServices } from "../components/dashboard/services";
 import { serviceStates } from "../lib/services";
 import { Cost } from "../components/dashboard/cost";
@@ -92,9 +93,9 @@ const host = (base: string) => {
     return base;
   }
 };
-const views = ["tasks", "routines", "services", "bots", "goals", "store", "stats", "cost"];
-const labels = ["Tasks", "Routines", "Services", "Bots", "Goals", "Store", "Stats", "Cost"];
-const keys = ["t", "r", "n", "b", "o", "e", "s", "c"];
+const views = ["tasks", "routines", "services", "bots", "goals", "store", "stats", "cost", "node"];
+const labels = ["Tasks", "Routines", "Services", "Bots", "Goals", "Store", "Stats", "Cost", "Node"];
+const keys = ["t", "r", "n", "b", "o", "e", "s", "c", "d"];
 // The list views whose selected item opens in the item pane, by the URL
 // parameter that names it; the list row id is `<param>-<key>`.
 const itemParams: Record<string, string> = {
@@ -476,6 +477,7 @@ export default function Dashboard() {
           v: "tasks",
           s: "stats",
           c: "cost",
+          d: "node",
           r: "routines",
           n: "services",
           b: "bots",
@@ -761,7 +763,7 @@ export default function Dashboard() {
             className={styles.listPane}
             aria-label="Task workspace"
           >
-            {view !== "stats" && view !== "cost" && view !== "store" && (
+            {view !== "stats" && view !== "cost" && view !== "store" && view !== "node" && (
             <div className={styles.filters}>
               <Search
                 compact
@@ -903,6 +905,8 @@ export default function Dashboard() {
               />
             ) : view === "cost" ? (
               <Cost base={base} params={p} onRange={(patch) => update(patch)} />
+            ) : view === "node" ? (
+              <Node base={base} params={p} onRange={(patch) => update(patch)} />
             ) : !data ? (
               <Skeleton label="Loading tasks…" lines={6} />
             ) : view === "stats" ? (

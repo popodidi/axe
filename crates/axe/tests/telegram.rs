@@ -3728,6 +3728,57 @@ fn post(rig: &Rig, path: &str, body: Value) -> Value {
         .unwrap()
 }
 
+/// A node sample carried on the admission report is stored, and `/node`
+/// replies with it in HTML without waking the bot.
+#[test]
+fn node_command_shows_the_reported_sample() {
+    let rig = Rig::new();
+    let g = post(
+        &rig,
+        "/api/dispatcher/register",
+        json!({"id":"d1","generation":""}),
+    );
+    let g = g["generation"].as_str().unwrap();
+    let gib: u64 = 1 << 30;
+    post(
+        &rig,
+        "/api/dispatcher/admission",
+        json!({"id":"d1","generation":g,"admission":{},"sample":{
+            "cpu_percent": 42.4, "mem_used_bytes": 4 * gib, "mem_total_bytes": 16 * gib,
+            "load1": 1.5, "load5": 1.25, "load15": 1.0,
+            "disk_free_bytes": 100 * gib, "disk_total_bytes": 400 * gib, "disk_path": "/runs",
+            "runs": {"task": {"harvis": 2, "tiktape": 1}, "bot": {"cos": 1},
+                     "service": {"cos": 1}, "scheduled": {}}}}),
+    );
+    let series: Value = ureq::get(&format!("{}/api/node/metrics?range=1h", rig.srv().url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(series["source"], "raw");
+    assert_eq!(series["points"].as_array().unwrap().len(), 1, "{series}");
+    assert_eq!(series["points"][0]["task_max"], 3.0);
+    assert_eq!(series["current"]["runs"]["task"]["harvis"], 2);
+
+    rig.stub.push(text_msg(100, 200, OWNER, OWNER, "/node"));
+    rig.stub.wait_confirmed(100);
+    wait_for("the /node reply", 20, || !rig.sent_to(OWNER).is_empty());
+    let sent = &rig.sent_to(OWNER)[0];
+    assert_eq!(sent["parse_mode"], "HTML");
+    let reply = sent["text"].as_str().unwrap();
+    assert!(reply.starts_with("<b>Node · 5 running</b>\nCPU <code>42%</code> · load <code>1.50 1.25 1.00</code>\nMemory <code>4.0 / 16.0 GiB</code> · <code>25%</code>\nDisk free <code>100.0 GiB</code> of <code>400.0 GiB</code>\nSampled "), "{reply}");
+    assert!(
+        reply.contains("<b>Running</b>\nTasks <code>3</code>: harvis <code>2</code>, tiktape\nBots <code>1</code>: cos\nServices <code>1</code>: cos\nScheduled <code>0</code>"),
+        "{reply}"
+    );
+    assert!(
+        reply.ends_with(&format!("<a href=\"{WEB}/?view=node\">Open node</a>")),
+        "{reply}"
+    );
+    assert!(rig.message_wakes().is_empty(), "the command wakes no bot");
+}
+
 #[test]
 fn runtimes_command_and_one_card_per_runtime_alert() {
     let rig = Rig::new();
@@ -4806,9 +4857,9 @@ fn command_menu_lists_the_routed_commands_for_the_owner_only() {
         .iter()
         .map(|(c, _)| *c)
         .collect();
-    assert_eq!(names.len(), 13, "{names:?}");
+    assert_eq!(names.len(), 14, "{names:?}");
     for c in [
-        "runtimes", "tasks", "task", "cost", "goals", "services", "routines",
+        "runtimes", "node", "tasks", "task", "cost", "goals", "services", "routines",
     ] {
         assert!(names.contains(&c), "{c} in {names:?}");
     }

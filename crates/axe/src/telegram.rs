@@ -69,8 +69,9 @@ const UPDATE_ATTEMPTS: u32 = 3;
 /// `/` menu shows ([`Gateway::publish_commands`]). `BotCommand`: the command
 /// is 1-32 lowercase letters, digits and underscores; the description 1-256
 /// characters.
-pub const OWNER_COMMANDS: [(&str, &str); 13] = [
+pub const OWNER_COMMANDS: [(&str, &str); 14] = [
     ("status", "Bot state, live run and next wake"),
+    ("node", "Node CPU, memory, disk and running runs"),
     ("tasks", "This bot's open tasks"),
     (
         "task",
@@ -1907,7 +1908,7 @@ impl Gateway {
         Ok(())
     }
 
-    /// `/status`, `/tasks`, `/task N`, `/cost`, `/goals`, `/services`,
+    /// `/status`, `/node`, `/tasks`, `/task N`, `/cost`, `/goals`, `/services`,
     /// `/routines`, `/stop`, `/pause`, `/resume`, `/reset`, `/wake [note]`:
     /// handled here, never waking the bot, so they
     /// work with no agent runtime logged in. The reply is recorded.
@@ -1932,13 +1933,14 @@ impl Gateway {
         // and bold headlines.
         let html = matches!(
             cmd,
-            "status" | "tasks" | "task" | "cost" | "goals" | "services" | "routines"
+            "status" | "node" | "tasks" | "task" | "cost" | "goals" | "services" | "routines"
         );
         let reply = {
             let mut conn = store.conn();
             let web = b.web.as_deref();
             let r = match cmd {
                 "status" => owner_views::status(&conn, &b.name(), now()),
+                "node" => owner_views::node(&conn, web, now()),
                 "tasks" => owner_views::tasks(&conn, &b.name(), web),
                 "task" => owner_views::task(&conn, arg, web),
                 "cost" => owner_views::cost(&conn, &b.name(), web, now()),

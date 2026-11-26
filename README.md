@@ -245,6 +245,14 @@ optional resource gate is open, and no admission hold is set
 gate's hard floor, so a full task queue never delays a bot's reply. Waiting
 tasks stay `pending` and spend nothing. `axe admission` shows why.
 
+**Node observability.** The node samples host CPU, memory, load, the run
+volume's free disk and its running runs by kind (task runs per project, bot
+runs per bot, services and scheduled service runs per bot) and sends them
+with its admission report; the server keeps raw samples and 5-minute rollups,
+pruned hourly (`[node_metrics]`, `node_metrics.rs`). The web Node view
+charts them (`GET /api/node/metrics`) and the Telegram owner command `/node`
+shows the latest sample.
+
 **Rollouts.** SIGUSR1 starts a bounded drain: nothing new is admitted, and
 after `drain_abort_seconds` unprotected task runs are stopped and requeued on
 the same session. `axe task protect ID` marks the live run as inside a
