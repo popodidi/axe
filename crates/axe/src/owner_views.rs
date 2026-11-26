@@ -656,7 +656,8 @@ pub fn routines(conn: &Connection, name: &str, web: Option<&str>, now: i64) -> R
 /// Characters of the live run's activity `/status` shows.
 const ACTIVITY_CAP: usize = 80;
 
-/// `/status`, HTML for a phone: a bold headline with the bot's state and
+/// `/status`, HTML for a phone, about this bot only (the machine it runs
+/// on is `/node`): a bold headline with the bot's state and
 /// what it is doing, one line of wakes and the last run (Taipei clock and
 /// how far off), then its services and its schedules (when each fires in
 /// words, the next fire; soonest first, paused last).
@@ -747,102 +748,124 @@ fn gib(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / (1u64 << 30) as f64)
 }
 
-/// One `/node` run line: the kind, its total, then each name (with its count
-/// when above one), largest first.
-fn node_runs_line(kind: &str, by: &std::collections::BTreeMap<String, u32>) -> String {
-    let total: u32 = by.values().sum();
-    let mut line = format!("{kind} <code>{total}</code>");
-    let mut names: Vec<(&String, &u32)> = by.iter().collect();
-    names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    let names: Vec<String> = names
-        .into_iter()
-        .map(|(n, c)| match c {
-            1 => escape(n),
-            c => format!("{} <code>{c}</code>", escape(n)),
-        })
-        .collect();
-    if !names.is_empty() {
-        line.push_str(": ");
-        line.push_str(&names.join(", "));
-    }
-    line
+fn pct(part: u64, whole: u64) -> f64 {
+    100.0 * part as f64 / whole.max(1) as f64
 }
 
-/// `/node` versions line: this server, the node binary and the CLI on the
-/// node host, each `version (short commit)`.
+/// `/node` versions, one per line: this server, the node binary and the CLI
+/// on the node host, each `version (short commit)`.
 fn node_versions(s: Option<&crate::node_metrics::Sample>) -> String {
-    let v = |x: Option<&str>| match x {
-        Some(x) => format!("<code>{}</code>", escape(x)),
-        None => "<code>?</code>".into(),
-    };
+    let v = |x: Option<&str>| format!("<code>{}</code>", escape(x.unwrap_or("?")));
     format!(
-        "axe server {} · node {} · CLI {}",
+        "Server {}\nNode {}\nCLI {}",
         v(Some(&crate::server::version().version)),
         v(s.and_then(|s| s.node_version.as_deref())),
         v(s.and_then(|s| s.cli_version.as_deref())),
     )
 }
 
-/// `/node`, HTML for a phone: the node's newest sample (`node_metrics.rs`),
-/// a versions line ([`node_versions`]), CPU, memory, disk and its running
-/// runs by kind.
+/// `/node`, HTML for a phone, about the machine only (the bot's own runs,
+/// services and schedules are `/status`): a bold headline with how many runs
+/// the node has, one line of CPU, memory and disk use, the running runs by
+/// kind (task runs by project; bot, service and scheduled runs as counts),
+/// then load, sizes, versions ([`node_versions`]) and the sample's age in an
+/// expandable quote. From the node's newest sample (`node_metrics.rs`).
 pub fn node(conn: &Connection, web: Option<&str>, now: i64) -> Result<String> {
     let link = view_link(web, "view=node", "Open node");
     let Some(s) = crate::node_metrics::latest(conn)? else {
         return Ok(format!(
-            "<b>Node · no samples yet</b>\n{}\nThe node reports every <code>[node_metrics] sample_seconds</code>.{link}",
+            "<b>Node · no samples yet</b>\nThe node reports every <code>[node_metrics] sample_seconds</code>.\n<blockquote expandable>{}</blockquote>{link}",
             node_versions(None)
         ));
     };
     let age = now - s.at;
+    let stale = age > NODE_STALE_SECONDS;
     let [task, bots, services, scheduled] = s.runs.totals();
     let running = task + bots + services + scheduled;
-    let mut out = if age > NODE_STALE_SECONDS {
+    let mut out = if stale {
         format!(
-            "<b>Node · stale</b> · last sample {} ago",
+            "<b>Node · stale, last sample {} ago</b>",
             crate::board::age(age)
         )
+    } else if running == 0 {
+        "<b>Node · idle</b>".to_string()
     } else {
         format!("<b>Node · {running} running</b>")
     };
-    out.push('\n');
-    out.push_str(&node_versions(Some(&s)));
-    let mut cpu = match s.cpu_percent {
-        Some(c) => format!("\nCPU <code>{c:.0}%</code>"),
-        None => "\nCPU <code>?</code>".into(),
-    };
-    if let (Some(a), Some(b), Some(c)) = (s.load1, s.load5, s.load15) {
-        cpu.push_str(&format!(" · load <code>{a:.2} {b:.2} {c:.2}</code>"));
-    }
-    out.push_str(&cpu);
+
+    let mut gauges = vec![match s.cpu_percent {
+        Some(c) => format!("CPU <code>{c:.0}%</code>"),
+        None => "CPU <code>?</code>".into(),
+    }];
     if let (Some(used), Some(total)) = (s.mem_used_bytes, s.mem_total_bytes) {
-        let pct = 100.0 * used as f64 / total.max(1) as f64;
+        gauges.push(format!("mem <code>{:.0}%</code>", pct(used, total)));
+    }
+    if let (Some(free), Some(total)) = (s.disk_free_bytes, s.disk_total_bytes) {
+        let used = total.saturating_sub(free);
+        gauges.push(format!("disk <code>{:.0}%</code>", pct(used, total)));
+    }
+    out.push('\n');
+    out.push_str(&gauges.join(" · "));
+
+    // Runs by kind, kinds with none left out. Only task runs name their
+    // projects: which bot runs, and its services, are that bot's `/status`.
+    if task > 0 {
+        let mut projects: Vec<(&String, &u32)> = s.runs.task.iter().collect();
+        projects.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let names: Vec<String> = projects
+            .into_iter()
+            .map(|(p, c)| match c {
+                1 => escape(p),
+                c => format!("{} <code>{c}</code>", escape(p)),
+            })
+            .collect();
         out.push_str(&format!(
-            "\nMemory <code>{} / {} GiB</code> · <code>{pct:.0}%</code>",
+            "\nTasks <code>{task}</code>: {}",
+            names.join(", ")
+        ));
+    }
+    let others: Vec<String> = [
+        ("bots", bots),
+        ("services", services),
+        ("scheduled", scheduled),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(kind, n)| format!("{kind} <code>{n}</code>"))
+    .collect();
+    if !others.is_empty() {
+        let mut line = others.join(" · ");
+        line[..1].make_ascii_uppercase();
+        out.push('\n');
+        out.push_str(&line);
+    }
+
+    let mut more = Vec::new();
+    if let (Some(a), Some(b), Some(c)) = (s.load1, s.load5, s.load15) {
+        more.push(format!("Load <code>{a:.2} {b:.2} {c:.2}</code>"));
+    }
+    if let (Some(used), Some(total)) = (s.mem_used_bytes, s.mem_total_bytes) {
+        more.push(format!(
+            "Memory <code>{} / {} GiB</code>",
             gib(used),
             gib(total)
         ));
     }
     if let (Some(free), Some(total)) = (s.disk_free_bytes, s.disk_total_bytes) {
-        out.push_str(&format!(
-            "\nDisk free <code>{} GiB</code> of <code>{} GiB</code>",
+        more.push(format!(
+            "Disk free <code>{} / {} GiB</code>",
             gib(free),
             gib(total)
         ));
     }
-    if age <= NODE_STALE_SECONDS {
-        out.push_str(&format!("\nSampled {} ago", crate::board::age(age)));
+    more.push(node_versions(Some(&s)));
+    if !stale {
+        more.push(format!("Sampled {} ago", crate::board::age(age)));
     }
-    out.push_str("\n\n<b>Running</b>");
-    for (kind, by) in [
-        ("Tasks", &s.runs.task),
-        ("Bots", &s.runs.bot),
-        ("Services", &s.runs.service),
-        ("Scheduled", &s.runs.scheduled),
-    ] {
-        out.push('\n');
-        out.push_str(&node_runs_line(kind, by));
-    }
+    out.push_str(&format!(
+        "\n<blockquote expandable>{}</blockquote>",
+        more.join("\n")
+    ));
     out.push_str(&link);
     Ok(out)
 }

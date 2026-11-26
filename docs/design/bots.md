@@ -177,7 +177,9 @@ Taipei clock plus how far off, then its services and schedules, cron in words
 where it can (`cron_words`). An empty `/goals`, `/services` or `/routines`
 says in plain words what the primitive is and to just ask the bot, with no
 commands. `/node` is the node's latest sample, the same for every bot
-(`owner_views::node`).
+(`owner_views::node`): only the machine (CPU, memory, disk, runs by kind,
+versions; detail in an expandable quote). Which bot runs and its services
+and schedules stay in that bot's `/status`, so the two never repeat.
 
 The owner's inbox is the bot chat's pinned list, rendered by the server
 (`board.rs`, `goal_board.rs`): one pinned card per open decision and one
