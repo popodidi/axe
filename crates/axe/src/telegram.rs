@@ -70,8 +70,14 @@ const UPDATE_ATTEMPTS: u32 = 3;
 /// is 1-32 lowercase letters, digits and underscores; the description 1-256
 /// characters.
 pub const OWNER_COMMANDS: [(&str, &str); 14] = [
-    ("status", "Bot state, live run and next wake"),
-    ("node", "Node CPU, memory, disk and running runs"),
+    (
+        "status",
+        "This bot: state, live run, wakes, services, schedules",
+    ),
+    (
+        "node",
+        "The machine: CPU, memory, disk, runs by kind, versions",
+    ),
     ("tasks", "This bot's open tasks"),
     (
         "task",

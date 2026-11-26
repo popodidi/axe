@@ -724,7 +724,8 @@ fn node_view_without_a_fresh_sample() {
     let empty = owner_views::node(&c, Some(WEB), now()).unwrap();
     assert!(
         empty.starts_with(&format!(
-            "<b>Node · no samples yet</b>\naxe server <code>{server}</code> · node <code>?</code> · CLI <code>?</code>\n"
+            "<b>Node · no samples yet</b>\nThe node reports every <code>[node_metrics] sample_seconds</code>.\n\
+             <blockquote expandable>Server <code>{server}</code>\nNode <code>?</code>\nCLI <code>?</code></blockquote>\n"
         )),
         "{empty}"
     );
@@ -745,10 +746,10 @@ fn node_view_without_a_fresh_sample() {
     assert_eq!(
         stale,
         format!(
-            "<b>Node · stale</b> · last sample 3h ago\n\
-             axe server <code>{server}</code> · node <code>0.5.4 (5437bf3602b8)</code> · CLI <code>0.5.3 (7467135d8cb8)</code>\n\
-             CPU <code>5%</code>\n\n<b>Running</b>\n\
-             Tasks <code>0</code>\nBots <code>1</code>: a\nServices <code>0</code>\nScheduled <code>0</code>"
+            "<b>Node · stale, last sample 3h ago</b>\n\
+             CPU <code>5%</code>\nBots <code>1</code>\n\
+             <blockquote expandable>Server <code>{server}</code>\n\
+             Node <code>0.5.4 (5437bf3602b8)</code>\nCLI <code>0.5.3 (7467135d8cb8)</code></blockquote>"
         )
     );
 }
