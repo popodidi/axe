@@ -190,20 +190,73 @@ impl channel::Store for State {
     fn runtime_login(&self, bot: &str, runtime: &str, method: &str) -> Result<String> {
         runtime_login(self, bot, runtime, method)
     }
-    fn runtime_add(&self, harness: &str) -> Result<String> {
-        let v = runtime_job(self, json!({"kind": "runtime_add", "harness": harness}))?;
-        let name = v["runtime"].as_str().context("the node named no runtime")?;
-        eprintln!("axe server: runtime {name} ({harness}) added from /runtimes");
-        Ok(name.to_string())
+    fn runtime_add(&self, actor: &db::Actor, harness: &str, bot: Option<&str>) -> Result<String> {
+        let v = runtime_add(self, actor, harness, bot)?;
+        Ok(v["runtime"].as_str().unwrap_or_default().to_string())
     }
     fn bot_runtime_ok(&self, name: &str) -> Result<()> {
         bot_runtime_ok(self, name)
     }
     fn runtime_remove(&self, runtime: &str) -> Result<String> {
-        let v = runtime_job(self, json!({"kind": "runtime_remove", "runtime": runtime}))?;
-        eprintln!("axe server: runtime {runtime} removed from /runtimes");
-        Ok(v["note"].as_str().unwrap_or("").to_string())
+        runtime_remove(self, runtime)
     }
+}
+
+/// Adds a node runtime of `harness` (`runtime::Registry::create`): login
+/// first, so no run goes to it before its login check passes. A bot with
+/// no runtime yet (its agent resolves to none the node lists) gets it as
+/// its primary. Returns `{"runtime", "primary_of"}`.
+fn runtime_add(
+    st: &State,
+    actor: &db::Actor,
+    harness: &str,
+    bot: Option<&str>,
+) -> Result<serde_json::Value> {
+    if !crate::harness::known(harness) {
+        bail!(
+            "unknown harness {harness:?} (expected one of {})",
+            crate::harness::names()
+        );
+    }
+    let before = crate::runtime::view(&st.admission());
+    let v = runtime_job(st, json!({"kind": "runtime_add", "harness": harness}))?;
+    let name = v["runtime"]
+        .as_str()
+        .context("the node named no runtime")?
+        .to_string();
+    eprintln!("axe server: runtime {name} ({harness}) added");
+    let mut primary_of = None;
+    if let Some(b) = bot {
+        let me = bot::get(&st.conn(), b)?;
+        let list = before["runtimes"].as_array().cloned().unwrap_or_default();
+        if crate::runtime::resolve_listed(&list, &me.agent).is_none() {
+            let e = bot::Edit {
+                agent: Some(name.clone()),
+                ..Default::default()
+            };
+            // The node just created it; its report may not list it yet.
+            let check = |n: &str| match n == name {
+                true => Ok(()),
+                false => bot_runtime_ok(st, n),
+            };
+            let why = "its first runtime, logged in from /runtimes";
+            // The runtime exists either way; a refused primary is logged.
+            match bot::edit(&mut st.conn(), actor, b, &e, why, &check) {
+                Ok(_) => primary_of = Some(b.to_string()),
+                Err(e) => eprintln!("axe server: bot {b}: primary {name}: {e:#}"),
+            }
+            st.notifier.bump();
+        }
+    }
+    Ok(json!({"runtime": name, "primary_of": primary_of}))
+}
+
+/// Removes node runtime `runtime` (`runtime::Registry::remove`, which
+/// refuses one with live runs); returns what happened to its login files.
+fn runtime_remove(st: &State, runtime: &str) -> Result<String> {
+    let v = runtime_job(st, json!({"kind": "runtime_remove", "runtime": runtime}))?;
+    eprintln!("axe server: runtime {runtime} removed");
+    Ok(v["note"].as_str().unwrap_or("").to_string())
 }
 
 /// Has the node set or release its admission hold (a file on its host).
@@ -1788,6 +1841,22 @@ struct AddBody {
 }
 
 #[derive(Deserialize)]
+struct RuntimeAddBody {
+    harness: String,
+    /// A bot with no runtime yet gets this one as its primary.
+    bot: Option<String>,
+    #[serde(flatten)]
+    who: Who,
+}
+
+#[derive(Deserialize)]
+struct RuntimeLoginBody {
+    method: String,
+    /// The bot that sends the owner the sealed form or the device code.
+    bot: String,
+}
+
+#[derive(Deserialize)]
 struct HoldBody {
     until: String,
     reason: Option<String>,
@@ -2476,6 +2545,22 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             .map_err(|e| HttpError(400, format!("{e:#}")))?,
         ),
         ("GET", ["api", "runtimes"]) => ok(200, &runtimes_view(st)),
+        ("POST", ["api", "runtimes"]) => {
+            let b: RuntimeAddBody = req.json()?;
+            ok(
+                201,
+                &runtime_add(st, &b.who.actor(), &b.harness, b.bot.as_deref())?,
+            )
+        }
+        ("POST", ["api", "runtimes", name, "login"]) => {
+            let b: RuntimeLoginBody = req.json()?;
+            let text = runtime_login(st, &b.bot, name, &b.method)?;
+            ok(200, &json!({"runtime": name, "text": text}))
+        }
+        ("DELETE", ["api", "runtimes", name]) => {
+            let note = runtime_remove(st, name)?;
+            ok(200, &json!({"runtime": name, "note": note}))
+        }
         // A runtime turned needs_login or limited: one card to the owner.
         ("POST", ["api", "dispatcher", "runtime-alert"]) => {
             let b: serde_json::Value = req.json()?;
@@ -3857,7 +3942,8 @@ fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
             if matches!(b.request.target, crate::sealed::Target::Runtime { .. }) {
                 return Err(HttpError(
                     400,
-                    "runtime logins start from the owner's Telegram /runtimes".into(),
+                    "runtime logins go through POST /api/runtimes/<name>/login (axe runtimes login)"
+                        .into(),
                 )
                 .into());
             }

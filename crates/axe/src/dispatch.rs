@@ -638,6 +638,9 @@ impl Dispatcher {
     /// Lapses limits, probes logins and sends pending runtime cards.
     fn runtime_tick(&mut self) {
         self.runtime_jobs();
+        // The one registry: the sealed form desk logs in from this copy.
+        *self.store.runtimes.lock().unwrap() =
+            Some((self.runtimes.managed, self.runtimes.runtimes.clone()));
         if !self.runtimes.managed {
             return;
         }

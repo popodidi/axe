@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use axe::bot::{self, NewMessage};
 use axe::db;
-use common::{Server, TOKEN};
+use common::{Server, Worker, TOKEN};
 use serde_json::{json, Value};
 
 const TG_TOKEN: &str = "123456:SECRET-test-token";
@@ -5702,4 +5702,127 @@ fn runtime_buttons_and_bot_edit_record_the_same_actions() {
         "{want:?}"
     );
     assert_eq!(owner_trace(&tg, tg_from), want);
+}
+
+/// A rig whose node has a runtime registry (empty) and fake `claude` and
+/// `codex` CLIs, with `cos` paused; returns it with the node running.
+fn registry_rig(dir: &Path) -> (Rig, Worker) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["claude", "codex"] {
+        let p = bin.join(name);
+        std::fs::write(&p, FAKE_LOGIN_CLI).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let reg = dir.join("runtimes");
+    std::fs::create_dir_all(&reg).unwrap();
+    let rig = Rig::with(&format!(
+        "[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"claude\"]\nharness = \"claude-code\"\nbot_args = []\n\
+         [agents.codex]\ncmd = [\"codex\"]\nharness = \"codex\"\nsession = \"none\"\nbot_args = []\n",
+        reg.display()
+    ));
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let node = rig.srv().dispatcher(&[], &[("PATH", &path)]);
+    wait_for("the empty report", 30, || {
+        rig.srv().ok(&["runtimes"]).contains("none reported")
+    });
+    (rig, node)
+}
+
+/// Contract (layering review step 5): `/runtimes` Add and Remove and
+/// `axe runtimes add|rm` are the same runtime actions: the node registry
+/// changes the same way and a bot with no runtime gets the first one as its
+/// primary.
+#[test]
+fn runtime_add_and_remove_match_their_api_twins() {
+    let registry = |dir: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir.join("runtimes"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    // Telegram.
+    let tg_dir = tempfile::tempdir().unwrap();
+    let (tg, _tg_node) = registry_rig(tg_dir.path());
+    let tg_from = last_event(&tg);
+    tg.stub.push(text_msg(100, 200, OWNER, OWNER, "/runtimes"));
+    wait_for("the /runtimes reply", 20, || !tg.sent_to(OWNER).is_empty());
+    wait_for("the list recorded", 20, || {
+        tg.messages()
+            .iter()
+            .any(|m| m.2.starts_with("Log in Claude"))
+    });
+    let list = tg.messages().last().unwrap().3;
+    tg.stub.push(press(101, list, "rtadd:claude-code"));
+    tg.stub.wait_confirmed(101);
+    wait_for("cos's primary", 20, || {
+        tg.srv().get("/api/bots/cos")["agent"] == "claude-1"
+    });
+    // The API.
+    let api_dir = tempfile::tempdir().unwrap();
+    let (api, _api_node) = registry_rig(api_dir.path());
+    let api_from = last_event(&api);
+    let out = api
+        .srv()
+        .ok(&["runtimes", "add", "claude-code", "--bot", "cos", "--json"]);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (&v["runtime"], &v["primary_of"]),
+        (&json!("claude-1"), &json!("cos")),
+        "{v}"
+    );
+    assert_eq!(api.srv().get("/api/bots/cos")["agent"], "claude-1");
+    assert_eq!(registry(api_dir.path()), registry(tg_dir.path()));
+    assert_eq!(registry(api_dir.path()), ["claude-1"]);
+    let want = owner_trace(&api, api_from);
+    assert_eq!(owner_trace(&tg, tg_from), want);
+    assert!(want.iter().any(|(k, _)| k == "agent"), "{want:?}");
+
+    // Remove: the API's answer, and the registry is empty again.
+    let out = api.srv().ok(&["runtimes", "rm", "claude-1"]);
+    assert!(out.starts_with("runtime claude-1 removed"), "{out}");
+    assert!(registry(api_dir.path()).is_empty());
+    let o = api.srv().run(&["runtimes", "rm", "claude-1"]);
+    assert!(!o.status.success(), "{o:?}");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("no runtime claude-1 on this node"),
+        "{o:?}"
+    );
+}
+
+/// `axe runtimes login` starts the same login as the /runtimes button: a
+/// Codex API key login sends the owner a sealed form from `--bot`.
+#[test]
+fn runtime_login_from_the_api_sends_the_sealed_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _node) = registry_rig(dir.path());
+    rig.srv().ok(&["runtimes", "add", "codex"]);
+    wait_for("codex-1 reported", 30, || {
+        rig.srv().ok(&["runtimes"]).contains("codex-1")
+    });
+    let n = rig.sent_to(OWNER).len();
+    let out = rig.srv().ok(&[
+        "runtimes", "login", "codex-1", "--method", "api_key", "--bot", "cos",
+    ]);
+    assert!(
+        out.contains("Sealed form sent for runtime codex-1"),
+        "{out}"
+    );
+    wait_for("the form prompt", 20, || {
+        rig.sent_to(OWNER)[n..]
+            .iter()
+            .any(|p| p["reply_markup"]["keyboard"].is_array())
+    });
+    let o = rig.srv().run(&[
+        "runtimes", "login", "codex-1", "--method", "token", "--bot", "cos",
+    ]);
+    assert!(!o.status.success(), "{o:?}");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("has no token login"),
+        "{o:?}"
+    );
 }

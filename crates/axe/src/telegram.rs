@@ -1462,43 +1462,20 @@ impl Gateway {
                     .unwrap_or_else(|e| format!("Login of runtime {name} not started: {e:#}"));
                 say(&text, &[], json!({}));
             }
-            RuntimePress::Add(harness) => match store.runtime_add(harness) {
-                Ok(name) => {
-                    // A bot with no runtime yet starts on its first login.
-                    let view = store.runtimes();
-                    let me = bot::get(&store.conn(), &b.name()).ok();
-                    if me.is_some() && roles(&view, me.as_ref()).0.is_none() {
-                        let e = bot::Edit {
-                            agent: Some(name.clone()),
-                            ..Default::default()
-                        };
-                        let why = "its first runtime, logged in from /runtimes";
-                        // The node just created it; its report may not list it yet.
-                        let check = |n: &str| match n == name {
-                            true => Ok(()),
-                            false => store.bot_runtime_ok(n),
-                        };
-                        if let Err(e) = bot::edit(
-                            &mut store.conn(),
-                            &owner_actor(),
-                            &b.name(),
-                            &e,
-                            why,
-                            &check,
-                        ) {
-                            eprintln!("telegram: bot {}: primary {name}: {e:#}", b.name());
-                        }
-                        store.changed();
+            // A bot with no runtime yet starts on its first login (the action).
+            RuntimePress::Add(harness) => {
+                match store.runtime_add(&owner_actor(), harness, Some(&b.name())) {
+                    Ok(name) => {
+                        let (text, buttons) = login_menu(&name, harness, Some(harness));
+                        say(&text, &buttons, json!({"runtime_menu": true}));
                     }
-                    let (text, buttons) = login_menu(&name, harness, Some(harness));
-                    say(&text, &buttons, json!({"runtime_menu": true}));
+                    Err(e) => say(
+                        &format!("No {harness} runtime added: {e:#}"),
+                        &[],
+                        json!({}),
+                    ),
                 }
-                Err(e) => say(
-                    &format!("No {harness} runtime added: {e:#}"),
-                    &[],
-                    json!({}),
-                ),
-            },
+            }
             RuntimePress::Remove(name) => {
                 let Some(r) = reported(name) else {
                     say(

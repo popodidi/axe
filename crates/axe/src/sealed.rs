@@ -1376,6 +1376,8 @@ pub struct Desk {
     logged_in: std::sync::Arc<Mutex<Vec<String>>>,
     /// Registry changes for the node; `None`: refused.
     runtime_jobs: Option<RuntimeJobs>,
+    /// The node loop's registry (`Dispatcher::runtime_tick`).
+    runtimes: crate::runtime::Snapshot,
 }
 
 /// Registry changes the desk hands the node: the job and where its answer goes.
@@ -1430,6 +1432,7 @@ impl Desk {
             codes: Default::default(),
             logged_in: Default::default(),
             runtime_jobs: None,
+            runtimes: Default::default(),
         }
     }
 
@@ -1464,6 +1467,12 @@ impl Desk {
     /// to the node, which applies them between picks and answers.
     pub fn with_runtime_jobs(mut self, jobs: RuntimeJobs) -> Desk {
         self.runtime_jobs = Some(jobs);
+        self
+    }
+
+    /// The desk reading runtimes from the node loop's registry.
+    pub fn with_runtimes(mut self, runtimes: crate::runtime::Snapshot) -> Desk {
+        self.runtimes = runtimes;
         self
     }
 
@@ -1522,12 +1531,16 @@ impl Desk {
             .cfg
             .clone()
             .context("runtime logins need the node config")?;
-        let reg = crate::runtime::Registry::load(&cfg)?;
-        if !reg.managed {
+        let snapshot = self.runtimes.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((managed, list)) = snapshot.as_ref() else {
+            bail!("the node has not loaded its runtimes yet; try again in a moment");
+        };
+        if !managed {
             bail!("this node has no runtime registry ([runtimes] dir)");
         }
-        let rt = reg
-            .get(name)
+        let rt = list
+            .iter()
+            .find(|r| r.name == name)
             .cloned()
             .with_context(|| format!("no runtime {name} on this node"))?;
         Ok((cfg, rt))
