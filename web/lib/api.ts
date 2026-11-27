@@ -69,6 +69,11 @@ repos: Array<string> | null,
  */
 retro?: RetroConfig, 
 /**
+ * The bot's session rotation settings ([`Rotation`]). `None` from
+ * servers that predate per-bot rotation.
+ */
+rotation?: Rotation, 
+/**
  * Derived: the live run, if any.
  */
 live_run: number | null, 
@@ -115,6 +120,18 @@ at: string,
  * The most asks on the card (1-1000).
  */
 size: number, };
+
+export type Rotation = { 
+/**
+ * Context tokens at which a cleanly exited run retires its session;
+ * `None`: [`SHRINK_CONTEXT_TOKENS`].
+ */
+shrink_at: number | null, 
+/**
+ * A fresh session's first prompt carries the bot's notes, so it need
+ * not read them first.
+ */
+inline_notes: boolean, };
 
 export type Message = { id: number, kind: string, text: string, reply_to: number | null, 
 /**
