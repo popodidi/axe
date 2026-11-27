@@ -933,7 +933,10 @@ pub fn write_git_credential(path: &Path, host: &str, username: &str, token: &str
 //   The text is `<base64url(header JSON)>.<base64url(iv | ciphertext)>`; the
 //   link is the form page with `#m=<text>` in its fragment (never sent to the
 //   page's host). The page asks for the passphrase, derives `K` and decrypts
-//   in the browser.
+//   in the browser. After that it can wrap `K` to a passkey on the device
+//   (WebAuthn PRF; only the wrapped key is stored, in the browser), so later
+//   opens take Face ID; a new reply key (new salt) makes that stale and the
+//   passphrase is the recovery path.
 // - Expiry: the page refuses a message past its authenticated expiry. One
 //   use: what must be single-use (a login code) is enforced where it is
 //   redeemed; the page also remembers opened ids per device and warns on a

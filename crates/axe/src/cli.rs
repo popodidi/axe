@@ -1345,7 +1345,7 @@ fn send_sealed(
         crate::sealed::seal_message(&key, &from, purpose, payload, ttl, crate::remote::epoch())?;
     let link = crate::sealed::message_link(cfg.forms.page(), &text);
     let note = format!(
-        "Sealed message from {from}: {purpose}\nOpen it with your passphrase before {}.",
+        "Sealed message from {from}: {purpose}\nOpen it with Face ID or your passphrase before {}.",
         h.expires
     );
     let sent: Value = c.send(
