@@ -2275,10 +2275,16 @@ enum BotCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Change identity, conduct, nudge, repos, project, retro or rotation; each change is recorded with --why
+    /// Change identity, conduct, nudge, repos, project, retro, rotation or
+    /// runtime; each change is recorded with --why
     Edit {
         #[arg(env = "AXE_BOT")]
         name: String,
+        /// Switch the bot's runtime (an agent or runtime name, e.g. codex-1;
+        /// `axe runtimes` lists them). Its session ends and the next run
+        /// starts fresh there; notes and wakes stay. Refused while it runs.
+        #[arg(long)]
+        agent: Option<String>,
         /// Move the bot to another project (existing subscriptions keep theirs)
         #[arg(long)]
         project: Option<String>,
@@ -4059,6 +4065,7 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
         }
         BotCmd::Edit {
             name,
+            agent,
             project,
             identity_file,
             conduct_file,
@@ -4094,8 +4101,20 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 json!({"identity":read(identity_file)?,"conduct":read(conduct_file)?,
                     "nudge_after":nudge_after,"repos":repos,"project":project,
                     "retro":retro_edit,"owner_ref":owner_ref,"rotation":rotation_edit,
-                    "why":why}),
+                    "agent":agent,"why":why}),
             )?;
+            // A server from before runtime switches ignores the field.
+            if let Some(a) = agent {
+                if b.agent != a.trim() {
+                    anyhow::bail!(
+                        "the server did not switch the runtime; it predates `bot edit --agent`"
+                    );
+                }
+                println!(
+                    "bot {name}: runtime {}; the next run starts a fresh session",
+                    b.agent
+                );
+            }
             // A server from before per-bot rotation ignores the field.
             if rotation_edit.is_some() && b.rotation.is_none() {
                 anyhow::bail!(

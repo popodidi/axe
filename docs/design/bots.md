@@ -89,10 +89,24 @@ folder would lose the session the rename is meant to keep.
 | Notes: working state (commitments, follow-ups, lessons) | CLI (`axe bot notes`) | They change often; in the system prompt every edit would break the cache, and resending them would bloat context. A fresh session reads them first |
 | History | CLI (`axe bot log`, `axe bot tg history`) and the run logs | Retrieval on demand; nothing is distilled |
 
-The agent needs a way to take a system prompt file and hook settings: an
-agent's `bot_args` (`config.rs`), which the built-in Claude agent has. An
-agent without them cannot run bots. Codex has none until its instruction
-semantics on resume are verified.
+The agent needs a way to take the system prompt and the inbox hooks: an
+agent's `bot_args` (`config.rs`), defaulting per CLI when `cmd` runs
+`claude` or `codex` (`CLAUDE_BOT_ARGS`, `CODEX_BOT_ARGS`). Claude Code gets
+them as files (`--append-system-prompt-file`, `--settings`). Codex
+(verified on codex-cli 0.172, fresh and `exec resume`) gets them as
+config overrides: the system prompt as `developer_instructions` (added to
+Codex's own instructions) and the same hooks as an inline `hooks` table,
+with `--dangerously-bypass-hook-trust` because Codex runs only trusted
+hooks and these are axe's own. Codex reads the same hook output, so wakes
+reach a running Codex session after a tool call and at Stop. One
+degradation: a Codex run log has no Claude `result` usage, so
+context-size rotation (below) does not retire Codex sessions; Codex
+compacts natively. Other agents without `bot_args` cannot run bots.
+
+A bot's runtime is sticky: its session's runtime while healthy, else its
+own `agent`. `axe bot edit <name> --agent <agent|runtime> --why W` switches
+it (refused during a live run): the session ends, so the next run starts
+fresh there, and notes, wakes and history stay (event `agent`).
 
 Compaction is native. Everything durable is on the server, so nothing is
 lost when a session summarizes. Because native compaction did not keep

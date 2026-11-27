@@ -459,7 +459,9 @@ impl Dispatcher {
         self.runtimes
             .get(name)
             .and_then(|r| self.cfg.agents.get(&r.agent))
-            .is_some_and(|a| (!bot || a.bot_args.is_some()) && (!resume || a.resume_cmd.is_some()))
+            .is_some_and(|a| {
+                (!bot || a.bot_args().is_some()) && (!resume || a.resume_cmd.is_some())
+            })
     }
 
     /// The least-used healthy runtime of `harness` (then by name); bots also
@@ -540,7 +542,16 @@ impl Dispatcher {
     /// A pinned agent (task or bot): its runtime while healthy, else the
     /// least-used healthy runtime of the same harness.
     fn pin_pick(&self, name: &str, why: &str, bot: bool) -> std::result::Result<Pick, NoPick> {
-        let Some(rt) = self.runtimes.resolve(name) else {
+        // A pin naming an agent template (`claude`) that no runtime adopts in
+        // place goes to a runtime of that template (`claude-1`, added from
+        // /runtimes with its own login).
+        let rt = self.runtimes.resolve(name).or_else(|| {
+            self.runtimes
+                .of_agent(name)
+                .find(|r| r.healthy(now_unix()))
+                .or_else(|| self.runtimes.of_agent(name).next())
+        });
+        let Some(rt) = rt else {
             return Err(NoPick::Missing(format!("unknown agent {name}")));
         };
         let now = now_unix();

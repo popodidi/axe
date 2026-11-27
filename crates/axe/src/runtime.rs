@@ -738,6 +738,11 @@ impl Registry {
         })
     }
 
+    /// Runtimes that run agent template `agent`, by name.
+    pub fn of_agent<'a>(&'a self, agent: &'a str) -> impl Iterator<Item = &'a Runtime> + 'a {
+        self.runtimes.iter().filter(move |r| r.agent == agent)
+    }
+
     /// Runtimes of `harness`.
     pub fn of<'a>(&'a self, harness: &'a str) -> impl Iterator<Item = &'a Runtime> + 'a {
         self.runtimes.iter().filter(move |r| r.harness == harness)

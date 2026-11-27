@@ -173,8 +173,7 @@ impl Dispatcher {
             .with_context(|| format!("unknown agent {}", rt.agent))?
             .clone();
         let bot_args = agent
-            .bot_args
-            .clone()
+            .bot_args()
             .with_context(|| format!("agent {} has no bot_args", rt.agent))?;
         let session_mode = agent.session_mode()?;
         let resume = c.session.as_ref().filter(|s| {
@@ -236,6 +235,8 @@ impl Dispatcher {
             ("project", b.project.clone()),
             ("system_prompt_file", system_file.display().to_string()),
             ("settings_file", settings_file.display().to_string()),
+            ("system_prompt_toml", bot::toml_string(&system)),
+            ("hooks_toml", bot::hooks_toml(exe)),
         ]);
         let template = match resume {
             Some(_) => agent.resume_cmd.as_ref().expect("resume template checked"),
@@ -248,10 +249,14 @@ impl Dispatcher {
         if let Some(u) = with {
             extra.extend(u.args());
         }
-        let argv: Vec<String> = splice_bot_args(template, &extra)
-            .iter()
-            .map(|a| render(a, &vars))
-            .collect();
+        let spliced = splice_bot_args(template, &extra);
+        let argv: Vec<String> = spliced.iter().map(|a| render(a, &vars)).collect();
+        // The logged command names the files instead of the inlined system
+        // prompt and hooks (`{system_prompt_toml}`, `{hooks_toml}`).
+        let mut shown_vars = vars.clone();
+        shown_vars.insert("system_prompt_toml", format!("@{}", system_file.display()));
+        shown_vars.insert("hooks_toml", format!("@{}", settings_file.display()));
+        let shown: Vec<String> = spliced.iter().map(|a| render(a, &shown_vars)).collect();
         let mode = if resume.is_some() { "resume" } else { "fresh" };
         let attrs = self.cfg.otel.attributes(&[
             ("bot", &b.name),
@@ -305,7 +310,7 @@ impl Dispatcher {
         let mut command = agent_proc::command(&argv, &cwd, &remove, &env, log)?;
         let event = json!({"run":c.run,"mode":mode,"agent":rt.name,"session_id":session_id,
             "log":log_path,"prompt_file":prompt_path,"system_prompt_file":system_file,
-            "settings_file":settings_file,"cmd":agent_proc::logged_cmd(&argv, &prompt_path),
+            "settings_file":settings_file,"cmd":agent_proc::logged_cmd(&shown, &prompt_path),
             "worktree":cwd,"repos_cloned":repos_cloned,"wakes":c.wakes.iter().map(|w| w.id).collect::<Vec<_>>(),
             "rule":pick.map(|p| p.rule.clone()),"use":with.map(|u| u.to_string())});
         self.store.request::<serde_json::Value>(
