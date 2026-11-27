@@ -331,7 +331,9 @@ worktree's Git directory; otherwise it changes nothing and fails with why.
 folder after the task is done for the retention: each repo worktree is
 removed with `git worktree remove` and pruned, and only when the folder holds
 nothing but what axe generates (`housekeeping.rs`; `axe housekeeping
---dry-run` prints each decision). Bot run folders stay.
+--dry-run` prints each decision). Bot run folders stay. Run logs and the
+runtimes' session transcripts go past `[housekeeping.logs]` `max_age`
+(default 30 days) or `max_size`, even with housekeeping off (`retention.rs`).
 
 **Agent environment.** Sessions get `AXE_ACTOR=agent`, `AXE_SESSION`,
 `AXE_TASK`, `AXE_SERVER`, `AXE_WORKTREE` and OpenTelemetry resource

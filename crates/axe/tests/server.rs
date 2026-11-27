@@ -819,6 +819,11 @@ fn session_lookup_returns_task_agent_and_latest_run() {
         (&s["task_id"], &s["agent"], &s["run"]["id"]),
         (&1.into(), &"claude".into(), &run.into())
     );
+    // Log retention's list: the task is not done, so both can be resumed.
+    assert_eq!(
+        srv.get("/api/sessions"),
+        serde_json::json!({"resumable": ["s-run", "s-stored"], "known": ["s-run", "s-stored"]})
+    );
     let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
     assert_eq!(
         keys(&s),

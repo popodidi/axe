@@ -486,3 +486,40 @@ test("Claude partial messages reconcile after reconnect and history prepend", as
     );
   expect(offsets).toEqual([...new Set(offsets)].sort((a, b) => a - b));
 });
+
+test("a pruned log shows the pruned state, not an error", async ({ page }) => {
+  await mockDesk(page);
+  const run: Run = {
+    ...runs[0],
+    id: 15,
+    ended_at: "2026-10-01T03:00:00Z",
+    exit_code: 0,
+  };
+  await page.route("http://axe.test/api/runs?*", (route) =>
+    route.fulfill({ json: [run] }),
+  );
+  let requests = 0;
+  await page.route("http://axe.test/api/runs/15/log?*", (route) => {
+    requests++;
+    return route.fulfill({
+      json: {
+        run,
+        unavailable: "Log pruned by the node's log retention",
+        pruned: true,
+      },
+    });
+  });
+  await page.goto(base + "&run=15");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("status")).toHaveText("Log pruned");
+  await expect(dialog.getByText(/^Log pruned: the node/)).toBeVisible();
+  await expect(dialog.getByText("History unavailable")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  await expect(
+    dialog.locator("header").getByText("Completed", { exact: true }),
+  ).toBeVisible();
+  const count = requests;
+  await page.waitForTimeout(1200);
+  expect(requests).toBe(count);
+  await page.screenshot({ path: test.info().outputPath("pruned.png") });
+});

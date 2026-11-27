@@ -2372,6 +2372,10 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             let b: serde_json::Value = req.json()?;
             ok(200, &runtime_alert(st, &b)?)
         }
+        ("GET", ["api", "sessions"]) => {
+            let (resumable, known) = db::retention_sessions(&st.conn())?;
+            ok(200, &json!({"resumable": resumable, "known": known}))
+        }
         ("GET", ["api", "sessions", sid]) => match db::find_session(&st.conn(), sid)? {
             Some(s) => ok(200, &s),
             None => Err(HttpError(404, format!("session {sid} not found")).into()),

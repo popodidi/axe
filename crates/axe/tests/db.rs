@@ -956,3 +956,38 @@ fn repo_registry_round_trip_and_validation() {
     }
     assert_eq!(repo::list(&c).unwrap().len(), 1);
 }
+
+#[test]
+fn retention_sessions_split_resumable_from_known() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+    let human = Actor::new("human");
+    let task = |conn: &mut rusqlite::Connection, session: &str| {
+        let id = db::add_task(conn, &human, &new_task("p")).unwrap();
+        let s = db::Session {
+            agent: "claude".into(),
+            session_id: session.into(),
+            resume_count: 0,
+        };
+        db::save_session(conn, id, &s).unwrap();
+        id
+    };
+    let done = task(&mut conn, "s-done");
+    let run = open_run(&conn, done, "r-done", "c1");
+    db::end_run(&conn, run, Some(0), None).unwrap();
+    let live = open_run(&conn, done, "r-live", "c2");
+    let waiting = task(&mut conn, "s-wait");
+    let old = open_run(&conn, waiting, "r-wait-old", "c3");
+    db::end_run(&conn, old, Some(1), None).unwrap();
+    conn.execute("UPDATE tasks SET state = 'done' WHERE id = ?1", [done])
+        .unwrap();
+    let (resumable, known) = db::retention_sessions(&conn).unwrap();
+    assert_eq!(resumable, ["r-live", "r-wait-old", "s-wait"]);
+    assert_eq!(
+        known,
+        ["r-done", "r-live", "r-wait-old", "s-done", "s-wait"]
+    );
+    db::end_run(&conn, live, Some(0), None).unwrap();
+    let (resumable, _) = db::retention_sessions(&conn).unwrap();
+    assert_eq!(resumable, ["r-wait-old", "s-wait"]);
+}

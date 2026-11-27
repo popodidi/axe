@@ -498,6 +498,38 @@ pub struct Housekeeping {
     pub tmp: Option<HousekeepingTmp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orphan_caches: Option<HousekeepingOrphanCaches>,
+    /// Retention of run logs and agent session transcripts; on by default
+    /// (`retention.rs`).
+    #[serde(default)]
+    pub logs: HousekeepingLogs,
+}
+
+/// `[housekeeping.logs]`: how long run logs (`log_dir`) and the node's
+/// runtimes' session transcripts are kept. The oldest go first until both
+/// limits hold (`retention.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HousekeepingLogs {
+    /// Older than this goes (`30d`); `off` keeps any age.
+    #[serde(default = "default_logs_max_age")]
+    pub max_age: String,
+    /// Logs and transcripts together stay under this (`20G`, `500M`);
+    /// omitted means no size limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<String>,
+}
+
+impl Default for HousekeepingLogs {
+    fn default() -> Self {
+        HousekeepingLogs {
+            max_age: default_logs_max_age(),
+            max_size: None,
+        }
+    }
+}
+
+fn default_logs_max_age() -> String {
+    "30d".into()
 }
 
 impl Default for Housekeeping {
@@ -510,6 +542,7 @@ impl Default for Housekeeping {
             build_output: None,
             tmp: None,
             orphan_caches: None,
+            logs: HousekeepingLogs::default(),
         }
     }
 }

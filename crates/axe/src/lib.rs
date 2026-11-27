@@ -43,6 +43,7 @@ pub mod worktree;
 
 pub mod remote;
 pub mod repo;
+pub mod retention;
 
 pub mod routine;
 pub mod rule;

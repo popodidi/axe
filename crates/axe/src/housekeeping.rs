@@ -29,11 +29,16 @@
 //! - `[housekeeping.orphan_caches]`: cache-root entries no task path claims,
 //!   once unused for a while.
 //!
+//! - `[housekeeping.logs]` (on by default, 30 days): run logs and session
+//!   transcripts past a max age or a max total size (`retention.rs`), hourly.
+//!
 //! Runs as a tick inside `axe node` (`[dispatcher] housekeep`), or once
-//! with `axe housekeeping --dry-run`. Each decision is one JSON line on stdout.
+//! with `axe housekeeping --dry-run`. With `housekeep = "off"` the node still
+//! applies `[housekeeping.logs]` unless both its limits are off. Each decision
+//! is one JSON line on stdout.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -51,6 +56,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use crate::admission::{self, Probe};
 use crate::client::Client;
 use crate::config::{expand_tilde, Config, Housekeep};
+use crate::retention::{self, Item};
 
 /// How often the node runs a housekeeping tick.
 pub const TICK: Duration = Duration::from_secs(180);
@@ -71,6 +77,16 @@ pub struct Rules {
     build_output: Option<BuildOutput>,
     tmp: Option<Tmp>,
     orphans: Option<Orphans>,
+    logs: Option<Logs>,
+}
+
+/// `[housekeeping.logs]` with what its sweep reads.
+#[derive(Debug, Clone)]
+struct Logs {
+    limits: retention::Limits,
+    log_dir: PathBuf,
+    /// For the runtime registry, read at each sweep (runtimes come and go).
+    cfg: Box<Config>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,7 +288,14 @@ impl Rules {
                 })
             }
         };
+        let limits = retention::Limits::new(&h.logs)?;
+        let logs = (!limits.off()).then(|| Logs {
+            limits,
+            log_dir: cfg.log_dir(),
+            cfg: Box::new(cfg.clone()),
+        });
         Ok(Rules {
+            logs,
             worktrees,
             runs: cfg.run_root(),
             retention,
@@ -1014,6 +1037,9 @@ pub struct Keeper {
     one_off: bool,
     last_sweep: Option<Instant>,
     last_trim: Option<Instant>,
+    last_logs: Option<Instant>,
+    /// Only `[housekeeping.logs]` (the node's `housekeep = "off"`).
+    logs_only: bool,
     episode: PathBuf,
     /// Task rows looked up during this tick; re-checks bypass it.
     tasks: RefCell<HashMap<u64, Result<TaskRow, String>>>,
@@ -1031,6 +1057,8 @@ impl Keeper {
             one_off: false,
             last_sweep: None,
             last_trim: None,
+            last_logs: None,
+            logs_only: false,
             episode: episode_path(),
             tasks: RefCell::default(),
             task_events: RefCell::default(),
@@ -1041,6 +1069,12 @@ impl Keeper {
     /// Sweeps on every tick instead of hourly while there is no pressure.
     pub fn one_off(mut self) -> Keeper {
         self.one_off = true;
+        self
+    }
+
+    /// Runs `[housekeeping.logs]` only.
+    pub fn logs_only(mut self) -> Keeper {
+        self.logs_only = true;
         self
     }
 
@@ -1643,6 +1677,110 @@ impl Keeper {
         Ok(ok)
     }
 
+    /// The server's session ids: `(resumable, known)` (`GET /api/sessions`).
+    fn sessions(&self) -> Result<(HashSet<String>, HashSet<String>)> {
+        let v: Value = self.client.get("/api/sessions", &[])?;
+        let list = |key: &str| -> Result<HashSet<String>> {
+            let ids = v[key]
+                .as_array()
+                .with_context(|| format!("no {key} session list (axe server too old?)"))?;
+            Ok(ids
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect())
+        };
+        Ok((list("resumable")?, list("known")?))
+    }
+
+    /// `[housekeeping.logs]`: the run logs and session transcripts past the
+    /// limits go, oldest first (`retention.rs`). A kind whose protection
+    /// cannot be read (the node journal, the server's session list) is left
+    /// alone for this sweep, as a failed task lookup retains: only a failed
+    /// removal fails the tick.
+    fn sweep_logs(&self, l: &Logs, stop: &AtomicBool, out: &mut Vec<Value>) -> bool {
+        let mut ok = true;
+        let mut skipped = Vec::new();
+        let mut items = Vec::new();
+        let running = match retention::unfinished_logs(&l.log_dir) {
+            Ok(running) => {
+                items.extend(retention::scan_logs(&l.log_dir));
+                running
+            }
+            Err(e) => {
+                skipped.push(format!("logs: {e:#}"));
+                HashSet::new()
+            }
+        };
+        let sessions = self
+            .sessions()
+            .and_then(|ids| Ok((ids, retention::login_roots(&l.cfg)?)));
+        let (resumable, known) = match sessions {
+            Ok((ids, roots)) => {
+                items.extend(retention::scan_sessions(&roots));
+                ids
+            }
+            Err(e) => {
+                skipped.push(format!("sessions: {e:#}"));
+                (HashSet::new(), HashSet::new())
+            }
+        };
+        let protect = |i: &Item, fresh: bool| -> Option<String> {
+            if retention::listed(i, &running) {
+                return Some("its run is still going".into());
+            }
+            if let Some(s) = &i.session {
+                if !known.contains(s) {
+                    return Some("not a session of an axe run".into());
+                }
+                if resumable.contains(s) {
+                    return Some("its session can still be resumed".into());
+                }
+            }
+            i.paths.iter().find_map(|p| self.in_use(p, fresh).err())
+        };
+        let bytes: u64 = items.iter().map(|i| i.bytes).sum();
+        let (mut deleted, mut freed, mut kept) = (0u64, 0u64, 0u64);
+        for d in retention::plan(&items, &l.limits, unix_now(), |i| protect(i, false)) {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let item = &items[d.index];
+            let (decision, reason) = match d.keep {
+                Some(keep) => ("retain", format!("{}; kept: {keep}", d.reason)),
+                None if !self.apply => ("would_delete", d.reason),
+                None => match item.restat() {
+                    None => ("retain", "re-check: gone".to_string()),
+                    Some(now) if now.modified > item.modified => {
+                        ("retain", "re-check: modified since the scan".to_string())
+                    }
+                    Some(_) => match protect(item, true) {
+                        Some(keep) => ("retain", format!("re-check: {keep}")),
+                        None => match retention::remove(item) {
+                            Ok(()) => ("deleted", d.reason),
+                            Err(e) => ("error", format!("{e:#}")),
+                        },
+                    },
+                },
+            };
+            match decision {
+                "retain" => kept += 1,
+                "error" => ok = false,
+                _ => {
+                    deleted += 1;
+                    freed += item.bytes;
+                }
+            }
+            out.push(json!({"kind": item.kind.name(), "path": item.paths[0],
+                "session": item.session, "bytes": item.bytes, "decision": decision, "reason": reason}));
+        }
+        out.push(json!({"event": "log_retention", "apply": self.apply,
+            "max_age_seconds": l.limits.max_age, "max_size_bytes": l.limits.max_size,
+            "items": items.len(), "bytes": bytes, "deleted": deleted, "freed_bytes": freed,
+            "kept_over_limit": kept, "skipped": skipped}));
+        ok
+    }
+
     /// Advances the episode file and wakes the bot once per episode. A failed
     /// wake is retried by the next tick; the key makes that idempotent.
     fn check_alert(&self, alert: &Alert, paused: bool, now: i64) -> Result<&'static str> {
@@ -1724,6 +1862,15 @@ impl Keeper {
                     }
                 }
             }
+        }
+        if let Some(l) = &rules.logs {
+            if self.one_off || due(self.last_logs, HOURLY) {
+                self.last_logs = Some(Instant::now());
+                out.ok &= self.sweep_logs(l, stop, &mut out.lines);
+            }
+        }
+        if self.logs_only {
+            return out;
         }
         if let (Some(alert), Some(view), true) = (&rules.alert, admission, self.apply) {
             // An unknown status says nothing: the episode file stays.
@@ -1914,23 +2061,41 @@ pub fn start(
     admission: admission::Handle,
     stop: Arc<AtomicBool>,
 ) -> Result<Option<JoinHandle<()>>> {
-    let apply = match mode {
-        Housekeep::Off => {
+    let rules = Rules::new(cfg)?;
+    let logs = rules.logs.as_ref().map(|l| {
+        format!(
+            "{} logs and sessions past max age {:?}s, max size {:?} bytes",
+            l.log_dir.display(),
+            l.limits.max_age,
+            l.limits.max_size
+        )
+    });
+    let (apply, logs_only) = match (mode, &logs) {
+        (Housekeep::Off, None) => {
             eprintln!("axe node: housekeeping off");
             return Ok(None);
         }
-        Housekeep::DryRun => false,
-        Housekeep::Apply => true,
+        (Housekeep::Off, Some(logs)) => {
+            eprintln!("axe node: housekeeping off except [housekeeping.logs]: {logs}");
+            (true, true)
+        }
+        (Housekeep::DryRun, _) => (false, false),
+        (Housekeep::Apply, _) => (true, false),
     };
-    let rules = Rules::new(cfg)?;
-    eprintln!(
-        "axe node: housekeeping {} every {}s, retention {}s, roots under {}",
-        if apply { "apply" } else { "dry-run" },
-        TICK.as_secs(),
-        rules.retention,
-        rules.worktrees.display()
-    );
+    if !logs_only {
+        eprintln!(
+            "axe node: housekeeping {} every {}s, retention {}s, roots under {}; {}",
+            if apply { "apply" } else { "dry-run" },
+            TICK.as_secs(),
+            rules.retention,
+            rules.worktrees.display(),
+            logs.as_deref().unwrap_or("[housekeeping.logs] off")
+        );
+    }
     let mut keeper = Keeper::new(rules, client, apply);
+    if logs_only {
+        keeper = keeper.logs_only();
+    }
     let handle = std::thread::Builder::new()
         .name("housekeeping".into())
         .spawn(move || {
