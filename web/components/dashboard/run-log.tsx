@@ -58,6 +58,8 @@ type Reply = {
   page?: LogPage;
   unavailable?: string;
   retryable?: boolean;
+  /** The node's log retention deleted this finished run's log. */
+  pruned?: boolean;
   log_complete?: boolean;
 };
 export function RunLog({
@@ -89,6 +91,7 @@ export function RunLog({
   const [lines, setLines] = useState<LogLine[]>([]);
   const [connection, setConnection] = useState("Connecting");
   const [unavailable, setUnavailable] = useState("");
+  const [pruned, setPruned] = useState(false);
   const [error, setError] = useState("");
   const [paused, setPaused] = useState(false);
   const [full, setFull] = useState(false);
@@ -180,6 +183,7 @@ export function RunLog({
         setRun(reply.run);
         setConnection("Connected");
         if (!reply.page) {
+          setPruned(!!reply.pruned);
           setUnavailable(reply.unavailable || "Log unavailable");
           s.stopped = !reply.retryable;
           if (reply.retryable) setConnection("Node unavailable");
@@ -226,6 +230,7 @@ export function RunLog({
         setBeginning(s.page.start === 0);
         setLines(s.lines);
         setUnavailable("");
+        setPruned(false);
       } catch (e) {
         if (!disposed) {
           s.failures++;
@@ -368,18 +373,20 @@ export function RunLog({
         <span role="status" className={styles.connection}>
           {error
             ? connection
-            : unavailable
-              ? "Log unavailable"
-              : paused
-                ? "Paused"
-                : full
-                  ? "Window full · follow paused"
-                  : run?.ended_at
-                    ? "History"
-                    : connection}
+            : pruned
+              ? "Log pruned"
+              : unavailable
+                ? "Log unavailable"
+                : paused
+                  ? "Paused"
+                  : full
+                    ? "Window full · follow paused"
+                    : run?.ended_at
+                      ? "History"
+                      : connection}
         </span>
         <span className={styles.actions}>
-          {(error || unavailable) && (
+          {(error || unavailable) && !pruned && (
             <Button
               size="sm"
               onClick={() => {
@@ -455,7 +462,12 @@ export function RunLog({
           }}
         >
           {error && <p role="alert">{error}</p>}
-          {unavailable ? (
+          {pruned ? (
+            <p className={styles.note}>
+              Log pruned: the node&apos;s log retention deleted this run&apos;s
+              log. Its usage and cost stay in the run details.
+            </p>
+          ) : unavailable ? (
             <p role="alert">{unavailable}. History unavailable.</p>
           ) : (
             <>

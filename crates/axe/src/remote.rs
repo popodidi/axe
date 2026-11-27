@@ -903,6 +903,12 @@ impl Store {
     }
 }
 
+/// The reply for a finished run whose log is gone from the node: log
+/// retention pruned it (`retention.rs`). Its usage stays in the server.
+fn pruned() -> Value {
+    json!({"unavailable":"Log pruned by the node's log retention","pruned":true})
+}
+
 pub struct LogJob {
     pub query: Value,
     pub reply: std::sync::mpsc::SyncSender<Value>,
@@ -1065,11 +1071,12 @@ impl Store {
                                 q["run"]
                                     .as_i64()
                                     .and_then(|id| logs.get(&id))
-                                    .map(|l| l.path.clone())
+                                    .map(|l| (l.path.clone(), l.finished))
                             };
                             match path {
+                                Some((p, true)) if !p.exists() => pruned(),
                                 // A bot's `system.md` is its latest system prompt.
-                                Some(p) => crate::run_log::run_files(
+                                Some((p, _)) => crate::run_log::run_files(
                                     &p,
                                     (kind == "bot_log_meta")
                                         .then(|| p.with_file_name("system.md"))
@@ -1093,6 +1100,7 @@ impl Store {
                                     .map(|l| (l.path.clone(), l.finished))
                             };
                             match local {
+                                Some((path, true)) if !path.exists() => pruned(),
                                 Some((path, finished)) => match crate::run_log::read(
                                     &path,
                                     q["after"].as_u64(),

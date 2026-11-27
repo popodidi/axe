@@ -76,7 +76,10 @@ struct Fake {
     posts: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
-fn serve(routes: HashMap<String, Value>, post_status: u16) -> Fake {
+fn serve(mut routes: HashMap<String, Value>, post_status: u16) -> Fake {
+    routes
+        .entry("/api/sessions".into())
+        .or_insert_with(|| json!({"resumable": [], "known": []}));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let posts = Arc::new(Mutex::new(Vec::new()));
@@ -155,10 +158,19 @@ fn ago(d: Duration) -> String {
 }
 
 /// A config for `workspace` with 48h retention and extra TOML (`[housekeeping.*]` tables).
+/// Its log dir (`<workspace>-logs`) and runtime registry (`<workspace>-runtimes`, empty
+/// unless a test adds one) sit beside the workspace, so log retention never
+/// reaches the real `~/.local/state/axe/logs` or `~/.claude`.
 fn config(workspace: &Path, extra: &str) -> Config {
+    let logs = workspace.with_file_name("axe-logs");
+    let runtimes = workspace.with_file_name("axe-runtimes");
+    fs::create_dir_all(&runtimes).unwrap();
     Config::parse(&format!(
-        "workspace_root = {:?}\n[housekeeping]\nretention = \"48h\"\n{extra}",
-        workspace.to_str().unwrap()
+        "workspace_root = {:?}\nlog_dir = {:?}\n[runtimes]\ndir = {:?}\n\
+         [housekeeping]\nretention = \"48h\"\n{extra}",
+        workspace.to_str().unwrap(),
+        logs.to_str().unwrap(),
+        runtimes.to_str().unwrap()
     ))
     .unwrap()
 }
@@ -807,8 +819,9 @@ fn dispatcher_thread_applies_and_stops() {
     let stop = Arc::new(AtomicBool::new(false));
     let client = Client::at(url.clone(), "housekeeper".into());
 
+    let no_logs = config(&workspace, "[housekeeping.logs]\nmax_age = \"off\"\n");
     let off = axe::housekeeping::start(
-        &cfg,
+        &no_logs,
         Housekeep::Off,
         client.clone(),
         axe::admission::handle(None),
@@ -816,6 +829,28 @@ fn dispatcher_thread_applies_and_stops() {
     )
     .unwrap();
     assert!(off.is_none());
+
+    // Off still applies [housekeeping.logs] (on by default), and only that.
+    let old_log = cfg.log_dir().join("9-1.log");
+    aged(&old_log, 10, 40 * DAY);
+    let logs_only = axe::housekeeping::start(
+        &cfg,
+        Housekeep::Off,
+        client.clone(),
+        axe::admission::handle(None),
+        Arc::clone(&stop),
+    )
+    .unwrap()
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while old_log.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!old_log.exists(), "the first tick prunes logs");
+    assert!(wt.exists(), "off leaves worktrees alone");
+    stop.store(true, Ordering::SeqCst);
+    logs_only.join().unwrap();
+    stop.store(false, Ordering::SeqCst);
 
     let handle = axe::housekeeping::start(
         &cfg,
@@ -864,7 +899,13 @@ fn cli_dry_run_prints_decisions() {
             .output()
             .unwrap()
     };
-    let good = format!("workspace_root = {:?}\n", workspace.to_str().unwrap());
+    fs::create_dir_all(tmp.join("runtimes")).unwrap();
+    let good = format!(
+        "workspace_root = {:?}\nlog_dir = {:?}\n[runtimes]\ndir = {:?}\n",
+        workspace.to_str().unwrap(),
+        tmp.join("logs").to_str().unwrap(),
+        tmp.join("runtimes").to_str().unwrap()
+    );
 
     let out = cli(&["housekeeping", "--dry-run"], &good);
     assert!(out.status.success(), "{out:?}");
@@ -882,6 +923,8 @@ fn cli_dry_run_prints_decisions() {
     // Removal is only a node mode; bad config and modes are rejected.
     assert!(!cli(&["housekeeping"], &good).status.success());
     let bad = format!("{good}[housekeeping]\nretention = \"soon\"\n");
+    assert!(!cli(&["housekeeping", "--dry-run"], &bad).status.success());
+    let bad = format!("{good}[housekeeping.logs]\nmax_size = \"lots\"\n");
     assert!(!cli(&["housekeeping", "--dry-run"], &bad).status.success());
     let out = cli(&["dispatch", "--housekeep=sometimes"], &good);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
@@ -1724,4 +1767,211 @@ fn done_run_folder_loses_build_output_at_once() {
             assert!(!lines.contains_key(&dir), "{lines:?}");
         }
     }
+}
+
+const DAY: u64 = 86400;
+
+/// Writes `bytes` bytes to `path`, last modified `age` seconds ago.
+fn aged(path: &Path, bytes: usize, age: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, vec![b'x'; bytes]).unwrap();
+    set_age(path, age);
+}
+
+fn set_age(path: &Path, age: u64) {
+    let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+    fs::File::open(path).unwrap().set_modified(t).unwrap();
+}
+
+/// Log retention decisions: file name -> decision.
+fn retention_lines(lines: &[Value]) -> HashMap<String, String> {
+    lines
+        .iter()
+        .filter(|v| matches!(v["kind"].as_str(), Some("log" | "session")))
+        .map(|v| {
+            let path = PathBuf::from(v["path"].as_str().unwrap());
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, v["decision"].as_str().unwrap().to_string())
+        })
+        .collect()
+}
+
+fn retention_summary(lines: &[Value]) -> Value {
+    lines
+        .iter()
+        .find(|v| v["event"] == "log_retention")
+        .cloned()
+        .expect("a log_retention line")
+}
+
+/// A Claude Code runtime on `login` in the test registry beside `workspace`.
+fn claude_runtime(workspace: &Path, login: &Path) {
+    let dir = workspace.with_file_name("axe-runtimes").join("claude-t");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("runtime.toml"),
+        format!(
+            "harness = \"claude-code\"\nagent = \"claude\"\nlogin_dir = {:?}\n",
+            login.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn log_retention_prunes_old_logs_and_sessions_but_never_protected_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let workspace = tmp.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let login = tmp.join("claude-home");
+    claude_runtime(&workspace, &login);
+    let cfg = config(&workspace, "");
+    let logs = cfg.log_dir();
+    let old = 40 * DAY;
+    // Run logs: a finished old run, one still running (journal), one a
+    // process holds open, a recent one, a bot run and a service log.
+    for f in ["1-1.log", "1-1.prompt.md", "1-1.times"] {
+        aged(&logs.join(f), 10, old);
+    }
+    aged(&logs.join("2-1.log"), 10, old);
+    aged(&logs.join("3-1.log"), 10, old);
+    aged(&logs.join("4-1.log"), 10, DAY);
+    aged(&logs.join("bots/ops/7.log"), 10, old);
+    aged(&logs.join("bots/ops/system.md"), 10, old);
+    aged(&logs.join("services/ops/probe.log"), 10, old);
+    fs::create_dir_all(logs.join(".dispatcher")).unwrap();
+    let journal = json!({"id": "n", "generation": "g", "pending": null,
+        "logs": {"1": {"path": logs.join("1-1.log"), "finished": true},
+                 "2": {"path": logs.join("2-1.log"), "finished": false}},
+        "bot_logs": {"5": {"path": logs.join("bots/ops/7.log"), "finished": true}}});
+    fs::write(logs.join(".dispatcher/journal.json"), journal.to_string()).unwrap();
+    set_age(&logs.join(".dispatcher/journal.json"), old);
+    let open = fs::File::open(logs.join("3-1.log")).unwrap();
+    // Session transcripts: a done task's (known, not resumable), a waiting
+    // task's (resumable), one no axe run had, and a project's memory.
+    let (done, waiting, foreign) = (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    );
+    let project = login.join("projects/-w-task");
+    for id in [done, waiting, foreign] {
+        aged(&project.join(format!("{id}.jsonl")), 10, old);
+    }
+    aged(&project.join(format!("{done}/subagents/a.jsonl")), 10, old);
+    set_age(&project.join(format!("{done}/subagents")), old);
+    set_age(&project.join(done), old);
+    aged(&project.join("memory/MEMORY.md"), 10, old);
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/api/sessions".into(),
+        json!({"resumable": [waiting], "known": [done, waiting]}),
+    );
+    let url = serve(routes, 200).url;
+
+    let dry = keeper(&cfg, &url, false, &tmp).tick(None, &AtomicBool::new(false));
+    assert!(dry.ok, "{:?}", dry.lines);
+    let d = retention_lines(&dry.lines);
+    assert_eq!(d["1-1.log"], "would_delete", "{d:?}");
+    assert!(logs.join("1-1.log").exists());
+
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &AtomicBool::new(false));
+    assert!(tick.ok, "{:?}", tick.lines);
+    let d = retention_lines(&tick.lines);
+    for name in ["1-1.log", "7.log", "probe.log"] {
+        assert_eq!(d[name], "deleted", "{name}: {d:?}");
+    }
+    assert_eq!(d[&format!("{done}.jsonl")], "deleted", "{d:?}");
+    for name in ["2-1.log", "3-1.log"] {
+        assert_eq!(d[name], "retain", "{name}: {d:?}");
+    }
+    assert_eq!(d[&format!("{waiting}.jsonl")], "retain");
+    assert_eq!(d[&format!("{foreign}.jsonl")], "retain");
+    for gone in ["1-1.log", "1-1.prompt.md", "1-1.times", "bots/ops/7.log"] {
+        assert!(!logs.join(gone).exists(), "{gone}");
+    }
+    assert!(!logs.join("services/ops/probe.log").exists());
+    for kept in [
+        "2-1.log",
+        "3-1.log",
+        "4-1.log",
+        "bots/ops/system.md",
+        ".dispatcher/journal.json",
+    ] {
+        assert!(logs.join(kept).exists(), "{kept}");
+    }
+    assert!(!project.join(format!("{done}.jsonl")).exists());
+    assert!(!project.join(done).exists());
+    assert!(project.join(format!("{waiting}.jsonl")).exists());
+    assert!(project.join(format!("{foreign}.jsonl")).exists());
+    assert!(project.join("memory/MEMORY.md").exists());
+    let summary = retention_summary(&tick.lines);
+    assert_eq!(summary["deleted"], 4, "{summary}");
+    // Running, open, resumable and foreign: over the age, kept.
+    assert_eq!(summary["kept_over_limit"], 4, "{summary}");
+    assert_eq!(summary["max_age_seconds"], 30 * DAY);
+    assert!(summary["freed_bytes"].as_u64().unwrap() > 0);
+    drop(open);
+
+    // The server's session list unavailable: transcripts stay, logs still go.
+    aged(&project.join(format!("{done}.jsonl")), 10, old);
+    aged(&logs.join("5-1.log"), 10, old);
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let tick =
+        keeper(&cfg, &format!("http://{dead}"), true, &tmp).tick(None, &AtomicBool::new(false));
+    assert!(tick.ok, "{:?}", tick.lines);
+    assert!(!logs.join("5-1.log").exists());
+    assert!(project.join(format!("{done}.jsonl")).exists());
+    let summary = retention_summary(&tick.lines);
+    assert!(summary["skipped"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("sessions:"));
+}
+
+#[test]
+fn log_retention_size_limit_deletes_oldest_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let workspace = tmp.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    // Six 64 KiB logs, 6..1 days old; the oldest is still running.
+    let probe = tmp.join("probe");
+    aged(&probe, 64 << 10, 0);
+    let each = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(&probe).unwrap().blocks() * 512
+    };
+    let cfg = config(
+        &workspace,
+        &format!(
+            "[housekeeping.logs]\nmax_age = \"off\"\nmax_size = \"{}\"\n",
+            3 * each
+        ),
+    );
+    let logs = cfg.log_dir();
+    for i in 1..=6u64 {
+        aged(&logs.join(format!("{i}-1.log")), 64 << 10, (7 - i) * DAY);
+    }
+    fs::create_dir_all(logs.join(".dispatcher")).unwrap();
+    let journal = json!({"id": "n", "generation": "g", "pending": null,
+        "logs": {"1": {"path": logs.join("1-1.log"), "finished": false}}});
+    fs::write(logs.join(".dispatcher/journal.json"), journal.to_string()).unwrap();
+    let url = serve(HashMap::new(), 200).url;
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &AtomicBool::new(false));
+    assert!(tick.ok, "{:?}", tick.lines);
+    // The running 1-1 counts toward the total; 2-1..4-1 go to get under it.
+    for i in 2..=4 {
+        assert!(!logs.join(format!("{i}-1.log")).exists(), "{i}");
+    }
+    for i in [1, 5, 6] {
+        assert!(logs.join(format!("{i}-1.log")).exists(), "{i}");
+    }
+    let summary = retention_summary(&tick.lines);
+    assert_eq!(summary["deleted"], 3, "{summary}");
+    assert_eq!(summary["kept_over_limit"], 1, "{summary}");
 }

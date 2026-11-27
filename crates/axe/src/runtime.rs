@@ -249,6 +249,17 @@ fn default_probe(harness: &str) -> Vec<String> {
 }
 
 impl Runtime {
+    /// The CLI's login directory, which also holds its session transcripts;
+    /// `None` for a harness axe does not know.
+    pub fn login_root(&self) -> Option<PathBuf> {
+        let (_, default) = login_var(&self.harness)?;
+        Some(
+            self.login_dir
+                .clone()
+                .unwrap_or_else(|| expand_tilde(default)),
+        )
+    }
+
     /// Healthy at `now`: ok, or limited/degraded past its end.
     pub fn healthy(&self, now: i64) -> bool {
         match self.health.state.as_str() {

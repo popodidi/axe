@@ -1813,6 +1813,36 @@ pub struct SessionInfo {
     pub run: Option<RunRecord>,
 }
 
+/// Agent sessions of this server for log retention (`retention.rs`):
+/// `(resumable, known)`. Resumable: those of tasks not done (stored or of
+/// any of their runs), of bots and of live runs; their transcripts stay.
+/// Known: every session a task or bot run had; a transcript of any other
+/// session (the owner's own CLI use) is never pruned.
+pub fn retention_sessions(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
+    let ids = |sql: &str| -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(sql)?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids.into_iter().filter(|s| !s.is_empty()).collect())
+    };
+    let resumable = ids(
+        "SELECT s.session_id FROM sessions s JOIN tasks t ON t.id = s.task_id
+           WHERE t.state != 'done'
+         UNION SELECT r.session_id FROM runs r JOIN tasks t ON t.id = r.task_id
+           WHERE r.session_id IS NOT NULL AND (t.state != 'done' OR r.ended_at IS NULL)
+         UNION SELECT session_id FROM bots WHERE session_id IS NOT NULL
+         UNION SELECT session_id FROM bot_runs
+           WHERE session_id IS NOT NULL AND ended_at IS NULL
+         ORDER BY 1",
+    )?;
+    let known = ids("SELECT session_id FROM runs WHERE session_id IS NOT NULL
+         UNION SELECT session_id FROM bot_runs WHERE session_id IS NOT NULL
+         UNION SELECT session_id FROM sessions
+         ORDER BY 1")?;
+    Ok((resumable, known))
+}
+
 pub fn find_session(conn: &Connection, session_id: &str) -> Result<Option<SessionInfo>> {
     let run = conn
         .query_row(
