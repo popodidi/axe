@@ -1,18 +1,21 @@
-//! Sealed forms on the server: a relay that keeps forms in memory only.
+//! Sealed forms on the server: a relay that holds open forms.
 //!
 //! The server never sees a value. It holds each form's signed spec (purpose,
 //! field names and types, target, expiry: not secret) and, between a
 //! channel's reply and the node's delivery, the sealed reply
 //! (ciphertext). Nothing about a form is written to the database except a
-//! task event naming it; the sealed reply is dropped once the node
-//! answers, and a restart forgets open forms (their links stop working).
-//! Crypto and targets: `sealed.rs`.
+//! task event naming it. Open forms' signed specs and prompts (never a reply,
+//! not even sealed) are kept in a file next to it ([`Forms::open`]), so a
+//! restart keeps their links working until they expire; a reply held at the
+//! restart is dropped and its form reopens. The sealed reply is dropped once
+//! the node answers. Crypto and targets: `sealed.rs`.
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use crate::sealed::{self, Sealed, Signed, Spec};
@@ -29,7 +32,7 @@ const KEEP_FINISHED: i64 = 3600;
 const CLOSE_AFTER: i64 = 2;
 
 /// Where a form's Telegram prompt went, so the reply can be answered there.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Prompt {
     pub bot: String,
     pub chat: i64,
@@ -107,11 +110,78 @@ pub struct Forms {
     forms: Mutex<HashMap<String, Form>>,
     cv: Condvar,
     next: AtomicU64,
+    /// Where open forms are kept across restarts (`None`: memory only).
+    path: Option<PathBuf>,
 }
 
 impl Forms {
+    /// Forms kept in `path`: the open forms saved there that have not
+    /// expired by `now` are open again, each without a held reply. A file
+    /// that cannot be read is reported and ignored.
+    pub fn open(path: PathBuf, now: i64) -> Forms {
+        let mut forms = Forms {
+            path: Some(path.clone()),
+            ..Forms::default()
+        };
+        match load(&path) {
+            Ok(saved) => {
+                let map = forms.forms.get_mut().unwrap_or_else(|e| e.into_inner());
+                for s in saved {
+                    let Ok(spec) = s.signed.decode() else {
+                        continue;
+                    };
+                    let Ok(expires) = spec.expires_at() else {
+                        continue;
+                    };
+                    if now > expires || !sealed::is_form_id(&spec.form) {
+                        continue;
+                    }
+                    let seq = forms.next.fetch_add(1, Ordering::Relaxed);
+                    map.insert(
+                        spec.form.clone(),
+                        Form {
+                            signed: s.signed,
+                            spec,
+                            expires,
+                            created: s.created,
+                            state: OPEN,
+                            sealed: None,
+                            delivered: None,
+                            error: None,
+                            prompt: s.prompt,
+                            finished: None,
+                            closed: false,
+                            seq,
+                        },
+                    );
+                }
+                if !map.is_empty() {
+                    eprintln!(
+                        "axe server: {} open form(s) restored from {}",
+                        map.len(),
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("axe server: forms: {e:#}"),
+        }
+        forms
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Form>> {
         self.forms.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Writes the open forms to the file (called with the lock held, so
+    /// writes land in order). Errors are reported, never fatal: the forms
+    /// stay usable in memory.
+    fn save(&self, forms: &HashMap<String, Form>) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if let Err(e) = save(path, forms) {
+            eprintln!("axe server: forms: save {}: {e:#}", path.display());
+        }
     }
 
     /// Records a form the node signed for `req`. The spec must match
@@ -139,7 +209,9 @@ impl Forms {
             closed: false,
             seq: self.next.fetch_add(1, Ordering::Relaxed),
         };
-        self.lock().insert(form.spec.form.clone(), form.clone());
+        let mut forms = self.lock();
+        forms.insert(form.spec.form.clone(), form.clone());
+        self.save(&forms);
         Ok(form)
     }
 
@@ -170,6 +242,7 @@ impl Forms {
         }
         forms.retain(|_, f| f.finished.is_none_or(|t| now - t < KEEP_FINISHED));
         if changed {
+            self.save(&forms);
             self.cv.notify_all();
         }
     }
@@ -232,8 +305,12 @@ impl Forms {
             }
             Delivery::Unavailable(e) => f.error = Some(e.clone()),
         }
+        let f = f.clone();
+        if f.finished.is_some() {
+            self.save(&forms);
+        }
         self.cv.notify_all();
-        Some(f.clone())
+        Some(f)
     }
 
     /// Submitted forms still waiting for a node.
@@ -253,14 +330,17 @@ impl Forms {
         let mut forms = self.lock();
         if let Some(f) = forms.get_mut(form) {
             f.prompt = Some(at.clone());
+            self.save(&forms);
         }
         open_prompts_in(&forms, at)
     }
 
     /// Forgets a prompt that could not be sent.
     pub fn clear_prompt(&self, form: &str) {
-        if let Some(f) = self.lock().get_mut(form) {
+        let mut forms = self.lock();
+        if let Some(f) = forms.get_mut(form) {
             f.prompt = None;
+            self.save(&forms);
         }
     }
 
@@ -329,6 +409,44 @@ impl Forms {
                 .0;
         }
     }
+}
+
+/// An open form as kept on disk: what the server was given, no reply.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Saved {
+    signed: Signed,
+    created: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt: Option<Prompt>,
+}
+
+/// The saved open forms, oldest first; none when there is no file yet.
+fn load(path: &Path) -> Result<Vec<Saved>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("read {}", path.display()))),
+    };
+    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+}
+
+/// Replaces the file with the open (and submitted: their reply is not kept)
+/// forms, in the order they were added, through a private temp file.
+fn save(path: &Path, forms: &HashMap<String, Form>) -> Result<()> {
+    let mut open: Vec<&Form> = forms
+        .values()
+        .filter(|f| matches!(f.state, OPEN | SUBMITTED))
+        .collect();
+    open.sort_by_key(|f| f.seq);
+    let saved: Vec<Saved> = open
+        .into_iter()
+        .map(|f| Saved {
+            signed: f.signed.clone(),
+            created: f.created,
+            prompt: f.prompt.clone(),
+        })
+        .collect();
+    sealed::write_private(path, &serde_json::to_vec(&saved)?)
 }
 
 /// The open forms prompted in `at`'s chat, in the order they were added: a
@@ -536,6 +654,66 @@ mod tests {
         // Finished forms are forgotten after a while.
         forms.sweep(3 + KEEP_FINISHED);
         assert!(forms.get(&f.spec.form, 3 + KEEP_FINISHED).is_none());
+    }
+
+    #[test]
+    fn open_forms_survive_a_restart_without_their_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forms.json");
+        let key = crate::sealed::Key::random();
+        let at = Prompt {
+            bot: "cos".into(),
+            chat: 7,
+        };
+        let forms = Forms::open(path.clone(), 0);
+        let (held, s) = key.sign("d", &req(), 0).unwrap();
+        forms.add(&req(), s, 0).unwrap();
+        forms.prompt_at(&held.form, &at);
+        let (open, s) = key.sign("d", &req(), 0).unwrap();
+        forms.add(&req(), s, 0).unwrap();
+        let (used, s) = key.sign("d", &req(), 0).unwrap();
+        forms.add(&req(), s, 0).unwrap();
+        let sealed = crate::sealed::seal(&held, &json!({"token": "v"})).unwrap();
+        forms.submit(&sealed.text(), 1).unwrap();
+        let reply = crate::sealed::seal(&used, &json!({"token": "v"})).unwrap();
+        forms.submit(&reply.text(), 1).unwrap();
+        forms.finish(&used.form, &Delivery::Done(json!({"files": []})), 1);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&sealed.text()), "no reply on disk");
+
+        // Restarted: open forms are open again, a held reply is gone (its
+        // form reopens), a delivered one is not kept.
+        let again = Forms::open(path.clone(), 2);
+        let mut ids: Vec<String> = again.list(2).into_iter().map(|f| f.spec.form).collect();
+        ids.sort();
+        let mut want = vec![held.form.clone(), open.form.clone()];
+        want.sort();
+        assert_eq!(ids, want);
+        let f = again.get(&held.form, 2).unwrap();
+        assert_eq!((f.state, f.prompt.as_ref()), (OPEN, Some(&at)));
+        assert!(again.job(&held.form).is_none());
+        let open_here: Vec<String> = again
+            .prompt_at(&held.form, &at)
+            .into_iter()
+            .map(|f| f.spec.form)
+            .collect();
+        assert_eq!(open_here, std::slice::from_ref(&held.form));
+        again.submit(&sealed.text(), 3).unwrap();
+        assert!(again.job(&held.form).is_some());
+        assert!(again
+            .submit(&reply.text(), 3)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown or expired"));
+
+        // Past their expiry they are not restored.
+        assert!(Forms::open(path.clone(), 121).list(121).is_empty());
+        // A file that does not parse is ignored.
+        std::fs::write(&path, "not json").unwrap();
+        assert!(Forms::open(path, 0).list(0).is_empty());
     }
 
     #[test]
