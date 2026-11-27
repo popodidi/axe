@@ -53,7 +53,7 @@ pub struct Agent {
     /// other agents without it cannot run bots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_args: Option<Vec<String>>,
-    /// The harness this agent drives (`rule::HARNESSES`), so selection rules
+    /// The harness this agent drives (`harness::HARNESSES`), so selection rules
     /// can pick it. Omitted: `claude-code` when `cmd` runs `claude`, `codex`
     /// when it runs `codex`, else none (only a task or bot pin selects it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,11 +74,7 @@ impl Agent {
             return Some(h);
         }
         let bin = self.cmd.first()?;
-        match Path::new(bin).file_name()?.to_str()? {
-            "claude" => Some("claude-code"),
-            "codex" => Some("codex"),
-            _ => None,
-        }
+        crate::harness::by_bin(Path::new(bin).file_name()?.to_str()?).map(|h| h.name)
     }
 
     /// The arguments a bot run splices in: `bot_args`, else the harness
@@ -89,12 +85,8 @@ impl Agent {
             return Some(a.clone());
         }
         let bin = Path::new(self.cmd.first()?).file_name()?.to_str()?;
-        let args: &[&str] = match bin {
-            "claude" => &CLAUDE_BOT_ARGS,
-            "codex" => &CODEX_BOT_ARGS,
-            _ => return None,
-        };
-        Some(args.iter().map(|a| a.to_string()).collect())
+        let h = crate::harness::by_bin(bin)?;
+        Some(h.bot_args.iter().map(|a| a.to_string()).collect())
     }
 
     pub fn session_mode(&self) -> Result<SessionMode> {
@@ -1114,7 +1106,7 @@ fn default_drain_abort_seconds() -> u64 {
     900
 }
 fn default_agents() -> Vec<String> {
-    vec!["claude".into()]
+    vec![crate::harness::DEFAULT_AGENT.into()]
 }
 fn default_strategy() -> Strategy {
     Strategy::Fixed
@@ -1159,30 +1151,6 @@ fn default_session() -> String {
     "none".into()
 }
 
-/// Claude Code bot runs: the system prompt appended from a file and the
-/// inbox hooks (`bot::settings_json`) from a settings file.
-pub const CLAUDE_BOT_ARGS: [&str; 6] = [
-    "--system-prompt-snapshot",
-    "off",
-    "--append-system-prompt-file",
-    "{system_prompt_file}",
-    "--settings",
-    "{settings_file}",
-];
-
-/// Codex bot runs (`codex exec` and `codex exec resume`, verified on
-/// codex-cli 0.172): the system prompt as `developer_instructions` (added to
-/// Codex's own instructions, not replacing them) and the same inbox hooks as
-/// an inline `hooks` table. Codex runs only hooks it has trusted; these are
-/// axe's own, written per run, so trust is bypassed for the run.
-pub const CODEX_BOT_ARGS: [&str; 5] = [
-    "--dangerously-bypass-hook-trust",
-    "-c",
-    "developer_instructions={system_prompt_toml}",
-    "-c",
-    "hooks={hooks_toml}",
-];
-
 fn builtin_claude() -> Agent {
     Agent {
         resume_cmd: Some(
@@ -1216,7 +1184,8 @@ fn builtin_claude() -> Agent {
         .map(String::from)
         .to_vec(),
         session: "preset".into(),
-        bot_args: Some(CLAUDE_BOT_ARGS.map(String::from).to_vec()),
+        bot_args: crate::harness::get(crate::harness::DEFAULT_HARNESS)
+            .map(|h| h.bot_args.iter().map(|a| a.to_string()).collect()),
         harness: None,
     }
 }
@@ -1279,7 +1248,7 @@ impl Config {
     pub fn parse(s: &str) -> Result<Config> {
         let mut cfg: Config = toml::from_str(s)?;
         cfg.agents
-            .entry("claude".into())
+            .entry(crate::harness::DEFAULT_AGENT.into())
             .or_insert_with(builtin_claude);
         cfg.validate()?;
         Ok(cfg)
@@ -1333,10 +1302,10 @@ impl Config {
             a.session_mode()
                 .with_context(|| format!("agents.{name}.session"))?;
             if let Some(h) = &a.harness {
-                if !crate::rule::HARNESSES.contains(&h.as_str()) {
+                if !crate::harness::known(h) {
                     bail!(
                         "agents.{name}.harness: unknown harness {h:?} (expected one of {})",
-                        crate::rule::HARNESSES.join(", ")
+                        crate::harness::names()
                     );
                 }
             }

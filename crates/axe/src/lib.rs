@@ -19,6 +19,7 @@ pub mod flow;
 pub mod form;
 pub mod goal;
 pub mod goal_board;
+pub mod harness;
 pub mod housekeeping;
 pub mod login;
 pub mod run_log;

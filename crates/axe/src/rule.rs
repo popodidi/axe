@@ -12,9 +12,6 @@ use serde_json::{json, Value};
 use std::fmt;
 use std::str::FromStr;
 
-/// Harnesses a rule can name: the coding CLIs axe drives.
-pub const HARNESSES: [&str; 2] = ["claude-code", "codex"];
-
 /// `rule_events.rule_id` is not a foreign key: a removed rule keeps its history.
 /// The one `import` event (no rule id) marks the one-time config import.
 pub const SCHEMA: &str = "
@@ -165,11 +162,11 @@ pub(crate) fn check_param(kind: &str, v: &str) -> Result<()> {
 
 impl Use {
     pub fn validate(&self) -> Result<()> {
-        if !HARNESSES.contains(&self.harness.as_str()) {
+        if !crate::harness::known(&self.harness) {
             bail!(
                 "unknown harness {:?} (expected one of {})",
                 self.harness,
-                HARNESSES.join(", ")
+                crate::harness::names()
             );
         }
         if let Some(m) = &self.model {
@@ -184,19 +181,14 @@ impl Use {
     /// Arguments that pass this entry's model and effort to its harness's CLI.
     pub fn args(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let codex = self.harness == "codex";
+        let Some(h) = crate::harness::get(&self.harness) else {
+            return out;
+        };
         if let Some(m) = &self.model {
-            out.push(if codex { "-m" } else { "--model" }.to_string());
-            out.push(m.clone());
+            out.extend(crate::harness::fill(h.model_args, "model", m));
         }
         if let Some(e) = &self.effort {
-            if codex {
-                out.push("-c".into());
-                out.push(format!("model_reasoning_effort=\"{e}\""));
-            } else {
-                out.push("--effort".into());
-                out.push(e.clone());
-            }
+            out.extend(crate::harness::fill(h.effort_args, "effort", e));
         }
         out
     }

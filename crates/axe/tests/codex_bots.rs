@@ -6,7 +6,7 @@ mod common;
 use std::path::Path;
 
 use axe::bot::{self, NewBot};
-use axe::config::{Config, CODEX_BOT_ARGS};
+use axe::config::Config;
 use axe::db::{self, Actor};
 use common::{Server, TOKEN};
 use serde_json::{json, Value};
@@ -94,7 +94,12 @@ fn a_codex_agent_runs_bots_with_default_args() {
     cfg.validate_bot_agent("codex").unwrap();
     assert_eq!(
         cfg.agents["codex"].bot_args().unwrap(),
-        CODEX_BOT_ARGS.map(String::from)
+        axe::harness::get("codex")
+            .unwrap()
+            .bot_args
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
     );
     // Configured bot_args win; other CLIs still need their own.
     assert_eq!(cfg.agents["mine"].bot_args().unwrap(), ["--x"]);
