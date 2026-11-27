@@ -716,20 +716,21 @@ fn status_shows_the_live_run_and_attention() {
     );
 }
 
-/// `/node` with no sample says so; an old sample is marked stale.
+/// `/node` with no sample says so; an old sample is marked stale, with
+/// unknown readings as empty bars and differing versions each named.
 #[test]
 fn node_view_without_a_fresh_sample() {
     let (_d, c) = setup();
     let server = axe::server::version().version;
     let empty = owner_views::node(&c, Some(WEB), now()).unwrap();
-    assert!(
-        empty.starts_with(&format!(
+    assert_eq!(
+        empty,
+        format!(
             "<b>Node · no samples yet</b>\nThe node reports every <code>[node_metrics] sample_seconds</code>.\n\
-             <blockquote expandable>Server <code>{server}</code>\nNode <code>?</code>\nCLI <code>?</code></blockquote>\n"
-        )),
-        "{empty}"
+             Server <code>{server}</code> · node <code>?</code> · CLI <code>?</code>\n\
+             <a href=\"http://axe.example/?view=node\">Open node</a>"
+        )
     );
-    assert!(empty.ends_with("<a href=\"http://axe.example/?view=node\">Open node</a>"));
     let s = axe::node_metrics::Sample {
         cpu_percent: Some(5.0),
         node_version: Some("0.5.4 (5437bf3602b8)".into()),
@@ -747,9 +748,50 @@ fn node_view_without_a_fresh_sample() {
         stale,
         format!(
             "<b>Node · stale, last sample 3h ago</b>\n\
-             CPU <code>5%</code>\nBots <code>1</code>\n\
-             <blockquote expandable>Server <code>{server}</code>\n\
-             Node <code>0.5.4 (5437bf3602b8)</code>\nCLI <code>0.5.3 (7467135d8cb8)</code></blockquote>"
+             <code>CPU  ▓░░░░░░░░░   5%</code>\n\
+             <code>Mem  ░░░░░░░░░░    ?</code>\n\
+             <code>Disk ░░░░░░░░░░    ?</code>\n\
+             Bots <code>1</code>\n\
+             Server <code>{server}</code> · node <code>0.5.4 (5437bf3602b8)</code> · \
+             CLI <code>0.5.3 (7467135d8cb8)</code>"
         )
+    );
+}
+
+/// A fresh idle sample: the age in the headline, three aligned bars with
+/// used of total, and one version when server, node and CLI agree.
+#[test]
+fn node_view_idle_with_one_version() {
+    let (_d, c) = setup();
+    let server = axe::server::version().version;
+    let gib: u64 = 1 << 30;
+    let s = axe::node_metrics::Sample {
+        cpu_percent: Some(2.4),
+        load1: Some(0.2),
+        load5: Some(0.3),
+        load15: Some(0.4),
+        mem_used_bytes: Some(gib),
+        mem_total_bytes: Some(20 * gib),
+        disk_free_bytes: Some(32 * gib),
+        disk_total_bytes: Some(144 * gib),
+        node_version: Some(server.clone()),
+        cli_version: Some(server.clone()),
+        ..Default::default()
+    };
+    axe::node_metrics::record(&c, "n1", now() - 12, s, &Default::default()).unwrap();
+    let out = owner_views::node(&c, Some(WEB), now()).unwrap();
+    let head = out.lines().next().unwrap();
+    assert!(head.starts_with("<b>Node · idle</b> · 1"), "{out}");
+    assert!(head.ends_with("s ago"), "{out}");
+    let rest: Vec<&str> = out.lines().skip(1).collect();
+    assert_eq!(
+        rest,
+        [
+            "<code>CPU  ░░░░░░░░░░   2%  load 0.20</code>",
+            "<code>Mem  ▓░░░░░░░░░   5%  1.0/20.0 GiB</code>",
+            "<code>Disk ▓▓▓▓▓▓▓▓░░  78%  112.0/144.0 GiB</code>",
+            &format!("Version <code>{server}</code>"),
+            "<a href=\"http://axe.example/?view=node\">Open node</a>",
+        ]
     );
 }

@@ -315,8 +315,14 @@ pub(crate) fn cells(ratio: f64) -> String {
 /// spend over its limit fills the bar and says `over`; no limit shows an
 /// empty bar and `no limit`.
 fn bar(label: &str, spent: f64, limit: Option<f64>, amount: &str) -> String {
-    let line = match limit {
-        None => format!("{label} {}    -  {amount} wk, no limit", cells(0.0)),
+    match limit {
+        None => format!(
+            "<code>{}</code>",
+            escape(&format!(
+                "{label} {}    -  {amount} wk, no limit",
+                cells(0.0)
+            ))
+        ),
         Some(l) => {
             let ratio = if l > 0.0 {
                 spent / l
@@ -325,16 +331,24 @@ fn bar(label: &str, spent: f64, limit: Option<f64>, amount: &str) -> String {
             } else {
                 0.0
             };
-            let pct = if ratio.is_finite() {
-                format!("{:.0}%", ratio * 100.0)
-            } else {
-                "max".to_string()
-            };
             let over = if ratio > 1.0 { " over" } else { "" };
-            format!("{label} {} {pct:>4}  {amount} wk{over}", cells(ratio))
+            gauge(label, Some(ratio), &format!("{amount} wk{over}"))
         }
+    }
+}
+
+/// One monospace gauge line, `LABEL CELLS PCT  TAIL`: [`cells`] of `ratio`,
+/// its percent right-aligned in four columns (`max` when infinite), then
+/// `tail`. An unknown ratio shows an empty bar and `?`. The budget bars and
+/// `/node`'s CPU, memory and disk lines.
+pub(crate) fn gauge(label: &str, ratio: Option<f64>, tail: &str) -> String {
+    let pct = match ratio {
+        None => "?".to_string(),
+        Some(r) if r.is_finite() => format!("{:.0}%", r * 100.0),
+        Some(_) => "max".to_string(),
     };
-    format!("<code>{}</code>", escape(&line))
+    let line = format!("{label} {} {pct:>4}  {tail}", cells(ratio.unwrap_or(0.0)));
+    format!("<code>{}</code>", escape(line.trim_end()))
 }
 
 /// One goal's block of lines, the scoreboard layout:
