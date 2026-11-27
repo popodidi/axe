@@ -284,3 +284,44 @@ fn a_runtime_switch_is_refused_during_a_live_run() {
     assert!(format!("{err:#}").contains("live run"), "{err:#}");
     assert_eq!(bot::get(&conn, "b").unwrap().agent, "claude");
 }
+
+#[test]
+fn a_bot_pinned_to_an_agent_runs_on_its_only_runtime() {
+    // A VM with no pre-made runtime: the owner added codex-1 (own login),
+    // and the bot names the agent template `codex`.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let rt = dir.join("runtimes/codex-1");
+    std::fs::create_dir_all(rt.join("home")).unwrap();
+    std::fs::write(
+        rt.join("runtime.toml"),
+        format!(
+            "harness = \"codex\"\nagent = \"codex\"\nlogin_dir = \"{}\"\n",
+            rt.join("home").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(rt.join("state.json"), r#"{"state":"ok"}"#).unwrap();
+    let srv = rig(dir);
+    let cfg = dir.join("config.toml");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "\n[runtimes]\ndir = \"{}\"\n",
+        dir.join("runtimes").display()
+    ));
+    std::fs::write(&cfg, text).unwrap();
+    let f = dir.join("bot.json");
+    std::fs::write(
+        &f,
+        json!({"name":"b","project":"a","agent":"codex"}).to_string(),
+    )
+    .unwrap();
+    srv.ok(&["bot", "create", "--file", f.to_str().unwrap()]);
+    dispatch_once(&srv, dir);
+    let runs: Vec<Value> = serde_json::from_value(srv.get("/api/bot-runs?bot=b")).unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0]["agent"], "codex-1", "{runs:?}");
+    let log = srv.ok(&["bot", "log", "b", "--full"]);
+    assert_eq!(runs[0]["exit_code"], 0, "{log}");
+    assert_eq!(&args(dir, 1)[0..2], ["exec", "--json"]);
+}

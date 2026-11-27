@@ -1419,7 +1419,11 @@ pub fn claim(
         None => None,
     };
     let open_cards = open_cards_for(tx, bot_id, &wakes)?;
-    let b = get(tx, name)?;
+    // Re-read for the claim's state; the run's agent stays the picked one.
+    let mut b = get(tx, name)?;
+    if let Some(a) = agent {
+        b.agent = a.to_string();
+    }
     Ok(Some(Claimed {
         run,
         bot: b,
