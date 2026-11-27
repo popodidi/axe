@@ -469,7 +469,7 @@ impl Target {
             }
             Target::Runtime { runtime, login } => {
                 crate::db::validate_name("runtime", runtime)?;
-                if !matches!(login.as_str(), "api_key" | "token") {
+                if !matches!(login.as_str(), "api_key" | "token" | "code") {
                     bail!("unknown runtime login {login:?}");
                 }
                 match fields {
@@ -1367,6 +1367,9 @@ pub struct Desk {
     cfg: Option<crate::config::Config>,
     /// Runtimes with a device login in progress.
     logins: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The stdin of each web login waiting for the code its page shows
+    /// (`claude auth login`), by runtime; a `code` login form writes there.
+    codes: std::sync::Arc<Mutex<BTreeMap<String, std::process::ChildStdin>>>,
     /// Where a reply key form writes the owner's [`ReplyKey`].
     reply_key: PathBuf,
     /// Runtimes just logged in, for the node to check at once.
@@ -1413,6 +1416,7 @@ impl Desk {
             used: Mutex::new(used),
             cfg: None,
             logins: Default::default(),
+            codes: Default::default(),
             logged_in: Default::default(),
             runtime_jobs: None,
         }
@@ -1536,9 +1540,14 @@ impl Desk {
             bail!("a login of runtime {name} is already in progress");
         }
         let logins = std::sync::Arc::clone(&self.logins);
+        let codes = std::sync::Arc::clone(&self.codes);
         let logged_in = std::sync::Arc::clone(&self.logged_in);
         let key = name.to_string();
+        // Held until the login is recorded below, so an instant exit
+        // cannot be overtaken by its own stdin.
+        let guard = self.codes.lock().unwrap_or_else(|e| e.into_inner());
         let r = rt.device_login(&cfg, DEVICE_OUTPUT_WAIT, move |_| {
+            codes.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
             logins
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1546,13 +1555,51 @@ impl Desk {
             // Checked whatever the CLI said: the check tells the owner.
             push_login(&logged_in, &key);
         });
-        if r.is_err() {
-            self.logins
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(name);
+        let mut guard = guard;
+        let login = match r {
+            Ok(l) => l,
+            Err(e) => {
+                self.logins
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(name);
+                return Err(e);
+            }
+        };
+        let code = login.code.is_some();
+        if let Some(stdin) = login.code {
+            guard.insert(name.to_string(), stdin);
         }
-        Ok(json!({"output": r?}))
+        Ok(json!({"output": login.output, "code": code}))
+    }
+
+    /// Passes the code the login page showed to runtime `runtime`'s waiting
+    /// web login ([`crate::runtime::DeviceLogin::code`]). Its outcome comes
+    /// when the CLI exits: the login is checked and a card follows.
+    fn relay_code(&self, runtime: &str, code: &str) -> Result<Value> {
+        use std::io::Write as _;
+        let code = code.trim();
+        if code.is_empty() || code.contains(['\n', '\r', '\0']) {
+            bail!("the code must be one line");
+        }
+        let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut stdin) = codes.remove(runtime) else {
+            bail!(
+                "no web sign-in of runtime {runtime} is waiting for a code; start it again from \
+                 /runtimes"
+            );
+        };
+        stdin
+            .write_all(format!("{code}\n").as_bytes())
+            .and_then(|_| stdin.flush())
+            .with_context(|| format!("runtime {runtime}: pass the code to the login"))?;
+        // Kept open until the CLI exits: it may still be reading.
+        codes.insert(runtime.to_string(), stdin);
+        Ok(
+            json!({"target": format!("runtime {runtime} login (code)"), "runtime": runtime,
+                  "note": "the code was passed to the login; a runtime card follows with the \
+                           result"}),
+        )
     }
 
     fn deliver(&self, q: &Value, now: i64) -> Result<Value> {
@@ -1614,6 +1661,9 @@ impl Desk {
                     Some(Val::Text(t)) => t,
                     _ => bail!("a runtime login needs its secret"),
                 };
+                if login == "code" {
+                    return self.relay_code(runtime, value);
+                }
                 let (cfg, rt) = self.runtime(runtime)?;
                 rt.login(&cfg, login, value)?;
                 self.logged_in(runtime);

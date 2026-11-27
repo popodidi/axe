@@ -173,7 +173,7 @@ impl channel::Store for State {
         self.stop.load(Ordering::SeqCst)
     }
     fn runtimes(&self) -> serde_json::Value {
-        crate::runtime::view(&self.admission())
+        runtimes_view(self)
     }
     fn form_submit(&self, sealed: &str) -> Result<form::Form> {
         let f = self.forms.submit(sealed, remote::epoch())?;
@@ -213,6 +213,46 @@ fn runtime_job(st: &State, job: serde_json::Value) -> Result<serde_json::Value> 
         bail!("the node is too old to change its runtimes");
     }
     Ok(v)
+}
+
+/// The node's runtimes ([`crate::runtime::view`]) with each one's uses:
+/// the bots it is primary or backup of, and `tasks` when selection rules
+/// pick its harness for tasks (no rule: claude-code).
+fn runtimes_view(st: &State) -> serde_json::Value {
+    let mut v = crate::runtime::view(&st.admission());
+    let (bots, rules) = {
+        let conn = st.conn();
+        (
+            crate::bot::list(&conn).unwrap_or_default(),
+            crate::rule::list(&conn).unwrap_or_default(),
+        )
+    };
+    let bots: Vec<(String, String, Option<String>)> = bots
+        .into_iter()
+        .map(|b| (b.name, b.agent, b.backup))
+        .collect();
+    let mut tasks: Vec<String> = rules
+        .iter()
+        .filter(|r| r.matcher.bot.is_none())
+        .flat_map(|r| r.uses.iter().map(|u| u.harness.clone()))
+        .collect();
+    if rules.is_empty() {
+        tasks.push("claude-code".into());
+    }
+    crate::runtime::with_uses(&mut v, &bots, &tasks);
+    v
+}
+
+/// A bot may run on `name`: a runtime the node reports, or an agent (or
+/// runtime) the server config can check ([`Config::validate_bot_agent`]).
+fn bot_runtime_ok(st: &State, name: &str) -> Result<()> {
+    let reported = crate::runtime::view(&st.admission())["runtimes"]
+        .as_array()
+        .is_some_and(|l| l.iter().any(|r| r["name"] == name));
+    if reported {
+        return Ok(());
+    }
+    st.check_agent(|c| c.validate_bot_agent(name))
 }
 
 impl State {
@@ -2366,7 +2406,7 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             )
             .map_err(|e| HttpError(400, format!("{e:#}")))?,
         ),
-        ("GET", ["api", "runtimes"]) => ok(200, &crate::runtime::view(&st.admission())),
+        ("GET", ["api", "runtimes"]) => ok(200, &runtimes_view(st)),
         // A runtime turned needs_login or limited: one card to the owner.
         ("POST", ["api", "dispatcher", "runtime-alert"]) => {
             let b: serde_json::Value = req.json()?;
@@ -3193,7 +3233,12 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         ("PATCH", ["api", "bots", name]) => {
             let b: EditBody = req.json()?;
             if let Some(a) = b.edit.agent.as_deref().map(str::trim) {
-                st.check_agent(|c| c.validate_bot_agent(a))?;
+                bot_runtime_ok(st, a)?;
+            }
+            if let Some(a) = b.edit.backup.as_deref().map(str::trim) {
+                if !matches!(a, "" | "none") {
+                    bot_runtime_ok(st, a)?;
+                }
             }
             ok(
                 200,
@@ -3871,27 +3916,57 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
             bail!("{e}");
         }
         eprintln!("axe server: runtime {runtime}: device login started");
+        let output = v["output"].as_str().unwrap_or("");
+        if v["code"] != true {
+            return Ok(format!(
+                "Log in runtime {runtime} ({harness}) with a device code: open the link below \
+                 and enter the code. The runtime is ok again at its next login check.\n\n{output}"
+            ));
+        }
+        // The CLI waits for the code the page shows: a sealed form takes it.
+        let sent = login_form(
+            st,
+            bot,
+            runtime,
+            &harness,
+            "code",
+            "code from the sign-in page",
+        )?;
         return Ok(format!(
-            "Log in runtime {runtime} ({harness}) with a device code: open the link below and \
-             enter the code. The runtime is ok again at its next login check.\n\n{}",
-            v["output"].as_str().unwrap_or("")
+            "Log in runtime {runtime} ({harness}): open the link below and sign in, then paste \
+             the code the page shows into the sealed form ({sent}).\n\n{output}"
         ));
     }
+    login_form(st, bot, runtime, &harness, method, label)?;
+    Ok(format!(
+        "Sealed form sent for runtime {runtime}: tap \"Open sealed form\"."
+    ))
+}
+
+/// Sends the owner a sealed form for runtime `runtime`'s `login` value.
+fn login_form(
+    st: &State,
+    bot: &str,
+    runtime: &str,
+    harness: &str,
+    login: &str,
+    label: &str,
+) -> Result<&'static str> {
     let req = crate::sealed::Request {
         purpose: format!("Log in runtime {runtime} ({harness}) with a {label}"),
         target: crate::sealed::Target::Runtime {
             runtime: runtime.into(),
-            login: method.into(),
+            login: login.into(),
         },
         fields: vec![crate::sealed::Field {
             name: "secret".into(),
-            label: (*label).to_string(),
+            label: label.to_string(),
             kind: crate::sealed::Kind::Secret,
             required: true,
             max: None,
             choices: vec![],
             env: None,
-            check: crate::runtime::login_check(&harness, method),
+            check: crate::runtime::login_check(harness, login),
         }],
         ttl: None,
         from: "/runtimes".into(),
@@ -3904,9 +3979,7 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
         f.spec.target.describe()
     );
     match sent["sent"].as_bool() {
-        Some(true) => Ok(format!(
-            "Sealed form sent for runtime {runtime}: tap \"Open sealed form\"."
-        )),
+        Some(true) => Ok("tap \"Open sealed form\""),
         _ => bail!(
             "the form could not be sent: {}",
             sent["reason"].as_str().unwrap_or("unknown")

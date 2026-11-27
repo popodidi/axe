@@ -2285,6 +2285,11 @@ enum BotCmd {
         /// starts fresh there; notes and wakes stay. Refused while it runs.
         #[arg(long)]
         agent: Option<String>,
+        /// The runtime the bot runs on while its own (--agent, the primary)
+        /// is unhealthy, with a fresh session there; it goes back to the
+        /// primary once that is healthy. `none` clears it.
+        #[arg(long)]
+        backup: Option<String>,
         /// Move the bot to another project (existing subscriptions keep theirs)
         #[arg(long)]
         project: Option<String>,
@@ -4066,6 +4071,7 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
         BotCmd::Edit {
             name,
             agent,
+            backup,
             project,
             identity_file,
             conduct_file,
@@ -4101,7 +4107,7 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 json!({"identity":read(identity_file)?,"conduct":read(conduct_file)?,
                     "nudge_after":nudge_after,"repos":repos,"project":project,
                     "retro":retro_edit,"owner_ref":owner_ref,"rotation":rotation_edit,
-                    "agent":agent,"why":why}),
+                    "agent":agent,"backup":backup,"why":why}),
             )?;
             // A server from before runtime switches ignores the field.
             if let Some(a) = agent {
@@ -4114,6 +4120,22 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                     "bot {name}: runtime {}; the next run starts a fresh session",
                     b.agent
                 );
+            }
+            if let Some(want) = backup.as_deref().map(str::trim) {
+                let want = (!matches!(want, "" | "none")).then_some(want);
+                // A server from before backups ignores the field.
+                if b.backup.as_deref() != want {
+                    anyhow::bail!(
+                        "the server did not set the backup; it predates `bot edit --backup`"
+                    );
+                }
+                match want {
+                    Some(n) => println!(
+                        "bot {name}: backup runtime {n}; used only while {} is unhealthy",
+                        b.agent
+                    ),
+                    None => println!("bot {name}: no backup runtime"),
+                }
             }
             // A server from before per-bot rotation ignores the field.
             if rotation_edit.is_some() && b.rotation.is_none() {

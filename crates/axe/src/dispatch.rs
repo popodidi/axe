@@ -539,22 +539,33 @@ impl Dispatcher {
         )))
     }
 
-    /// A pinned agent (task or bot): its runtime while healthy, else the
+    /// The runtime a pin names: that runtime (or the one adopting agent
+    /// `name`'s default login), else a runtime of agent template `name`
+    /// that no runtime adopts in place (`claude-1`, added from /runtimes with
+    /// its own login), a healthy one first.
+    pub(crate) fn pin_runtime<'a>(
+        &'a self,
+        name: &'a str,
+        now: i64,
+    ) -> Option<&'a runtime::Runtime> {
+        self.runtimes.resolve(name).or_else(|| {
+            self.runtimes
+                .of_agent(name)
+                .find(|r| r.healthy(now))
+                .or_else(|| self.runtimes.of_agent(name).next())
+        })
+    }
+
+    /// A pinned task agent: its runtime while healthy, else the
     /// least-used healthy runtime of the same harness.
     fn pin_pick(&self, name: &str, why: &str, bot: bool) -> std::result::Result<Pick, NoPick> {
         // A pin naming an agent template (`claude`) that no runtime adopts in
         // place goes to a runtime of that template (`claude-1`, added from
         // /runtimes with its own login).
-        let rt = self.runtimes.resolve(name).or_else(|| {
-            self.runtimes
-                .of_agent(name)
-                .find(|r| r.healthy(now_unix()))
-                .or_else(|| self.runtimes.of_agent(name).next())
-        });
-        let Some(rt) = rt else {
+        let now = now_unix();
+        let Some(rt) = self.pin_runtime(name, now) else {
             return Err(NoPick::Missing(format!("unknown agent {name}")));
         };
-        let now = now_unix();
         let pick = |agent: String| Pick {
             agent,
             rule: why.to_string(),

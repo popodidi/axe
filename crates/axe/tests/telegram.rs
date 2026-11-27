@@ -3902,16 +3902,25 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     rig.stub.wait_confirmed(100);
     wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
     let reply = rig.sent_to(OWNER)[0]["text"].as_str().unwrap().to_string();
+    // Plain login states and each runtime's use (selection rules send
+    // tasks to claude-code; a node this old names no agent template, so no
+    // bot resolves to a runtime).
     assert!(
-        reply.contains(
-            "claude-1 (claude-code): needs login (last failure auth_invalid at \
-             2027-01-15T08:00:00Z), 0 live"
-        ),
+        reply.contains("claude-1 (Claude): Login expired. Tasks"),
         "{reply}"
     );
     assert!(
-        reply.contains("codex-1 (codex): ok, plan pro, 1 live"),
+        reply.contains("codex-1 (Codex): Logged in. Not used"),
         "{reply}"
+    );
+    // `axe runtimes` keeps the technical line, with the uses.
+    let cli = rig.srv().ok(&["runtimes"]);
+    assert!(
+        cli.contains(
+            "claude-1 (claude-code): needs login (last failure auth_invalid at \
+             2027-01-15T08:00:00Z), 0 live; tasks"
+        ),
+        "{cli}"
     );
     assert!(rig.message_wakes().is_empty(), "the command wakes no bot");
 
@@ -3955,7 +3964,7 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     assert!(listed["text"]
         .as_str()
         .unwrap()
-        .contains("claude-1 (claude-code): needs login"));
+        .contains("claude-1 (Claude): Login expired"));
     assert_eq!(listed["reply_parameters"]["message_id"], tg_id);
     assert_eq!(rig.stub.calls("answerCallbackQuery").len(), 1);
     assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
@@ -4511,8 +4520,9 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
             .contains("claude-1 (claude-code)")
     });
 
-    // /runtimes lists the runtime with Log in (it was never logged in) and
-    // Remove, then Add.
+    // /runtimes lists the runtime with Log in (it needs a login) and
+    // Remove, then Add. It is aux's primary (aux runs on agent claude, whose
+    // default login claude-1 adopts): no Primary or Backup button.
     rig.stub
         .push_to(AUX_TOKEN, text_msg(100, 200, OWNER, OWNER, "/runtimes"));
     wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
@@ -4554,6 +4564,10 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     assert_eq!(
         keyboard_of(&menu),
         vec![
+            vec![(
+                "Web sign-in".to_string(),
+                "rtlogin:claude-1:device".to_string()
+            )],
             vec![(
                 "Setup-token token".to_string(),
                 "rtlogin:claude-1:token".to_string()
@@ -4664,8 +4678,8 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     });
     assert!(rig.message_wakes().is_empty(), "no bot was woken");
 
-    // Add Claude: the node adds claude-2 on its own login and its login
-    // menu follows.
+    // Add Claude: the node makes claude-2 on its own login, waiting for its
+    // first login, and its login menu follows.
     let sent = rig.sent_to(OWNER).len();
     press_on(105, list_tg, "rtadd:claude-code");
     wait_for("the added runtime's menu", 20, || {
@@ -4676,12 +4690,13 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         added["text"]
             .as_str()
             .unwrap()
-            .starts_with("Added runtime claude-2 (claude-code) with its own login."),
+            .starts_with("Log in Claude for a new runtime (claude-2, its own login)."),
         "{added}"
     );
     assert_eq!(
         keyboard_of(&added),
         kb(&[
+            &[("Web sign-in", "rtlogin:claude-2:device")],
             &[("Setup-token token", "rtlogin:claude-2:token")],
             &[("API key", "rtlogin:claude-2:api_key")]
         ])
@@ -4697,11 +4712,12 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         .messages()
         .iter()
         .rev()
-        .find(|m| m.2.starts_with("Added runtime claude-2"))
+        .find(|m| m.2.starts_with("Log in Claude for a new runtime"))
         .unwrap()
         .3;
 
-    // Both are listed, each with its buttons.
+    // A runtime exists once its login works: claude-2 is not listed yet,
+    // and claude-1, logged in now, has no Log in button.
     let sent = rig.sent_to(OWNER).len();
     rig.stub
         .push_to(AUX_TOKEN, text_msg(106, 201, OWNER, OWNER, "/runtimes"));
@@ -4709,24 +4725,20 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     let list = rig.sent_to(OWNER).pop().unwrap();
     assert_eq!(
         keyboard_of(&list),
-        kb(&[
-            &[
-                ("Re-login claude-1", "rtlogin:claude-1"),
-                ("Remove claude-1", "rtrm:claude-1")
-            ],
-            &[
-                ("Log in claude-2", "rtlogin:claude-2"),
-                ("Remove claude-2", "rtrm:claude-2")
-            ],
-            add_row
-        ])
+        kb(&[&[("Remove claude-1", "rtrm:claude-1")], add_row])
     );
+    let text = list["text"].as_str().unwrap();
+    assert!(
+        text.contains("claude-1 (Claude): Logged in. Primary of cos, aux, grp; tasks"),
+        "{text}"
+    );
+    assert!(!text.contains("claude-2"), "{text}");
     wait_for("the list recorded", 20, || {
         rig.messages()
             .last()
             .unwrap()
             .2
-            .contains("claude-2 (claude-code)")
+            .starts_with("Runtimes\nclaude-1")
     });
     let list_tg = rig.messages().last().unwrap().3;
 
@@ -5180,4 +5192,314 @@ fn command_menu_lists_the_routed_commands_for_the_owner_only() {
     });
     assert!(rig.inbound().is_empty(), "{:?}", rig.inbound());
     assert!(rig.message_wakes().is_empty());
+}
+
+/// Fake `claude` and `codex` (by the name it is called as): Claude's web
+/// sign-in prints the claude.ai URL and reads the pasted code on stdin;
+/// Codex takes an API key on stdin; each status exits 0 once logged in.
+const FAKE_LOGIN_CLI: &str = r#"#!/bin/sh
+case "$(basename "$0") $1 $2" in
+"claude auth login")
+  echo "If the browser didn't open, visit: https://claude.ai/oauth/authorize?code=true&state=t"
+  printf 'Paste code here if prompted > '
+  read code
+  [ "$code" = "good#state" ] || { echo "Couldn't log in: That code wasn't accepted"; exit 1; }
+  echo '{}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+  echo "Login successful." ;;
+"claude auth status") [ -f "$CLAUDE_CONFIG_DIR/.credentials.json" ] || { echo "Not logged in"; exit 1; } ;;
+"codex login --with-api-key") cat > "$CODEX_HOME/auth.json" ;;
+"codex login status") [ -f "$CODEX_HOME/auth.json" ] ;;
+*) exit 2 ;;
+esac
+"#;
+
+/// Login first (task 1976): with no runtime the bot asks for a Claude or
+/// Codex login; a runtime is listed once its login works (the Claude web
+/// sign-in relays the code the owner pastes into a sealed form); each
+/// runtime shows its use, and the chat bot's Primary and Backup buttons
+/// set its runtimes.
+#[test]
+fn runtimes_log_in_first_then_set_the_bots_primary_and_backup() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["claude", "codex"] {
+        let p = bin.join(name);
+        std::fs::write(&p, FAKE_LOGIN_CLI).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let reg = dir.path().join("runtimes");
+    std::fs::create_dir_all(&reg).unwrap();
+    let rig = Rig::with(&format!(
+        "{}[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"claude\"]\nharness = \"claude-code\"\nbot_args = []\n\
+         [agents.codex]\ncmd = [\"codex\"]\nharness = \"codex\"\nsession = \"none\"\nbot_args = []\n",
+        extra_bots(dir.path()),
+        reg.display()
+    ));
+    rig.srv().ok(&["bot", "pause", "cos"]);
+    rig.add_bot("aux");
+    rig.add_bot("grp");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let _disp = rig.srv().dispatcher(&[], &[("PATH", &path)]);
+    wait_for("the empty report", 30, || {
+        rig.srv().ok(&["runtimes"]).contains("none reported")
+    });
+    let press_on = |update: i64, tg: i64, data: &str| {
+        rig.stub.push_to(AUX_TOKEN, press(update, tg, data));
+        rig.stub.wait_confirmed(update);
+    };
+    let next = |what: &str, after: usize| -> Value {
+        wait_for(what, 20, || rig.sent_to(OWNER).len() > after);
+        rig.sent_to(OWNER).pop().unwrap()
+    };
+    let recorded = |what: &str, starts: &str| -> i64 {
+        wait_for(what, 20, || {
+            rig.messages().iter().any(|m| m.2.starts_with(starts))
+        });
+        rig.messages()
+            .iter()
+            .rev()
+            .find(|m| m.2.starts_with(starts))
+            .unwrap()
+            .3
+    };
+    let kb = |rows: &[&[(&str, &str)]]| -> Vec<Vec<(String, String)>> {
+        rows.iter()
+            .map(|r| {
+                r.iter()
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect()
+            })
+            .collect()
+    };
+
+    // No runtime: one login button per harness.
+    rig.stub
+        .push_to(AUX_TOKEN, text_msg(100, 200, OWNER, OWNER, "/runtimes"));
+    let list = next("the /runtimes reply", 0);
+    assert_eq!(list["text"], "Log in Claude or Codex to start me.");
+    assert_eq!(
+        keyboard_of(&list),
+        kb(&[&[
+            ("Log in Claude", "rtadd:claude-code"),
+            ("Log in Codex", "rtadd:codex")
+        ]])
+    );
+    let list_tg = recorded("the list recorded", "Log in Claude or Codex");
+
+    // Log in Claude: claude-1 waits for its login (not listed yet) and aux,
+    // which had no runtime, gets it as its primary.
+    let n = rig.sent_to(OWNER).len();
+    press_on(101, list_tg, "rtadd:claude-code");
+    let menu = next("the login menu", n);
+    assert!(
+        menu["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Log in Claude for a new runtime (claude-1, its own login)."),
+        "{menu}"
+    );
+    assert_eq!(keyboard_of(&menu)[0][0].1, "rtlogin:claude-1:device");
+    assert_eq!(rig.srv().get("/api/bots/aux")["agent"], "claude-1");
+    let n = rig.sent_to(OWNER).len();
+    rig.stub
+        .push_to(AUX_TOKEN, text_msg(102, 201, OWNER, OWNER, "/runtimes"));
+    assert_eq!(
+        next("the list while logging in", n)["text"],
+        "Log in Claude or Codex to start me."
+    );
+    let menu_tg = recorded("the menu recorded", "Log in Claude for a new runtime");
+
+    // Web sign-in: the claude.ai link and a sealed form for the code.
+    let n = rig.sent_to(OWNER).len();
+    press_on(103, menu_tg, "rtlogin:claude-1:device");
+    wait_for("the link and the form", 30, || {
+        rig.sent_to(OWNER).len() >= n + 2
+    });
+    let sent = rig.sent_to(OWNER)[n..].to_vec();
+    let note = sent
+        .iter()
+        .find(|p| {
+            p["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Log in runtime claude-1")
+        })
+        .unwrap_or_else(|| panic!("{sent:?}"));
+    let note = note["text"].as_str().unwrap();
+    assert!(
+        note.contains("sign in, then paste the code the page shows into the sealed form")
+            && note.contains("https://claude.ai/oauth/authorize?code=true&state=t"),
+        "{note}"
+    );
+    let prompt = sent
+        .iter()
+        .find(|p| p["reply_markup"]["keyboard"].is_array())
+        .unwrap();
+    let link = prompt["reply_markup"]["keyboard"][0][0]["web_app"]["url"]
+        .as_str()
+        .unwrap();
+    let spec = form_spec(&json!({ "link": link }));
+    assert_eq!(
+        spec.target,
+        axe::sealed::Target::Runtime {
+            runtime: "claude-1".into(),
+            login: "code".into()
+        }
+    );
+    let sealed = axe::sealed::seal(&spec, &json!({"secret": "good#state"})).unwrap();
+    rig.stub.push_to(
+        AUX_TOKEN,
+        json!({"update_id": 104, "message": {
+        "message_id": 700, "date": 0, "from": user(OWNER),
+        "chat": {"id": OWNER, "type": "private"},
+        "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}),
+    );
+    rig.stub.wait_confirmed(104);
+    wait_for("the login check card", 30, || {
+        rig.sent_to(OWNER).iter().any(|p| {
+            p["text"] == "Runtime claude-1 (claude-code): the new login works; the runtime is ok."
+        })
+    });
+    const DELIVERED: &str =
+        "Sealed form delivered: runtime claude-1 login (code). The code was passed to the login";
+    let delivered = rig.sent_to(OWNER);
+    assert!(
+        delivered
+            .iter()
+            .any(|p| p["text"].as_str().unwrap().starts_with(DELIVERED)),
+        "{delivered:?}"
+    );
+    assert!(reg.join("claude-1/home/.credentials.json").is_file());
+
+    // Log in Codex with an API key: codex-1, logged in, is listed too.
+    wait_for("claude-1 ok", 20, || {
+        rig.srv()
+            .ok(&["runtimes"])
+            .contains("claude-1 (claude-code): ok")
+    });
+    let n = rig.sent_to(OWNER).len();
+    rig.stub
+        .push_to(AUX_TOKEN, text_msg(105, 202, OWNER, OWNER, "/runtimes"));
+    let list = next("the list with claude-1", n);
+    assert_eq!(
+        keyboard_of(&list),
+        kb(&[
+            &[("Remove claude-1", "rtrm:claude-1")],
+            &[
+                ("Add Claude", "rtadd:claude-code"),
+                ("Add Codex", "rtadd:codex")
+            ]
+        ])
+    );
+    let list_tg = recorded("the list recorded", "Runtimes\nclaude-1");
+    let n = rig.sent_to(OWNER).len();
+    press_on(106, list_tg, "rtadd:codex");
+    next("the codex menu", n);
+    let menu_tg = recorded("the codex menu recorded", "Log in Codex for a new runtime");
+    let n = rig.sent_to(OWNER).len();
+    press_on(107, menu_tg, "rtlogin:codex-1:api_key");
+    wait_for("the codex form", 20, || rig.sent_to(OWNER).len() >= n + 2);
+    let prompt = rig.sent_to(OWNER)[n..]
+        .iter()
+        .find(|p| p["reply_markup"]["keyboard"].is_array())
+        .cloned()
+        .unwrap();
+    let spec =
+        form_spec(&json!({ "link": prompt["reply_markup"]["keyboard"][0][0]["web_app"]["url"] }));
+    let sealed =
+        axe::sealed::seal(&spec, &json!({"secret": "sk-codex-dummy-xxxxxxxxxxxxxxxx"})).unwrap();
+    rig.stub.push_to(
+        AUX_TOKEN,
+        json!({"update_id": 108, "message": {
+        "message_id": 701, "date": 0, "from": user(OWNER),
+        "chat": {"id": OWNER, "type": "private"},
+        "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}),
+    );
+    rig.stub.wait_confirmed(108);
+    wait_for("codex-1 ok", 30, || {
+        rig.srv().ok(&["runtimes"]).contains("codex-1 (codex): ok")
+    });
+
+    // Each runtime's use; aux's buttons on the one it does not use.
+    let n = rig.sent_to(OWNER).len();
+    rig.stub
+        .push_to(AUX_TOKEN, text_msg(109, 203, OWNER, OWNER, "/runtimes"));
+    let list = next("the list with both", n);
+    let text = list["text"].as_str().unwrap();
+    assert!(
+        text.contains("claude-1 (Claude): Logged in. Primary of cos, aux, grp; tasks"),
+        "{text}"
+    );
+    assert!(
+        text.contains("codex-1 (Codex): Logged in. Not used"),
+        "{text}"
+    );
+    assert_eq!(
+        keyboard_of(&list),
+        kb(&[
+            &[("Remove claude-1", "rtrm:claude-1")],
+            &[
+                ("Primary codex-1", "rtpri:codex-1"),
+                ("Backup codex-1", "rtbak:codex-1"),
+                ("Remove codex-1", "rtrm:codex-1")
+            ],
+            &[
+                ("Add Claude", "rtadd:claude-code"),
+                ("Add Codex", "rtadd:codex")
+            ]
+        ])
+    );
+    let list_tg = recorded(
+        "the list recorded",
+        "Runtimes\nclaude-1 (Claude): Logged in. Primary of cos, aux, grp; tasks\ncodex-1",
+    );
+
+    // Backup, then Primary.
+    let n = rig.sent_to(OWNER).len();
+    press_on(110, list_tg, "rtbak:codex-1");
+    assert_eq!(
+        next("the backup reply", n)["text"],
+        "codex-1 is now the backup of aux: it runs aux only while the primary is down."
+    );
+    assert_eq!(rig.srv().get("/api/bots/aux")["backup"], "codex-1");
+    let n = rig.sent_to(OWNER).len();
+    rig.stub
+        .push_to(AUX_TOKEN, text_msg(111, 204, OWNER, OWNER, "/runtimes"));
+    let list = next("the list with a backup", n);
+    assert!(
+        list["text"]
+            .as_str()
+            .unwrap()
+            .contains("codex-1 (Codex): Logged in. Backup of aux"),
+        "{list}"
+    );
+    assert_eq!(
+        keyboard_of(&list)[1],
+        kb(&[&[
+            ("Primary codex-1", "rtpri:codex-1"),
+            ("No backup", "rtbak-"),
+            ("Remove codex-1", "rtrm:codex-1")
+        ]])[0]
+    );
+    let list_tg = recorded("the list recorded", "Runtimes\nclaude-1 (Claude): Logged in. Primary of cos, aux, grp; tasks\ncodex-1 (Codex): Logged in. Backup");
+    let n = rig.sent_to(OWNER).len();
+    press_on(112, list_tg, "rtpri:codex-1");
+    assert_eq!(
+        next("the primary reply", n)["text"],
+        "codex-1 is now the primary of aux. Its next run starts a fresh session there; notes \
+         are kept."
+    );
+    let aux = rig.srv().get("/api/bots/aux");
+    assert_eq!(
+        (&aux["agent"], &aux["backup"]),
+        (&json!("codex-1"), &Value::Null),
+        "{aux}"
+    );
+    assert!(rig
+        .srv()
+        .ok(&["runtimes"])
+        .contains("codex-1 (codex): ok, 0 live; primary of aux"));
+    assert!(rig.message_wakes().is_empty(), "no bot was woken");
 }

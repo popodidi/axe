@@ -103,10 +103,16 @@ degradation: a Codex run log has no Claude `result` usage, so
 context-size rotation (below) does not retire Codex sessions; Codex
 compacts natively. Other agents without `bot_args` cannot run bots.
 
-A bot's runtime is sticky: its session's runtime while healthy, else its
-own `agent`. `axe bot edit <name> --agent <agent|runtime> --why W` switches
-it (refused during a live run): the session ends, so the next run starts
-fresh there, and notes, wakes and history stay (event `agent`).
+A bot is long running, so selection rules (made for disposable tasks) do
+not pick its runtime (owner, 2026-11-27): it has one sticky primary, its
+`agent`, and an optional backup (`Bot::backup`, the latest `backup` event).
+The backup runs it only while the primary is unhealthy, in a fresh session,
+and it returns to the primary, fresh again, once that is healthy; notes carry
+over (`Dispatcher::bot_pick`). A matching rule only sets the model and effort.
+`axe bot edit <name> --agent <agent|runtime> --why W` switches the primary
+(refused during a live run): the session ends, so the next run starts fresh
+there, and notes, wakes and history stay (event `agent`). `--backup
+<runtime|none>` sets the backup; Telegram `/runtimes` has both as buttons.
 
 Compaction is native. Everything durable is on the server, so nothing is
 lost when a session summarizes. Because native compaction did not keep

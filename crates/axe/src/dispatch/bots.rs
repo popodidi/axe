@@ -116,9 +116,13 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// The runtime of bot `name`'s next run: its stored session's runtime
-    /// while healthy, else a stored rule that names the bot, else the bot's
-    /// own agent (or another healthy runtime of its harness).
+    /// The runtime of bot `name`'s next run: its primary (the bot's agent)
+    /// while healthy, else its backup ([`bot::Bot::backup`]) while healthy,
+    /// else none (its wakes wait). A run on another runtime than its
+    /// session's starts a fresh session (`spawn_bot`), so moving to the
+    /// backup and back each start fresh; notes carry over. Selection rules
+    /// pick tasks' runtimes, not a bot's: a stored rule matching the bot only
+    /// sets the model and effort of the picked runtime's harness.
     fn bot_pick(&self, name: &str) -> Result<std::result::Result<Pick, NoPick>> {
         let rule = match self.stored_rules {
             true => self
@@ -126,37 +130,49 @@ impl Dispatcher {
                 .request::<Option<rule::Rule>>("rule_select", json!({"bot":name}))?,
             false => None,
         };
-        let key = rule.as_ref().map(rule::Rule::key);
         let bot = self
             .store
             .client
             .get::<serde_json::Value>(&format!("/api/bots/{name}"), &[])?;
         let now = now_unix();
-        let session = bot["session_agent"]
-            .as_str()
-            .and_then(|a| self.runtimes.resolve(a))
-            .filter(|r| r.healthy(now) && self.can_run(&r.name, true, true));
-        if let Some(rt) = session {
-            return Ok(Ok(Pick {
-                agent: rt.name.clone(),
-                rule: key.unwrap_or_else(|| "bot session".into()),
-                with: rule
-                    .as_ref()
-                    .and_then(|r| r.uses.iter().find(|u| u.harness == rt.harness).cloned()),
-                profile: None,
-            }));
+        let primary = bot["agent"].as_str().unwrap_or("claude");
+        let backup = bot["backup"].as_str();
+        let pick = |rt: &crate::runtime::Runtime, why: String| Pick {
+            agent: rt.name.clone(),
+            rule: why,
+            with: rule
+                .as_ref()
+                .and_then(|r| r.uses.iter().find(|u| u.harness == rt.harness).cloned()),
+            profile: None,
+        };
+        let usable =
+            |rt: &&crate::runtime::Runtime| rt.healthy(now) && self.can_run(&rt.name, true, false);
+        let primary_rt = self.pin_runtime(primary, now);
+        if let Some(rt) = primary_rt.filter(usable) {
+            return Ok(Ok(pick(rt, "bot primary".into())));
         }
-        if let Some(r) = &rule {
-            match self.pick_from(Some(r), true) {
-                Ok(p) => return Ok(Ok(p)),
-                Err(NoPick::Missing(note)) => {
-                    eprintln!("axe node: bot {name}: {note}; using its own agent");
-                }
-                Err(e) => return Ok(Err(e)),
-            }
+        let backup_rt = backup.and_then(|b| self.pin_runtime(b, now));
+        if let Some(rt) = backup_rt.filter(usable) {
+            return Ok(Ok(pick(rt, format!("bot backup ({primary} unhealthy)"))));
         }
-        let own = bot["agent"].as_str().unwrap_or("claude");
-        Ok(self.pin_pick(own, "bot agent", true))
+        let known: Vec<&crate::runtime::Runtime> =
+            primary_rt.into_iter().chain(backup_rt).collect();
+        if known.is_empty() {
+            return Ok(Err(NoPick::Missing(format!("unknown agent {primary}"))));
+        }
+        let harnesses: Vec<&str> = known.iter().map(|r| r.harness.as_str()).collect();
+        let states: Vec<String> = known
+            .iter()
+            .map(|r| format!("{} {}", r.name, r.state(now)))
+            .collect();
+        let backup_note = match backup {
+            Some(_) => "",
+            None => "; no backup runtime",
+        };
+        Ok(Err(NoPick::Unhealthy {
+            until: self.runtimes.next_healthy(&harnesses, now),
+            note: format!("bot runtimes unhealthy: {}{backup_note}", states.join(", ")),
+        }))
     }
 
     fn spawn_bot(&mut self, c: &Claimed, pick: Option<&Pick>) -> Result<()> {

@@ -74,6 +74,12 @@ retro?: RetroConfig,
  */
 rotation?: Rotation, 
 /**
+ * The runtime the bot runs on while its own ([`Bot::agent`], the
+ * primary) is unhealthy: the latest `backup` event's `to`, so the
+ * setting needs no column. `None`: no backup.
+ */
+backup?: string, 
+/**
  * Derived: the live run, if any.
  */
 live_run: number | null, 
