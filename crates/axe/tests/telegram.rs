@@ -2665,6 +2665,88 @@ fn escalated_tasks_get_a_card_from_the_bot_or_a_fallback() {
     assert_eq!(rig.events("card_fallback").len(), 1);
 }
 
+#[test]
+fn an_escalated_task_gets_its_card_only_from_its_owner_bot() {
+    // Task 1916: a task owned by one bot got a card wake and a fallback card
+    // in every subscribed bot's chat as well.
+    let tokens = tempfile::tempdir().unwrap();
+    let rig = Rig::with(&extra_bots(tokens.path()));
+    rig.add_bot("aux");
+    // cos watches every project; aux, the owner, watches none.
+    rig.srv()
+        .ok(&["bot", "subscribe", "cos", "--all-projects", "--why", "test"]);
+    make_board(&rig);
+    let aux = |args: &[&str]| -> String {
+        let mut a = vec!["bot", "tg", "--bot", "aux"];
+        a.extend_from_slice(args);
+        rig.srv().ok(&a)
+    };
+    let out = aux(&["send", "--silent", "board"]);
+    let local = out.trim().trim_start_matches("sent #");
+    aux(&["board", "set-message", local]);
+
+    let card_wakes = |bot: &str| -> Vec<String> {
+        rig.db()
+            .prepare(
+                "SELECT w.key FROM bot_wakes w JOIN bots b ON b.id=w.bot_id
+                 WHERE b.name=?1 AND w.key LIKE 'wake:card-task-%' ORDER BY w.id",
+            )
+            .unwrap()
+            .query_map([bot], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let fallbacks = |token: &str, task: i64| -> usize {
+        rig.stub
+            .calls("sendMessage")
+            .iter()
+            .filter(|c| {
+                c.token == token
+                    && c.params["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .starts_with(&format!("<b>Task #{task}</b>"))
+            })
+            .count()
+    };
+
+    // Owned by aux: only aux is asked, and only aux posts the fallback.
+    rig.srv().ok(&[
+        "add",
+        "--project",
+        "p",
+        "--title",
+        "Owned by aux",
+        "--owner",
+        "bot:aux",
+    ]);
+    escalate(&rig, "1");
+    wait_for("owner card wake", 20, || card_wakes("aux").len() == 1);
+    assert!(card_wakes("cos").is_empty(), "{:?}", card_wakes("cos"));
+    rig.db()
+        .execute(
+            "UPDATE bot_wakes SET due_at='2026-01-01T00:00:00Z' WHERE key LIKE 'wake:card-task-1-%'",
+            [],
+        )
+        .unwrap();
+    rig.srv()
+        .ok(&["add", "--project", "other", "--title", "Nudge"]);
+    wait_for("owner fallback card", 20, || fallbacks(AUX_TOKEN, 1) == 1);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(fallbacks(TG_TOKEN, 1), 0, "no card in cos's chat");
+    assert_eq!(rig.events("card_fallback").len(), 1);
+    assert!(card_wakes("cos").is_empty());
+
+    // No bot owner: the project's bot (cos, active; aux is paused) alone.
+    rig.srv()
+        .ok(&["add", "--project", "p", "--title", "Nobody's"]);
+    escalate(&rig, "3");
+    wait_for("project bot card wake", 20, || card_wakes("cos").len() == 1);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(card_wakes("aux").len(), 1, "{:?}", card_wakes("aux"));
+}
+
 /// Proposes goal `name` from a JSON spec.
 fn propose_goal(rig: &Rig, spec: Value) {
     let f = rig
