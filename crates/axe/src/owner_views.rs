@@ -748,64 +748,87 @@ fn gib(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / (1u64 << 30) as f64)
 }
 
-fn pct(part: u64, whole: u64) -> f64 {
-    100.0 * part as f64 / whole.max(1) as f64
-}
-
-/// `/node` versions, one per line: this server, the node binary and the CLI
-/// on the node host, each `version (short commit)`.
+/// `/node` versions on one line: this server, the node binary and the CLI on
+/// the node host, each `version (short commit)`; one version when all three
+/// agree.
 fn node_versions(s: Option<&crate::node_metrics::Sample>) -> String {
     let v = |x: Option<&str>| format!("<code>{}</code>", escape(x.unwrap_or("?")));
+    let server = crate::server::version().version;
+    let node = s.and_then(|s| s.node_version.as_deref());
+    let cli = s.and_then(|s| s.cli_version.as_deref());
+    if node == Some(server.as_str()) && cli == Some(server.as_str()) {
+        return format!("Version {}", v(Some(&server)));
+    }
     format!(
-        "Server {}\nNode {}\nCLI {}",
-        v(Some(&crate::server::version().version)),
-        v(s.and_then(|s| s.node_version.as_deref())),
-        v(s.and_then(|s| s.cli_version.as_deref())),
+        "Server {} · node {} · CLI {}",
+        v(Some(&server)),
+        v(node),
+        v(cli)
+    )
+}
+
+/// `/node`'s CPU, memory and disk lines, budget-bar style
+/// ([`goal_board::gauge`]), labels padded so the bars align: busy CPU with
+/// the 1-minute load, memory used and disk used of their totals in GiB.
+fn node_gauges(s: &crate::node_metrics::Sample) -> String {
+    let cpu = goal_board::gauge(
+        "CPU ",
+        s.cpu_percent.map(|c| c / 100.0),
+        &s.load1.map(|l| format!("load {l:.2}")).unwrap_or_default(),
+    );
+    let of = |used: u64, total: u64| {
+        (
+            Some(used as f64 / total.max(1) as f64),
+            format!("{}/{} GiB", gib(used), gib(total)),
+        )
+    };
+    let (mr, mt) = match (s.mem_used_bytes, s.mem_total_bytes) {
+        (Some(used), Some(total)) => of(used, total),
+        _ => (None, String::new()),
+    };
+    let (dr, dt) = match (s.disk_free_bytes, s.disk_total_bytes) {
+        (Some(free), Some(total)) => of(total.saturating_sub(free), total),
+        _ => (None, String::new()),
+    };
+    format!(
+        "{cpu}\n{}\n{}",
+        goal_board::gauge("Mem ", mr, &mt),
+        goal_board::gauge("Disk", dr, &dt)
     )
 }
 
 /// `/node`, HTML for a phone, about the machine only (the bot's own runs,
 /// services and schedules are `/status`): a bold headline with how many runs
-/// the node has, one line of CPU, memory and disk use, the running runs by
-/// kind (task runs by project; bot, service and scheduled runs as counts),
-/// then load, sizes, versions ([`node_versions`]) and the sample's age in an
-/// expandable quote. From the node's newest sample (`node_metrics.rs`).
+/// the node has and the sample's age, CPU, memory and disk as bars
+/// ([`node_gauges`]), the running runs by kind (task runs by project; bot,
+/// service and scheduled runs as counts), then the versions
+/// ([`node_versions`]). From the node's newest sample (`node_metrics.rs`).
 pub fn node(conn: &Connection, web: Option<&str>, now: i64) -> Result<String> {
     let link = view_link(web, "view=node", "Open node");
     let Some(s) = crate::node_metrics::latest(conn)? else {
         return Ok(format!(
-            "<b>Node · no samples yet</b>\nThe node reports every <code>[node_metrics] sample_seconds</code>.\n<blockquote expandable>{}</blockquote>{link}",
+            "<b>Node · no samples yet</b>\nThe node reports every <code>[node_metrics] sample_seconds</code>.\n{}{link}",
             node_versions(None)
         ));
     };
     let age = now - s.at;
-    let stale = age > NODE_STALE_SECONDS;
     let [task, bots, services, scheduled] = s.runs.totals();
     let running = task + bots + services + scheduled;
-    let mut out = if stale {
+    let mut out = if age > NODE_STALE_SECONDS {
         format!(
             "<b>Node · stale, last sample {} ago</b>",
             crate::board::age(age)
         )
-    } else if running == 0 {
-        "<b>Node · idle</b>".to_string()
     } else {
-        format!("<b>Node · {running} running</b>")
+        let head = if running == 0 {
+            "<b>Node · idle</b>".to_string()
+        } else {
+            format!("<b>Node · {running} running</b>")
+        };
+        format!("{head} · {} ago", crate::board::age(age))
     };
-
-    let mut gauges = vec![match s.cpu_percent {
-        Some(c) => format!("CPU <code>{c:.0}%</code>"),
-        None => "CPU <code>?</code>".into(),
-    }];
-    if let (Some(used), Some(total)) = (s.mem_used_bytes, s.mem_total_bytes) {
-        gauges.push(format!("mem <code>{:.0}%</code>", pct(used, total)));
-    }
-    if let (Some(free), Some(total)) = (s.disk_free_bytes, s.disk_total_bytes) {
-        let used = total.saturating_sub(free);
-        gauges.push(format!("disk <code>{:.0}%</code>", pct(used, total)));
-    }
     out.push('\n');
-    out.push_str(&gauges.join(" · "));
+    out.push_str(&node_gauges(&s));
 
     // Runs by kind, kinds with none left out. Only task runs name their
     // projects: which bot runs, and its services, are that bot's `/status`.
@@ -839,33 +862,8 @@ pub fn node(conn: &Connection, web: Option<&str>, now: i64) -> Result<String> {
         out.push('\n');
         out.push_str(&line);
     }
-
-    let mut more = Vec::new();
-    if let (Some(a), Some(b), Some(c)) = (s.load1, s.load5, s.load15) {
-        more.push(format!("Load <code>{a:.2} {b:.2} {c:.2}</code>"));
-    }
-    if let (Some(used), Some(total)) = (s.mem_used_bytes, s.mem_total_bytes) {
-        more.push(format!(
-            "Memory <code>{} / {} GiB</code>",
-            gib(used),
-            gib(total)
-        ));
-    }
-    if let (Some(free), Some(total)) = (s.disk_free_bytes, s.disk_total_bytes) {
-        more.push(format!(
-            "Disk free <code>{} / {} GiB</code>",
-            gib(free),
-            gib(total)
-        ));
-    }
-    more.push(node_versions(Some(&s)));
-    if !stale {
-        more.push(format!("Sampled {} ago", crate::board::age(age)));
-    }
-    out.push_str(&format!(
-        "\n<blockquote expandable>{}</blockquote>",
-        more.join("\n")
-    ));
+    out.push('\n');
+    out.push_str(&node_versions(Some(&s)));
     out.push_str(&link);
     Ok(out)
 }

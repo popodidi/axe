@@ -3850,25 +3850,23 @@ fn node_command_shows_the_reported_sample() {
     let sent = &rig.sent_to(OWNER)[0];
     assert_eq!(sent["parse_mode"], "HTML");
     let reply = sent["text"].as_str().unwrap();
+    let (head, body) = reply.split_once('\n').unwrap();
+    assert!(head.starts_with("<b>Node · 5 running</b> · "), "{reply}");
+    assert!(head.ends_with("s ago"), "{reply}");
     assert!(
-        reply.starts_with(
-            "<b>Node · 5 running</b>\n\
-             CPU <code>42%</code> · mem <code>25%</code> · disk <code>75%</code>\n\
+        body.starts_with(&format!(
+            "<code>CPU  ▓▓▓▓░░░░░░  42%  load 1.50</code>\n\
+             <code>Mem  ▓▓▓░░░░░░░  25%  4.0/16.0 GiB</code>\n\
+             <code>Disk ▓▓▓▓▓▓▓▓░░  75%  300.0/400.0 GiB</code>\n\
              Tasks <code>3</code>: harvis <code>2</code>, tiktape\n\
              Bots <code>1</code> · services <code>1</code>\n\
-             <blockquote expandable>Load <code>1.50 1.25 1.00</code>\n\
-             Memory <code>4.0 / 16.0 GiB</code>\nDisk free <code>100.0 / 400.0 GiB</code>\n"
-        ),
-        "{reply}"
-    );
-    assert!(
-        reply.contains(&format!(
-            "\nServer <code>{}</code>\nNode <code>0.5.4 (5437bf3602b8)</code>\n\
-             CLI <code>0.5.4 (5437bf3602b8)</code>\nSampled ",
+             Server <code>{}</code> · node <code>0.5.4 (5437bf3602b8)</code> · \
+             CLI <code>0.5.4 (5437bf3602b8)</code>\n",
             axe::server::version().version
         )),
         "{reply}"
     );
+    assert!(!reply.contains("blockquote"), "{reply}");
     // Which bot runs and its services are that bot's /status, not /node.
     assert!(!reply.contains("cos"), "{reply}");
     assert!(
