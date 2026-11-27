@@ -31,7 +31,9 @@ struct Rig {
 }
 
 impl Rig {
-    /// `runtimes`: (name, runtime.toml body, state.json body or "").
+    /// `runtimes`: (name, runtime.toml body, state.json body). "" is a
+    /// runtime checked before (`{"state":"ok"}`), "-" one never checked
+    /// (no state.json).
     fn new(runtimes: &[(&str, &str, &str)]) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
@@ -49,8 +51,10 @@ impl Rig {
                 "probe = [\"false\"]\n"
             };
             std::fs::write(rd.join("runtime.toml"), format!("{toml}{probe}")).unwrap();
-            if !state.is_empty() {
-                std::fs::write(rd.join("state.json"), state).unwrap();
+            match *state {
+                "-" => {}
+                "" => std::fs::write(rd.join("state.json"), r#"{"state":"ok"}"#).unwrap(),
+                s => std::fs::write(rd.join("state.json"), s).unwrap(),
             }
         }
         let q = |s: &str| serde_json::to_string(s).unwrap();
@@ -395,7 +399,7 @@ fn failure_classes_mark_the_runtime_and_card_once() {
 }
 
 #[test]
-fn a_runtime_that_was_never_logged_in_needs_login_and_refunds_the_run() {
+fn a_runtime_whose_login_fails_in_a_run_needs_login_and_refunds_the_run() {
     // A task run: refunded and held, the runtime needs a login, one card.
     let rig = Rig::new(&[("claude-1", CLAUDE, "")]);
     std::fs::write(
@@ -475,6 +479,76 @@ fn a_login_probe_that_passes_makes_the_runtime_ok_again() {
     assert_eq!(rig.task(id).state, "done");
 }
 
+/// A runtime never checked (no state.json) takes no run before its login
+/// probe, the CLI's own `codex login status`, passes: without a login it
+/// shows "not logged in" and holds its task; once logged in it runs.
+#[test]
+fn a_never_checked_codex_runtime_runs_only_after_its_login_probe_passes() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // No `probe` line, so the default `codex login status` is checked (the
+    // word keeps the rig from adding its failing one).
+    let toml = format!("{CODEX}# default probe: codex login status\n");
+    let rig = Rig::new(&[("codex-1", &toml, "-")]);
+    let bin = rig.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("codex");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$1 $2\" = \"login status\" ] || exit 2\n\
+         [ -e \"$RT_OUT/loggedin\" ] && { echo 'Logged in using ChatGPT'; exit 0; }\n\
+         echo 'Not logged in'; exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let out = rig.out().display().to_string();
+    let id: i64 = rig
+        .srv
+        .ok(&["add", "--project", "p", "--title", "t", "--agent", "codex"])
+        .trim()
+        .parse()
+        .unwrap();
+    let wait = |what: &str, f: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !f() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+
+    // No login: the probe fails, nothing runs, no card.
+    let worker = rig
+        .srv
+        .dispatcher(&[], &[("RT_OUT", &out), ("PATH", &path)]);
+    wait("the probe", &|| {
+        std::fs::read_to_string(rig.dir.path().join("runtimes/codex-1/probe.log"))
+            .is_ok_and(|l| l.contains("Not logged in"))
+    });
+    wait("the report", &|| {
+        rig.srv
+            .ok(&["runtimes"])
+            .contains("codex-1 (codex): not logged in, 0 live")
+    });
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    drop(worker);
+    assert!(rig.calls().is_empty(), "{:?}", rig.calls());
+    let t = rig.task(id);
+    assert_eq!((t.state.as_str(), t.runs), ("pending", 0), "{t:?}");
+
+    // Logged in: the next node's first probe passes, the runtime is ok
+    // (and saved), and the task runs.
+    std::fs::write(rig.out().join("loggedin"), "").unwrap();
+    let worker = rig
+        .srv
+        .dispatcher(&[], &[("RT_OUT", &out), ("PATH", &path)]);
+    wait("the task", &|| rig.task(id).state == "done");
+    drop(worker);
+    let s = rig.state("codex-1");
+    assert_eq!(s["state"], "ok", "{s}");
+    assert!(s["login_at"].is_i64(), "{s}");
+    assert_eq!(rig.calls().len(), 1, "{:?}", rig.calls());
+}
+
 #[test]
 fn the_heartbeat_carries_state_and_quota_but_no_login_or_secret() {
     let d = tempfile::tempdir().unwrap();
@@ -511,6 +585,7 @@ fn the_heartbeat_carries_state_and_quota_but_no_login_or_secret() {
         "harness",
         "plan",
         "state",
+        "never_logged_in",
         "healthy",
         "until",
         "last_failure",

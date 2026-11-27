@@ -115,7 +115,7 @@ const ADDABLE: &[(&str, &str)] = &[("claude-code", "Add Claude"), ("codex", "Add
 enum RuntimePress<'a> {
     /// A runtime card's button: the list.
     List,
-    /// Re-login: the runtime's login methods.
+    /// Log in or Re-login: the runtime's login methods.
     Menu(&'a str),
     Login(&'a str, &'a str),
     Remove(&'a str),
@@ -153,7 +153,8 @@ impl<'a> RuntimePress<'a> {
 }
 
 /// The `/runtimes` list's keyboard on a node that manages its runtimes:
-/// Re-login and Remove per runtime (one row each), then the Add buttons.
+/// Log in (never logged in) or Re-login, and Remove per runtime (one row
+/// each), then the Add buttons.
 fn list_buttons(view: &Value) -> (Vec<(String, String)>, Vec<usize>) {
     if view["managed"] != true {
         return (vec![], vec![]);
@@ -166,7 +167,11 @@ fn list_buttons(view: &Value) -> (Vec<(String, String)>, Vec<usize>) {
         };
         let mut row = vec![];
         if !crate::runtime::login_methods(r["harness"].as_str().unwrap_or("")).is_empty() {
-            row.push((format!("Re-login {n}"), format!("{LOGIN_BUTTON}{n}")));
+            let verb = match r["never_logged_in"] == true {
+                true => "Log in",
+                false => "Re-login",
+            };
+            row.push((format!("{verb} {n}"), format!("{LOGIN_BUTTON}{n}")));
         }
         row.push((format!("Remove {n}"), format!("{REMOVE_BUTTON}{n}")));
         row.retain(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT);

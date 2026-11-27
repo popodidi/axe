@@ -201,7 +201,10 @@ runtime while it is healthy; sessions recorded before runtimes resolve to the
 runtime on the default login. Quota, login and provider failures
 (`failure.rs`) mark the runtime limited, needs_login or degraded
 (`<name>/state.json`); a needs_login runtime is probed with `claude auth
-status` / `codex login status` until it passes. The node reports each
+status` / `codex login status` until it passes. A runtime with no
+`state.json` yet (never checked) needs its login probe to pass before it
+takes a run (no card); one that never passed a login and never failed a run
+shows as "not logged in". The node reports each
 runtime's state, last failure and quota with its admission report, never a
 login directory or credential: `axe runtimes`, `GET /api/runtimes` and the
 Telegram owner command `/runtimes` show them, and a runtime turning limited
@@ -211,14 +214,19 @@ login and always healthy.
 
 **Managing runtimes from Telegram.** On a node with `[runtimes] dir`,
 `/runtimes` lists every runtime on one line (harness, state with its last
-failure when not ok, live runs, quota) with *Re-login* and *Remove* per
+failure when not ok, live runs, quota) with *Log in* (never logged in) or
+*Re-login* and *Remove* per
 runtime and *Add Claude* / *Add Codex* (`Registry::create`, `Registry::remove`):
 
 - **Add** writes `<dir>/<name>/runtime.toml` under the next free name
   (`claude-2`) with its own `login_dir` (`<dir>/<name>/home`, linking the
   owner's instructions, settings and skills from the CLI's default directory,
   never its credentials) and opens its login menu. It takes no runs until its login check passes; then it shares
-  the harness's work with the others.
+  the harness's work with the others. An Add that does not end in a login
+  leaves nothing behind: the runtime is removed when its first login fails
+  its check, or when none passed within `runtime::ADD_LOGIN_WAIT` (the
+  longest sealed form plus 10 minutes; `added_at` in its `state.json`), and
+  the owner gets a card saying so.
 - **Remove** asks to confirm, is refused while the runtime has live runs and
   deletes `<dir>/<name>` (its stored credentials, and its login directory when
   that is inside); a login directory elsewhere, such as the CLI's default, is
@@ -227,7 +235,7 @@ runtime and *Add Claude* / *Add Codex* (`Registry::create`, `Registry::remove`):
 The node applies both between picks, and they persist: the registry directory
 is the state, so hand-written runtimes keep working beside them.
 
-**Logins from Telegram.** *Re-login* offers the runtime's login methods
+**Logins from Telegram.** *Log in* / *Re-login* offers the runtime's login methods
 (`runtime::login_methods`):
 
 - **Claude Code.** A `claude setup-token` token or an API key arrives in a

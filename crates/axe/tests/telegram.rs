@@ -4511,7 +4511,8 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
             .contains("claude-1 (claude-code)")
     });
 
-    // /runtimes lists the runtime with Re-login and Remove, then Add.
+    // /runtimes lists the runtime with Log in (it was never logged in) and
+    // Remove, then Add.
     rig.stub
         .push_to(AUX_TOKEN, text_msg(100, 200, OWNER, OWNER, "/runtimes"));
     wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
@@ -4533,7 +4534,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         keyboard_of(&list),
         kb(&[
             &[
-                ("Re-login claude-1", "rtlogin:claude-1"),
+                ("Log in claude-1", "rtlogin:claude-1"),
                 ("Remove claude-1", "rtrm:claude-1")
             ],
             add_row
@@ -4690,7 +4691,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     wait_for("both runtimes reported", 20, || {
         let out = rig.srv().ok(&["runtimes"]);
         out.contains("claude-1 (claude-code): ok")
-            && out.contains("claude-2 (claude-code): needs login, 0 live")
+            && out.contains("claude-2 (claude-code): not logged in, 0 live")
     });
     let added_tg = rig
         .messages()
@@ -4714,7 +4715,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
                 ("Remove claude-1", "rtrm:claude-1")
             ],
             &[
-                ("Re-login claude-2", "rtlogin:claude-2"),
+                ("Log in claude-2", "rtlogin:claude-2"),
                 ("Remove claude-2", "rtrm:claude-2")
             ],
             add_row
