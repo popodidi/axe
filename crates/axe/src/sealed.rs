@@ -129,6 +129,151 @@ pub struct Field {
     /// the target's later runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    /// A format the value must have; the page and the node both check it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Check>,
+}
+
+/// Characters a [`Check`] allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Chars {
+    /// `0-9` only.
+    Digits,
+    /// Anything but whitespace.
+    Nospace,
+}
+
+/// A field's format: a prefix, a length range (characters) and the
+/// characters allowed. The page shows the first problem inline and holds
+/// the seal; the node refuses a value that still fails, naming the problem
+/// ([`Check::problem`]). It never rewrites a value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Check {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chars: Option<Chars>,
+}
+
+/// How a whitespace problem reads: "contains 2 spaces: likely a wrapped
+/// line". The page words it the same (`sealed-form`'s `formatProblem`).
+fn whitespace_problem(s: &str) -> Option<String> {
+    let n = s.chars().filter(|c| c.is_whitespace()).count();
+    if n == 0 {
+        return None;
+    }
+    let breaks = s.chars().filter(|c| matches!(c, '\n' | '\r')).count();
+    let spaces = s.chars().filter(|c| *c == ' ').count();
+    let what = if breaks == n {
+        plural(n, "line break", "line breaks")
+    } else if spaces == n {
+        plural(n, "space", "spaces")
+    } else {
+        plural(n, "whitespace character", "whitespace characters")
+    };
+    Some(if s.trim().contains(char::is_whitespace) {
+        format!("contains {what}: likely a wrapped line")
+    } else {
+        format!("contains {what} at the start or end")
+    })
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+impl Check {
+    /// The first problem with `s`, as "contains 2 spaces: likely a wrapped
+    /// line" (to follow the field's label), or `None` when it fits. The
+    /// value itself is never in the text.
+    pub fn problem(&self, s: &str) -> Option<String> {
+        if self.chars.is_some() {
+            if let Some(p) = whitespace_problem(s) {
+                return Some(p);
+            }
+        }
+        if !s.starts_with(&self.prefix) {
+            return Some(format!("must start with {}", self.prefix));
+        }
+        if self.chars == Some(Chars::Digits) && !s.chars().all(|c| c.is_ascii_digit()) {
+            return Some("must be digits only".into());
+        }
+        let len = s.chars().count();
+        match (self.min, self.max) {
+            (Some(lo), Some(hi)) if lo == hi && len != lo => {
+                Some(format!("is {len} characters; expected {lo}"))
+            }
+            (Some(lo), _) if len < lo => Some(format!(
+                "is too short ({len} characters; expected at least {lo})"
+            )),
+            (_, Some(hi)) if len > hi => Some(format!(
+                "is too long ({len} characters; expected at most {hi})"
+            )),
+            _ => None,
+        }
+    }
+
+    fn validate(&self, kind: Kind, max_bytes: usize) -> Result<()> {
+        if !matches!(kind, Kind::Secret | Kind::Text | Kind::Code) {
+            bail!("only a secret, text or code field has a check");
+        }
+        if self.prefix.chars().count() > MAX_LABEL {
+            bail!("check prefix over {MAX_LABEL} characters");
+        }
+        if self
+            .prefix
+            .contains(|c: char| c.is_whitespace() || c.is_control())
+        {
+            bail!("check prefix has whitespace");
+        }
+        if let (Some(lo), Some(hi)) = (self.min, self.max) {
+            if lo > hi {
+                bail!("check length {lo}..{hi} is empty");
+            }
+        }
+        if self.max.is_some_and(|hi| hi == 0) || self.min.is_some_and(|lo| lo > max_bytes) {
+            bail!("check length does not fit the field's max of {max_bytes} bytes");
+        }
+        if self.chars == Some(Chars::Digits) && !self.prefix.chars().all(|c| c.is_ascii_digit()) {
+            bail!("a digits check has a digits prefix only");
+        }
+        Ok(())
+    }
+
+    /// Parses the CLI's `len=MIN..MAX` (`N`, `N..`, `..N`).
+    fn parse_len(&mut self, v: &str) -> Result<()> {
+        let num = |s: &str| -> Result<Option<usize>> {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(s.parse().with_context(|| format!("len {v:?}"))?))
+            }
+        };
+        match v.split_once("..") {
+            Some((lo, hi)) => {
+                self.min = num(lo)?;
+                self.max = num(hi.trim_start_matches('='))?;
+            }
+            None => {
+                self.min = num(v)?;
+                self.max = self.min;
+            }
+        }
+        if self.min.is_none() && self.max.is_none() {
+            bail!("len {v:?}: expected MIN..MAX");
+        }
+        Ok(())
+    }
 }
 
 impl Field {
@@ -136,9 +281,19 @@ impl Field {
         self.max.unwrap_or_else(|| self.kind.default_max())
     }
 
+    pub fn label_or_name(&self) -> &str {
+        if self.label.is_empty() {
+            &self.name
+        } else {
+            &self.label
+        }
+    }
+
     /// Parses `NAME:TYPE[:FLAGS...]` from the CLI, for example
     /// `token:secret:required:env=GH_TOKEN`, `plan:choice=max|pro`,
-    /// `cert:file:max=4096`, `note:text:label=A note`.
+    /// `cert:file:max=4096`, `note:text:label=A note`. Check flags:
+    /// `prefix=TEXT`, `len=MIN..MAX` (characters), `chars=digits|nospace`,
+    /// for example `token:secret:prefix=ghp_:len=40:chars=nospace`.
     pub fn parse(s: &str) -> Result<Field> {
         let mut parts = s.split(':');
         let name = parts.next().unwrap_or("").to_string();
@@ -160,10 +315,23 @@ impl Field {
             max: None,
             choices,
             env: None,
+            check: None,
         };
         for flag in parts {
             match flag.split_once('=') {
                 None if flag == "required" => f.required = true,
+                Some(("prefix", v)) => f.check.get_or_insert_default().prefix = v.to_string(),
+                Some(("len", v)) => f
+                    .check
+                    .get_or_insert_default()
+                    .parse_len(v)
+                    .with_context(|| format!("field {}", f.name))?,
+                Some(("chars", v)) => {
+                    f.check.get_or_insert_default().chars =
+                        Some(serde_json::from_value(json!(v)).map_err(|_| {
+                            anyhow::anyhow!("field {}: chars {v:?} (digits, nospace)", f.name)
+                        })?)
+                }
                 Some(("max", n)) => {
                     f.max = Some(
                         n.parse()
@@ -173,7 +341,8 @@ impl Field {
                 Some(("env", v)) => f.env = Some(v.to_string()),
                 Some(("label", v)) => f.label = v.to_string(),
                 _ => bail!(
-                    "field {}: unknown flag {flag:?} (required, max=N, env=VAR, label=TEXT)",
+                    "field {}: unknown flag {flag:?} (required, max=N, env=VAR, label=TEXT, \
+                     prefix=TEXT, len=MIN..MAX, chars=digits|nospace)",
                     f.name
                 ),
             }
@@ -219,6 +388,10 @@ impl Field {
             if self.kind == Kind::File {
                 bail!("field {n}: a file cannot be an environment variable");
             }
+        }
+        if let Some(c) = &self.check {
+            c.validate(self.kind, max)
+                .with_context(|| format!("field {n}"))?;
         }
         Ok(())
     }
@@ -787,6 +960,9 @@ pub fn check_values(spec: &Spec, values: &Map<String, Value>) -> Result<BTreeMap
             }
         }
         if let Val::Text(s) = &val {
+            if let Some(p) = f.check.as_ref().and_then(|c| c.problem(s)) {
+                bail!("{} {p}", f.label_or_name());
+            }
             if f.kind != Kind::Text && s.contains(['\n', '\r', '\0']) {
                 bail!("field {}: a single line is expected", f.name);
             }
@@ -1624,6 +1800,111 @@ mod tests {
         assert!(r.validate().is_err());
         r.fields = vec![Field::parse("passphrase:secret:required").unwrap()];
         r.validate().unwrap();
+    }
+
+    #[test]
+    fn field_checks_name_the_problem() {
+        let f =
+            Field::parse("token:secret:required:label=Token:prefix=sk-:len=10..20:chars=nospace")
+                .unwrap();
+        let c = f.check.clone().unwrap();
+        assert_eq!(
+            c,
+            Check {
+                prefix: "sk-".into(),
+                min: Some(10),
+                max: Some(20),
+                chars: Some(Chars::Nospace)
+            }
+        );
+        // The JSON a page reads.
+        assert_eq!(
+            serde_json::to_value(&f).unwrap()["check"],
+            json!({"prefix": "sk-", "min": 10, "max": 20, "chars": "nospace"})
+        );
+        let p = |s: &str| c.problem(s);
+        assert_eq!(p("sk-abcdefgh"), None);
+        assert_eq!(
+            p("sk-abc  defgh").unwrap(),
+            "contains 2 spaces: likely a wrapped line"
+        );
+        assert_eq!(
+            p("sk-abc\ndefgh").unwrap(),
+            "contains 1 line break: likely a wrapped line"
+        );
+        assert_eq!(
+            p(" sk-abcdefgh").unwrap(),
+            "contains 1 space at the start or end"
+        );
+        assert_eq!(
+            p("sk-ab\tc defgh").unwrap(),
+            "contains 2 whitespace characters: likely a wrapped line"
+        );
+        assert_eq!(p("pk-abcdefgh").unwrap(), "must start with sk-");
+        assert_eq!(
+            p("sk-a").unwrap(),
+            "is too short (4 characters; expected at least 10)"
+        );
+        assert_eq!(
+            p(&format!("sk-{}", "a".repeat(30))).unwrap(),
+            "is too long (33 characters; expected at most 20)"
+        );
+        let id = Field::parse("chat:code:chars=digits:len=6").unwrap();
+        let ic = id.check.clone().unwrap();
+        assert_eq!(ic.problem("123456"), None);
+        assert_eq!(ic.problem("12a456").unwrap(), "must be digits only");
+        assert_eq!(ic.problem("12345").unwrap(), "is 5 characters; expected 6");
+        assert_eq!(
+            ic.problem("123 456").unwrap(),
+            "contains 1 space: likely a wrapped line"
+        );
+        // No chars: whitespace is allowed (a passphrase).
+        let pass = Check {
+            min: Some(3),
+            ..Check::default()
+        };
+        assert_eq!(pass.problem("a b c"), None);
+        // Bad checks.
+        assert!(Field::parse("p:choice=a|b:prefix=a").is_err());
+        assert!(Field::parse("f:file:len=3").is_err());
+        assert!(Field::parse("t:text:len=9..3").is_err());
+        assert!(Field::parse("t:text:len=..").is_err());
+        assert!(Field::parse("t:text:chars=hex").is_err());
+        assert!(Field::parse("t:code:chars=digits:prefix=a").is_err());
+        assert!(
+            Field::parse("t:code:len=65..").is_err(),
+            "over the field max"
+        );
+        assert!(serde_json::from_value::<Field>(
+            json!({"name": "t", "type": "secret", "check": {"regex": "x"}})
+        )
+        .is_err());
+
+        // The node refuses a value that fails, naming the field and the
+        // problem, and never the value.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = desk(tmp.path());
+        let r = Request {
+            purpose: "Token".into(),
+            target: Target::Task { task: 7 },
+            fields: vec![f],
+            ttl: None,
+            from: String::new(),
+        };
+        r.validate().unwrap();
+        let (spec, s) = signed(&d, &r, 1000);
+        let bad = "sk-abc  defgh";
+        let e = deliver(&d, &s, &seal(&spec, &json!({"token": bad})).unwrap(), 1001);
+        let e = e["error"].as_str().unwrap();
+        assert_eq!(e, "Token contains 2 spaces: likely a wrapped line");
+        assert!(!e.contains("abc"));
+        let ok = deliver(
+            &d,
+            &s,
+            &seal(&spec, &json!({"token": "sk-abcdefgh"})).unwrap(),
+            1002,
+        );
+        assert!(ok["delivered"].is_object(), "{ok}");
     }
 
     #[test]

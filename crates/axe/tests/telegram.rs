@@ -4473,6 +4473,7 @@ fn every_open_form_in_a_chat_keeps_its_button() {
 
 #[test]
 fn runtimes_log_in_from_telegram_through_a_sealed_form() {
+    const TOKEN_4411: &str = "sk-ant-oat01-dummy4411xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     let dir = tempfile::tempdir().unwrap();
     let reg = dir.path().join("runtimes");
     std::fs::create_dir_all(reg.join("claude-1")).unwrap();
@@ -4480,7 +4481,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     std::fs::write(
         reg.join("claude-1/runtime.toml"),
         "harness = \"claude-code\"\nprobe = [\"sh\", \"-c\", \
-         \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = oat-dummy-4411 ] || { echo Not logged in; exit 1; }\"]\n",
+         \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = sk-ant-oat01-dummy4411xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ] || { echo Not logged in; exit 1; }\"]\n",
     )
     .unwrap();
     // It needs a login: the node's first probe fails, and the next
@@ -4595,15 +4596,39 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
             login: "token".into()
         }
     );
-    let sealed = axe::sealed::seal(&spec, &json!({"secret": "oat-dummy-4411"})).unwrap();
+    // The form declares the token's format; a token pasted from a wrapped
+    // terminal line (an old page does not check) is refused by name and
+    // the form stays open.
+    let check = spec.fields[0].check.clone().expect("a token check");
+    assert_eq!(check.prefix, "sk-ant-oat01-");
+    let wrapped = format!("{} {}", &TOKEN_4411[..40], &TOKEN_4411[40..]);
+    let wrapped = format!("{} {}", &wrapped[..80], &wrapped[80..]);
+    let sealed = axe::sealed::seal(&spec, &json!({"secret": wrapped})).unwrap();
     rig.stub.push_to(
         AUX_TOKEN,
         json!({"update_id": 103, "message": {
-        "message_id": 600, "date": 0, "from": user(OWNER),
+        "message_id": 610, "date": 0, "from": user(OWNER),
         "chat": {"id": OWNER, "type": "private"},
         "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}),
     );
     rig.stub.wait_confirmed(103);
+    wait_for("the refusal", 20, || {
+        rig.sent_to(OWNER).iter().any(|p| {
+            p["text"]
+                == "Sealed form reply refused: setup-token token contains 2 spaces: likely a \
+                    wrapped line. The form is still open."
+        })
+    });
+    assert!(!reg.join("claude-1/login/CLAUDE_CODE_OAUTH_TOKEN").exists());
+    let sealed = axe::sealed::seal(&spec, &json!({"secret": TOKEN_4411})).unwrap();
+    rig.stub.push_to(
+        AUX_TOKEN,
+        json!({"update_id": 104, "message": {
+        "message_id": 600, "date": 0, "from": user(OWNER),
+        "chat": {"id": OWNER, "type": "private"},
+        "web_app_data": {"data": sealed.text(), "button_text": "Open sealed form"}}}),
+    );
+    rig.stub.wait_confirmed(104);
     wait_for("the delivery", 20, || {
         rig.sent_to(OWNER).iter().any(|p| {
             p["text"]
@@ -4612,7 +4637,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         })
     });
     let file = reg.join("claude-1/login/CLAUDE_CODE_OAUTH_TOKEN");
-    assert_eq!(std::fs::read_to_string(file).unwrap(), "oat-dummy-4411");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), TOKEN_4411);
     // The stored login is checked at once, not at the next periodic probe:
     // the runtime is ok and the owner gets its card.
     wait_for("the login check card", 20, || {
@@ -4637,7 +4662,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     // Add Claude: the node adds claude-2 on its own login and its login
     // menu follows.
     let sent = rig.sent_to(OWNER).len();
-    press_on(104, list_tg, "rtadd:claude-code");
+    press_on(105, list_tg, "rtadd:claude-code");
     wait_for("the added runtime's menu", 20, || {
         rig.sent_to(OWNER).len() > sent
     });
@@ -4674,7 +4699,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     // Both are listed, each with its buttons.
     let sent = rig.sent_to(OWNER).len();
     rig.stub
-        .push_to(AUX_TOKEN, text_msg(105, 201, OWNER, OWNER, "/runtimes"));
+        .push_to(AUX_TOKEN, text_msg(106, 201, OWNER, OWNER, "/runtimes"));
     wait_for("the second list", 20, || rig.sent_to(OWNER).len() > sent);
     let list = rig.sent_to(OWNER).pop().unwrap();
     assert_eq!(
@@ -4702,7 +4727,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
 
     // Its login flow is the chosen runtime's: a sealed form for claude-2.
     let sent = rig.sent_to(OWNER).len();
-    press_on(106, added_tg, "rtlogin:claude-2:token");
+    press_on(107, added_tg, "rtlogin:claude-2:token");
     wait_for("the form for claude-2", 20, || {
         rig.sent_to(OWNER).len() >= sent + 2
     });
@@ -4724,7 +4749,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
 
     // Remove asks first and says what happens to the login.
     let sent = rig.sent_to(OWNER).len();
-    press_on(107, list_tg, "rtrm:claude-2");
+    press_on(108, list_tg, "rtrm:claude-2");
     wait_for("the confirmation", 20, || rig.sent_to(OWNER).len() > sent);
     let confirm = rig.sent_to(OWNER).pop().unwrap();
     assert!(
@@ -4750,7 +4775,7 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
     });
     let confirm_tg = rig.messages().last().unwrap().3;
     let sent = rig.sent_to(OWNER).len();
-    press_on(108, confirm_tg, "rtrm!:claude-2");
+    press_on(109, confirm_tg, "rtrm!:claude-2");
     wait_for("the removal", 20, || rig.sent_to(OWNER).len() > sent);
     let done = rig.sent_to(OWNER).pop().unwrap();
     assert_eq!(
