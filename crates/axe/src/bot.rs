@@ -1042,6 +1042,37 @@ pub fn request_wake(
     add_wake(conn, actor, name, due, &note, w.key.as_deref(), now)
 }
 
+/// The id of bot `bot_id`'s latest event, 0 with none.
+pub fn last_event_id(conn: &Connection, bot_id: i64) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(MAX(id),0) FROM bot_events WHERE bot_id=?1",
+        [bot_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// Bot `bot_id`'s `attention` events after event `after`: (id, body).
+pub fn attention_since(conn: &Connection, bot_id: i64, after: i64) -> Result<Vec<(i64, String)>> {
+    Ok(conn
+        .prepare("SELECT id, body FROM bot_events WHERE bot_id=?1 AND id>?2 AND kind='attention' ORDER BY id")?
+        .query_map(params![bot_id, after], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether bot `name` has a wake with `key` ([`add_wake`]'s key).
+pub fn has_wake(conn: &Connection, name: &str, key: &str) -> Result<bool> {
+    let b = get(conn, name)?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM bot_wakes WHERE bot_id=?1 AND key=?2",
+            params![b.id, format!("wake:{key}")],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// Schedules a `wake` at `due` (epoch); returns its id and due time. A repeated
 /// `key` returns the existing wake.
 pub fn add_wake(

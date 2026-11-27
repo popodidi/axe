@@ -1078,6 +1078,13 @@ pub fn record(
     Ok(id)
 }
 
+/// The name of goal `id`, if it exists.
+pub fn name_of(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT name FROM goals WHERE id=?1", [id], |r| r.get(0))
+        .optional()?)
+}
+
 /// The goal id for a link: `None` for `"none"`, else the goal, which must exist.
 pub fn resolve(conn: &Connection, name: &str) -> Result<Option<Goal>> {
     if name.trim() == NONE {

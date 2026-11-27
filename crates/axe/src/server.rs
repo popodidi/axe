@@ -156,8 +156,8 @@ impl State {
     }
 }
 
-impl channel::Store for State {
-    fn conn(&self) -> MutexGuard<'_, Connection> {
+impl crate::core::Axe for State {
+    fn db(&self) -> MutexGuard<'_, Connection> {
         State::conn(self)
     }
     fn changed(&self) {
@@ -406,9 +406,9 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     #[cfg(feature = "telegram")]
     if let Some(gw) = &state.telegram {
-        gw.bind(&state.conn());
+        gw.bind(state.as_ref());
         eprintln!("axe server: telegram gateway for bots {:?}", gw.names());
-        gw.start(Arc::clone(&state) as Arc<dyn channel::Store>);
+        gw.start(Arc::clone(&state) as Arc<dyn crate::core::Axe>);
     }
     #[cfg(not(feature = "telegram"))]
     if cfg.telegram.is_some() {
@@ -2509,6 +2509,17 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             ok(200, &v)
         }
         ("GET", ["api", "admission"]) => ok(200, &st.admission()),
+        // The owner views Telegram's /status, /tasks, ... show (HTML).
+        ("GET", ["api", "views", view]) => {
+            let text = crate::core::Axe::view(
+                st,
+                view,
+                req.query("bot").unwrap_or(""),
+                req.query("arg").unwrap_or(""),
+                st.cfg.blobs.public_url.as_deref(),
+            )?;
+            ok(200, &json!({"view": view, "text": text}))
+        }
         ("POST", ["api", "admission", "hold"]) => {
             let b: HoldBody = req.json()?;
             let until = db::parse_wake(&b.until)?;
@@ -4027,7 +4038,7 @@ fn form_route(st: &State, req: &Request, path: &[&str]) -> Result<Response> {
             if parsed.form != *id {
                 return Err(HttpError(400, "the sealed reply is for another form".into()).into());
             }
-            let f = channel::Store::form_submit(st, &b.sealed)
+            let f = crate::core::Axe::form_submit(st, &b.sealed)
                 .map_err(|e| HttpError(409, format!("{e:#}")))?;
             ok(200, &f.view(page))
         }
