@@ -351,35 +351,59 @@ pub fn buttons(open: &[Form], page: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The owner-facing prompt text for a form (no values; names only).
-pub fn prompt_text(f: &Form) -> String {
+/// The owner-facing Telegram prompt for a form, as Telegram HTML (no values;
+/// names only): the purpose, the target once (a task linked to its page on
+/// `web`, the server's public URL), when it closes relative to `now`, a line
+/// per field, and the key fingerprint and browser fallback `link` folded in
+/// an expandable quote.
+pub fn prompt_html(f: &Form, web: Option<&str>, link: &str, now: i64) -> String {
+    use crate::board::escape;
+    let attr = |s: &str| escape(s).replace('"', "&quot;");
+    let target = match &f.spec.target {
+        sealed::Target::Task { task } => match web {
+            Some(w) => format!(
+                "<a href=\"{}/?task={task}\">task {task}</a>",
+                attr(w.trim_end_matches('/'))
+            ),
+            None => format!("task {task}"),
+        },
+        sealed::Target::Bot { bot } => escape(bot),
+        t => escape(&t.describe()),
+    };
+    // Who asked, only when it is not the target itself.
+    let from = &f.spec.from;
+    let asked = if from.is_empty() || *from == f.spec.target.describe() {
+        String::new()
+    } else {
+        format!(" · asked by {}", escape(from))
+    };
+    let closes = if f.expires > now {
+        format!("closes in {}", crate::board::age(f.expires - now))
+    } else {
+        "closed".to_string()
+    };
     let fields: Vec<String> = f
         .spec
         .fields
         .iter()
         .map(|x| {
-            let label = if x.label.is_empty() {
-                &x.name
-            } else {
-                &x.label
-            };
-            format!("{label} ({})", x.kind.as_str())
+            let req = if x.required { " · required" } else { "" };
+            format!(
+                "• <b>{}</b> · {}{req}",
+                escape(x.label_or_name()),
+                x.kind.as_str()
+            )
         })
         .collect();
-    let from = if f.spec.from.is_empty() {
-        String::new()
-    } else {
-        format!(" from {}", f.spec.from)
-    };
     format!(
-        "Sealed form{from}: {}\nFor: {}\nFields: {}\nDispatcher key: {}\nExpires: {}\n\n\
-         Tap \"Open sealed form\" below. The values are encrypted on your phone to the \
-         dispatcher key; Telegram and the axe server see only ciphertext.",
-        f.spec.purpose,
-        f.spec.target.describe(),
-        fields.join(", "),
-        sealed::fingerprint_b64(&f.spec.pubkey).unwrap_or_default(),
-        f.spec.expires,
+        "<b>{}</b>\nFor {target}{asked} · {closes}\n\n{}\n\n<blockquote expandable>\
+         Encrypted on your phone to the node key <code>{}</code>; Telegram and the axe \
+         server see only ciphertext. Not in Telegram? <a href=\"{}\">Open the form in a \
+         browser</a> and paste the sealed reply here.</blockquote>",
+        escape(f.spec.purpose.trim()),
+        fields.join("\n"),
+        escape(&sealed::fingerprint_b64(&f.spec.pubkey).unwrap_or_default()),
+        attr(link),
     )
 }
 
@@ -583,14 +607,65 @@ mod tests {
         assert!(forms.take_closing(200).is_empty(), "once");
     }
 
-    #[test]
-    fn prompt_names_fields_not_values() {
+    fn prompt(r: &Request, web: Option<&str>, now: i64) -> (String, String) {
         let key = crate::sealed::Key::random();
-        let (_, s) = key.sign("d", &req(), 0).unwrap();
-        let f = Forms::default().add(&req(), s, 0).unwrap();
-        let t = prompt_text(&f);
-        assert!(t.contains("token (secret)"));
-        assert!(t.contains(&key.fingerprint()));
-        assert!(t.contains("For: task 3"));
+        let (_, s) = key.sign("d", r, 0).unwrap();
+        let f = Forms::default().add(r, s, 0).unwrap();
+        (
+            prompt_html(&f, web, "https://p/form#f=a.b", now),
+            key.fingerprint(),
+        )
+    }
+
+    #[test]
+    fn prompt_for_a_task_leads_with_the_purpose() {
+        let (t, fp) = prompt(&req(), Some("http://axe.hlab/"), 0);
+        assert_eq!(
+            t,
+            format!(
+                "<b>Token</b>\nFor <a href=\"http://axe.hlab/?task=3\">task 3</a> · closes in 2m\n\n\
+                 • <b>token</b> · secret · required\n\n<blockquote expandable>Encrypted on your \
+                 phone to the node key <code>{fp}</code>; Telegram and the axe server see only \
+                 ciphertext. Not in Telegram? <a href=\"https://p/form#f=a.b\">Open the form in \
+                 a browser</a> and paste the sealed reply here.</blockquote>"
+            )
+        );
+        // Without a public URL the task is named, not linked.
+        let (t, _) = prompt(&req(), None, 60);
+        assert!(t.contains("\nFor task 3 · closes in 1m\n"), "{t}");
+        let (t, _) = prompt(&req(), None, 500);
+        assert!(t.contains(" · closed\n"), "{t}");
+    }
+
+    #[test]
+    fn prompt_for_a_bot_names_the_bot_and_marks_required_fields() {
+        let r = Request {
+            purpose: "Willy's <BotFather> token".into(),
+            target: Target::Bot {
+                bot: "willy".into(),
+            },
+            fields: vec![
+                Field::parse("token:secret:required:label=BotFather token").unwrap(),
+                Field::parse("note:text").unwrap(),
+            ],
+            ttl: Some(3600),
+            from: "bot axe-os".into(),
+        };
+        let (t, _) = prompt(&r, Some("http://axe.hlab"), 0);
+        assert!(
+            t.starts_with(
+                "<b>Willy's &lt;BotFather&gt; token</b>\nFor willy · asked by bot axe-os · closes in 1h\n\n\
+                 • <b>BotFather token</b> · secret · required\n• <b>note</b> · text\n\n<blockquote expandable>"
+            ),
+            "{t}"
+        );
+        // The asker is not repeated when it is the target.
+        let r = Request {
+            from: "bot willy".into(),
+            ..r
+        };
+        let (t, _) = prompt(&r, None, 0);
+        assert!(t.contains("\nFor willy · closes in 1h\n"), "{t}");
+        assert!(!t.contains("Sealed form"), "{t}");
     }
 }
