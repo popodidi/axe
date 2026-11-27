@@ -242,6 +242,7 @@ fn template_sets_owner_repos_and_labels() {
     t.owner = Some("bot:ops".into());
     t.repos = Some(vec!["axe".into(), "web".into(), "axe".into()]);
     t.labels = vec!["infra".into(), "nightly".into()];
+    t.workload = Some("ops".into());
     let id = routine::save(&mut c, &a, None, &t, 0).unwrap();
     for task in [routine::trigger(&mut c, &a, id, "k").unwrap(), {
         routine::tick(&mut c, 120).unwrap();
@@ -260,7 +261,9 @@ fn template_sets_owner_repos_and_labels() {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(kinds, ["created", "owner", "repos", "labels"]);
+        // Routine tasks go through the task action (`db::add_task_in`), so
+        // the workload is a normal (fanned-out) event too.
+        assert_eq!(kinds, ["created", "owner", "repos", "labels", "workload"]);
     }
     // repos: [] is a run workspace with no repos, as `axe task add --no-repos`.
     t.repos = Some(vec![]);

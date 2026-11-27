@@ -826,9 +826,72 @@ pub fn add_task_full(
     if let Some(o) = &f.owner {
         validate_owner(o)?;
     }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let id = add_task_in(&tx, actor, t, blocked_by, workload, goal, f, None, &|_| {
+        Ok(())
+    })?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Gives back the run a node counted for task `id` (a drain, an outage or a
+/// release before any work).
+pub fn refund_run(tx: &Transaction, id: i64) -> Result<()> {
+    tx.execute(
+        "UPDATE tasks SET runs = MAX(runs - 1, 0) WHERE id = ?1",
+        [id],
+    )?;
+    Ok(())
+}
+
+/// Moves every task owned by `from` to `to` (a bot rename), with an `owner`
+/// event on each, as any owner change has. Returns how many moved.
+pub fn rename_owner(tx: &Transaction, actor: &Actor, from: &str, to: &str) -> Result<usize> {
+    let ids: Vec<i64> = tx
+        .prepare("SELECT id FROM tasks WHERE owner=?1 ORDER BY id")?
+        .query_map([from], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in &ids {
+        tx.execute("UPDATE tasks SET owner=?2 WHERE id=?1", params![id, to])?;
+        write_event(
+            tx,
+            actor,
+            *id,
+            "owner",
+            Some(from),
+            Some(to),
+            Some("bot renamed"),
+        )?;
+    }
+    Ok(ids.len())
+}
+
+/// The task action inside `tx`: validates, inserts, writes the creation
+/// events (fanned out to subscribers) and the edges. `created` extends the
+/// `created` event body (`state=...`), as routine occurrences do;
+/// `inserted` runs between the insert and the events (a routine records its
+/// occurrence there, so the `created` fan-out sees it).
+#[allow(clippy::too_many_arguments)]
+pub fn add_task_in(
+    tx: &Transaction,
+    actor: &Actor,
+    t: &NewTask,
+    blocked_by: &[i64],
+    workload: Option<&str>,
+    goal: Option<&str>,
+    f: &Fields,
+    created: Option<&str>,
+    inserted: &dyn Fn(i64) -> Result<()>,
+) -> Result<i64> {
+    validate_state(t.state)?;
+    if let Some(w) = workload {
+        validate_workload(w)?;
+    }
+    if let Some(o) = &f.owner {
+        validate_owner(o)?;
+    }
     let repos = f.repos.as_deref().map(|r| names("repo", r)).transpose()?;
     let labels = names("label", &f.labels)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ts = now();
     tx.execute(
         "INSERT INTO tasks (project, title, detail, state, created_at, updated_at, agent,
@@ -847,35 +910,30 @@ pub fn add_task_full(
         ],
     )?;
     let id = tx.last_insert_rowid();
-    let body = format!("state={}", t.state);
-    write_event(&tx, actor, id, "created", None, Some(t.title), Some(&body))?;
+    inserted(id)?;
+    let body = match created {
+        Some(c) => format!("state={} {c}", t.state),
+        None => format!("state={}", t.state),
+    };
+    write_event(tx, actor, id, "created", None, Some(t.title), Some(&body))?;
     if let Some(o) = &f.owner {
-        write_event(&tx, actor, id, "owner", None, Some(o), None)?;
+        write_event(tx, actor, id, "owner", None, Some(o), None)?;
     }
     if let Some(r) = &repos {
-        write_event(&tx, actor, id, "repos", None, Some(&r.join(",")), None)?;
+        write_event(tx, actor, id, "repos", None, Some(&r.join(",")), None)?;
     }
     if !labels.is_empty() {
-        write_event(
-            &tx,
-            actor,
-            id,
-            "labels",
-            None,
-            Some(&labels.join(",")),
-            None,
-        )?;
+        write_event(tx, actor, id, "labels", None, Some(&labels.join(",")), None)?;
     }
     if let Some(w) = workload {
-        write_event(&tx, actor, id, "workload", None, Some(w), None)?;
+        write_event(tx, actor, id, "workload", None, Some(w), None)?;
     }
     if let Some(g) = goal {
-        link_goal(&tx, actor, id, g)?;
+        link_goal(tx, actor, id, g)?;
     }
     for p in dedup(blocked_by) {
-        add_dep_in(&tx, actor, id, p)?;
+        add_dep_in(tx, actor, id, p)?;
     }
-    tx.commit()?;
     Ok(id)
 }
 

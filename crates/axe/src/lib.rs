@@ -33,6 +33,7 @@ pub mod service;
 pub mod skill;
 pub mod subscription;
 pub mod task_inbox;
+pub mod task_policy;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 pub mod trace;

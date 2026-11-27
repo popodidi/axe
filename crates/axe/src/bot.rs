@@ -652,9 +652,11 @@ pub fn rename(
         "UPDATE bots SET name=?1, updated_at=?2 WHERE id=?3",
         params![new, at, b.id],
     )?;
-    let tasks = tx.execute(
-        "UPDATE tasks SET owner=?2 WHERE owner=?1",
-        params![format!("bot:{}", b.name), format!("bot:{new}")],
+    let tasks = crate::db::rename_owner(
+        &tx,
+        actor,
+        &format!("bot:{}", b.name),
+        &format!("bot:{new}"),
     )?;
     let rules = crate::rule::rename_bot(&tx, actor, &b.name, new)?;
     let routines = crate::routine::rename_bot(&tx, actor, &b.name, new)?;

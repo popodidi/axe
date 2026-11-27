@@ -341,42 +341,32 @@ fn occurrence(
         return Ok(task);
     }
     let t = &r.template;
-    let ts = db::now();
-    let repos = t
-        .repos
-        .as_deref()
-        .map(|r| db::names("repo", r))
-        .transpose()?;
-    let labels = db::names("label", &t.labels)?;
-    conn.execute("INSERT INTO tasks(project,title,detail,state,created_at,updated_at,agent,owner,repos,labels) VALUES (?1,?2,?3,'pending',?4,?4,?5,?6,?7,?8)",params![t.project,t.title,t.detail,ts,t.agent,t.owner,repos.as_ref().map(serde_json::to_string).transpose()?,serde_json::to_string(&labels)?])?;
-    let task = conn.last_insert_rowid();
-    conn.execute("INSERT INTO routine_occurrences(routine_id,identity,scheduled_at,task_id,snapshot,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![r.id,identity,scheduled,task,serde_json::to_string(t)?,ts])?;
-    // Same event contract as manually added tasks; the backlink lives in its own indexed table.
-    conn.execute("INSERT INTO events(task_id,at,actor,session,kind,to_value,body) VALUES (?1,?2,?3,?4,'created',?5,?6)",params![task,ts,actor.name,actor.session,t.title,format!("state=pending routine={} occurrence={identity}",r.id)])?;
-    crate::subscription::fan_out(
+    // The task action (validation, events, subscriber fan-out), with the
+    // occurrence named in its `created` event.
+    let task = db::add_task_in(
         conn,
-        &actor.name,
-        conn.last_insert_rowid(),
-        task,
-        "created",
+        actor,
+        &db::NewTask {
+            agent: t.agent.as_deref(),
+            project: &t.project,
+            title: &t.title,
+            detail: &t.detail,
+            state: "pending",
+        },
+        &[],
+        t.workload.as_deref(),
         None,
-        Some(&t.title),
-        None,
+        &db::Fields {
+            owner: t.owner.clone(),
+            repos: t.repos.clone(),
+            labels: t.labels.clone(),
+        },
+        Some(&format!("routine={} occurrence={identity}", r.id)),
+        &|task| {
+            conn.execute("INSERT INTO routine_occurrences(routine_id,identity,scheduled_at,task_id,snapshot,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![r.id,identity,scheduled,task,serde_json::to_string(t)?,db::now()])?;
+            Ok(())
+        },
     )?;
-    // The same events, in the same order, as `db::add_task_full`.
-    if let Some(o) = &t.owner {
-        db::write_event(conn, actor, task, "owner", None, Some(o), None)?;
-    }
-    if let Some(r) = &repos {
-        db::write_event(conn, actor, task, "repos", None, Some(&r.join(",")), None)?;
-    }
-    if !labels.is_empty() {
-        let l = labels.join(",");
-        db::write_event(conn, actor, task, "labels", None, Some(&l), None)?;
-    }
-    if let Some(w) = &t.workload {
-        conn.execute("INSERT INTO events(task_id,at,actor,session,kind,to_value) VALUES (?1,?2,?3,?4,'workload',?5)",params![task,ts,actor.name,actor.session,w])?;
-    }
     audit(
         conn,
         r.id,
