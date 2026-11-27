@@ -63,6 +63,7 @@ pub trait Source {
 }
 
 /// A doc's content, or a folder's files.
+#[derive(Clone)]
 pub enum Fetched {
     Doc(String),
     Folder(Vec<doc::File>),

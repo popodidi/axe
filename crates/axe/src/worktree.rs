@@ -317,6 +317,7 @@ fn git_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
         let _ = err.read_to_string(&mut s);
         s
     });
+    let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -324,10 +325,28 @@ fn git_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
         if Instant::now() >= end {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("git {} timed out", args.join(" "));
+            crate::trace::detail(
+                start.elapsed(),
+                format_args!("git -C {} {}  (timed out)", dir.display(), args.join(" ")),
+            );
+            bail!(
+                "git {} timed out after {}s in {}",
+                args.join(" "),
+                timeout.as_secs(),
+                dir.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    crate::trace::detail(
+        start.elapsed(),
+        format_args!(
+            "git -C {} {}{}",
+            dir.display(),
+            args.join(" "),
+            if status.success() { "" } else { "  (failed)" }
+        ),
+    );
     let stdout = reader.join().unwrap_or_default();
     let stderr = err_reader.join().unwrap_or_default();
     ensure!(

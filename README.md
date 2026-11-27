@@ -525,6 +525,14 @@ the store moved on, the edit is kept, the store's copy is written next to it
 as `<file>.store` and sync exits non-zero: merge, delete the copy and sync
 again. Generated files and new files are never sent (create docs with
 `axe doc put`), and repo changes go through git as usual (`workspace.rs`).
+Both read the server without retries and give a host lookup 10s, so a network
+failure ends the command at once and names the server and the step. A build
+that did not finish (a failed clone or fetch, say) resumes when run again,
+and `sync` there says so instead of syncing. `--force` rebuilds the generated
+files and the repo worktrees from scratch (branches and commits stay); it
+refuses, listing them, while a repo has uncommitted changes or a store-backed
+file an unsynced edit. `-v` prints each step with its duration, `-vv` also
+each git command and HTTP call.
 Claude Code finds the root `AGENTS.md` from the folder and from
 `repos/<r>`. Codex reads it only when started in the folder, since it stops
 at the repo's git root; from `repos/<r>`, run

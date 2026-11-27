@@ -559,3 +559,212 @@ fn repo_registry_cli_and_api() {
         other => panic!("{other:?}"),
     }
 }
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn an_unreachable_server_fails_fast_and_writes_nothing() {
+    let l = Laptop::new();
+    let id = l.task("one");
+    let dir = l.base.join("w");
+    let d = dir.to_str().unwrap();
+    // A name that never resolves (RFC 6761), and a port nothing listens on:
+    // no retries, so each ends well inside the 10s DNS and 5s connect bounds.
+    for (server, host) in [
+        ("http://axe.invalid", "axe.invalid"),
+        ("http://127.0.0.1:9", "127.0.0.1:9"),
+    ] {
+        let start = std::time::Instant::now();
+        let out = l
+            .srv
+            .cli(&["workspace", &id, "--dir", d])
+            .env("AXE_CONFIG", &l.config)
+            .env("HOME", l.base.join("home"))
+            .env("AXE_SERVER", server)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+        let err = stderr(&out);
+        assert!(
+            err.contains(&format!("read task {id} from the axe server at"))
+                && err.contains(host)
+                && err.contains("nothing was changed"),
+            "{err}"
+        );
+        assert!(!dir.exists());
+    }
+    // sync too: a built folder, then the server goes away.
+    l.ok(&["workspace", &id, "--dir", d]);
+    let out = l
+        .srv
+        .cli(&["workspace", "sync", d])
+        .env("AXE_CONFIG", &l.config)
+        .env("AXE_SERVER", "http://axe.invalid")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(stderr(&out).contains("axe.invalid"), "{out:?}");
+}
+
+#[test]
+fn a_build_that_did_not_finish_resumes_and_sync_waits_for_it() {
+    let l = Laptop::new();
+    l.attach("notes/plan.md", &[("", "# The plan\nbody\n")], "label:proj");
+    let id = l.task("one,two");
+    let dir = l.base.join("w");
+    let d = dir.to_str().unwrap();
+    // Repo two's origin is gone: its worktree cannot be fetched.
+    let two = l.base.join("ws/two");
+    let origin = l.base.join("two.git");
+    git(
+        &two,
+        &["remote", "set-url", "origin", "/nonexistent/two.git"],
+    );
+    let out = l.axe(&["workspace", &id, "--dir", d]);
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("did not finish")
+            && err.contains(&format!("run `axe workspace {id} --dir {d}` again"))
+            && err.contains("set up repos/two"),
+        "{err}"
+    );
+    assert!(dir.join("repos/one").is_dir());
+    assert!(!dir.join(".axe/manifest.json").exists());
+
+    // sync there refuses and names the command that finishes the build.
+    let out = l.axe(&["workspace", "sync", d]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        stderr(&out).contains(&format!("run `axe workspace {id} --dir {d}` to finish it")),
+        "{out:?}"
+    );
+
+    // Once the network is back, the same command resumes it.
+    git(
+        &two,
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
+    let out = l.axe(&["workspace", &id, "--dir", d]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(stderr(&out).contains("resuming it"), "{out:?}");
+    assert!(dir.join("repos/two/README.md").is_file());
+    assert!(dir.join("docs/store/notes/plan.md").is_file());
+    assert!(dir.join(".axe/manifest.json").is_file());
+    assert!(!dir.join(".axe/building.json").exists());
+    l.ok(&["workspace", "sync", d]);
+}
+
+#[test]
+fn a_folder_an_older_build_left_needs_force() {
+    let l = Laptop::new();
+    let id = l.task("one");
+    let dir = l.base.join("w");
+    let d = dir.to_str().unwrap();
+    // What an interrupted build by an older axe left: worktrees and
+    // generated files, no manifest and no build marker.
+    l.ok(&["workspace", &id, "--dir", d]);
+    std::fs::remove_dir_all(dir.join(".axe")).unwrap();
+    std::fs::remove_dir_all(dir.join("docs/store")).unwrap_or_default();
+    let out = l.axe(&["workspace", &id, "--dir", d]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        stderr(&out).contains("did not finish")
+            && stderr(&out).contains(&format!("Run `axe workspace {id} --dir {d} --force`")),
+        "{out:?}"
+    );
+    // A commit on the task branch survives --force.
+    std::fs::write(dir.join("repos/one/work.txt"), "w\n").unwrap();
+    git(&dir.join("repos/one"), &["add", "."]);
+    git(&dir.join("repos/one"), &["commit", "-qm", "work"]);
+    let head = git(&dir.join("repos/one"), &["rev-parse", "HEAD"]);
+    let out = l.axe(&["workspace", &id, "--dir", d, "--force"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(git(&dir.join("repos/one"), &["rev-parse", "HEAD"]), head);
+    assert!(dir.join(".axe/manifest.json").is_file());
+
+    // --force still refuses a folder that is not a workspace.
+    let mine = l.base.join("mine");
+    std::fs::create_dir_all(mine.join("docs")).unwrap();
+    std::fs::write(mine.join("docs/notes.md"), "mine\n").unwrap();
+    let out = l.axe(&["workspace", &id, "--dir", mine.to_str().unwrap(), "--force"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(stderr(&out).contains("is not an axe workspace"), "{out:?}");
+    assert!(mine.join("docs/notes.md").is_file());
+}
+
+#[test]
+fn force_refuses_while_a_repo_or_a_store_file_has_changes() {
+    let l = Laptop::new();
+    l.attach("notes/plan.md", &[("", "# The plan\nbody\n")], "label:proj");
+    let id = l.task("one");
+    let dir = l.base.join("w");
+    let d = dir.to_str().unwrap();
+    l.ok(&["workspace", &id, "--dir", d]);
+    let plan = dir.join("docs/store/notes/plan.md");
+    std::fs::write(&plan, "# The plan\nmine\n").unwrap();
+    std::fs::write(dir.join("repos/one/scratch.txt"), "mine\n").unwrap();
+    let out = l.axe(&["workspace", &id, "--dir", d, "--force"]);
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("--force would lose these, so nothing was changed")
+            && err.contains("edited: docs/store/notes/plan.md")
+            && err.contains("repos/one: 1 uncommitted or untracked paths"),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&plan).unwrap(),
+        "# The plan\nmine\n"
+    );
+    assert!(dir.join("repos/one/scratch.txt").is_file());
+
+    // Synced and committed: --force rebuilds.
+    l.ok(&["workspace", "sync", d]);
+    let wt = dir.join("repos/one");
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-qm", "scratch"]);
+    let out = l.axe(&["workspace", &id, "--dir", d, "--force", "-v"]);
+    assert!(out.status.success(), "{out:?}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("cleared") && err.contains("remove repos/one"),
+        "{err}"
+    );
+    assert!(dir.join("repos/one/scratch.txt").is_file());
+    assert_eq!(
+        std::fs::read_to_string(&plan).unwrap(),
+        "# The plan\nmine\n"
+    );
+}
+
+#[test]
+fn verbose_prints_steps_and_vv_the_git_and_http_calls() {
+    let l = Laptop::new();
+    l.attach("notes/plan.md", &[("", "# The plan\nbody\n")], "label:proj");
+    let id = l.task("one");
+    let d = l.base.join("w");
+    let d = d.to_str().unwrap();
+    let quiet = l.axe(&["workspace", &id, "--dir", d]);
+    assert!(quiet.status.success(), "{quiet:?}");
+    assert_eq!(stderr(&quiet), "");
+    let v = stderr(&l.axe(&["workspace", &id, "--dir", d, "-v"]));
+    for want in [
+        &format!("read task {id}\n"),
+        "worktree repos/one\n",
+        "write the attached docs\n",
+    ] {
+        assert!(v.contains(want), "{want:?} in {v}");
+    }
+    assert!(!v.contains("GET ") && !v.contains("git -C"), "{v}");
+    let vv = stderr(&l.axe(&["workspace", &id, "--dir", d, "-vv"]));
+    assert!(
+        vv.contains(&format!("/api/tasks/{id}\n")) && vv.contains("git -C"),
+        "{vv}"
+    );
+    let sync = stderr(&l.axe(&["workspace", "sync", d, "-v"]));
+    assert!(sync.contains("write the attached docs"), "{sync}");
+}

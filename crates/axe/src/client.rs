@@ -50,10 +50,7 @@ impl Client {
     pub fn at(base: String, actor: String) -> Client {
         Client {
             base: base.trim_end_matches('/').to_string(),
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(5))
-                .timeout(Duration::from_secs(60))
-                .build(),
+            agent: agent_builder().build(),
             actor,
             session: env_nonempty("AXE_SESSION"),
             token: None,
@@ -98,6 +95,17 @@ impl Client {
         }
     }
 
+    /// Fails fast for an interactive build (`axe workspace`): no retries, and
+    /// a host name lookup that gives up after `dns` (ureq's own timeouts do
+    /// not cover it, so an unanswered DNS query would otherwise hang).
+    pub fn fail_fast(mut self, dns: Duration) -> Client {
+        self.retry = Duration::ZERO;
+        self.agent = agent_builder()
+            .resolver(move |netloc: &str| resolve_within(netloc, dns))
+            .build();
+        self
+    }
+
     /// Uses `token` for writes instead of the environment or token file.
     pub fn with_token(mut self, token: &str) -> Client {
         self.token = Some(token.to_string());
@@ -136,7 +144,8 @@ impl Client {
     ) -> Result<T> {
         body["actor"] = Value::from(self.actor.as_str());
         body["session"] = self.session.as_deref().map_or(Value::Null, Value::from);
-        self.attempts(true, |id| {
+        let start = Instant::now();
+        let r = self.attempts(true, |id| {
             let mut req = self.agent.request(method, &format!("{}{path}", self.base));
             if let Some(t) = timeout {
                 req = req.timeout(t);
@@ -148,7 +157,9 @@ impl Client {
                 req = req.set(REQUEST_ID_HEADER, id);
             }
             self.finish(req.send_json(body.clone()))
-        })
+        });
+        self.trace(start, method, path, &[], r.is_ok());
+        r
     }
 
     /// A GET with the token.
@@ -157,7 +168,8 @@ impl Client {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T> {
-        self.attempts(false, |_| {
+        let start = Instant::now();
+        let r = self.attempts(false, |_| {
             let mut req = self.agent.get(&format!("{}{path}", self.base));
             for (k, v) in query {
                 req = req.query(k, v);
@@ -166,7 +178,27 @@ impl Client {
                 req = req.set("Authorization", &format!("Bearer {token}"));
             }
             self.finish(req.call())
-        })
+        });
+        self.trace(start, "GET", path, query, r.is_ok());
+        r
+    }
+
+    /// One HTTP call, at `-vv` (`trace.rs`).
+    fn trace(&self, start: Instant, method: &str, path: &str, query: &[(&str, &str)], ok: bool) {
+        if crate::trace::level() < 2 {
+            return;
+        }
+        let q: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        crate::trace::detail(
+            start.elapsed(),
+            format_args!(
+                "{method} {}{path}{}{}{}",
+                self.base,
+                if q.is_empty() { "" } else { "?" },
+                q.join("&"),
+                if ok { "" } else { "  (failed)" }
+            ),
+        );
     }
 
     /// Downloads a file route: (percent-decoded `X-Axe-File-Name`, bytes).
@@ -318,6 +350,35 @@ impl Client {
             }
             .into()),
         }
+    }
+}
+
+fn agent_builder() -> ureq::AgentBuilder {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(Duration::from_secs(60))
+}
+
+/// Resolves `netloc` (`host:port`) on a helper thread, giving up after
+/// `limit`; a lookup still running then is left to finish on its own.
+fn resolve_within(netloc: &str, limit: Duration) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = netloc.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(owned.to_socket_addrs().map(|a| a.collect()));
+    });
+    let host = netloc.rsplit_once(':').map_or(netloc, |(h, _)| h);
+    match rx.recv_timeout(limit) {
+        Ok(Ok(addrs)) => Ok(addrs),
+        Ok(Err(e)) => Err(std::io::Error::new(
+            e.kind(),
+            format!("DNS lookup of {host} failed: {e}"),
+        )),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("DNS lookup of {host} timed out after {}s", limit.as_secs()),
+        )),
     }
 }
 
