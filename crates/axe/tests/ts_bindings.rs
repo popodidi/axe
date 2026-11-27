@@ -19,6 +19,7 @@ fn bindings() -> String {
         db::RunRecord::decl(&cfg),
         bot::Bot::decl(&cfg),
         ask::RetroConfig::decl(&cfg),
+        bot::Rotation::decl(&cfg),
         bot::Message::decl(&cfg),
         bot::Wake::decl(&cfg),
         bot::BotRun::decl(&cfg),

@@ -2236,7 +2236,7 @@ enum BotCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Change identity, conduct, nudge, repos, project or retro; each change is recorded with --why
+    /// Change identity, conduct, nudge, repos, project, retro or rotation; each change is recorded with --why
     Edit {
         #[arg(env = "AXE_BOT")]
         name: String,
@@ -2275,6 +2275,13 @@ enum BotCmd {
         /// Owner decision a retro change rests on (e.g. "msg #873"); required unless human
         #[arg(long)]
         owner_ref: Option<String>,
+        /// Context size at which a cleanly exited run retires the session
+        /// (e.g. 120k; `default` for 200k)
+        #[arg(long)]
+        shrink_at: Option<String>,
+        /// Put the notes in a fresh session's first prompt
+        #[arg(long, value_parser = PossibleValuesParser::new(["on", "off"]))]
+        inline_notes: Option<String>,
         #[arg(long)]
         why: String,
     },
@@ -3767,7 +3774,7 @@ fn format_bot(b: &crate::bot::Bot) -> String {
         b.state.clone()
     };
     format!(
-        "name: {}\nproject: {}\nrepos: {}\nagent: {}\nstate: {state}\nfailures: {}\nnudge_after: {}s\n{}session: {}\nlive_run: {}\nnext_wake: {}\nqueued: {}\nlast_run_end: {}\ncreated_at: {}\nupdated_at: {}\n\n# Identity\n\n{}\n\n# Conduct\n\n{}",
+        "name: {}\nproject: {}\nrepos: {}\nagent: {}\nstate: {state}\nfailures: {}\nnudge_after: {}s\n{}{}session: {}\nlive_run: {}\nnext_wake: {}\nqueued: {}\nlast_run_end: {}\ncreated_at: {}\nupdated_at: {}\n\n# Identity\n\n{}\n\n# Conduct\n\n{}",
         b.name,
         b.project,
         match b.repos.as_deref() {
@@ -3781,6 +3788,9 @@ fn format_bot(b: &crate::bot::Bot) -> String {
             "retro: {}\n",
             r.line(crate::remote::epoch())
         )),
+        b.rotation
+            .as_ref()
+            .map_or(String::new(), |r| format!("rotation: {}\n", r.line())),
         b.session_id.as_deref().unwrap_or("-"),
         b.live_run.map_or("-".into(), |r| r.to_string()),
         b.next_wake.as_deref().unwrap_or("-"),
@@ -3992,6 +4002,8 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
             retro_at,
             retro_size,
             owner_ref,
+            shrink_at,
+            inline_notes,
             why,
         } => {
             let read = |f: &Option<PathBuf>| f.as_ref().map(read_file).transpose();
@@ -4004,13 +4016,24 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 json!({"on": retro.as_deref().map(|r| r == "on"), "every": retro_every,
                     "at": retro_at, "size": retro_size})
             });
+            let rotation_edit = (shrink_at.is_some() || inline_notes.is_some()).then(|| {
+                json!({"shrink_at": shrink_at,
+                    "inline_notes": inline_notes.as_deref().map(|r| r == "on")})
+            });
             let b: Bot = c.send(
                 "PATCH",
                 &format!("/api/bots/{name}"),
                 json!({"identity":read(identity_file)?,"conduct":read(conduct_file)?,
                     "nudge_after":nudge_after,"repos":repos,"project":project,
-                    "retro":retro_edit,"owner_ref":owner_ref,"why":why}),
+                    "retro":retro_edit,"owner_ref":owner_ref,"rotation":rotation_edit,
+                    "why":why}),
             )?;
+            // A server from before per-bot rotation ignores the field.
+            if rotation_edit.is_some() && b.rotation.is_none() {
+                anyhow::bail!(
+                    "the server did not apply the rotation change; it predates per-bot rotation"
+                );
+            }
             // A server from before per-bot retros ignores the field.
             if retro_edit.is_some() && b.retro.is_none() {
                 anyhow::bail!(

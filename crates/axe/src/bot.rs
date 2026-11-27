@@ -96,9 +96,96 @@ pub const FAILURES_FRESH: i64 = 2;
 pub const FAILURES_PAUSE: i64 = 3;
 /// A run that exits cleanly with at least this much context retires its session,
 /// so the next wake starts fresh instead of re-reading it from a cold cache.
+/// The default; a bot may set its own ([`Rotation::shrink_at`]).
 pub const SHRINK_CONTEXT_TOKENS: i64 = 200_000;
-/// A resumed run whose session is at least this large is told it may be retired.
+/// A resumed run whose session is at least this large is told it may be retired
+/// (three quarters of the threshold: [`Rotation::warn_at`]).
 pub const SHRINK_WARN_TOKENS: i64 = 150_000;
+/// The range a per-bot rotation threshold may take.
+pub const SHRINK_RANGE: (i64, i64) = (20_000, 1_000_000);
+
+/// A bot's session rotation settings: the latest `rotation` event's `to`
+/// (no event: [`Default`]). Kept as events so the setting needs no column.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Rotation {
+    /// Context tokens at which a cleanly exited run retires its session;
+    /// `None`: [`SHRINK_CONTEXT_TOKENS`].
+    #[serde(default)]
+    pub shrink_at: Option<i64>,
+    /// A fresh session's first prompt carries the bot's notes, so it need
+    /// not read them first.
+    #[serde(default)]
+    pub inline_notes: bool,
+}
+
+impl Rotation {
+    /// The threshold in effect.
+    pub fn shrink_at(&self) -> i64 {
+        self.shrink_at.unwrap_or(SHRINK_CONTEXT_TOKENS)
+    }
+
+    /// The size at which a resumed run is warned.
+    pub fn warn_at(&self) -> i64 {
+        match self.shrink_at {
+            None => SHRINK_WARN_TOKENS,
+            Some(t) => t / 4 * 3,
+        }
+    }
+
+    /// `shrink at 120k (warn 90k), inline notes on` for `axe bot show`.
+    pub fn line(&self) -> String {
+        format!(
+            "shrink at {}k{} (warn {}k), inline notes {}",
+            self.shrink_at() / 1000,
+            if self.shrink_at.is_none() {
+                " default"
+            } else {
+                ""
+            },
+            self.warn_at() / 1000,
+            if self.inline_notes { "on" } else { "off" }
+        )
+    }
+}
+
+/// Tokens in `120k`, `1m` or a bare number, within [`SHRINK_RANGE`].
+pub fn parse_tokens(s: &str) -> Result<i64> {
+    let t = s.trim().to_lowercase();
+    let (n, mult) = match t.chars().last() {
+        Some('k') => (&t[..t.len() - 1], 1_000),
+        Some('m') => (&t[..t.len() - 1], 1_000_000),
+        _ => (t.as_str(), 1),
+    };
+    let n: i64 = n
+        .parse()
+        .with_context(|| format!("bad token count {s:?}: use e.g. 120k"))?;
+    let v = n.saturating_mul(mult);
+    if !(SHRINK_RANGE.0..=SHRINK_RANGE.1).contains(&v) {
+        bail!(
+            "token count {s:?}: expected {}k to {}k",
+            SHRINK_RANGE.0 / 1000,
+            SHRINK_RANGE.1 / 1000
+        );
+    }
+    Ok(v)
+}
+
+/// A bot's rotation settings ([`Rotation`]).
+fn rotation_of(conn: &Connection, bot: i64) -> Result<Rotation> {
+    let to: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(body,'$.to') FROM bot_events WHERE bot_id=?1 AND kind='rotation'
+             ORDER BY id DESC LIMIT 1",
+            [bot],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(to
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default())
+}
 /// Claude Code caps hook `additionalContext`; stay under it.
 pub const HOOK_CONTEXT_CAP: usize = 10_000;
 
@@ -177,6 +264,11 @@ pub struct Bot {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub retro: Option<crate::ask::RetroConfig>,
+    /// The bot's session rotation settings ([`Rotation`]). `None` from
+    /// servers that predate per-bot rotation.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub rotation: Option<Rotation>,
     /// Derived: the live run, if any.
     #[serde(default)]
     pub live_run: Option<i64>,
@@ -206,7 +298,9 @@ const BOT_COLS: &str = "b.*,
  (SELECT COUNT(*) FROM bot_wakes w WHERE w.bot_id=b.id AND w.run_id IS NULL) AS queued,
  (SELECT MAX(ended_at) FROM bot_runs r WHERE r.bot_id=b.id) AS last_run_end,
  (SELECT json_extract(e.body,'$.from') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='rename'
-  ORDER BY e.id LIMIT 1) AS first_name";
+  ORDER BY e.id LIMIT 1) AS first_name,
+ (SELECT json_extract(e.body,'$.to') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='rotation'
+  ORDER BY e.id DESC LIMIT 1) AS rotation";
 
 impl Bot {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -235,6 +329,11 @@ impl Bot {
                 .and_then(|s| serde_json::from_str(&s).ok()),
             retro: Some(
                 r.get::<_, Option<String>>("retro")?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+            ),
+            rotation: Some(
+                r.get::<_, Option<String>>("rotation")?
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default(),
             ),
@@ -592,6 +691,20 @@ pub struct Edit {
     /// event.
     #[serde(default)]
     pub owner_ref: Option<String>,
+    /// Changes the session rotation settings; unset fields keep their value.
+    #[serde(default)]
+    pub rotation: Option<RotationEdit>,
+}
+
+/// A change to a bot's rotation settings ([`Rotation`]); `None` keeps the
+/// field.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RotationEdit {
+    /// A threshold (`120k`), or `default` for [`SHRINK_CONTEXT_TOKENS`].
+    #[serde(default)]
+    pub shrink_at: Option<String>,
+    #[serde(default)]
+    pub inline_notes: Option<bool>,
 }
 
 /// A change to a bot's retro settings (`ask::RetroConfig`); `None` keeps
@@ -652,6 +765,30 @@ pub fn edit(conn: &mut Connection, actor: &Actor, name: &str, e: &Edit, why: &st
                 actor,
                 "retro",
                 &format!("why: {why}\n{owner}{} -> {}", old.line(now), new.line(now)),
+            )?;
+            changed = true;
+        }
+    }
+    if let Some(r) = e.rotation.as_ref() {
+        let old = b.rotation.clone().unwrap_or_default();
+        let shrink_at = match r.shrink_at.as_deref().map(str::trim) {
+            None => old.shrink_at,
+            Some("default") => None,
+            Some(t) => Some(parse_tokens(t)?),
+        };
+        let new = Rotation {
+            shrink_at: shrink_at.filter(|t| *t != SHRINK_CONTEXT_TOKENS),
+            inline_notes: r.inline_notes.unwrap_or(old.inline_notes),
+        };
+        if new != old {
+            event(
+                &tx,
+                b.id,
+                actor,
+                "rotation",
+                &json!({"why": why, "owner_ref": owner_ref, "from": old, "to": new,
+                    "change": format!("{} -> {}", old.line(), new.line())})
+                .to_string(),
             )?;
             changed = true;
         }
@@ -1472,7 +1609,8 @@ fn session_context(conn: &Connection, bot: i64, session: &str) -> Result<Option<
 }
 
 /// After [`finish`]: retires the session of a cleanly exited run that ended with
-/// at least [`SHRINK_CONTEXT_TOKENS`] of context, so the next wake starts fresh.
+/// at least the bot's threshold of context ([`Rotation::shrink_at`]), so the
+/// next wake starts fresh.
 /// The session is kept (event `shrink_deferred`) while the owner's latest
 /// message has no later reply, or when the bot already moved to another
 /// session. Returns the event body, or `None` when nothing applied.
@@ -1481,7 +1619,7 @@ pub fn shrink_after(
     run: i64,
     context_tokens: Option<i64>,
 ) -> Result<Option<Value>> {
-    let Some(tokens) = context_tokens.filter(|t| *t >= SHRINK_CONTEXT_TOKENS) else {
+    let Some(tokens) = context_tokens.filter(|t| *t >= SHRINK_RANGE.0) else {
         return Ok(None);
     };
     let (bot, reason, code, session): (i64, Option<String>, Option<i64>, Option<String>) = conn
@@ -1491,6 +1629,10 @@ pub fn shrink_after(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
     if reason.as_deref() != Some("exit") || code != Some(0) {
+        return Ok(None);
+    }
+    let threshold = rotation_of(conn, bot)?.shrink_at();
+    if tokens < threshold {
         return Ok(None);
     }
     let Some(session) = session else {
@@ -1514,7 +1656,7 @@ pub fn shrink_after(
     )?;
     let unanswered = last_in.filter(|i| last_out.is_none_or(|o| o < *i));
     let mut body = json!({"run":run,"session_id":session,"context_tokens":tokens,
-        "threshold":SHRINK_CONTEXT_TOKENS});
+        "threshold":threshold});
     let kind = if let Some(msg) = unanswered {
         body["unanswered_message"] = json!(msg);
         "shrink_deferred"
@@ -1785,18 +1927,27 @@ pub fn render_prompt(c: &Claimed, resumed: bool) -> String {
         s.push_str("\n- (none)");
     }
     s.push_str(&open_cards_text(&c.open_cards));
-    if !resumed {
+    let rotation = c.bot.rotation.clone().unwrap_or_default();
+    if !resumed && rotation.inline_notes {
+        let notes = c.bot.notes.trim();
+        s.push_str(&format!(
+            "\nFresh session. Your notes (`axe bot notes`) as of this run:\n<notes>\n{}\n</notes>\n\
+             Read `axe bot log --limit 50`, `axe bot tg history --limit 20` and \
+             `axe goal list --bot $AXE_BOT` first.",
+            if notes.is_empty() { "(empty)" } else { notes }
+        ));
+    } else if !resumed {
         s.push_str(
             "\nFresh session: read `axe bot notes`, `axe bot log --limit 50`, \
              `axe bot tg history --limit 20` and `axe goal list --bot $AXE_BOT` first.",
         );
-    } else if let Some(t) = c.context_tokens.filter(|t| *t >= SHRINK_WARN_TOKENS) {
+    } else if let Some(t) = c.context_tokens.filter(|t| *t >= rotation.warn_at()) {
         s.push_str(&format!(
             "\nThis session holds about {}k tokens. If this run ends at {}k or more, axe \
              retires it and the next wake starts fresh: before you exit, put every open \
              thread in notes, a task or a wake.",
             t / 1000,
-            SHRINK_CONTEXT_TOKENS / 1000
+            rotation.shrink_at() / 1000
         ));
     }
     s

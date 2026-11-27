@@ -100,7 +100,10 @@ sessions small in practice and cold re-reads dominated bot spend, a run that
 exits cleanly with a very large context retires its session, and the next
 wake starts fresh from the system prompt, notes and history (2026-11-10). This
 reuses the fresh-session path instead of a headless compaction run. A session
-is kept while the owner's latest message is unanswered.
+is kept while the owner's latest message is unanswered. The threshold is
+200k tokens; a bot may set its own (`axe bot edit --shrink-at 120k`), and
+`--inline-notes on` puts its notes in a fresh session's first prompt. Both are
+the latest `rotation` bot event (`bot::Rotation`), so they need no column.
 
 ## Wake delivery
 

@@ -1173,6 +1173,132 @@ fn large_sessions_are_retired_after_a_clean_run_unless_a_message_is_unanswered()
 }
 
 #[test]
+fn a_bot_rotation_threshold_and_inline_notes_apply_to_that_bot_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+    let now = remote::epoch();
+    let human = Actor::new("human");
+    for name in ["trial", "control"] {
+        let mut b = new_bot(name);
+        b.notes = format!("NOTES-OF-{name}");
+        bot::create(&mut conn, &human, &b, now).unwrap();
+    }
+    let edit = |conn: &mut rusqlite::Connection, shrink: Option<&str>, inline: Option<bool>| {
+        let e = bot::Edit {
+            rotation: Some(bot::RotationEdit {
+                shrink_at: shrink.map(Into::into),
+                inline_notes: inline,
+            }),
+            ..Default::default()
+        };
+        bot::edit(conn, &human, "trial", &e, "trial")
+    };
+    // Defaults: 200k, warned at 150k, notes not inlined.
+    let r = bot::get(&conn, "trial").unwrap().rotation.unwrap();
+    assert_eq!(
+        (r.shrink_at(), r.warn_at(), r.inline_notes),
+        (200_000, 150_000, false)
+    );
+    assert!(edit(&mut conn, Some("5k"), None).is_err());
+    assert!(edit(&mut conn, Some("lots"), None).is_err());
+    let b = edit(&mut conn, Some("120k"), Some(true)).unwrap();
+    let r = b.rotation.unwrap();
+    assert_eq!(
+        (r.shrink_at, r.warn_at(), r.inline_notes),
+        (Some(120_000), 90_000, true)
+    );
+    assert_eq!(r.line(), "shrink at 120k (warn 90k), inline notes on");
+    // A repeated edit records nothing.
+    edit(&mut conn, Some("120000"), None).unwrap();
+    assert_eq!(bot_events(&conn, "rotation").len(), 1);
+    assert_eq!(bot_events(&conn, "rotation")[0]["to"]["shrink_at"], 120_000);
+    let c = bot::get(&conn, "control").unwrap().rotation.unwrap();
+    assert_eq!(c, bot::Rotation::default());
+
+    let reg = remote::register(&conn, &json!({"id":"d1","generation":""})).unwrap();
+    let generation = reg["generation"].as_str().unwrap().to_string();
+    let mut n = 0;
+    let mut op = |conn: &rusqlite::Connection, op: &str, body: Value| {
+        n += 1;
+        remote::operation(
+            conn,
+            &json!({"dispatcher":"d1","generation":generation,"operation_id":format!("op-{n}"),
+                "op":op,"body":body}),
+        )
+        .unwrap()
+    };
+    let claim = |op: &mut dyn FnMut(&rusqlite::Connection, &str, Value) -> Value,
+                 conn: &mut rusqlite::Connection,
+                 name: &str| {
+        let now = remote::epoch();
+        bot::add_wake(conn, &human, name, now - 1, "w", None, now).unwrap();
+        let v = op(
+            conn,
+            "bot_claim",
+            json!({"bot":name,"claim":format!("bot:{name}")}),
+        );
+        serde_json::from_value::<bot::Claimed>(v).unwrap()
+    };
+    // The trial bot's fresh prompt carries its notes; the control's does not.
+    let t = claim(&mut op, &mut conn, "trial");
+    let prompt = bot::render_prompt(&t, false);
+    assert!(
+        prompt.contains("<notes>\nNOTES-OF-trial\n</notes>")
+            && !prompt.contains("read `axe bot notes`"),
+        "{prompt}"
+    );
+    let c = claim(&mut op, &mut conn, "control");
+    let prompt = bot::render_prompt(&c, false);
+    assert!(
+        !prompt.contains("NOTES-OF") && prompt.contains("read `axe bot notes`"),
+        "{prompt}"
+    );
+    // 130k retires the trial bot's session but not the control's.
+    let finish = |op: &mut dyn FnMut(&rusqlite::Connection, &str, Value) -> Value,
+                  conn: &rusqlite::Connection,
+                  run: i64,
+                  s: &str,
+                  ctx: i64| {
+        op(
+            conn,
+            "bot_finish",
+            json!({"run":run,"code":0,"reason":"exit","session_id":s,"usage":usage(s, ctx)}),
+        )
+    };
+    let done = finish(&mut op, &conn, t.run, "st", 130_000);
+    assert_eq!(done["shrink"]["kind"], "shrink", "{done}");
+    assert_eq!(done["shrink"]["threshold"], 120_000, "{done}");
+    assert_eq!(bot::get(&conn, "trial").unwrap().session_id, None);
+    let done = finish(&mut op, &conn, c.run, "sc", 130_000);
+    assert!(done.get("shrink").is_none(), "{done}");
+    assert_eq!(
+        bot::get(&conn, "control").unwrap().session_id.as_deref(),
+        Some("sc")
+    );
+    // A resumed control run at 130k is not warned; a trial run at 100k is.
+    let c = claim(&mut op, &mut conn, "control");
+    assert!(!bot::render_prompt(&c, true).contains("retires"));
+    let t = claim(&mut op, &mut conn, "trial");
+    finish(&mut op, &conn, t.run, "st2", 100_000);
+    let t = claim(&mut op, &mut conn, "trial");
+    let prompt = bot::render_prompt(&t, true);
+    assert!(
+        prompt.contains("about 100k tokens. If this run ends at 120k or more"),
+        "{prompt}"
+    );
+    // `default` goes back to 200k.
+    let r = edit(&mut conn, Some("default"), Some(false))
+        .unwrap()
+        .rotation
+        .unwrap();
+    assert_eq!(r, bot::Rotation::default());
+    assert_eq!(
+        r.line(),
+        "shrink at 200k default (warn 150k), inline notes off"
+    );
+}
+
+#[test]
 fn bot_actors_can_approve_and_task_agents_still_cannot() {
     let dir = tempfile::tempdir().unwrap();
     let mut conn = db::open(&dir.path().join("t.db")).unwrap();
@@ -1390,6 +1516,31 @@ fn bot_cli_round_trip() {
     );
     // Older CLIs must still parse a bot, which requires this field.
     assert!(rig.bot()["heartbeat_seconds"].is_i64());
+    assert!(
+        show.contains("rotation: shrink at 200k default (warn 150k), inline notes off"),
+        "{show}"
+    );
+    rig.srv.ok(&[
+        "bot",
+        "edit",
+        "b",
+        "--shrink-at",
+        "120k",
+        "--inline-notes",
+        "on",
+        "--why",
+        "trial",
+    ]);
+    let show = rig.srv.ok(&["bot", "show", "b"]);
+    assert!(
+        show.contains("rotation: shrink at 120k (warn 90k), inline notes on"),
+        "{show}"
+    );
+    assert!(!rig
+        .srv
+        .run(&["bot", "edit", "b", "--shrink-at", "2m", "--why", "x"])
+        .status
+        .success());
     assert_eq!(rig.srv.ok(&["bot", "notes", "b"]), "NOTES-TEXT\n");
     let notes = rig.out.join("notes.md");
     std::fs::write(&notes, "commitments: none\n").unwrap();
