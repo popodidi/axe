@@ -42,7 +42,7 @@ const CONN: &[&str] = &[".conn()"];
 /// step 6, storage is private to `core` and the compiler enforces this.
 const CHANNEL_ALLOWLIST: &[(&str, &str, usize)] = &[
     ("telegram.rs", "sql", 33),
-    ("telegram.rs", "conn", 72),
+    ("telegram.rs", "conn", 70),
     ("owner_views.rs", "sql", 1),
     ("board.rs", "sql", 24),
     ("channel.rs", "sql", 6),

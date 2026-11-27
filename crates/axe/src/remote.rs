@@ -742,6 +742,8 @@ pub struct Store {
     /// Runtime registry changes from the owner (`runtime_add`,
     /// `runtime_remove`), applied by the node between picks.
     pub runtime_jobs: crate::sealed::RuntimeJobs,
+    /// The node loop's runtime registry, for the sealed form desk.
+    pub runtimes: crate::runtime::Snapshot,
     pub client: Client,
     pub journal: Arc<Mutex<Journal>>,
     path: PathBuf,
@@ -839,6 +841,7 @@ impl Store {
             aborts: Arc::default(),
             logins: Arc::default(),
             runtime_jobs: Arc::default(),
+            runtimes: Arc::default(),
             client,
             journal: Arc::new(Mutex::new(journal)),
             path,
@@ -942,7 +945,8 @@ impl Store {
                 Ok(d) => {
                     let d = d
                         .with_logged_in(Arc::clone(&self.logins))
-                        .with_runtime_jobs(Arc::clone(&self.runtime_jobs));
+                        .with_runtime_jobs(Arc::clone(&self.runtime_jobs))
+                        .with_runtimes(Arc::clone(&self.runtimes));
                     eprintln!(
                         "axe node: sealed form key {} ({})",
                         d.key().fingerprint(),

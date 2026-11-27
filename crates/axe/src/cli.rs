@@ -198,6 +198,8 @@ enum Cmd {
     Runtimes {
         #[arg(long)]
         json: bool,
+        #[command(subcommand)]
+        command: Option<RuntimesCmd>,
     },
     /// Sealed forms: ask the owner for secrets, codes or files
     ///
@@ -2561,6 +2563,36 @@ enum AdmissionCmd {
 }
 
 #[derive(Subcommand)]
+enum RuntimesCmd {
+    /// Add a runtime of a harness on the node (its own login, next free
+    /// name). It takes no run before its first login passes; log it in with
+    /// `axe runtimes login`
+    Add {
+        /// claude-code or codex
+        harness: String,
+        /// A bot with no runtime yet gets this one as its primary
+        #[arg(long)]
+        bot: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Log a runtime in: the owner gets a sealed form (token, API key) or
+    /// the device code from --bot on Telegram
+    Login {
+        runtime: String,
+        /// A login method of its harness (device, token, api_key)
+        #[arg(long)]
+        method: String,
+        /// The bot that sends the owner the form or code
+        #[arg(long)]
+        bot: String,
+    },
+    /// Remove a runtime from the node (refused while it has live runs); its
+    /// stored credentials are deleted
+    Rm { runtime: String },
+}
+
+#[derive(Subcommand)]
 enum ScheduleCmd {
     /// Add a schedule (five-field numeric cron, at least 15 minutes apart)
     Add {
@@ -4862,7 +4894,51 @@ fn run_cmd(cli: &Cli) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
-        Cmd::Runtimes { json } => {
+        Cmd::Runtimes {
+            command: Some(command),
+            ..
+        } => match command {
+            RuntimesCmd::Add { harness, bot, json } => {
+                let v: Value = client().send(
+                    "POST",
+                    "/api/runtimes",
+                    json!({"harness": harness, "bot": bot}),
+                )?;
+                if *json {
+                    print_json(&v)?;
+                } else {
+                    let name = v["runtime"].as_str().unwrap_or("?");
+                    println!("runtime {name} ({harness}) added; log it in: axe runtimes login {name} --method <m> --bot <b>");
+                    if let Some(b) = v["primary_of"].as_str() {
+                        println!("it is the primary of {b}");
+                    }
+                }
+            }
+            RuntimesCmd::Login {
+                runtime,
+                method,
+                bot,
+            } => {
+                let v: Value = client().send(
+                    "POST",
+                    &format!("/api/runtimes/{runtime}/login"),
+                    json!({"method": method, "bot": bot}),
+                )?;
+                println!("{}", v["text"].as_str().unwrap_or_default());
+            }
+            RuntimesCmd::Rm { runtime } => {
+                let v: Value =
+                    client().send("DELETE", &format!("/api/runtimes/{runtime}"), json!({}))?;
+                match v["note"].as_str().filter(|n| !n.is_empty()) {
+                    Some(n) => println!("runtime {runtime} removed: {n}"),
+                    None => println!("runtime {runtime} removed"),
+                }
+            }
+        },
+        Cmd::Runtimes {
+            json,
+            command: None,
+        } => {
             let v: Value = client().get("/api/runtimes", &[])?;
             if *json {
                 print_json(&v)?;

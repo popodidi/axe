@@ -159,6 +159,11 @@ impl Default for Health {
     }
 }
 
+/// The node's registry as its main loop last saw it (`managed`, runtimes),
+/// for the sealed form desk: one registry per node, owned by the loop.
+/// `None` until the loop has published it.
+pub type Snapshot = std::sync::Arc<std::sync::Mutex<Option<(bool, Vec<Runtime>)>>>;
+
 #[derive(Debug, Clone)]
 pub struct Runtime {
     pub name: String,

@@ -51,9 +51,14 @@ pub trait Store: Send + Sync + 'static {
     fn runtime_login(&self, _bot: &str, _runtime: &str, _method: &str) -> anyhow::Result<String> {
         anyhow::bail!("runtime logins need an axe server")
     }
-    /// Adds a node runtime of `harness` (`runtime::Registry::create`);
-    /// returns its name.
-    fn runtime_add(&self, _harness: &str) -> anyhow::Result<String> {
+    /// Adds a node runtime of `harness` (`runtime::Registry::create`); a
+    /// `bot` with no runtime yet gets it as its primary. Returns its name.
+    fn runtime_add(
+        &self,
+        _actor: &crate::db::Actor,
+        _harness: &str,
+        _bot: Option<&str>,
+    ) -> anyhow::Result<String> {
         anyhow::bail!("runtime changes need an axe server")
     }
     /// Whether a bot may run on `name` (a primary or backup), the check
