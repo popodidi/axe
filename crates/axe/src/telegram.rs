@@ -105,10 +105,17 @@ const LOGIN_BUTTON: &str = "rtlogin:";
 const REMOVE_BUTTON: &str = "rtrm:";
 const REMOVE_CONFIRM: &str = "rtrm!:";
 const REMOVE_CANCEL: &str = "rtrm-";
-/// `rtadd:<harness>` adds a runtime of that harness.
+/// `rtadd:<harness>` starts a login of a new runtime of that harness.
 const ADD_BUTTON: &str = "rtadd:";
-/// Harnesses `/runtimes` can add a runtime of, with their button labels.
-const ADDABLE: &[(&str, &str)] = &[("claude-code", "Add Claude"), ("codex", "Add Codex")];
+/// `rtpri:<runtime>` makes the runtime the chat bot's primary;
+/// `rtbak:<runtime>` its backup, and `rtbak-` clears its backup.
+const PRIMARY_BUTTON: &str = "rtpri:";
+const BACKUP_BUTTON: &str = "rtbak:";
+const NO_BACKUP: &str = "rtbak-";
+/// Harnesses `/runtimes` can add a runtime of, with their names.
+const ADDABLE: &[(&str, &str)] = &[("claude-code", "Claude"), ("codex", "Codex")];
+/// What `/runtimes` says when no runtime is logged in yet.
+const NO_RUNTIME: &str = "Log in Claude or Codex to start me.";
 
 /// A press on a `/runtimes` button, by its callback data.
 #[derive(Debug, PartialEq)]
@@ -122,6 +129,9 @@ enum RuntimePress<'a> {
     Confirm(&'a str),
     Cancel,
     Add(&'a str),
+    Primary(&'a str),
+    Backup(&'a str),
+    NoBackup,
 }
 
 impl<'a> RuntimePress<'a> {
@@ -131,6 +141,15 @@ impl<'a> RuntimePress<'a> {
         }
         if data == REMOVE_CANCEL {
             return Some(RuntimePress::Cancel);
+        }
+        if data == NO_BACKUP {
+            return Some(RuntimePress::NoBackup);
+        }
+        if let Some(n) = data.strip_prefix(PRIMARY_BUTTON) {
+            return Some(RuntimePress::Primary(n));
+        }
+        if let Some(n) = data.strip_prefix(BACKUP_BUTTON) {
+            return Some(RuntimePress::Backup(n));
         }
         if let Some(l) = data.strip_prefix(LOGIN_BUTTON) {
             return Some(match l.split_once(':') {
@@ -152,26 +171,139 @@ impl<'a> RuntimePress<'a> {
     }
 }
 
-/// The `/runtimes` list's keyboard on a node that manages its runtimes:
-/// Log in (never logged in) or Re-login, and Remove per runtime (one row
-/// each), then the Add buttons.
-fn list_buttons(view: &Value) -> (Vec<(String, String)>, Vec<usize>) {
+/// Runtimes a [`crate::runtime::view`] shows: not those still waiting
+/// for their first login (a runtime exists once its login works).
+fn shown(view: &Value) -> Vec<Value> {
+    view["runtimes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r["pending"] != true)
+        .collect()
+}
+
+/// The names of chat bot `me`'s primary and backup runtimes in `view`.
+fn roles(view: &Value, me: Option<&bot::Bot>) -> (Option<String>, Option<String>) {
+    let list = view["runtimes"].as_array().cloned().unwrap_or_default();
+    let name = |n: Option<&str>| {
+        n.and_then(|n| crate::runtime::resolve_listed(&list, n))
+            .and_then(|r| r["name"].as_str().map(String::from))
+    };
+    match me {
+        Some(b) => (name(Some(&b.agent)), name(b.backup.as_deref())),
+        None => (None, None),
+    }
+}
+
+/// A harness for people: `Claude`, `Codex`.
+fn harness_name(h: &str) -> &str {
+    ADDABLE
+        .iter()
+        .find(|(a, _)| *a == h)
+        .map_or(h, |(_, n)| n)
+}
+
+/// A runtime's login state in plain words, with a limit's end.
+fn plain_state(r: &Value) -> String {
+    let until = r["until"].as_i64().map(bot::ts);
+    match r["state"].as_str().unwrap_or("?") {
+        crate::runtime::NEEDS_LOGIN if r["never_logged_in"] == true => "Not logged in".into(),
+        crate::runtime::NEEDS_LOGIN => "Login expired".into(),
+        crate::runtime::LIMITED => match until {
+            Some(u) => format!("Logged in, out of quota until {u}"),
+            None => "Logged in, out of quota".into(),
+        },
+        crate::runtime::DEGRADED => match until {
+            Some(u) => format!("Logged in, failing until {u}"),
+            None => "Logged in, failing".into(),
+        },
+        crate::runtime::DISABLED => "Disabled".into(),
+        _ => "Logged in".into(),
+    }
+}
+
+/// The `/runtimes` text: one line per runtime with its login state and
+/// uses, or [`NO_RUNTIME`] on a node that manages its runtimes and has
+/// none logged in.
+fn list_text(view: &Value) -> String {
+    let list = shown(view);
+    if list.is_empty() && view["managed"] == true && view["report_age_seconds"].is_u64() {
+        return NO_RUNTIME.into();
+    }
+    if list.is_empty() {
+        return crate::runtime::render(view);
+    }
+    let mut out = vec!["Runtimes".to_string()];
+    for r in &list {
+        let uses: Vec<&str> = r["uses"]
+            .as_array()
+            .map(|u| u.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let mut line = format!(
+            "{} ({}): {}",
+            r["name"].as_str().unwrap_or("?"),
+            harness_name(r["harness"].as_str().unwrap_or("?")),
+            plain_state(r)
+        );
+        match uses.is_empty() {
+            true => line.push_str(". Not used"),
+            false => line.push_str(&format!(". {}", capitalize(&uses.join(", ")))),
+        }
+        out.push(line);
+    }
+    out.push(String::new());
+    out.push(
+        "Primary runs this bot. Backup runs it only while the primary is down, in a fresh \
+         session; it goes back to the primary once that works. Notes are kept."
+            .into(),
+    );
+    if view["stale"] == true {
+        out.push(format!(
+            "(stale: the node last reported {}s ago)",
+            view["report_age_seconds"].as_u64().unwrap_or(0)
+        ));
+    }
+    if let Some(fp) = view["key"]["fingerprint"].as_str() {
+        out.push(format!(
+            "dispatcher key {fp} (sealed forms show it; compare once)"
+        ));
+    }
+    out.join("\n")
+}
+
+/// The `/runtimes` list's keyboard on a node that manages its runtimes,
+/// for chat bot `me`: per runtime (one row each) Log in when its login
+/// expired, Primary and Backup (or No backup) for `me`, and Remove; then
+/// one login button per harness for a new runtime.
+fn list_buttons(view: &Value, me: Option<&bot::Bot>) -> (Vec<(String, String)>, Vec<usize>) {
     if view["managed"] != true {
         return (vec![], vec![]);
     }
+    let (primary, backup) = roles(view, me);
+    let list = shown(view);
     let mut buttons = Vec::new();
     let mut rows = Vec::new();
-    for r in view["runtimes"].as_array().cloned().unwrap_or_default() {
+    for r in &list {
         let Some(n) = r["name"].as_str() else {
             continue;
         };
         let mut row = vec![];
-        if !crate::runtime::login_methods(r["harness"].as_str().unwrap_or("")).is_empty() {
-            let verb = match r["never_logged_in"] == true {
-                true => "Log in",
-                false => "Re-login",
-            };
-            row.push((format!("{verb} {n}"), format!("{LOGIN_BUTTON}{n}")));
+        let can_login =
+            !crate::runtime::login_methods(r["harness"].as_str().unwrap_or("")).is_empty();
+        if can_login && r["state"] == crate::runtime::NEEDS_LOGIN {
+            row.push((format!("Log in {n}"), format!("{LOGIN_BUTTON}{n}")));
+        }
+        if me.is_some() {
+            let is_primary = primary.as_deref() == Some(n);
+            if !is_primary {
+                row.push((format!("Primary {n}"), format!("{PRIMARY_BUTTON}{n}")));
+            }
+            if backup.as_deref() == Some(n) {
+                row.push(("No backup".into(), NO_BACKUP.into()));
+            } else if !is_primary {
+                row.push((format!("Backup {n}"), format!("{BACKUP_BUTTON}{n}")));
+            }
         }
         row.push((format!("Remove {n}"), format!("{REMOVE_BUTTON}{n}")));
         row.retain(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT);
@@ -180,8 +312,12 @@ fn list_buttons(view: &Value) -> (Vec<(String, String)>, Vec<usize>) {
             buttons.extend(row);
         }
     }
-    for (h, label) in ADDABLE {
-        buttons.push((label.to_string(), format!("{ADD_BUTTON}{h}")));
+    for (h, name) in ADDABLE {
+        let label = match list.is_empty() {
+            true => format!("Log in {name}"),
+            false => format!("Add {name}"),
+        };
+        buttons.push((label, format!("{ADD_BUTTON}{h}")));
     }
     rows.push(ADDABLE.len());
     (buttons, rows)
@@ -197,8 +333,9 @@ fn login_menu(name: &str, harness: &str, added: Option<&str>) -> (String, Vec<(S
         .collect();
     let head = match added {
         Some(h) => format!(
-            "Added runtime {name} ({h}) with its own login. It takes no runs until it is \
-             logged in. "
+            "Log in {} for a new runtime ({name}, its own login). It is added once the login \
+             works; nothing is added if it fails. ",
+            harness_name(h)
         ),
         None => String::new(),
     };
@@ -1291,7 +1428,11 @@ impl Gateway {
             RuntimePress::Menu(_) | RuntimePress::Login(..) => {
                 flags["runtimes_list"] == true || flags["runtime_menu"] == true
             }
-            RuntimePress::Remove(_) | RuntimePress::Add(_) => flags["runtimes_list"] == true,
+            RuntimePress::Remove(_)
+            | RuntimePress::Add(_)
+            | RuntimePress::Primary(_)
+            | RuntimePress::Backup(_)
+            | RuntimePress::NoBackup => flags["runtimes_list"] == true,
             RuntimePress::Confirm(_) | RuntimePress::Cancel => flags["runtime_remove"] == true,
         };
         if !ours {
@@ -1331,6 +1472,20 @@ impl Gateway {
             }
             RuntimePress::Add(harness) => match store.runtime_add(harness) {
                 Ok(name) => {
+                    // A bot with no runtime yet starts on its first login.
+                    let view = store.runtimes();
+                    let me = bot::get(&store.conn(), &b.name()).ok();
+                    if me.is_some() && roles(&view, me.as_ref()).0.is_none() {
+                        let e = bot::Edit {
+                            agent: Some(name.clone()),
+                            ..Default::default()
+                        };
+                        let why = "its first runtime, logged in from /runtimes";
+                        if let Err(e) = bot::edit(&mut store.conn(), &owner_actor(), &b.name(), &e, why) {
+                            eprintln!("telegram: bot {}: primary {name}: {e:#}", b.name());
+                        }
+                        store.changed();
+                    }
                     let (text, buttons) = login_menu(&name, harness, Some(harness));
                     say(&text, &buttons, json!({"runtime_menu": true}));
                 }
@@ -1364,12 +1519,26 @@ impl Gateway {
                     );
                     return Ok(true);
                 }
-                let text = format!(
+                let mut text = format!(
                     "Remove runtime {name} ({harness})? No run goes to it afterwards; a \
                      session that ran on it starts fresh elsewhere. Its stored credentials \
                      are deleted, and its login directory too when it has its own; the \
                      CLI's default login is left in place."
                 );
+                let primaries: Vec<&str> = r["uses"]
+                    .as_array()
+                    .map(|u| u.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|u| u.strip_prefix("primary of "))
+                    .collect();
+                if !primaries.is_empty() {
+                    text.push_str(&format!(
+                        " It is the primary of {}: until you pick another primary, those bots \
+                         run only on their backup.",
+                        primaries.join(", ")
+                    ));
+                }
                 let buttons = vec![
                     (format!("Remove {name}"), format!("{REMOVE_CONFIRM}{name}")),
                     ("Cancel".to_string(), REMOVE_CANCEL.to_string()),
@@ -1397,6 +1566,46 @@ impl Gateway {
                 self.clear_buttons(b, chat, tg_msg);
                 say("Nothing removed.", &[], json!({}));
             }
+            RuntimePress::Primary(name) | RuntimePress::Backup(name) => {
+                let primary = matches!(press, RuntimePress::Primary(_));
+                if reported(name).is_none() {
+                    say(&format!("The node reports no runtime {name}."), &[], json!({}));
+                    return Ok(true);
+                }
+                let e = bot::Edit {
+                    agent: primary.then(|| name.to_string()),
+                    backup: (!primary).then(|| name.to_string()),
+                    ..Default::default()
+                };
+                let me = b.name();
+                let why = "owner via /runtimes";
+                let text = match bot::edit(&mut store.conn(), &owner_actor(), &me, &e, why) {
+                    Ok(_) if primary => format!(
+                        "{name} is now the primary of {me}. Its next run starts a fresh session \
+                         there; notes are kept."
+                    ),
+                    Ok(_) => format!(
+                        "{name} is now the backup of {me}: it runs {me} only while the primary \
+                         is down."
+                    ),
+                    Err(e) => format!("Not changed: {e:#}"),
+                };
+                store.changed();
+                say(&text, &[], json!({}));
+            }
+            RuntimePress::NoBackup => {
+                let e = bot::Edit {
+                    backup: Some("none".into()),
+                    ..Default::default()
+                };
+                let me = b.name();
+                let text = match bot::edit(&mut store.conn(), &owner_actor(), &me, &e, "owner via /runtimes") {
+                    Ok(_) => format!("{me} has no backup runtime now."),
+                    Err(e) => format!("Not changed: {e:#}"),
+                };
+                store.changed();
+                say(&text, &[], json!({}));
+            }
         }
         Ok(true)
     }
@@ -1421,8 +1630,9 @@ impl Gateway {
         thread: Option<i64>,
     ) {
         let view = store.runtimes();
-        let text = crate::runtime::render(&view);
-        let (buttons, rows) = list_buttons(&view);
+        let text = list_text(&view);
+        let me = bot::get(&store.conn(), &b.name()).ok();
+        let (buttons, rows) = list_buttons(&view, me.as_ref());
         let mut p = json!({"chat_id": chat, "text": text});
         if let Some(r) = reply_to {
             p["reply_parameters"] = json!({"message_id": r, "allow_sending_without_reply": true});

@@ -45,6 +45,19 @@ pub const REMOVED: &str = "removed";
 /// login check.
 pub const ADD_LOGIN_WAIT: i64 = crate::sealed::MAX_TTL + 600;
 
+/// Longest a web login (`codex login --device-auth`, `claude auth login`)
+/// may wait for the owner before it is stopped: the longest sealed form.
+pub const DEVICE_LOGIN_MAX: Duration = Duration::from_secs(crate::sealed::MAX_TTL as u64);
+
+/// A web login in progress ([`Runtime::device_login`]).
+pub struct DeviceLogin {
+    /// What the CLI printed first: the URL, and Codex's one-time code.
+    pub output: String,
+    /// The CLI's stdin when it waits for the code the page shows (Claude):
+    /// the code goes there, followed by a newline.
+    pub code: Option<std::process::ChildStdin>,
+}
+
 /// How long a runtime stays limited when the quota reset time is unknown.
 pub const LIMITED_DEFAULT_SECONDS: i64 = 3600;
 /// How often a runtime that needs a login is probed (`probe`).
@@ -114,6 +127,14 @@ pub struct Health {
     /// removed when the login fails its check or after [`ADD_LOGIN_WAIT`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<i64>,
+}
+
+impl Runtime {
+    /// Made by `/runtimes` and still waiting for its first login: it takes
+    /// no run and is not shown as a runtime yet (login first).
+    pub fn pending(&self) -> bool {
+        self.health.added_at.is_some() && self.health.never_logged_in()
+    }
 }
 
 impl Health {
@@ -198,9 +219,12 @@ pub fn login_methods(
     harness: &str,
 ) -> &'static [(&'static str, Option<&'static str>, &'static str)] {
     match harness {
-        // Claude Code reads an API key, or a `claude setup-token` token, from
-        // the environment ahead of its login directory.
+        // `claude auth login` prints a claude.ai URL and reads the code
+        // the page shows from stdin (relayed from a sealed form); Claude Code
+        // reads an API key, or a `claude setup-token` token, from the
+        // environment ahead of its login directory.
         "claude-code" => &[
+            ("device", None, "web sign-in"),
             (
                 "token",
                 Some("CLAUDE_CODE_OAUTH_TOKEN"),
@@ -348,16 +372,21 @@ impl Runtime {
         }
     }
 
-    /// Starts `codex login --device-auth` and returns what it printed in the
-    /// first `wait` (the URL and the one-time code, ANSI codes removed). The
-    /// login keeps running in the background until the owner approves it or
-    /// it gives up; `done` gets its outcome.
+    /// Starts the CLI's web login and returns what it printed in the first
+    /// `wait` (ANSI codes removed), with the login's stdin when it reads a
+    /// code there. `codex login --device-auth` prints a URL and a one-time
+    /// code the owner enters on the page; `claude auth login` prints a
+    /// claude.ai URL and reads the code that page shows from stdin
+    /// ([`DeviceLogin::code`]). The login keeps running in the background
+    /// until it ends or [`DEVICE_LOGIN_MAX`] passes; `done` gets its outcome.
+    /// A passing Claude login removes the runtime's stored token and API key,
+    /// which Claude Code would read ahead of the new login.
     pub fn device_login(
         &self,
         cfg: &Config,
         wait: Duration,
         done: impl FnOnce(bool) + Send + 'static,
-    ) -> Result<String> {
+    ) -> Result<DeviceLogin> {
         if !login_methods(&self.harness)
             .iter()
             .any(|(m, _, _)| *m == "device")
@@ -368,16 +397,26 @@ impl Runtime {
                 self.harness
             );
         }
-        if self.login_secrets.is_none() {
+        let Some(secrets) = self.login_secrets.clone() else {
             bail!("runtime {} is not in the runtime registry", self.name);
+        };
+        let claude = self.harness == "claude-code";
+        let (args, stdin): (&[&str], Stdio) = match claude {
+            true => (&["auth", "login", "--claudeai"], Stdio::piped()),
+            false => (&["login", "--device-auth"], Stdio::null()),
+        };
+        let mut cmd = self.cli(cfg, args)?;
+        if claude {
+            // No browser on the node: the URL goes to the owner.
+            cmd.env("BROWSER", "/bin/false");
         }
-        let mut child = self
-            .cli(cfg, &["login", "--device-auth"])?
-            .stdin(Stdio::null())
+        let mut child = cmd
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("runtime {}: start the device login", self.name))?;
+        let code = child.stdin.take();
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         for pipe in [
             child
@@ -417,21 +456,50 @@ impl Runtime {
             }
         }
         let name = self.name.clone();
+        let stale: Vec<&'static str> = match claude {
+            true => login_methods(&self.harness)
+                .iter()
+                .filter_map(|(_, v, _)| *v)
+                .collect(),
+            false => vec![],
+        };
+        let printed = !lines.is_empty();
         std::thread::spawn(move || {
             // Drain the rest so the CLI never blocks on a full pipe.
             let drain = std::thread::spawn(move || for _ in rx {});
-            let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            let end = Instant::now() + DEVICE_LOGIN_MAX;
+            let ok = loop {
+                match child.try_wait() {
+                    Ok(Some(s)) => break s.success(),
+                    Ok(None) if printed && Instant::now() < end => {
+                        std::thread::sleep(Duration::from_millis(200))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break false;
+                    }
+                }
+            };
             let _ = drain.join();
+            if ok {
+                for v in stale {
+                    let _ = std::fs::remove_file(secrets.join(v));
+                }
+            }
             eprintln!(
                 "axe node: runtime {name}: device login {}",
                 if ok { "succeeded" } else { "failed" }
             );
             done(ok);
         });
-        if lines.is_empty() {
+        if !printed {
             bail!("runtime {}: the device login printed nothing", self.name);
         }
-        Ok(lines.join("\n"))
+        Ok(DeviceLogin {
+            output: lines.join("\n"),
+            code: code.filter(|_| claude),
+        })
     }
 
     /// The CLI this runtime's agent template runs (its first argument).
@@ -599,6 +667,13 @@ impl Registry {
         let Some(prefix) = name_prefix(harness) else {
             bail!("runtimes of harness {harness:?} cannot be added here");
         };
+        // One login at a time per harness: a runtime still waiting for its
+        // first login is reused, its wait started again.
+        if let Some(rt) = self.runtimes.iter_mut().find(|r| r.harness == harness && r.pending()) {
+            rt.health.added_at = Some(unix_now());
+            rt.save()?;
+            return Ok(rt.name.clone());
+        }
         let agent = match self.of(harness).next() {
             Some(r) => r.agent.clone(),
             None => {
@@ -1103,6 +1178,9 @@ impl Registry {
                 json!({
                     "name": r.name,
                     "harness": r.harness,
+                    "agent": r.agent,
+                    "default_login": r.login_dir.is_none(),
+                    "pending": r.pending(),
                     "plan": r.plan,
                     "state": r.state(now),
                     "never_logged_in": r.health.never_logged_in(),
@@ -1310,6 +1388,49 @@ pub fn view(admission: &Value) -> Value {
     })
 }
 
+/// The listed runtime a bot's primary or backup `name` runs on, as the node
+/// resolves a pin (`Dispatcher::pin_runtime`): that runtime, or the one on
+/// agent `name`'s default login, else a runtime of agent template `name`, a
+/// healthy one first. Pending runtimes ([`Runtime::pending`]) are not runtimes yet.
+pub fn resolve_listed<'a>(list: &'a [Value], name: &str) -> Option<&'a Value> {
+    let shown = || list.iter().filter(|r| r["pending"] != true);
+    let of = || shown().filter(move |r| r["agent"] == name);
+    shown()
+        .find(|r| r["name"] == name)
+        .or_else(|| of().find(|r| r["default_login"] == true))
+        .or_else(|| of().find(|r| r["healthy"] == true))
+        .or_else(|| of().next())
+}
+
+/// Adds each runtime's `uses` to a [`view`]: `primary of <bot>` and
+/// `backup of <bot>` for each bot `(name, primary, backup)`, and `tasks`
+/// when its harness is in `task_harnesses` (what selection rules pick for
+/// tasks).
+pub fn with_uses(view: &mut Value, bots: &[(String, String, Option<String>)], task_harnesses: &[String]) {
+    let list = view["runtimes"].as_array().cloned().unwrap_or_default();
+    let mut uses: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (bot, primary, backup) in bots {
+        for (role, name) in [("primary", Some(primary)), ("backup", backup.as_ref())] {
+            let Some(rt) = name.and_then(|n| resolve_listed(&list, n)) else {
+                continue;
+            };
+            let rt = rt["name"].as_str().unwrap_or_default().to_string();
+            uses.entry(rt).or_default().push(format!("{role} of {bot}"));
+        }
+    }
+    if let Some(l) = view["runtimes"].as_array_mut() {
+        for r in l {
+            let name = r["name"].as_str().unwrap_or_default().to_string();
+            let mut u = uses.remove(&name).unwrap_or_default();
+            let harness = r["harness"].as_str().unwrap_or_default();
+            if r["pending"] != true && task_harnesses.iter().any(|h| h == harness) {
+                u.push("tasks".into());
+            }
+            r["uses"] = json!(u);
+        }
+    }
+}
+
 fn when(t: &Value) -> String {
     t.as_i64().map_or("-".into(), crate::bot::ts)
 }
@@ -1366,6 +1487,13 @@ pub fn render(v: &Value) -> String {
                 q["window"].as_str().unwrap_or("window"),
                 when(&q["resets_at"])
             ));
+        }
+        let uses: Vec<&str> = r["uses"]
+            .as_array()
+            .map(|u| u.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !uses.is_empty() {
+            line.push_str(&format!("; {}", uses.join(", ")));
         }
         out.push(line);
     }
@@ -1576,13 +1704,77 @@ exit 2
                 tx.send(ok).unwrap();
             })
             .unwrap();
-        assert_eq!(out, "Open https://example.test/device\nCode: ABCD-1234");
+        assert_eq!(out.output, "Open https://example.test/device\nCode: ABCD-1234");
+        assert!(out.code.is_none(), "Codex reads no code");
         assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap());
-        assert!(reg
-            .get("claude-1")
-            .unwrap()
-            .device_login(&cfg, Duration::ZERO, |_| {})
-            .is_err());
+    }
+
+    /// Fake `claude auth login`: prints the sign-in URL and the paste
+    /// prompt (no newline), reads the code from stdin and, for `good#state`,
+    /// saves a login in its config directory.
+    const FAKE_CLAUDE_LOGIN: &str = r#"#!/bin/sh
+[ "$1 $2 $3" = "auth login --claudeai" ] || exit 3
+[ "$BROWSER" = /bin/false ] || exit 4
+echo "Opening browser to sign in..."
+echo "If the browser didn't open, visit: https://claude.ai/oauth/authorize?code=true&state=x"
+printf 'Paste code here if prompted > '
+read code
+[ "$code" = "good#state" ] || { echo "Couldn't log in: That code wasn't accepted"; exit 1; }
+echo '{}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+echo "Login successful."
+"#;
+
+    #[test]
+    fn a_claude_web_login_relays_its_link_and_takes_the_code_on_stdin() {
+        use std::io::Write as _;
+        const OAT: &str = "sk-ant-oat01-dummy123xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let claude = dir.join("fake-claude");
+        std::fs::write(&claude, FAKE_CLAUDE_LOGIN).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.join("claude-home");
+        std::fs::create_dir_all(dir.join("runtimes/claude-2")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            dir.join("runtimes/claude-2/runtime.toml"),
+            format!("harness = \"claude-code\"\nlogin_dir = \"{}\"\n", home.display()),
+        )
+        .unwrap();
+        let cfg = Config::parse(&format!(
+            "[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"{}\"]\nharness = \"claude-code\"\n",
+            dir.join("runtimes").display(),
+            claude.display()
+        ))
+        .unwrap();
+        let reg = Registry::load(&cfg).unwrap();
+        let rt = reg.get("claude-2").unwrap();
+        // A stored token would hide the new login: it goes once that works.
+        rt.login(&cfg, "token", OAT).unwrap();
+        let login = |code: &str| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut l = rt
+                .device_login(&cfg, Duration::from_millis(800), move |ok| {
+                    tx.send(ok).unwrap();
+                })
+                .unwrap();
+            assert_eq!(
+                l.output,
+                "Opening browser to sign in...\nIf the browser didn't open, visit: \
+                 https://claude.ai/oauth/authorize?code=true&state=x"
+            );
+            let mut stdin = l.code.take().expect("Claude reads the code on stdin");
+            writeln!(stdin, "{code}").unwrap();
+            rx.recv_timeout(Duration::from_secs(10)).unwrap()
+        };
+        assert!(!login("bad#code"), "a refused code fails the login");
+        assert!(rt.env().0.iter().any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"));
+        assert!(login("good#state"));
+        assert!(home.join(".credentials.json").exists());
+        assert!(
+            !rt.env().0.iter().any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"),
+            "the stale token was removed"
+        );
     }
 
     /// Collects `reg`'s probes until `f` holds or 10 seconds pass.
@@ -1760,6 +1952,10 @@ exit 2
 
         // A second and a third Claude: next free names, each its own login.
         assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-2");
+        // One login at a time: Add again while claude-2 waits for its first
+        // login reuses it.
+        assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-2");
+        reg.get_mut("claude-2").unwrap().health.login_at = Some(1);
         assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-3");
         assert_eq!(reg.create(&cfg, "codex").unwrap(), "codex-2");
         assert!(reg.create(&cfg, "gemini").is_err());
@@ -1829,10 +2025,10 @@ exit 2
             "{note}"
         );
         assert!(tmp.path().join("codex-home").is_dir());
-        // The next add reuses the lowest free name.
-        assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-1");
+        // The next add reuses claude-3, still waiting for its first login.
+        assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-3");
         let reg = Registry::load(&cfg).unwrap();
-        assert_eq!(names(&reg), ["claude-1", "claude-3", "codex-2"]);
+        assert_eq!(names(&reg), ["claude-3", "codex-2"]);
 
         // Implicit runtimes cannot change.
         let plain =
