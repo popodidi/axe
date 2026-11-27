@@ -694,6 +694,11 @@ pub struct Edit {
     /// Changes the session rotation settings; unset fields keep their value.
     #[serde(default)]
     pub rotation: Option<RotationEdit>,
+    /// Switches the bot's runtime (an agent or runtime name the server has
+    /// checked can run bots). The session ends so the next run starts fresh
+    /// on it; notes, wakes and history stay. Refused during a live run.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// A change to a bot's rotation settings ([`Rotation`]); `None` keeps the
@@ -743,6 +748,31 @@ pub fn edit(conn: &mut Connection, actor: &Actor, name: &str, e: &Edit, why: &st
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let b = get(&tx, name)?;
     let mut changed = false;
+    if let Some(new) = e.agent.as_deref().map(str::trim) {
+        if new.is_empty() || new.chars().any(char::is_whitespace) {
+            bail!("invalid agent {new:?}");
+        }
+        if new != b.agent {
+            if let Some(run) = b.live_run {
+                bail!("bot {name} has a live run ({run}); stop it or wait before switching its runtime");
+            }
+            tx.execute(
+                "UPDATE bots SET agent=?1, session_agent=NULL, session_id=NULL, resume_count=0,
+                   failures=0 WHERE id=?2",
+                params![new, b.id],
+            )?;
+            event(
+                &tx,
+                b.id,
+                actor,
+                "agent",
+                &json!({"why": why, "owner_ref": owner_ref, "from": b.agent, "to": new,
+                    "session_ended": b.session_id, "change": format!("{} -> {new}", b.agent)})
+                .to_string(),
+            )?;
+            changed = true;
+        }
+    }
     if let Some(r) = retro_edit {
         let old = b.retro.clone().unwrap_or_default();
         let new = crate::ask::RetroConfig {
@@ -1389,7 +1419,11 @@ pub fn claim(
         None => None,
     };
     let open_cards = open_cards_for(tx, bot_id, &wakes)?;
-    let b = get(tx, name)?;
+    // Re-read for the claim's state; the run's agent stays the picked one.
+    let mut b = get(tx, name)?;
+    if let Some(a) = agent {
+        b.agent = a.to_string();
+    }
     Ok(Some(Claimed {
         run,
         bot: b,
@@ -1982,12 +2016,31 @@ pub fn system_prompt(b: &Bot, parts: &[String]) -> String {
 
 /// Claude Code settings installing the inbox hooks; `axe` is the binary path.
 pub fn settings_json(axe: &str) -> String {
+    serde_json::to_string_pretty(&json!({"hooks":hooks(axe)})).expect("static JSON")
+}
+
+/// The inbox hooks of a bot run: `axe bot inbox --take --hook post-tool`
+/// after each tool call and `--hook stop` before the run ends. Claude Code
+/// and Codex read this same shape and the same hook output.
+fn hooks(axe: &str) -> Value {
     let quoted = format!("'{}'", axe.replace('\'', r"'\''"));
     let hook = |kind: &str| json!([{"hooks":[{"type":"command","command":format!("{quoted} bot inbox --take --hook {kind}")}]}]);
     let mut post = hook("post-tool");
     post[0]["matcher"] = json!("*");
-    serde_json::to_string_pretty(&json!({"hooks":{"PostToolUse":post,"Stop":hook("stop")}}))
-        .expect("static JSON")
+    json!({"PostToolUse":post,"Stop":hook("stop")})
+}
+
+/// [`hooks`] as a TOML inline table, for `{hooks_toml}` (Codex
+/// `-c hooks=...`).
+pub fn hooks_toml(axe: &str) -> String {
+    toml::Value::try_from(hooks(axe))
+        .expect("hooks are TOML")
+        .to_string()
+}
+
+/// `s` as a TOML string, for `{system_prompt_toml}`.
+pub fn toml_string(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
 }
 
 /// Hook stdout for `axe bot inbox --take --hook`, or `None` for no output.

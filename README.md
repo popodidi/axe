@@ -81,7 +81,8 @@ One host, a loopback server, one task, using the built-in defaults.
    starter one with a `stub` agent (no model) and prints the commands for a
    first task (`STARTER` in `crates/axe/src/config.rs`). Agents are
    `[agents.<name>]` tables (`cmd`, `resume_cmd`, `session`, `harness`,
-   `bot_args`; `Agent` in `crates/axe/src/config.rs`); bots need `bot_args`.
+   `bot_args`; `Agent` in `crates/axe/src/config.rs`); bots need `bot_args`,
+   which default for agents that run `claude` or `codex`.
    Repos are `[repos.<name>]` (`path`, `url`); a clone URL can instead be
    registered once on the server with `axe repo add <name> <url>`.
 3. **Server**: `axe server`. On loopback it needs no token. It reads the
@@ -100,7 +101,8 @@ One host, a loopback server, one task, using the built-in defaults.
 
 A bot works the same way: `axe bot create --file bot.json` (`name`,
 `project`, `agent`, `identity`, `conduct`), `axe bot edit <name> --repo a,b`
-for a multi-repo run folder, `axe bot wake <name> --now --note ...`, then
+for a multi-repo run folder, `axe bot edit <name> --agent codex-1 --why W`
+to move it to another runtime (fresh session), `axe bot wake <name> --now --note ...`, then
 `axe node`. The bot protocol is built in; bundles only add opinions.
 Telegram is optional. The `axe doc put` commands below read
 `skills/` and `bundles/` from a clone of this repository; `cargo install`
