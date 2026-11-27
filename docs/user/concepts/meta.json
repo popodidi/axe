@@ -1,0 +1,13 @@
+{
+  "title": "Concepts",
+  "pages": [
+    "tasks",
+    "architecture",
+    "runtimes",
+    "run-workspaces",
+    "routines-bots-goals",
+    "blobs",
+    "sealed-forms",
+    "docs-store"
+  ]
+}

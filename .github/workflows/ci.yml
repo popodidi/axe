@@ -1,7 +1,7 @@
 name: ci
 
 # Pull requests run the fast checks: default-feature fmt, clippy and tests, the
-# TS types test, and the web job when the dashboard changed
+# TS types test, the docs link check, and the web job when the dashboard changed
 # (scripts/ci_scope.py). release.yml calls this workflow with `full: true` on a
 # v* tag (and on a release-dry-run/* branch push): that adds the
 # --no-default-features and embed-ui variants and always runs the web job.
@@ -81,6 +81,20 @@ jobs:
       - name: Build and test (embed-ui)
         if: inputs.full
         run: cargo build --locked --features embed-ui && cargo test --locked --features embed-ui --test embed_ui
+
+  docs:
+    # Same-repository branches only: fork pull requests get no CI.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Relative links and anchors in README.md and docs/user/, plus the
+      # front matter and meta.json the docs site reads.
+      - name: Doc links
+        run: python3 scripts/check_doc_links.py
 
   web:
     # Same-repository branches only: fork pull requests get no CI.
