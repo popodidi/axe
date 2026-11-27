@@ -35,6 +35,15 @@ pub const DISABLED: &str = "disabled";
 /// Alert classes of a login check right after a login ([`Registry::check_now`]).
 pub const LOGIN_OK: &str = "login_ok";
 pub const LOGIN_FAILED: &str = "login_failed";
+/// Alert class and state of a runtime `/runtimes` Add made that was removed
+/// again: its first login failed its check, or none came within
+/// [`ADD_LOGIN_WAIT`].
+pub const ADD_REMOVED: &str = "add_removed";
+pub const REMOVED: &str = "removed";
+/// How long a runtime `/runtimes` Add made waits for its first login
+/// before it is removed: the longest sealed form, plus a margin for its
+/// login check.
+pub const ADD_LOGIN_WAIT: i64 = crate::sealed::MAX_TTL + 600;
 
 /// How long a runtime stays limited when the quota reset time is unknown.
 pub const LIMITED_DEFAULT_SECONDS: i64 = 3600;
@@ -100,6 +109,19 @@ pub struct Health {
     /// mark the runtime ([`Registry::mark`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_at: Option<i64>,
+    /// Unix seconds when `/runtimes` Add made this runtime; cleared by its
+    /// first passing login. A runtime still waiting for that login is
+    /// removed when the login fails its check or after [`ADD_LOGIN_WAIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<i64>,
+}
+
+impl Health {
+    /// Needs a login and never passed one: no login check passed and no run
+    /// failed on it. Shown as "not logged in" with a Log in button.
+    pub fn never_logged_in(&self) -> bool {
+        self.state == NEEDS_LOGIN && self.login_at.is_none() && self.last_failure.is_none()
+    }
 }
 
 impl Default for Health {
@@ -111,6 +133,7 @@ impl Default for Health {
             quota: None,
             alerted: None,
             login_at: None,
+            added_at: None,
         }
     }
 }
@@ -614,6 +637,7 @@ impl Registry {
             let health = Health {
                 state: NEEDS_LOGIN.into(),
                 alerted: Some(NEEDS_LOGIN.into()),
+                added_at: Some(unix_now()),
                 ..Health::default()
             };
             std::fs::write(home.join("state.json"), serde_json::to_vec_pretty(&health)?)?;
@@ -832,8 +856,22 @@ impl Registry {
         }
     }
 
-    /// Lapsed limits return to ok, and the card episode ends with them.
-    pub fn tick(&mut self, now: i64) {
+    /// Lapsed limits return to ok, and the card episode ends with them. A
+    /// runtime `/runtimes` Add made that got no login within
+    /// [`ADD_LOGIN_WAIT`] is removed; returns its card.
+    pub fn tick(&mut self, now: i64) -> Vec<Alert> {
+        let abandoned: Vec<(String, String)> = self
+            .runtimes
+            .iter()
+            .filter(|r| r.health.never_logged_in() && !self.checks.contains(&r.name))
+            .filter(|r| r.health.added_at.is_some_and(|a| now - a >= ADD_LOGIN_WAIT))
+            .map(|r| (r.name.clone(), r.harness.clone()))
+            .collect();
+        let mut alerts = Vec::new();
+        for (name, harness) in abandoned {
+            let wait = format!("no login within {} minutes of Add", ADD_LOGIN_WAIT / 60);
+            alerts.extend(self.remove_added(&name, &harness, ADD_REMOVED, wait));
+        }
         for rt in &mut self.runtimes {
             if matches!(rt.health.state.as_str(), LIMITED | DEGRADED)
                 && rt.health.until.is_none_or(|u| u <= now)
@@ -844,6 +882,32 @@ impl Registry {
                 if let Err(e) = rt.save() {
                     eprintln!("axe node: runtime {}: {e:#}", rt.name);
                 }
+            }
+        }
+        alerts
+    }
+
+    /// Removes runtime `name`, which `/runtimes` Add made and which never
+    /// logged in (so it never took a run), and returns the owner's card.
+    fn remove_added(
+        &mut self,
+        name: &str,
+        harness: &str,
+        class: &str,
+        why: String,
+    ) -> Option<Alert> {
+        match self.remove(name, 0) {
+            Ok(_) => Some(Alert {
+                runtime: name.into(),
+                harness: harness.into(),
+                state: REMOVED.into(),
+                class: class.into(),
+                message: why,
+                until: None,
+            }),
+            Err(e) => {
+                eprintln!("axe node: runtime {name}: remove after a failed Add: {e:#}");
+                None
             }
         }
     }
@@ -974,6 +1038,7 @@ impl Registry {
         let rt = self.get_mut(name)?;
         if ok && rt.health.login_at.is_none_or(|l| l < started_at) {
             rt.health.login_at = Some(started_at);
+            rt.health.added_at = None;
             if rt.health.state != NEEDS_LOGIN {
                 if let Err(e) = rt.save() {
                     eprintln!("axe node: runtime {name}: {e:#}");
@@ -1000,6 +1065,12 @@ impl Registry {
             "axe node: runtime {name}: login check {}",
             if ok { "passed" } else { "failed" }
         );
+        // The first login of a runtime Add made failed: Add made nothing.
+        if !ok && rt.health.added_at.is_some() && rt.health.never_logged_in() {
+            let harness = rt.harness.clone();
+            return self.remove_added(name, &harness, LOGIN_FAILED, message);
+        }
+        let rt = self.get(name)?;
         Some(Alert {
             runtime: rt.name.clone(),
             harness: rt.harness.clone(),
@@ -1023,6 +1094,7 @@ impl Registry {
                     "harness": r.harness,
                     "plan": r.plan,
                     "state": r.state(now),
+                    "never_logged_in": r.health.never_logged_in(),
                     "healthy": r.healthy(now),
                     "until": (!r.healthy(now)).then_some(r.health.until).flatten(),
                     "last_failure": r.health.last_failure,
@@ -1134,6 +1206,14 @@ impl Runtime {
         let health = match std::fs::read(&state_path) {
             Ok(b) => serde_json::from_slice(&b)
                 .with_context(|| format!("read {}", state_path.display()))?,
+            // Never checked: no run goes to it before its login probe
+            // passes (the probe runs at once; no card). Without a probe it
+            // is trusted as before.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !probe.is_empty() => Health {
+                state: NEEDS_LOGIN.into(),
+                alerted: Some(NEEDS_LOGIN.into()),
+                ..Health::default()
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Health::default(),
             Err(e) => return Err(e).with_context(|| format!("read {}", state_path.display())),
         };
@@ -1246,11 +1326,15 @@ pub fn render(v: &Value) -> String {
     let mut out = Vec::new();
     for r in &list {
         let state = r["state"].as_str().unwrap_or("?");
+        let label = match r["never_logged_in"] == true {
+            true => "not logged in",
+            false => state_label(state),
+        };
         let mut line = format!(
             "{} ({}): {}",
             r["name"].as_str().unwrap_or("?"),
             r["harness"].as_str().unwrap_or("?"),
-            state_label(state)
+            label
         );
         if !r["until"].is_null() {
             line.push_str(&format!(" until {}", when(&r["until"])));
@@ -1297,6 +1381,15 @@ pub fn alert_text(a: &Value) -> String {
         (Some(LOGIN_OK), _) => {
             return format!("Runtime {name} ({harness}): the new login works; the runtime is ok.")
         }
+        (Some(LOGIN_FAILED), Some(REMOVED)) => format!(
+            "Runtime {name} ({harness}): its first login failed its check, so the runtime \
+             /runtimes added was removed again. Add it again to retry."
+        ),
+        (Some(ADD_REMOVED), _) => format!(
+            "Runtime {name} ({harness}) was removed again: it got no login within {} minutes \
+             of /runtimes Add. Add it again to log in.",
+            ADD_LOGIN_WAIT / 60
+        ),
         (Some(LOGIN_FAILED), Some(NEEDS_LOGIN)) => format!(
             "Runtime {name} ({harness}): the new login failed its check, so the runtime still \
              needs a login. Log in again from /runtimes; it is also rechecked every {} minutes.",
@@ -1587,6 +1680,8 @@ exit 2
              \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = sk-ant-oat01-goodxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ]\"]\n",
         )
         .unwrap();
+        // It was ok (checked before).
+        std::fs::write(dir.join("state.json"), r#"{"state":"ok"}"#).unwrap();
         let mut reg = Registry::load(&cfg).unwrap();
         let expired = Failure {
             class: AUTH_INVALID,
@@ -1755,5 +1850,153 @@ exit 2
              codex-1 (codex): failing until 2027-01-15T08:00:00Z (last failure \
              provider_unavailable at 2027-01-15T08:00:00Z), 0 live"
         );
+        // Never logged in: said so.
+        let v = json!({"runtimes": [{"name":"codex-2","harness":"codex","state":"needs_login",
+            "never_logged_in":true,"in_use":0}], "report_age_seconds": 1});
+        assert_eq!(render(&v), "codex-2 (codex): not logged in, 0 live");
+    }
+
+    /// Adds codex-2 as /runtimes Add does, with `probe` as its login check.
+    fn add_codex(cfg: &Config, reg: &mut Registry, probe: &str) -> Registry {
+        assert_eq!(reg.create(cfg, "codex").unwrap(), "codex-2");
+        let toml = cfg_dir(cfg).join("codex-2/runtime.toml");
+        let mut text = std::fs::read_to_string(&toml).unwrap();
+        text.push_str(&format!("probe = {probe}\n"));
+        std::fs::write(&toml, text).unwrap();
+        Registry::load(cfg).unwrap()
+    }
+
+    fn cfg_dir(cfg: &Config) -> PathBuf {
+        expand_tilde(&cfg.runtimes.as_ref().unwrap().dir)
+    }
+
+    #[test]
+    fn a_runtime_never_logged_in_is_reported_so_until_a_login_or_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, mut reg) = registry(tmp.path());
+        let mut reg = add_codex(&cfg, &mut reg, "[\"false\"]");
+        let never = |reg: &Registry| {
+            reg.heartbeat(|_| 0, 0)["list"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["name"] == "codex-2")
+                .unwrap()["never_logged_in"]
+                .clone()
+        };
+        assert_eq!(never(&reg), true);
+        // A run that failed on a login is a lost login, not a new one.
+        let f = Failure {
+            class: AUTH_INVALID,
+            status: None,
+            message: "expired".into(),
+            retry_at: None,
+        };
+        reg.mark("codex-2", &f, 60, unix_now(), unix_now());
+        assert_eq!(never(&reg), false);
+    }
+
+    #[test]
+    fn an_added_runtime_whose_first_login_fails_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, mut reg) = registry(tmp.path());
+        let mut reg = add_codex(
+            &cfg,
+            &mut reg,
+            "[\"sh\", \"-c\", \"echo Not logged in; exit 1\"]",
+        );
+        reg.check_now("codex-2");
+        let alerts = collect(&mut reg, |_, a| !a.is_empty());
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(
+            (alerts[0].class.as_str(), alerts[0].state.as_str()),
+            (LOGIN_FAILED, REMOVED)
+        );
+        assert!(alerts[0].message.contains("Not logged in"), "{alerts:?}");
+        let text = alert_text(&alerts[0].to_json());
+        assert!(text.contains("was removed again. Add it again"), "{text}");
+        assert!(reg.get("codex-2").is_none());
+        assert!(!cfg_dir(&cfg).join("codex-2").exists());
+        // A runtime that was not added by /runtimes is never removed so.
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, mut reg) = registry(tmp.path());
+        reg.check_now("codex-1");
+        let alerts = collect(&mut reg, |_, a| !a.is_empty());
+        assert_eq!(alerts[0].state, NEEDS_LOGIN, "{alerts:?}");
+        assert!(reg.get("codex-1").is_some());
+    }
+
+    #[test]
+    fn an_added_runtime_left_without_a_login_is_removed_after_the_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, mut reg) = registry(tmp.path());
+        let mut reg = add_codex(&cfg, &mut reg, "[\"false\"]");
+        let added = reg.get("codex-2").unwrap().health.added_at.unwrap();
+        assert!(reg.tick(added + ADD_LOGIN_WAIT - 1).is_empty());
+        assert!(reg.get("codex-2").is_some());
+        // It survives a node restart with its Add time.
+        let mut reg = Registry::load(&cfg).unwrap();
+        let alerts = reg.tick(added + ADD_LOGIN_WAIT);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(
+            (alerts[0].class.as_str(), alerts[0].state.as_str()),
+            (ADD_REMOVED, REMOVED)
+        );
+        assert!(alert_text(&alerts[0].to_json()).contains("got no login within 70 minutes"));
+        assert!(reg.get("codex-2").is_none());
+        assert!(!cfg_dir(&cfg).join("codex-2").exists());
+
+        // Once logged in it stays, however long ago it was added.
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, mut reg) = registry(tmp.path());
+        let mut reg = add_codex(&cfg, &mut reg, "[\"true\"]");
+        reg.check_now("codex-2");
+        let alerts = collect(&mut reg, |_, a| !a.is_empty());
+        assert_eq!(alerts[0].class, LOGIN_OK);
+        let h = &reg.get("codex-2").unwrap().health;
+        assert_eq!((h.state.as_str(), h.added_at), (OK, None));
+        assert!(reg.tick(unix_now() + 10 * ADD_LOGIN_WAIT).is_empty());
+        assert!(reg.get("codex-2").is_some());
+    }
+
+    #[test]
+    fn a_runtime_never_checked_needs_its_login_probe_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, _) = registry(tmp.path());
+        let dir = cfg_dir(&cfg);
+        // registry() writes no state.json: both wait for their probe, no card.
+        let reg = Registry::load(&cfg).unwrap();
+        for name in ["claude-1", "codex-1"] {
+            let h = &reg.get(name).unwrap().health;
+            assert_eq!(
+                (h.state.as_str(), h.alerted.as_deref()),
+                (NEEDS_LOGIN, Some(NEEDS_LOGIN))
+            );
+            assert!(!reg.get(name).unwrap().healthy(unix_now()));
+        }
+        // A runtime with no login check is trusted as before.
+        std::fs::write(
+            dir.join("codex-1/runtime.toml"),
+            "harness = \"codex\"\nprobe = []\n",
+        )
+        .unwrap();
+        let reg = Registry::load(&cfg).unwrap();
+        assert_eq!(reg.get("codex-1").unwrap().health.state, OK);
+        // A passing probe makes it ok and records the check.
+        std::fs::write(
+            dir.join("claude-1/runtime.toml"),
+            "harness = \"claude-code\"\nprobe = [\"true\"]\n",
+        )
+        .unwrap();
+        let mut reg = Registry::load(&cfg).unwrap();
+        collect(&mut reg, |r, _| {
+            r.get("claude-1").unwrap().health.state == OK
+        });
+        assert_eq!(reg.get("claude-1").unwrap().health.state, OK);
+        let saved: Health =
+            serde_json::from_slice(&std::fs::read(dir.join("claude-1/state.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.state, OK);
+        assert!(saved.login_at.is_some());
     }
 }

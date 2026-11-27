@@ -619,7 +619,8 @@ impl Dispatcher {
         if !self.runtimes.managed {
             return;
         }
-        self.runtimes.tick(now_unix());
+        let removed = self.runtimes.tick(now_unix());
+        self.alerts.extend(removed);
         let logins = std::mem::take(&mut *self.store.logins.lock().unwrap());
         for name in logins {
             self.runtimes.check_now(&name);
@@ -629,12 +630,14 @@ impl Dispatcher {
         let mut i = 0;
         while i < self.alerts.len() {
             let a = self.alerts[i].clone();
-            // The runtime recovered before the card went out: no card.
-            if self
-                .runtimes
-                .get(&a.runtime)
-                .map(|r| r.health.state.as_str())
-                != Some(a.state.as_str())
+            // The runtime recovered before the card went out: no card. A
+            // removed runtime's card always goes out.
+            if a.state != runtime::REMOVED
+                && self
+                    .runtimes
+                    .get(&a.runtime)
+                    .map(|r| r.health.state.as_str())
+                    != Some(a.state.as_str())
             {
                 self.alerts.remove(i);
                 continue;
