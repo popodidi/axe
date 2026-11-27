@@ -10,12 +10,11 @@ use std::process::Child;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use super::{now_unix, Dispatcher, NoPick, Pick};
+use super::{Dispatcher, NoPick, Pick};
 use crate::activity;
 use crate::agent_proc::{self, kill_child, kill_tree, render};
 use crate::bot::{self, Claimed};
 use crate::config::SessionMode;
-use crate::rule;
 
 pub(super) struct BotRun {
     run_id: i64,
@@ -120,61 +119,13 @@ impl Dispatcher {
     /// while healthy, else its backup ([`bot::Bot::backup`]) while healthy,
     /// else none (its wakes wait). A run on another runtime than its
     /// session's starts a fresh session (`spawn_bot`), so moving to the
-    /// backup and back each start fresh; notes carry over. Selection rules
-    /// pick tasks' runtimes, not a bot's: a stored rule matching the bot only
-    /// sets the model and effort of the picked runtime's harness.
+    /// backup and back each start fresh; notes carry over. A stored rule
+    /// naming the bot only sets the model and effort of the picked runtime's
+    /// harness ([`crate::runtime_config`]).
     fn bot_pick(&self, name: &str) -> Result<std::result::Result<Pick, NoPick>> {
-        let rule = match self.stored_rules {
-            true => self
-                .store
-                .request::<Option<rule::Rule>>("rule_select", json!({"bot":name}))?,
-            false => None,
-        };
-        let bot = self
-            .store
-            .client
-            .get::<serde_json::Value>(&format!("/api/bots/{name}"), &[])?;
-        let now = now_unix();
-        let primary = bot["agent"]
-            .as_str()
-            .unwrap_or(crate::harness::DEFAULT_AGENT);
-        let backup = bot["backup"].as_str();
-        let pick = |rt: &crate::runtime::Runtime, why: String| Pick {
-            agent: rt.name.clone(),
-            rule: why,
-            with: rule
-                .as_ref()
-                .and_then(|r| r.uses.iter().find(|u| u.harness == rt.harness).cloned()),
-            profile: None,
-        };
-        let usable =
-            |rt: &&crate::runtime::Runtime| rt.healthy(now) && self.can_run(&rt.name, true, false);
-        let primary_rt = self.pin_runtime(primary, now);
-        if let Some(rt) = primary_rt.filter(usable) {
-            return Ok(Ok(pick(rt, "bot primary".into())));
-        }
-        let backup_rt = backup.and_then(|b| self.pin_runtime(b, now));
-        if let Some(rt) = backup_rt.filter(usable) {
-            return Ok(Ok(pick(rt, format!("bot backup ({primary} unhealthy)"))));
-        }
-        let known: Vec<&crate::runtime::Runtime> =
-            primary_rt.into_iter().chain(backup_rt).collect();
-        if known.is_empty() {
-            return Ok(Err(NoPick::Missing(format!("unknown agent {primary}"))));
-        }
-        let harnesses: Vec<&str> = known.iter().map(|r| r.harness.as_str()).collect();
-        let states: Vec<String> = known
-            .iter()
-            .map(|r| format!("{} {}", r.name, r.state(now)))
-            .collect();
-        let backup_note = match backup {
-            Some(_) => "",
-            None => "; no backup runtime",
-        };
-        Ok(Err(NoPick::Unhealthy {
-            until: self.runtimes.next_healthy(&harnesses, now),
-            note: format!("bot runtimes unhealthy: {}{backup_note}", states.join(", ")),
-        }))
+        // Bots run no task, so the config's task limits do not apply.
+        let config = self.runtime_config(json!({"bot":name}), "")?;
+        Ok(self.pick(&config, true))
     }
 
     fn spawn_bot(&mut self, c: &Claimed, pick: Option<&Pick>) -> Result<()> {

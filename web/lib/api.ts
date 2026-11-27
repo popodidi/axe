@@ -75,8 +75,9 @@ retro?: RetroConfig,
 rotation?: Rotation, 
 /**
  * The runtime the bot runs on while its own ([`Bot::agent`], the
- * primary) is unhealthy: the latest `backup` event's `to`, so the
- * setting needs no column. `None`: no backup.
+ * primary) is unhealthy (`bots.backup`, the bot layer of
+ * [`crate::runtime_config`]; each change is also a `backup` event).
+ * `None`: no backup.
  */
 backup?: string, 
 /**

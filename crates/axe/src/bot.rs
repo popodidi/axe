@@ -270,8 +270,9 @@ pub struct Bot {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub rotation: Option<Rotation>,
     /// The runtime the bot runs on while its own ([`Bot::agent`], the
-    /// primary) is unhealthy: the latest `backup` event's `to`, so the
-    /// setting needs no column. `None`: no backup.
+    /// primary) is unhealthy (`bots.backup`, the bot layer of
+    /// [`crate::runtime_config`]; each change is also a `backup` event).
+    /// `None`: no backup.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub backup: Option<String>,
@@ -306,9 +307,7 @@ const BOT_COLS: &str = "b.*,
  (SELECT json_extract(e.body,'$.from') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='rename'
   ORDER BY e.id LIMIT 1) AS first_name,
  (SELECT json_extract(e.body,'$.to') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='rotation'
-  ORDER BY e.id DESC LIMIT 1) AS rotation,
- (SELECT json_extract(e.body,'$.to') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='backup'
-  ORDER BY e.id DESC LIMIT 1) AS backup";
+  ORDER BY e.id DESC LIMIT 1) AS rotation";
 
 impl Bot {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -822,6 +821,10 @@ pub fn edit(
     let backup = backup.filter(|n| n != primary);
     if backup != b.backup {
         let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "none".into());
+        tx.execute(
+            "UPDATE bots SET backup=?1 WHERE id=?2",
+            params![backup, b.id],
+        )?;
         event(
             &tx,
             b.id,
@@ -1694,12 +1697,7 @@ pub fn finish(
         // With a backup, no wait: the node marked the primary unhealthy, so
         // the retry goes to the backup (or waits for a healthy runtime).
         let backup: Option<String> = conn
-            .query_row(
-                "SELECT json_extract(body,'$.to') FROM bot_events WHERE bot_id=?1
-                 AND kind='backup' ORDER BY id DESC LIMIT 1",
-                [bot],
-                |r| r.get(0),
-            )
+            .query_row("SELECT backup FROM bots WHERE id=?1", [bot], |r| r.get(0))
             .optional()?
             .flatten();
         let wait = match backup {

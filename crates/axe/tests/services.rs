@@ -326,7 +326,7 @@ fn migrates_v21_to_the_services_table_and_keeps_it_after_downgrade() {
     let v: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 24);
+    assert_eq!(v, 25);
     let new: axe::service::NewService =
         serde_json::from_value(json!({"command":"sleep 1"})).unwrap();
     axe::service::put(&mut c, &db::Actor::new("t"), "b", "s", &new).unwrap();
@@ -358,7 +358,7 @@ fn migrates_v22_to_the_schedule_column_and_keeps_it_after_downgrade() {
     let v: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 24);
+    assert_eq!(v, 25);
     assert_eq!(
         axe::service::get(&c, "b", "long").unwrap().spec.schedule,
         None

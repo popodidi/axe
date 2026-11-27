@@ -50,6 +50,7 @@ pub mod retention;
 pub mod routine;
 pub mod rule;
 pub mod runtime;
+pub mod runtime_config;
 
 pub mod metrics;
 pub mod node_metrics;

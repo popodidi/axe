@@ -331,6 +331,13 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             let rules: Vec<crate::rule::NewRule> = serde_json::from_value(b["rules"].clone())?;
             crate::rule::import(&tx, &actor, &rules, field(b, "source")?)?
         }
+        // The stored runtime config layers of a task or a bot
+        // (`runtime_config`); the node resolves and applies health.
+        "runtime_layers" => match b["bot"].as_str() {
+            Some(bot) => json!(crate::runtime_config::Layers::of_bot(&tx, bot)?),
+            None => json!(crate::runtime_config::Layers::of_task(&tx, task()?)?),
+        },
+        // Nodes before `runtime_layers` select rules here.
         "rule_select" => {
             let subject = match b["bot"].as_str() {
                 Some(bot) => crate::rule::bot_subject(&tx, bot)?,
@@ -715,6 +722,7 @@ fn read_only(op: &str) -> bool {
             | "bot_ready"
             | "bot_control"
             | "rule_select"
+            | "runtime_layers"
             | "routine_profile"
     )
 }

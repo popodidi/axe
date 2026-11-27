@@ -17,8 +17,9 @@ pub use crate::agent_proc::{otel_resource_attributes, parse_jsonl_session, rende
 use crate::config::{Config, Prompts, SessionMode, Strategy};
 use crate::db::{self, Changes, Claim, Task};
 use crate::node_metrics;
-use crate::rule::{self, Use};
+use crate::rule::Use;
 use crate::runtime::{self, Registry};
+use crate::runtime_config::{self, RuntimeConfig};
 
 mod bots;
 mod pre_check;
@@ -127,7 +128,8 @@ pub struct Dispatcher {
     bots_unsupported: bool,
     drain: Option<Drain>,
     /// Stored rules pick agents (`rule.rs`); false while the deprecated
-    /// `[defaults]`/`[[rule]]` config does (see [`Dispatcher::init_rules`]).
+    /// `[defaults]`/`[[rule]]` config does (see [`Dispatcher::init_rules`]),
+    /// as the resolver's config layer ([`runtime_config::ConfigLayer`]).
     stored_rules: bool,
     /// The runtimes runs go to, with their health (`runtime.rs`).
     runtimes: Registry,
@@ -494,49 +496,162 @@ impl Dispatcher {
         s.join(", ")
     }
 
-    /// Walks a rule's `use` list: the first entry with a healthy runtime of
-    /// its harness wins, the least used such runtime first (then by name). An
-    /// entry whose runtimes are all unhealthy is skipped for the next. No
-    /// matching rule means `claude-code`. Bots also need `bot_args`.
-    fn pick_from(&self, rule: Option<&rule::Rule>, bot: bool) -> std::result::Result<Pick, NoPick> {
-        let fallback = [Use {
-            harness: crate::harness::DEFAULT_HARNESS.into(),
-            model: None,
-            effort: None,
-        }];
-        let uses = rule.map_or(&fallback[..], |r| &r.uses);
-        let key = rule.map_or("no rule".to_string(), rule::Rule::key);
+    /// The resolved config's stored layers for a task or bot
+    /// (`runtime_layers`), resolved with this node's limits for `project`.
+    fn runtime_config(&self, subject: Value, project: &str) -> Result<RuntimeConfig> {
+        let mut layers = self
+            .store
+            .request::<runtime_config::Layers>("runtime_layers", subject)?;
+        if !self.stored_rules {
+            // The deprecated config picks instead of stored rules.
+            layers.rule = None;
+        }
+        Ok(RuntimeConfig::resolve(
+            &layers,
+            runtime_config::Limits::of(&self.cfg, project),
+        ))
+    }
+
+    /// A task's layers on a node whose config picks (`stored_rules` false):
+    /// its pin and the config's agent list for `project`, at the
+    /// round-robin cursor when that list is the one that picks (no resume,
+    /// no pin), exactly as before stored rules.
+    fn config_layers(
+        &self,
+        project: &str,
+        task_agent: Option<String>,
+        cursor: bool,
+    ) -> Result<runtime_config::Layers> {
+        let res = self.cfg.resolve(project);
+        let index = match res.strategy {
+            Strategy::RoundRobin if cursor && task_agent.is_none() => self.store.request::<usize>(
+                "round_robin",
+                json!({"rule":res.rule_key,"len":res.agents.len()}),
+            )?,
+            _ => 0,
+        };
+        Ok(runtime_config::Layers {
+            task_agent,
+            config: Some(runtime_config::ConfigLayer {
+                agents: res.agents,
+                index,
+                rule_key: res.rule_key,
+            }),
+            ..Default::default()
+        })
+    }
+
+    /// Applies runtime health to a resolved config, the node's only part in
+    /// selection:
+    /// - a bot: its primary while healthy, else its backup while healthy,
+    ///   else none (its wakes wait);
+    /// - a task pin: its runtime while healthy, else the least-used healthy
+    ///   runtime of the same harness;
+    /// - otherwise the `use` entries in order: the first with a healthy
+    ///   runtime of its harness wins, the least used such runtime (then by
+    ///   name); an entry whose runtimes are all unhealthy is skipped.
+    ///
+    /// The model and effort are the rule's entry for the picked harness.
+    /// Bots also need `bot_args`.
+    fn pick(&self, c: &RuntimeConfig, bot: bool) -> std::result::Result<Pick, NoPick> {
         let now = now_unix();
-        let mut unhealthy = Vec::new();
-        for u in uses {
-            match self.least_used(&u.harness, bot, now) {
-                Ok(name) => {
-                    return Ok(Pick {
-                        agent: name,
-                        rule: key,
-                        with: Some(u.clone()),
-                        profile: None,
-                    })
+        let pick = |rt: &runtime::Runtime, why: String| Pick {
+            agent: rt.name.clone(),
+            rule: why,
+            with: c.with(&rt.harness),
+            profile: None,
+        };
+        match (&c.runtime, bot) {
+            (Some(primary), true) => {
+                let usable =
+                    |rt: &&runtime::Runtime| rt.healthy(now) && self.can_run(&rt.name, true, false);
+                let primary_rt = self.pin_runtime(primary, now);
+                if let Some(rt) = primary_rt.filter(usable) {
+                    return Ok(pick(rt, c.why.clone()));
                 }
-                Err(true) => unhealthy.push(u.harness.as_str()),
-                Err(false) => {}
+                let backup_rt = c.backup.as_deref().and_then(|b| self.pin_runtime(b, now));
+                if let Some(rt) = backup_rt.filter(usable) {
+                    return Ok(pick(rt, format!("bot backup ({primary} unhealthy)")));
+                }
+                let known: Vec<&runtime::Runtime> =
+                    primary_rt.into_iter().chain(backup_rt).collect();
+                if known.is_empty() {
+                    return Err(NoPick::Missing(format!("unknown agent {primary}")));
+                }
+                let harnesses: Vec<&str> = known.iter().map(|r| r.harness.as_str()).collect();
+                let states: Vec<String> = known
+                    .iter()
+                    .map(|r| format!("{} {}", r.name, r.state(now)))
+                    .collect();
+                let backup_note = match c.backup {
+                    Some(_) => "",
+                    None => "; no backup runtime",
+                };
+                Err(NoPick::Unhealthy {
+                    until: self.runtimes.next_healthy(&harnesses, now),
+                    note: format!("bot runtimes unhealthy: {}{backup_note}", states.join(", ")),
+                })
+            }
+            (Some(name), false) => {
+                // A pin naming an agent template (`claude`) that no runtime
+                // adopts in place goes to a runtime of that template
+                // (`claude-1`, added from /runtimes with its own login).
+                let Some(rt) = self.pin_runtime(name, now) else {
+                    return Err(NoPick::Missing(format!("unknown agent {name}")));
+                };
+                if rt.healthy(now) {
+                    return Ok(pick(rt, c.why.clone()));
+                }
+                let harness = rt.harness.as_str();
+                match self.least_used(harness, bot, now) {
+                    Ok(other) => Ok(pick(
+                        self.runtimes.get(&other).expect("a listed runtime"),
+                        c.why.clone(),
+                    )),
+                    Err(_) => Err(NoPick::Unhealthy {
+                        until: self.runtimes.next_healthy(&[harness], now),
+                        note: format!(
+                            "{} {name}: no healthy {harness} runtime: {}",
+                            c.why,
+                            self.unhealthy_states(&[harness], now)
+                        ),
+                    }),
+                }
+            }
+            (None, _) => {
+                let key = &c.rule_key;
+                let mut unhealthy = Vec::new();
+                for u in &c.uses {
+                    match self.least_used(&u.harness, bot, now) {
+                        Ok(name) => {
+                            return Ok(Pick {
+                                agent: name,
+                                rule: key.clone(),
+                                with: Some(u.clone()),
+                                profile: None,
+                            })
+                        }
+                        Err(true) => unhealthy.push(u.harness.as_str()),
+                        Err(false) => {}
+                    }
+                }
+                let tried: Vec<String> = c.uses.iter().map(Use::to_string).collect();
+                if !unhealthy.is_empty() {
+                    return Err(NoPick::Unhealthy {
+                        until: self.runtimes.next_healthy(&unhealthy, now),
+                        note: format!(
+                            "{key}: no healthy runtime for any use entry ({}): {}",
+                            tried.join(", "),
+                            self.unhealthy_states(&unhealthy, now)
+                        ),
+                    });
+                }
+                Err(NoPick::Missing(format!(
+                    "{key}: no configured agent for any use entry ({})",
+                    tried.join(", ")
+                )))
             }
         }
-        let tried: Vec<String> = uses.iter().map(Use::to_string).collect();
-        if !unhealthy.is_empty() {
-            return Err(NoPick::Unhealthy {
-                until: self.runtimes.next_healthy(&unhealthy, now),
-                note: format!(
-                    "{key}: no healthy runtime for any use entry ({}): {}",
-                    tried.join(", "),
-                    self.unhealthy_states(&unhealthy, now)
-                ),
-            });
-        }
-        Err(NoPick::Missing(format!(
-            "{key}: no configured agent for any use entry ({})",
-            tried.join(", ")
-        )))
     }
 
     /// The runtime a pin names: that runtime (or the one adopting agent
@@ -554,38 +669,6 @@ impl Dispatcher {
                 .find(|r| r.healthy(now))
                 .or_else(|| self.runtimes.of_agent(name).next())
         })
-    }
-
-    /// A pinned task agent: its runtime while healthy, else the
-    /// least-used healthy runtime of the same harness.
-    fn pin_pick(&self, name: &str, why: &str, bot: bool) -> std::result::Result<Pick, NoPick> {
-        // A pin naming an agent template (`claude`) that no runtime adopts in
-        // place goes to a runtime of that template (`claude-1`, added from
-        // /runtimes with its own login).
-        let now = now_unix();
-        let Some(rt) = self.pin_runtime(name, now) else {
-            return Err(NoPick::Missing(format!("unknown agent {name}")));
-        };
-        let pick = |agent: String| Pick {
-            agent,
-            rule: why.to_string(),
-            with: None,
-            profile: None,
-        };
-        if rt.healthy(now) {
-            return Ok(pick(rt.name.clone()));
-        }
-        let harness = rt.harness.as_str();
-        match self.least_used(harness, bot, now) {
-            Ok(other) => Ok(pick(other)),
-            Err(_) => Err(NoPick::Unhealthy {
-                until: self.runtimes.next_healthy(&[harness], now),
-                note: format!(
-                    "{why} {name}: no healthy {harness} runtime: {}",
-                    self.unhealthy_states(&[harness], now)
-                ),
-            }),
-        }
     }
 
     /// Returns a claimed task to pending until `until` (Unix seconds),
@@ -1143,11 +1226,11 @@ impl Dispatcher {
     /// Claims and spawns the oldest ready task in `project`; false when none was
     /// left to claim.
     fn admit_one(&mut self, project: &str) -> Result<bool> {
-        let res = self.cfg.resolve(project);
+        let limits = runtime_config::Limits::of(&self.cfg, project);
         let claim_id = format!("dispatch:{}", uuid::Uuid::new_v4());
         let task = match self.store.request::<Claim>(
             "claim",
-            json!({"project":project,"claim":claim_id,"max_runs":res.max_runs}),
+            json!({"project":project,"claim":claim_id,"max_runs":limits.max_runs}),
         )? {
             Claim::Claimed(t) => *t,
             Claim::Blocked(_) => return Ok(true),
@@ -1175,7 +1258,7 @@ impl Dispatcher {
             fallback = match rt {
                 None => Some("stored agent no longer exists".to_string()),
                 Some(_)
-                    if res
+                    if limits
                         .max_resumes
                         .is_some_and(|max| !interrupted && session.resume_count >= max) =>
                 {
@@ -1191,56 +1274,25 @@ impl Dispatcher {
             };
             rt.filter(|_| fallback.is_none()).map(|r| r.name.clone())
         });
-        let matched = match self.stored_rules {
-            true => self
-                .store
-                .request::<Option<rule::Rule>>("rule_select", json!({"task":task.id}))?,
-            false => None,
+        let config = match self.stored_rules {
+            true => self.runtime_config(json!({"task":task.id}), project)?,
+            false => RuntimeConfig::resolve(
+                &self.config_layers(project, task.agent.clone(), resume_on.is_none())?,
+                limits,
+            ),
         };
         let picked = if let Some(name) = resume_on {
             // The stored session resumes on its own runtime, with the model
             // and effort the rule gives that runtime's harness.
             let harness = self.runtimes.get(&name).map(|r| r.harness.clone());
-            Ok(match self.stored_rules {
-                true => Pick {
-                    agent: name,
-                    rule: matched.as_ref().map_or("no rule".into(), rule::Rule::key),
-                    with: matched.as_ref().and_then(|r| {
-                        r.uses
-                            .iter()
-                            .find(|u| Some(&u.harness) == harness.as_ref())
-                            .cloned()
-                    }),
-                    profile: None,
-                },
-                false => Pick {
-                    agent: name,
-                    rule: res.rule_key.clone(),
-                    with: None,
-                    profile: None,
-                },
+            Ok(Pick {
+                agent: name,
+                rule: config.rule_key.clone(),
+                with: harness.and_then(|h| config.with(&h)),
+                profile: None,
             })
-        } else if let Some(agent) = &task.agent {
-            let why = if self.stored_rules {
-                "task agent"
-            } else {
-                &res.rule_key
-            };
-            self.pin_pick(agent, why, false)
-        } else if !self.stored_rules {
-            let agent = match res.strategy {
-                Strategy::Fixed => res.agents[0].clone(),
-                Strategy::RoundRobin => {
-                    let i = self.store.request::<usize>(
-                        "round_robin",
-                        json!({"rule":res.rule_key,"len":res.agents.len()}),
-                    )?;
-                    res.agents[i].clone()
-                }
-            };
-            self.pin_pick(&agent, &res.rule_key, false)
         } else {
-            self.pick_from(matched.as_ref(), false)
+            self.pick(&config, false)
         };
         let pick = match picked {
             Ok(p) => Pick { profile, ..p },
@@ -1612,7 +1664,20 @@ impl Dispatcher {
             let pinned = |a: &String| self.runtimes.resolve(a).map(|r| r.name.clone());
             let pick = match &task.agent {
                 Some(a) if pinned(a).as_ref() != Some(&run.pick.agent) => {
-                    match self.pin_pick(a, "task agent", false) {
+                    // As before: labelled `task agent`, without the
+                    // deprecated config's list.
+                    let picked = match self.stored_rules {
+                        true => self.runtime_config(json!({"task":task.id}), &task.project),
+                        false => Ok(RuntimeConfig::resolve(
+                            &runtime_config::Layers {
+                                task_agent: Some(a.clone()),
+                                ..Default::default()
+                            },
+                            runtime_config::Limits::of(&self.cfg, &task.project),
+                        )),
+                    }
+                    .map(|c| self.pick(&c, false));
+                    match picked? {
                         Ok(p) => Pick {
                             profile: run.pick.profile.clone(),
                             ..p

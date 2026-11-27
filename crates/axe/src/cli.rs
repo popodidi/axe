@@ -1777,6 +1777,16 @@ enum RuleCmd {
     },
     /// Remove a rule
     Rm { id: i64 },
+    /// The runtime config a task or bot resolves to (default -> project
+    /// rule -> bot -> task pin), before runtime health
+    Explain {
+        #[arg(long, conflicts_with = "bot", required_unless_present = "bot")]
+        task: Option<i64>,
+        #[arg(long)]
+        bot: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Rule edits (added, removed, imported), newest first
     Log {
         #[arg(long)]
@@ -1816,6 +1826,39 @@ fn run_rule(c: &Client, command: RuleCmd) -> Result<()> {
             } else {
                 for r in &rules {
                     println!("{}", format_rule(r));
+                }
+            }
+        }
+        RuleCmd::Explain { task, bot, json } => {
+            let q = match (&task, &bot) {
+                (Some(t), _) => ("task", t.to_string()),
+                (None, Some(b)) => ("bot", b.clone()),
+                (None, None) => unreachable!("clap requires --task or --bot"),
+            };
+            let v: Value = c.get("/api/runtime-config", &[(q.0, &q.1)])?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                let cfg = &v["config"];
+                let uses: Vec<String> = cfg["uses"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|u| serde_json::from_value::<crate::rule::Use>(u.clone()).ok())
+                    .map(|u| u.to_string())
+                    .collect();
+                println!("{} {}", q.0, q.1);
+                println!("  rule: {}", cfg["rule_key"].as_str().unwrap_or("?"));
+                println!("  use: {}", uses.join(", "));
+                if let Some(r) = cfg["runtime"].as_str() {
+                    println!("  runtime: {r} ({})", cfg["why"].as_str().unwrap_or(""));
+                }
+                if let Some(b) = cfg["backup"].as_str() {
+                    println!("  backup: {b}");
+                }
+                println!("  max_runs: {}", cfg["max_runs"]);
+                if let Some(m) = cfg["max_resumes"].as_u64() {
+                    println!("  max_resumes: {m}");
                 }
             }
         }

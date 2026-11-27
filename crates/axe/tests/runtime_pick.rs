@@ -290,11 +290,30 @@ const TASK_CASES: &[TaskCase] = &[
         want: None,
     },
     TaskCase {
-        name: "a task pin (an agent template) skips rules and drops their model and effort",
+        name: "a task pin (an agent template) overrides the rule's harness list",
         rules: &[&["--default", "--use", "claude-code:opus:high"]],
         health: &[],
         task: &["--project", "a", "--agent", "codex"],
         want: Some(("codex-1", "task agent", &[])),
+    },
+    TaskCase {
+        // Step 7 (runtime_config): before, a pin dropped the rule's model
+        // and effort.
+        name: "a pinned task keeps the rule's model/effort",
+        rules: &[&[
+            "--default",
+            "--use",
+            "claude-code:opus",
+            "--use",
+            "codex:gpt-5:low",
+        ]],
+        health: &[],
+        task: &["--project", "a", "--agent", "codex"],
+        want: Some((
+            "codex-1",
+            "task agent",
+            &["-m", "gpt-5", "-c", "model_reasoning_effort=\"low\""],
+        )),
     },
     TaskCase {
         name: "a pin runs on a healthy runtime of its template",
