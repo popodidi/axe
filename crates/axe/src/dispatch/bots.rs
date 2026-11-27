@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::Child;
+use std::sync::mpsc;
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -15,6 +16,7 @@ use crate::activity;
 use crate::agent_proc::{self, kill_child, kill_tree, render};
 use crate::bot::{self, Claimed};
 use crate::config::SessionMode;
+use crate::transcribe::{self, Transcript};
 
 pub(super) struct BotRun {
     run_id: i64,
@@ -28,6 +30,62 @@ pub(super) struct BotRun {
     log_len: u64,
     /// Unix seconds when the run read its runtime's login.
     started_at: i64,
+}
+
+/// A claimed bot run waiting for its voice messages' transcripts
+/// (`transcribe.rs`) before it spawns. A worker thread fetches each voice
+/// file through the API and transcribes it; the node loop spawns the run
+/// once all are back ([`Dispatcher::poll_preparing`]).
+pub(super) struct Preparing {
+    claimed: Claimed,
+    pick: Option<Pick>,
+    done: mpsc::Receiver<Vec<(i64, Transcript)>>,
+}
+
+/// The voice messages among `c`'s wakes still without a transcript.
+pub fn voice_wakes(c: &Claimed) -> Vec<i64> {
+    c.wakes
+        .iter()
+        .filter_map(|w| w.message.as_ref())
+        .filter(|m| transcribe::needs_transcript(&m.kind, &m.flags))
+        .map(|m| m.id)
+        .collect()
+}
+
+/// Puts `results` on `c`'s wake messages, as stored on the server.
+pub fn apply_transcripts(c: &mut Claimed, results: &[(i64, Transcript)]) {
+    for w in &mut c.wakes {
+        let Some(m) = &mut w.message else { continue };
+        if let Some((_, t)) = results.iter().find(|(id, _)| *id == m.id) {
+            if !m.flags.is_object() {
+                m.flags = json!({});
+            }
+            m.flags["transcript"] = json!(t);
+        }
+    }
+}
+
+/// Fetches and transcribes voice messages `msgs` of bot `bot` (the worker
+/// thread's job): every message gets a transcript, failures included.
+pub fn transcribe_voices(
+    client: &crate::client::Client,
+    engine: &dyn transcribe::Engine,
+    bot: &str,
+    msgs: &[i64],
+) -> Vec<(i64, Transcript)> {
+    msgs.iter()
+        .map(|&id| {
+            let t = match client.get_file(&format!("/api/bots/{bot}/tg/file/{id}")) {
+                Ok((_, bytes)) => transcribe::transcribe(engine, &bytes),
+                Err(e) => Transcript {
+                    error: Some(format!("could not fetch the voice file: {e:#}")),
+                    engine: engine.name(),
+                    ..Default::default()
+                },
+            };
+            (id, t)
+        })
+        .collect()
 }
 
 /// Splices `bot_args` in before the first argument that holds `{prompt}`, or
@@ -46,7 +104,7 @@ pub fn splice_bot_args(template: &[String], bot_args: &[String]) -> Vec<String> 
 impl Dispatcher {
     /// True while the bot pool has a free slot. Task runs never count here.
     fn bot_slot_free(&self) -> bool {
-        self.cfg.pool_bots().is_none_or(|n| self.bots.len() < n)
+        self.cfg.pool_bots().is_none_or(|n| self.live_bots() < n)
     }
 
     /// Claims and spawns ready bots while the bot pool has room and the
@@ -79,7 +137,8 @@ impl Dispatcher {
                 }
             }
             let claim = format!("bot:{}", uuid::Uuid::new_v4());
-            let pick = match self.bot_pick(&name)? {
+            let (transcribe_voice, pick) = self.bot_pick(&name)?;
+            let pick = match pick {
                 Ok(p) => {
                     if self.bots_held.remove(&name).is_some() {
                         eprintln!("axe node: bot {name}: runtime {} healthy; running", p.agent);
@@ -105,6 +164,15 @@ impl Dispatcher {
             else {
                 continue;
             };
+            let voices = if transcribe_voice {
+                voice_wakes(&c)
+            } else {
+                Vec::new()
+            };
+            if !voices.is_empty() {
+                self.prepare_bot(c, pick, voices);
+                continue;
+            }
             if let Err(e) = self.spawn_bot(&c, pick.as_ref()) {
                 self.store.request::<serde_json::Value>(
                     "bot_finish",
@@ -122,10 +190,122 @@ impl Dispatcher {
     /// backup and back each start fresh; notes carry over. A stored rule
     /// naming the bot only sets the model and effort of the picked runtime's
     /// harness ([`crate::runtime_config`]).
-    fn bot_pick(&self, name: &str) -> Result<std::result::Result<Pick, NoPick>> {
+    /// Also returns whether the bot's voice messages are transcribed
+    /// (`RuntimeConfig::transcribe_voice`).
+    fn bot_pick(&self, name: &str) -> Result<(bool, std::result::Result<Pick, NoPick>)> {
         // Bots run no task, so the config's task limits do not apply.
         let config = self.runtime_config(json!({"bot":name}), "")?;
-        Ok(self.pick(&config, true))
+        Ok((config.transcribe_voice, self.pick(&config, true)))
+    }
+
+    /// Starts transcribing claimed run `c`'s voice messages `msgs` on a
+    /// worker thread; [`Dispatcher::poll_preparing`] spawns the run after.
+    fn prepare_bot(&mut self, c: Claimed, pick: Option<Pick>, msgs: Vec<i64>) {
+        let (tx, rx) = mpsc::channel();
+        // A failing download must not hold the reply for the node's whole
+        // retry budget.
+        let client = self
+            .store
+            .client
+            .clone()
+            .retrying(std::time::Duration::from_secs(15));
+        let bot = c.bot.name.clone();
+        let cache = self.stt_dir.clone();
+        eprintln!(
+            "axe node: bot {bot} run {}: transcribing voice message(s) {msgs:?}",
+            c.run
+        );
+        std::thread::spawn(move || {
+            let results = match cache {
+                Some(dir) => {
+                    let engine = transcribe::SenseVoice::new(dir);
+                    transcribe_voices(&client, &engine, &bot, &msgs)
+                }
+                None => msgs
+                    .iter()
+                    .map(|&id| {
+                        (
+                            id,
+                            Transcript {
+                                error: Some("no cache folder for the speech model".into()),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            let _ = tx.send(results);
+        });
+        self.preparing.push(Preparing {
+            claimed: c,
+            pick,
+            done: rx,
+        });
+    }
+
+    /// Spawns the preparing runs whose transcripts are back, after storing
+    /// each on its message. A lost worker counts as a failed transcription.
+    pub(super) fn poll_preparing(&mut self) -> Result<()> {
+        let mut i = 0;
+        while i < self.preparing.len() {
+            let results = match self.preparing[i].done.try_recv() {
+                Ok(r) => r,
+                Err(mpsc::TryRecvError::Empty) => {
+                    i += 1;
+                    continue;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => voice_wakes(&self.preparing[i].claimed)
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id,
+                            Transcript {
+                                error: Some("the transcription worker stopped".into()),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            let Preparing {
+                mut claimed, pick, ..
+            } = self.preparing.swap_remove(i);
+            for (msg, t) in &results {
+                match (&t.text, &t.error) {
+                    (Some(text), _) => eprintln!(
+                        "axe node: bot {} voice #{msg}: {} chars, {:.1}s audio, {} ms, peak {} MB",
+                        claimed.bot.name,
+                        text.chars().count(),
+                        t.audio_secs.unwrap_or_default(),
+                        t.ms,
+                        t.peak_rss_mb.map_or("?".into(), |m| m.to_string()),
+                    ),
+                    (None, e) => eprintln!(
+                        "axe node: bot {} voice #{msg}: transcription failed: {}",
+                        claimed.bot.name,
+                        e.as_deref().unwrap_or("-")
+                    ),
+                }
+                // Best effort: the prompt carries it either way.
+                if let Err(e) = self.store.request::<serde_json::Value>(
+                    "bot_transcript",
+                    json!({"run":claimed.run,"message":msg,"transcript":t}),
+                ) {
+                    eprintln!(
+                        "axe node: bot {} voice #{msg}: store transcript: {e:#}",
+                        claimed.bot.name
+                    );
+                }
+            }
+            apply_transcripts(&mut claimed, &results);
+            if let Err(e) = self.spawn_bot(&claimed, pick.as_ref()) {
+                self.store.request::<serde_json::Value>(
+                    "bot_finish",
+                    json!({"run":claimed.run,"code":null,"reason":"error","note":format!("{e:#}")}),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn spawn_bot(&mut self, c: &Claimed, pick: Option<&Pick>) -> Result<()> {
@@ -316,13 +496,31 @@ impl Dispatcher {
 
     /// Finishes exited bot runs, and kills runs whose bot was stopped or paused.
     pub(super) fn reap_bots(&mut self) -> Result<()> {
-        if self.bots.is_empty() {
+        self.poll_preparing()?;
+        if self.live_bots() == 0 {
             return Ok(());
         }
         let kills: Vec<(i64, String)> = self
             .store
             .request("bot_control", json!({}))
             .unwrap_or_default();
+        // A run stopped or paused while its voice messages are transcribed
+        // never spawns; its worker's result is dropped.
+        let mut j = 0;
+        while j < self.preparing.len() {
+            let run = self.preparing[j].claimed.run;
+            let Some((_, reason)) = kills.iter().find(|(r, _)| *r == run) else {
+                j += 1;
+                continue;
+            };
+            let reason = reason.clone();
+            self.preparing.swap_remove(j);
+            self.store.request::<serde_json::Value>(
+                "bot_finish",
+                json!({"run":run,"code":null,"reason":reason,
+                    "note":format!("bot {reason} requested before the run started")}),
+            )?;
+        }
         let mut i = 0;
         while i < self.bots.len() {
             if let Some(status) = self.bots[i].child.try_wait()? {
@@ -406,6 +604,12 @@ impl Dispatcher {
 
     /// Kills live bot runs on dispatcher shutdown; not counted as failures.
     pub(super) fn stop_bots(&mut self) -> Result<()> {
+        for p in std::mem::take(&mut self.preparing) {
+            self.store.request::<serde_json::Value>(
+                "bot_finish",
+                json!({"run":p.claimed.run,"code":null,"reason":"dispatcher_stopped","note":null}),
+            )?;
+        }
         let mut runs = std::mem::take(&mut self.bots);
         for run in &mut runs {
             kill_child(&mut run.child);

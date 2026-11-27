@@ -97,6 +97,9 @@ impl Layers {
 pub struct Limits {
     pub max_runs: i64,
     pub max_resumes: Option<u64>,
+    /// `[defaults] transcribe_voice`; `None`: the built-in default (on).
+    #[serde(default)]
+    pub transcribe_voice: Option<bool>,
 }
 
 impl Limits {
@@ -105,6 +108,7 @@ impl Limits {
         Limits {
             max_runs: r.max_runs,
             max_resumes: r.max_resumes,
+            transcribe_voice: r.transcribe_voice,
         }
     }
 }
@@ -130,6 +134,15 @@ pub struct RuntimeConfig {
     pub why: String,
     pub max_runs: i64,
     pub max_resumes: Option<u64>,
+    /// Whether a bot's voice messages are transcribed before its run
+    /// (`transcribe.rs`): on by default, off with `[defaults]
+    /// transcribe_voice = false` in the node config.
+    #[serde(default = "on")]
+    pub transcribe_voice: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 /// The built-in default layer: the default harness, no model or effort.
@@ -161,6 +174,7 @@ impl RuntimeConfig {
             rule_key,
             max_runs: limits.max_runs,
             max_resumes: limits.max_resumes,
+            transcribe_voice: limits.transcribe_voice.unwrap_or(true),
         };
         if let Some(cl) = &l.config {
             c.runtime = cl.agents.get(cl.index % cl.agents.len().max(1)).cloned();
@@ -222,6 +236,7 @@ mod tests {
     const LIMITS: Limits = Limits {
         max_runs: 6,
         max_resumes: None,
+        transcribe_voice: None,
     };
 
     fn u(h: &str, m: Option<&str>, e: Option<&str>) -> Use {
@@ -372,15 +387,37 @@ mod tests {
             Limits::of(&cfg, "a"),
             Limits {
                 max_runs: 3,
-                max_resumes: Some(2)
+                max_resumes: Some(2),
+                transcribe_voice: None,
             }
         );
         assert_eq!(
             Limits::of(&cfg, "b"),
             Limits {
                 max_runs: 9,
-                max_resumes: Some(5)
+                max_resumes: Some(5),
+                transcribe_voice: None,
             }
+        );
+    }
+
+    /// Voice transcription: on by default, one switch in `[defaults]` turns it off.
+    #[test]
+    fn transcribe_voice_is_on_unless_defaults_turn_it_off() {
+        let bot_layers = Layers {
+            bot: Some(BotLayer {
+                name: "b".into(),
+                primary: "claude-1".into(),
+                backup: None,
+            }),
+            ..Default::default()
+        };
+        let on = Config::parse("").unwrap();
+        assert!(RuntimeConfig::resolve(&bot_layers, Limits::of(&on, "")).transcribe_voice);
+        let off = Config::parse("[defaults]\ntranscribe_voice = false\n").unwrap();
+        assert!(!RuntimeConfig::resolve(&bot_layers, Limits::of(&off, "")).transcribe_voice);
+        assert!(
+            !RuntimeConfig::resolve(&Layers::default(), Limits::of(&off, "p")).transcribe_voice
         );
     }
 }

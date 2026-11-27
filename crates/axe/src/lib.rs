@@ -52,6 +52,7 @@ pub mod routine;
 pub mod rule;
 pub mod runtime;
 pub mod runtime_config;
+pub mod transcribe;
 
 pub mod metrics;
 pub mod node_metrics;

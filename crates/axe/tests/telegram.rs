@@ -1227,6 +1227,178 @@ fn offset_advances_only_after_commit_and_redelivery_dedupes_across_restart() {
     );
 }
 
+/// A voice message reaches the bot's run as a marked transcript: the node
+/// fetches the voice file through the server, runs the speech engine (a
+/// stand-in script installed where the real one is cached, so no network),
+/// stores the transcript on the message and puts it in the prompt. A voice
+/// file that cannot be fetched still wakes the bot, with a failure marker.
+#[cfg(target_os = "linux")]
+#[test]
+fn voice_messages_reach_the_bot_as_marked_transcripts() {
+    let fake_agent = r#"printf '%s' "$1" > "$VOICE_OUT/prompt-$AXE_BOT_RUN""#;
+    let extra = format!(
+        "\n[agents.fake]\ncmd = [\"sh\", \"-c\", {}, \"fake\", \"{{prompt}}\"]\nsession = \"preset\"\nbot_args = []\n",
+        serde_json::to_string(fake_agent).unwrap()
+    );
+    let rig = Rig::with(&extra);
+    rig.srv()
+        .ok(&["bot", "edit", "cos", "--agent", "fake", "--why", "test"]);
+    let out = rig.dir.path().join("out");
+    let cache = rig.dir.path().join("cache");
+    // The engine and model as `transcribe::install` leaves them; the engine
+    // keeps the audio it was given and answers like `sherpa-onnx-offline`.
+    let stt = cache.join("axe").join("stt");
+    let bin = stt.join("sherpa-onnx-v2.0.3").join("bin");
+    let model = stt.join("sense-voice-int8-2024-07-17");
+    for d in [&out, &bin, &model] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(model.join("model.int8.onnx"), "").unwrap();
+    std::fs::write(model.join("tokens.txt"), "").unwrap();
+    let engine = bin.join("sherpa-onnx-offline");
+    std::fs::write(
+        &engine,
+        "#!/bin/sh\nfor a; do w=\"$a\"; done\ncp \"$w\" \"$VOICE_OUT/heard.wav\"\nprintf '%s\\n' \"$*\" > \"$VOICE_OUT/engine-args\"\n\
+         echo 'Elapsed seconds: 0.1 s' >&2\n\
+         echo '{\"lang\": \"<|en|>\", \"emotion\": \"<|NEUTRAL|>\", \"text\": \"ship it on friday\", \"tokens\": []}'\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let ogg = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/voice/en-fleurs.ogg"),
+    )
+    .unwrap();
+    rig.stub.state.lock().unwrap().files.insert(
+        "v1".into(),
+        ("voice/file_1.oga".into(), ogg.len() as u64, ogg.clone()),
+    );
+    let voice = |update: i64, message: i64, file_id: &str| {
+        json!({"update_id": update, "message": {"message_id": message, "date": 0, "from": user(OWNER),
+            "chat": {"id": OWNER, "type": "private"},
+            "voice": {"file_id": file_id, "file_unique_id": "u", "duration": 7,
+                "mime_type": "audio/ogg", "file_size": ogg.len()}}})
+    };
+    rig.stub.push(voice(90, 95, "v1"));
+    // Unknown to Telegram: getFile fails.
+    rig.stub.push(voice(91, 96, "gone"));
+    rig.stub.wait_confirmed(91);
+    let ids: Vec<i64> = rig
+        .db()
+        .prepare("SELECT id FROM bot_messages WHERE kind='voice' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    rig.db()
+        .execute("UPDATE bot_wakes SET due_at='2026-01-01T00:00:00Z'", [])
+        .unwrap();
+
+    let o = rig
+        .srv()
+        .dispatcher(
+            &["--once"],
+            &[
+                ("VOICE_OUT", out.to_str().unwrap()),
+                ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+            ],
+        )
+        .wait();
+    assert!(o.status.success(), "{o:?}");
+    let log = String::from_utf8_lossy(&o.stderr);
+    assert!(log.contains("transcribing voice message(s)"), "{log}");
+
+    let prompt = std::fs::read_to_string(out.join("prompt-1")).unwrap();
+    let line = |id: i64| {
+        prompt
+            .lines()
+            .find(|l| l.contains(&format!("[message #{id} ")))
+            .unwrap_or_else(|| panic!("no line for #{id}: {prompt}"))
+            .to_string()
+    };
+    let ok = line(ids[0]);
+    assert!(
+        ok.contains("] [voice message, auto-transcribed, may contain errors] ship it on friday (attachments: voice voice.ogg "),
+        "{ok}"
+    );
+    // The original audio stays available, as for any attachment.
+    assert!(
+        ok.ends_with(&format!("→ axe bot tg file {})", ids[0])),
+        "{ok}"
+    );
+    let failed = line(ids[1]);
+    assert!(
+        failed.contains("] [voice message, transcription failed: could not fetch the voice file"),
+        "{failed}"
+    );
+    assert!(
+        failed.ends_with(&format!("→ axe bot tg file {})", ids[1])),
+        "{failed}"
+    );
+
+    // The engine heard the clip as 16 kHz mono 16-bit WAV (6.5 s).
+    let wav = std::fs::read(out.join("heard.wav")).unwrap();
+    assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1, "mono");
+    assert_eq!(
+        u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
+        16_000
+    );
+    let secs = (wav.len() - 44) as f64 / 32_000.0;
+    assert!((secs - 6.54).abs() < 0.1, "{secs}");
+    let args = std::fs::read_to_string(out.join("engine-args")).unwrap();
+    assert!(
+        args.contains("--sense-voice-model=") && args.contains("model.int8.onnx"),
+        "{args}"
+    );
+    // The temporary WAV is gone.
+    assert!(
+        !std::fs::read_dir(&stt).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".wav")),
+        "temporary audio left behind"
+    );
+
+    // Stored on the messages: history and later runs see the same text.
+    let flags = |id: i64| -> Value {
+        let f: String = rig
+            .db()
+            .query_row("SELECT flags FROM bot_messages WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        serde_json::from_str(&f).unwrap()
+    };
+    let t = &flags(ids[0])["transcript"];
+    assert_eq!(t["text"], "ship it on friday");
+    assert_eq!(t["lang"], "en");
+    assert_eq!(t["engine"], "sensevoice-small-int8-2024-07-17");
+    assert!(
+        (t["audio_secs"].as_f64().unwrap() - 6.54).abs() < 0.1,
+        "{t}"
+    );
+    assert!(flags(ids[1])["transcript"]["error"].is_string());
+    let history = rig.tg_ok(&["history", "--limit", "5"]);
+    assert!(
+        history.contains("[voice message, auto-transcribed, may contain errors] ship it on friday"),
+        "{history}"
+    );
+    // The wake view, which never carries message content, hides it too.
+    let public = rig.srv().get("/api/bots/cos/wakes");
+    assert!(public.as_array().is_some_and(|w| !w.is_empty()), "{public}");
+    assert!(
+        !public.to_string().contains("ship it on friday"),
+        "{public}"
+    );
+}
+
 #[test]
 fn file_limits_on_download_and_upload() {
     let rig = Rig::new();

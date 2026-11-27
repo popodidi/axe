@@ -124,6 +124,11 @@ pub struct Dispatcher {
     hold_logged: Option<String>,
     /// Live bot runs, in their own pool (see `dispatch/bots.rs`).
     bots: Vec<bots::BotRun>,
+    /// Claimed bot runs whose voice messages are being transcribed before
+    /// they spawn; they hold a bot slot (`dispatch/bots.rs`).
+    preparing: Vec<bots::Preparing>,
+    /// Where the speech engine and model are cached (`transcribe.rs`).
+    pub stt_dir: Option<PathBuf>,
     /// The server refused bot operations (an older server); logged once.
     bots_unsupported: bool,
     drain: Option<Drain>,
@@ -385,6 +390,8 @@ impl Dispatcher {
             hold_path: admission::hold_path(),
             hold_logged: None,
             bots: Vec::new(),
+            preparing: Vec::new(),
+            stt_dir: crate::transcribe::default_dir(),
             bots_unsupported: false,
             drain: None,
             stored_rules: false,
@@ -848,7 +855,7 @@ impl Dispatcher {
 
     /// Live agent sessions, task and bot runs.
     pub fn live(&self) -> usize {
-        self.runs.len() + self.pre_checks.len() + self.bots.len()
+        self.runs.len() + self.pre_checks.len() + self.live_bots()
     }
 
     /// Live task runs; with deferred fallbacks they fill `[pool] total`.
@@ -858,7 +865,7 @@ impl Dispatcher {
 
     /// Live bot runs; they fill `[pool] bots`, never `[pool] total`.
     pub fn live_bots(&self) -> usize {
-        self.bots.len()
+        self.bots.len() + self.preparing.len()
     }
 
     /// Task and bot slot use for `axe admission`: `bots.total` is the
@@ -875,7 +882,7 @@ impl Dispatcher {
         };
         json!({
             "tasks": {"used": self.runs.len() + self.pre_checks.len() + self.deferred.len(), "total": self.cfg.pool_total()},
-            "bots": {"used": self.bots.len(), "total": bots_total,
+            "bots": {"used": self.live_bots(), "total": bots_total,
                 "configured": self.cfg.pool_bots()},
         })
     }
@@ -941,7 +948,7 @@ impl Dispatcher {
     fn report_admission(&mut self) {
         let samples = self.gate.as_ref().map_or(0, |g| g.samples());
         // Slot use changes are reported at once too.
-        let used = (self.runs.len() + self.deferred.len(), self.bots.len());
+        let used = (self.runs.len() + self.deferred.len(), self.live_bots());
         // So is a hold being set, released or expiring.
         let hold = self.hold();
         let runtimes = self.runtimes.heartbeat(|n| self.in_use(n), now_unix());
@@ -1108,7 +1115,7 @@ impl Dispatcher {
             let until = *drain
                 .bots_until
                 .get_or_insert(now.max(warned) + DRAIN_BOT_GRACE);
-            return Ok(now >= warned && (self.bots.is_empty() || now >= until));
+            return Ok(now >= warned && (self.live_bots() == 0 || now >= until));
         }
         if now >= drain.abort_at && now >= drain.next_check {
             drain.next_check = now + DRAIN_CHECK;

@@ -111,9 +111,9 @@ fn exit_text(s: ExitStatus) -> String {
 
 fn human(d: Duration) -> String {
     let s = d.as_secs();
-    if s >= 3600 && s % 3600 == 0 {
+    if s >= 3600 && s.is_multiple_of(3600) {
         format!("{}h", s / 3600)
-    } else if s >= 60 && s % 60 == 0 {
+    } else if s >= 60 && s.is_multiple_of(60) {
         format!("{}m", s / 60)
     } else {
         format!("{s}s")

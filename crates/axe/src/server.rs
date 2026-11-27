@@ -3036,6 +3036,10 @@ fn redact(mut wakes: Vec<bot::Wake>) -> Vec<bot::Wake> {
         if let Some(m) = &mut w.message {
             m.text = String::new();
             m.attachments = json!([]);
+            // A voice message's transcript is its text.
+            if let Some(f) = m.flags.as_object_mut() {
+                f.remove("transcript");
+            }
         }
     }
     wakes

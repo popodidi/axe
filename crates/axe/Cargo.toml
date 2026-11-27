@@ -2,7 +2,7 @@
 name = "axe-os"
 version = "0.5.6"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A self-hosted task queue and dispatcher for coding agents"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/popodidi/axe"
@@ -59,6 +59,11 @@ chrono = "0.4.45"
 chrono-tz = "0.10.4"
 ts-rs = { version = "12", features = ["serde-json-impl"], optional = true }
 rust-embed = { version = "8", features = ["debug-embed"], optional = true }
+# Voice transcription (`transcribe.rs`): Telegram's Ogg/Opus decoded in pure
+# Rust, and the pinned speech engine and model archives (tar.bz2) unpacked.
+opus-pure = "0.2"
+bzip2 = "0.6"
+tar = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

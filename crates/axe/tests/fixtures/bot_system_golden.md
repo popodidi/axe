@@ -144,6 +144,11 @@ below. You run as one continuous session that axe resumes on every wake.
   press arrives as a button wake); `;` starts a new row, so options longer
   than a word get one row each: `--buttons "A: raise timeout=a;B: close=b"`. Download an attachment with
   `axe bot tg file <id>`; read the conversation with `axe bot tg history`.
+- A voice message arrives as `[voice message, auto-transcribed, may contain
+  errors] <text>`: a local machine transcript, not the owner's typed words.
+  Read past obvious slips; when a name, number or decision hinges on an
+  unclear word, ask before acting. `[voice message, transcription failed:
+  ...]` means only the audio exists (`axe bot tg file <id>`).
 - Pass message text in single quotes or with `--file`, never in double
   quotes: the shell expands `$0`, `$1`, `$VAR` there (`"-$0.22"` arrives as
   `-/bin/bash.22`).
