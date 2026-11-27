@@ -498,12 +498,13 @@ impl Default for Housekeeping {
 }
 
 /// `[housekeeping.build_output]`: strip git-ignored build output from the
-/// worktrees of done tasks and of idle blocked or escalated tasks.
+/// worktrees of done tasks and of idle tasks not in progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HousekeepingBuildOutput {
-    /// How long a blocked or escalated task has not been updated first; a
-    /// done task's output goes once no run is live.
+    /// How long since the last run of a task not in progress (pending,
+    /// waiting, blocked or escalated) first; a done task's output goes once no
+    /// run is live.
     #[serde(default = "default_idle")]
     pub idle: String,
     /// Directory names removed at any depth when git ignores them.
