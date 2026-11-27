@@ -422,6 +422,16 @@ any task or bot session:
 axe form ask --bot ops --purpose "Deploy token" --field token:secret:required:env=DEPLOY_TOKEN --wait
 ```
 
+- A field can declare a format: `prefix=TEXT`, `len=MIN..MAX` (characters)
+  and `chars=digits|nospace`, for example
+  `--field chat:code:required:chars=digits` or
+  `--field token:secret:prefix=ghp_:chars=nospace`. The page shows the first
+  problem under the field ("contains 2 spaces: likely a wrapped line") and
+  holds the seal until it is fixed; the node refuses a value that still fails
+  with the same words (`Check` in `sealed.rs`). Nothing trims or rewrites a
+  value. `/runtimes` login forms declare each method's format
+  (`runtime::login_check`), and a runtime login refuses a malformed
+  credential by name before storing it.
 - `--bot` names the Telegram bot that sends the owner the prompt; it must be
   able to write to the owner's private chat. It is required unless
   `--no-telegram`, which only prints the link. `/runtimes` login forms come

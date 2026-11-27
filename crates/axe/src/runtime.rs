@@ -195,6 +195,26 @@ pub fn login_methods(
     }
 }
 
+/// The format a login method's credential has, for the sealed form and
+/// [`Runtime::login`]: the CLI would take a malformed one and only fail on
+/// a later run.
+pub fn login_check(harness: &str, method: &str) -> Option<crate::sealed::Check> {
+    let (prefix, min, max) = match (harness, method) {
+        // `claude setup-token` prints `sk-ant-oat01-` and about 95 more
+        // characters, wrapped on a narrow terminal.
+        ("claude-code", "token") => ("sk-ant-oat01-", 90, 256),
+        ("claude-code", "api_key") => ("sk-ant-", 40, 256),
+        ("codex", "api_key") => ("sk-", 20, 512),
+        _ => return None,
+    };
+    Some(crate::sealed::Check {
+        prefix: prefix.into(),
+        min: Some(min),
+        max: Some(max),
+        chars: Some(crate::sealed::Chars::Nospace),
+    })
+}
+
 /// Exits 0 while logged in: `claude auth status`, `codex login status`.
 fn default_probe(harness: &str) -> Vec<String> {
     let argv: &[&str] = match harness {
@@ -271,7 +291,13 @@ impl Runtime {
         if method == "device" {
             bail!("a device code login takes no value");
         }
-        if value.is_empty() || value.contains(['\n', '\r', '\0']) {
+        if value.is_empty() {
+            bail!("the credential is empty");
+        }
+        if let Some(p) = login_check(&self.harness, method).and_then(|c| c.problem(value)) {
+            bail!("the {method} {p}");
+        }
+        if value.contains(['\n', '\r', '\0']) {
             bail!("the credential must be one line");
         }
         match var {
@@ -1308,7 +1334,7 @@ mod tests {
 case "$1 $2" in
 "login --with-api-key")
   read -r key
-  if [ "$key" = "bad-key-1" ]; then echo "invalid key $key" >&2; exit 1; fi
+  if [ "$key" = "sk-bad-key-1xxxxxxxxxxxx" ]; then echo "invalid key $key" >&2; exit 1; fi
   printf '%s' "$key" > "$CODEX_HOME/key"; exit 0;;
 "login --device-auth")
   printf '\033[1mOpen https://example.test/device\033[0m\nCode: ABCD-1234\n'; sleep 1; exit 0;;
@@ -1352,27 +1378,50 @@ exit 2
 
     #[test]
     fn a_claude_login_is_a_private_env_credential_replacing_the_other() {
+        const OAT: &str = "sk-ant-oat01-dummy123xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        const KEY: &str = "sk-ant-api03-dummy1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
         let tmp = tempfile::tempdir().unwrap();
         let (cfg, reg) = registry(tmp.path());
         let rt = reg.get("claude-1").unwrap();
-        rt.login(&cfg, "token", "oat-123").unwrap();
+        rt.login(&cfg, "token", OAT).unwrap();
         let file = tmp
             .path()
             .join("runtimes/claude-1/login/CLAUDE_CODE_OAUTH_TOKEN");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "oat-123");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), OAT);
         assert_eq!(
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
         let (set, _) = rt.env();
-        assert!(set.contains(&("CLAUDE_CODE_OAUTH_TOKEN", "oat-123".into())));
-        rt.login(&cfg, "api_key", "sk-1").unwrap();
+        assert!(set.contains(&("CLAUDE_CODE_OAUTH_TOKEN", OAT.into())));
+        rt.login(&cfg, "api_key", KEY).unwrap();
         let (set, _) = rt.env();
-        assert!(set.contains(&("ANTHROPIC_API_KEY", "sk-1".into())));
+        assert!(set.contains(&("ANTHROPIC_API_KEY", KEY.into())));
         assert!(!set.iter().any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(rt.login(&cfg, "device", "").is_err());
         assert!(rt.login(&cfg, "bogus", "x").is_err());
         assert!(rt.login(&cfg, "token", "a\nb").is_err());
+        // A malformed credential is refused by name and nothing is stored:
+        // never trimmed or rewritten, never a later "Not logged in".
+        let err = |v: &str| rt.login(&cfg, "token", v).unwrap_err().to_string();
+        let wrapped = format!("{} {}", &OAT[..50], &OAT[50..]);
+        assert_eq!(
+            err(&wrapped),
+            "the token contains 1 space: likely a wrapped line"
+        );
+        assert_eq!(
+            err(&format!("{OAT}\n")),
+            "the token contains 1 line break at the start or end"
+        );
+        assert_eq!(
+            err("sk-ant-api03-abc"),
+            "the token must start with sk-ant-oat01-"
+        );
+        assert_eq!(
+            err(&OAT[..60]),
+            "the token is too short (60 characters; expected at least 90)"
+        );
+        assert!(rt.env().0.contains(&("ANTHROPIC_API_KEY", KEY.into())));
         // Without a registry there is nowhere to keep a login.
         let plain =
             Config::parse("[agents.claude]\ncmd = [\"claude\"]\nharness = \"claude-code\"\n")
@@ -1390,17 +1439,21 @@ exit 2
         let tmp = tempfile::tempdir().unwrap();
         let (cfg, reg) = registry(tmp.path());
         let rt = reg.get("codex-1").unwrap();
-        rt.login(&cfg, "api_key", "sk-codex-9").unwrap();
+        rt.login(&cfg, "api_key", "sk-codex-9xxxxxxxxxxxxxxx")
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("codex-home/key")).unwrap(),
-            "sk-codex-9"
+            "sk-codex-9xxxxxxxxxxxxxxx"
         );
         let e = rt
-            .login(&cfg, "api_key", "bad-key-1")
+            .login(&cfg, "api_key", "sk-bad-key-1xxxxxxxxxxxx")
             .unwrap_err()
             .to_string();
         assert!(e.contains("login failed"), "{e}");
-        assert!(e.contains("<redacted>") && !e.contains("bad-key-1"), "{e}");
+        assert!(
+            e.contains("<redacted>") && !e.contains("sk-bad-key-1xxxxxxxxxxxx"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1445,7 +1498,7 @@ exit 2
         std::fs::write(
             dir.join("runtime.toml"),
             "harness = \"claude-code\"\nprobe = [\"sh\", \"-c\", \
-             \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = good ] || \
+             \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = sk-ant-oat01-goodxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ] || \
              { printf '\\\\033[1mInvalid token %s\\\\033[0m\\\\n' \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" >&2; exit 1; }\"]\n",
         )
         .unwrap();
@@ -1467,7 +1520,7 @@ exit 2
 
         // A bad login: checked now, the card says why and hides the value.
         let rt = reg.get("claude-1").unwrap().clone();
-        rt.login(&cfg, "token", "bad-oat-77").unwrap();
+        rt.login(&cfg, "token", "sk-ant-oat01-bad-oat-77xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
         reg.check_now("claude-1");
         let alerts = collect(&mut reg, |_, a| !a.is_empty());
         assert_eq!(alerts.len(), 1, "{alerts:?}");
@@ -1485,7 +1538,7 @@ exit 2
         );
 
         // A good login: checked now, ok again, and the card says so.
-        rt.login(&cfg, "token", "good").unwrap();
+        rt.login(&cfg, "token", "sk-ant-oat01-goodxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
         reg.check_now("claude-1");
         let alerts = collect(&mut reg, |_, a| !a.is_empty());
         assert_eq!(alerts.len(), 1, "{alerts:?}");
@@ -1507,7 +1560,7 @@ exit 2
         assert_eq!(saved.state, OK);
 
         // An ok runtime is checked too; a failure reports but keeps it ok.
-        rt.login(&cfg, "token", "worse").unwrap();
+        rt.login(&cfg, "token", "sk-ant-oat01-worsexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
         reg.check_now("claude-1");
         let alerts = collect(&mut reg, |_, a| !a.is_empty());
         assert_eq!(
@@ -1526,7 +1579,7 @@ exit 2
         std::fs::write(
             dir.join("runtime.toml"),
             "harness = \"claude-code\"\nprobe = [\"sh\", \"-c\", \
-             \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = good ]\"]\n",
+             \"[ \\\"$CLAUDE_CODE_OAUTH_TOKEN\\\" = sk-ant-oat01-goodxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ]\"]\n",
         )
         .unwrap();
         let mut reg = Registry::load(&cfg).unwrap();
@@ -1545,7 +1598,7 @@ exit 2
         // The new login is stored and its check passes: ok, login confirmed.
         let before_login = unix_now() - 1;
         let rt = reg.get("claude-1").unwrap().clone();
-        rt.login(&cfg, "token", "good").unwrap();
+        rt.login(&cfg, "token", "sk-ant-oat01-goodxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
         reg.check_now("claude-1");
         collect(&mut reg, |_, a| !a.is_empty());
         let health = &reg.get("claude-1").unwrap().health;
@@ -1629,7 +1682,7 @@ exit 2
         );
         assert!(std::fs::symlink_metadata(home.join(".credentials.json")).is_err());
         // Its login goes to its own folder.
-        two.login(&cfg, "token", "oat-two").unwrap();
+        two.login(&cfg, "token", "sk-ant-oat01-oat-twoxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
         assert!(dir.join("claude-2/login/CLAUDE_CODE_OAUTH_TOKEN").is_file());
 
         // A restart loads the same runtimes, with their state.

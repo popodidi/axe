@@ -1218,8 +1218,9 @@ enum FormCmd {
         purpose: String,
         /// NAME:TYPE[:FLAG...], repeatable. TYPE: secret, text, code,
         /// choice=A|B, file. FLAG: required, max=BYTES, env=VAR (also set on
-        /// the target's later runs), label=TEXT. Example:
-        /// token:secret:required:env=DEPLOY_TOKEN
+        /// the target's later runs), label=TEXT; a format the page and node
+        /// check: prefix=TEXT, len=MIN..MAX (characters), chars=digits|nospace.
+        /// Example: token:secret:required:env=DEPLOY_TOKEN:chars=nospace
         #[arg(long = "field", value_name = "NAME:TYPE[:FLAG...]", required = true)]
         fields: Vec<String>,
         /// A git credential for https://HOST instead, used by the

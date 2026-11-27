@@ -3879,6 +3879,7 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
             max: None,
             choices: vec![],
             env: None,
+            check: crate::runtime::login_check(&harness, method),
         }],
         ttl: None,
         from: "/runtimes".into(),

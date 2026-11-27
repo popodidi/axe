@@ -70,6 +70,9 @@ impl Form {
                 if let Some(e) = &f.env {
                     v["env"] = json!(e);
                 }
+                if let Some(c) = &f.check {
+                    v["check"] = json!(c);
+                }
                 v
             })
             .collect();
