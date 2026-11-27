@@ -4161,7 +4161,13 @@ fn sealed_forms_go_out_as_a_mini_app_button_and_come_back_as_ciphertext() {
     let spec = form_spec(&v);
     let prompt = rig.sent_to(OWNER).pop().unwrap();
     let text = prompt["text"].as_str().unwrap();
-    assert!(text.contains("API key for a test"), "{text}");
+    assert!(
+        text.starts_with("<b>API key for a test</b>\nFor "),
+        "the purpose leads: {text}"
+    );
+    assert!(text.contains("task 5</a> · closes in "), "{text}");
+    assert!(text.contains("• <b>key</b> · secret · required"), "{text}");
+    assert!(text.contains("<blockquote expandable>"), "{text}");
     assert!(text.contains(v["fingerprint"].as_str().unwrap()), "{text}");
     assert_eq!(prompt["parse_mode"], "HTML");
     let button = &prompt["reply_markup"]["keyboard"][0][0];

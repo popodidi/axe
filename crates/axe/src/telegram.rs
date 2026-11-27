@@ -1604,12 +1604,7 @@ impl Gateway {
             bot: name.clone(),
             chat,
         });
-        let text = crate::form::prompt_text(f);
-        let html = format!(
-            "{}\n\nNot in Telegram? <a href=\"{}\">Open the form in a browser</a> and paste the sealed reply here.",
-            html_escape(&text),
-            html_escape(link)
-        );
+        let html = crate::form::prompt_html(f, b.web.as_deref(), link, now());
         let p = json!({
             "chat_id": chat,
             "text": html,
@@ -1623,10 +1618,10 @@ impl Gateway {
             &name,
             &sent,
             "text",
-            &text,
+            &html,
             None,
             json!([]),
-            json!({"system": true, "form": f.spec.form}),
+            json!({"system": true, "html": true, "form": f.spec.form}),
         )?;
         Ok(json!({"sent": true, "bot": name, "id": id}))
     }
