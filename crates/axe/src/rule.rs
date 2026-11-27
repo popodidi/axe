@@ -330,7 +330,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Rule> {
     .with_context(|| format!("rule {id} not found"))
 }
 
-fn audit(
+pub(crate) fn audit(
     conn: &Connection,
     id: Option<i64>,
     actor: &Actor,

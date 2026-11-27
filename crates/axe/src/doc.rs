@@ -1098,6 +1098,169 @@ impl Store {
         })?;
         Ok(moved)
     }
+
+    /// Moves a project's docs to its new name in one commit: every doc under
+    /// `old/` to `new/` (history stays with the old paths), every attachment
+    /// of a path at or under `old` (in any scope) to the new path, and the
+    /// attachments of `label:<old>` to `label:<new>`. Refused when `new/` or
+    /// `label:<new>` already holds anything. `apply` false only plans.
+    pub fn rename_prefix(
+        &self,
+        old: &str,
+        new: &str,
+        author: &str,
+        apply: bool,
+    ) -> Result<PrefixMove> {
+        let (old, new) = (check_path(old)?, check_path(new)?);
+        let (from_scope, to_scope) = (
+            Scope::parse(&format!("label:{old}"))?,
+            Scope::parse(&format!("label:{new}"))?,
+        );
+        let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(head) = self.head()? else {
+            return Ok(PrefixMove::default());
+        };
+        if self.kind_at(&head, &format!("docs/{new}"))?.is_some() {
+            return invalid(format!(
+                "docs under {new}/ already exist; pick another name"
+            ));
+        }
+        if self.kind_at(&head, &to_scope.file())?.is_some() {
+            return invalid(format!(
+                "scope {to_scope} already has attachments; pick another name"
+            ));
+        }
+        let moved = |p: &str| -> Option<String> {
+            if p == old {
+                Some(new.clone())
+            } else {
+                p.strip_prefix(&format!("{old}/"))
+                    .map(|rest| format!("{new}/{rest}"))
+            }
+        };
+        // (mode, blob, path under docs/) of every file under docs/<old>.
+        let tree = self.git(
+            &["ls-tree", "-r", "-z", &head, "--", &format!("docs/{old}")],
+            None,
+        )?;
+        let mut files = Vec::new();
+        for line in tree.split('\0').filter(|l| !l.is_empty()) {
+            let Some((meta, name)) = line.split_once('\t') else {
+                continue;
+            };
+            let Some(path) = name.strip_prefix("docs/").filter(|p| moved(p).is_some()) else {
+                continue;
+            };
+            let mut m = meta.split_whitespace();
+            let (mode, blob) = (m.next().unwrap_or("100644"), m.nth(1).unwrap_or(""));
+            files.push((mode.to_string(), blob.to_string(), path.to_string()));
+        }
+        // Scope files to rewrite: (old file, new file, new list).
+        let mut lists: Vec<(String, String, Vec<String>)> = Vec::new();
+        let mut plan = PrefixMove {
+            docs: files.iter().map(|f| f.2.clone()).collect(),
+            ..Default::default()
+        };
+        let names = self.git(
+            &["ls-tree", "-r", "-z", "--name-only", &head, "--", "attach"],
+            None,
+        )?;
+        for f in names.split('\0').filter(|f| !f.is_empty()) {
+            let Some(scope) = Scope::from_file(f) else {
+                continue;
+            };
+            let list = self.attach_list(&head, f)?;
+            let mut changed = false;
+            let mut out = Vec::new();
+            for p in list {
+                match moved(&p) {
+                    Some(n) => {
+                        plan.attachments.push(Attachment {
+                            scope: scope.to_string(),
+                            exists: true,
+                            path: p,
+                        });
+                        changed = true;
+                        out.push(n);
+                    }
+                    None => out.push(p),
+                }
+            }
+            out.sort();
+            out.dedup();
+            if scope == from_scope {
+                plan.label_attachments = out.len();
+                lists.push((f.to_string(), to_scope.file(), out));
+            } else if changed {
+                lists.push((f.to_string(), f.to_string(), out));
+            }
+        }
+        if !apply || plan.is_empty() {
+            return Ok(plan);
+        }
+        let msg = format!("rename project {old} to {new}");
+        plan.version = self.commit(Some(&head), author, &msg, |idx| {
+            for (mode, blob, path) in &files {
+                idx.git(
+                    &[
+                        "update-index",
+                        "--force-remove",
+                        "--",
+                        &format!("docs/{path}"),
+                    ],
+                    None,
+                )?;
+                let to = moved(path).expect("filtered above");
+                idx.git(
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("{mode},{blob},docs/{to}"),
+                    ],
+                    None,
+                )?;
+            }
+            for (from_file, to_file, list) in &lists {
+                idx.git(&["update-index", "--force-remove", "--", from_file], None)?;
+                if list.is_empty() {
+                    continue;
+                }
+                let body = format!("{}\n", list.join("\n"));
+                let blob = idx.git(&["hash-object", "-w", "--stdin"], Some(body.as_bytes()))?;
+                idx.git(
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("100644,{},{to_file}", blob.trim()),
+                    ],
+                    None,
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(plan)
+    }
+}
+
+/// What [`Store::rename_prefix`] moves (or would move).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PrefixMove {
+    /// Docs under the old folder, by their old path.
+    pub docs: Vec<String>,
+    /// Attachments whose path moves, by their old path.
+    pub attachments: Vec<Attachment>,
+    /// Attachments `label:<old>` held, now `label:<new>`'s.
+    pub label_attachments: usize,
+    /// The commit that moved them; `None` for a plan or when nothing moved.
+    pub version: Option<String>,
+}
+
+impl PrefixMove {
+    pub fn is_empty(&self) -> bool {
+        self.docs.is_empty() && self.attachments.is_empty() && self.label_attachments == 0
+    }
 }
 
 /// A temporary index over the store's repository.

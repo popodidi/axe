@@ -2387,6 +2387,56 @@ fn route(st: &State, req: &Request) -> Result<Response> {
                 }),
             )
         }
+        ("POST", ["api", "projects", name, "rename"]) => {
+            #[derive(Deserialize)]
+            struct Body {
+                to: String,
+                why: String,
+                owner_ref: Option<String>,
+                #[serde(default)]
+                dry_run: bool,
+                #[serde(flatten)]
+                who: Who,
+            }
+            let b: Body = req.json()?;
+            let actor = b.who.actor();
+            let renamed = crate::project::rename(
+                &mut st.conn(),
+                &actor,
+                &crate::project::Request {
+                    from: name,
+                    to: &b.to,
+                    why: &b.why,
+                    owner_ref: b.owner_ref.as_deref(),
+                    dry_run: b.dry_run,
+                },
+                st.docs.as_ref(),
+            )?;
+            // The server config is not the database's: name what still
+            // carries the old name for the owner to edit.
+            let mut warnings = Vec::new();
+            if st.cfg.metrics.projects.iter().any(|p| p == name) {
+                warnings.push(format!(
+                    "server config [metrics] projects names {name}: change it to {} and restart the server",
+                    renamed.to
+                ));
+            }
+            if st
+                .cfg
+                .rules
+                .iter()
+                .any(|r| r.matcher.project.as_deref() == Some(name))
+            {
+                warnings.push(format!(
+                    "a server config [[rule]] matches project {name}: change it to {} (and on each node's config)",
+                    renamed.to
+                ));
+            }
+            if st.docs.is_none() {
+                warnings.push("the doc store is not open: docs were not moved".to_string());
+            }
+            ok(200, &json!({"renamed": renamed, "warnings": warnings}))
+        }
         ("POST", ["api", "tasks"]) => {
             let b: AddBody = req.json()?;
             st.check_agent(|c| c.validate_agent(b.agent.as_deref()))?;

@@ -1878,14 +1878,24 @@ impl Drop for Dispatcher {
 
 /// Where a task without repos ran before run workspaces:
 /// `<workspace_root>/.worktrees/<project>/task-<id>--work`, when a directory is
-/// still there.
+/// still there. A renamed project's directory keeps its old name (an agent
+/// session resumes by its directory), so any project directory holding the
+/// task's (task ids are unique) is it.
 fn legacy_task_dir(cfg: &Config, task: &Task) -> Option<PathBuf> {
-    let dir = cfg
-        .workspace_root()
-        .join(".worktrees")
-        .join(&task.project)
-        .join(format!("task-{}--work", task.id));
-    dir.is_dir().then_some(dir)
+    let root = cfg.workspace_root().join(".worktrees");
+    let name = format!("task-{}--work", task.id);
+    let dir = root.join(&task.project).join(&name);
+    if dir.is_dir() {
+        return Some(dir);
+    }
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path().join(&name))
+        .filter(|d| d.is_dir())
+        .collect();
+    found.sort();
+    found.into_iter().next()
 }
 
 #[cfg(test)]
@@ -1895,6 +1905,29 @@ mod tests {
 
     fn u(s: &str) -> Use {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn legacy_task_dir_is_found_under_a_former_project_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            workspace_root: dir.path().to_str().unwrap().into(),
+            ..Config::default()
+        };
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id": 7, "project": "new", "title": "t", "detail": "", "state": "pending",
+            "claimed_by": null, "runs": 1, "created_at": "", "updated_at": "",
+            "not_before": null, "status": "pending"
+        }))
+        .unwrap();
+        assert_eq!(legacy_task_dir(&cfg, &task), None);
+        let old = dir.path().join(".worktrees/old/task-7--work");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(dir.path().join(".worktrees/old/task-70--work")).unwrap();
+        assert_eq!(legacy_task_dir(&cfg, &task), Some(old));
+        let cur = dir.path().join(".worktrees/new/task-7--work");
+        std::fs::create_dir_all(&cur).unwrap();
+        assert_eq!(legacy_task_dir(&cfg, &task), Some(cur));
     }
 
     #[test]
