@@ -744,9 +744,27 @@ pub struct RetroEdit {
 }
 
 /// Applies an edit and records each change as a diff event with the reason.
-pub fn edit(conn: &mut Connection, actor: &Actor, name: &str, e: &Edit, why: &str) -> Result<Bot> {
+/// `runtime_ok` checks a new primary or backup is a runtime the bot may run
+/// on (the server's `bot_runtime_ok`), so every caller enforces the same
+/// rule.
+pub fn edit(
+    conn: &mut Connection,
+    actor: &Actor,
+    name: &str,
+    e: &Edit,
+    why: &str,
+    runtime_ok: &dyn Fn(&str) -> Result<()>,
+) -> Result<Bot> {
     if why.trim().is_empty() {
         bail!("--why must not be empty");
+    }
+    if let Some(a) = e.agent.as_deref().map(str::trim) {
+        runtime_ok(a)?;
+    }
+    if let Some(a) = e.backup.as_deref().map(str::trim) {
+        if !matches!(a, "" | "none") {
+            runtime_ok(a)?;
+        }
     }
     refuse_heartbeat(e.heartbeat.as_ref())?;
     let owner_ref = e
@@ -980,6 +998,48 @@ pub fn set_notes(
     }
     tx.commit()?;
     get(conn, name)
+}
+
+/// A wake asked for by the owner, a bot or an agent: exactly one of
+/// `in_seconds` (> 0), `at` (a time) or `now`; `goal` labels the note
+/// `[goal NAME]` and must exist.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WakeRequest {
+    pub in_seconds: Option<i64>,
+    pub at: Option<String>,
+    #[serde(default)]
+    pub now: bool,
+    pub note: String,
+    pub key: Option<String>,
+    pub goal: Option<String>,
+}
+
+/// Parses `w` and schedules its wake ([`add_wake`]); returns its id and due
+/// time.
+pub fn request_wake(
+    conn: &mut Connection,
+    actor: &Actor,
+    name: &str,
+    w: &WakeRequest,
+    now: i64,
+) -> Result<(i64, String)> {
+    let due = match (w.in_seconds, &w.at, w.now) {
+        (Some(s), None, false) if s > 0 => now + s,
+        (None, Some(at), false) => {
+            epoch_of(&crate::db::parse_wake(at)?).context("invalid wake time")?
+        }
+        (None, None, true) => now,
+        _ => bail!("give exactly one of in_seconds (> 0), at or now"),
+    };
+    let goal = match &w.goal {
+        Some(g) if !w.note.trim().is_empty() => crate::goal::resolve(conn, g)?,
+        _ => None,
+    };
+    let note = match goal {
+        Some(g) => crate::goal::label(&g.name, &w.note),
+        None => w.note.clone(),
+    };
+    add_wake(conn, actor, name, due, &note, w.key.as_deref(), now)
 }
 
 /// Schedules a `wake` at `due` (epoch); returns its id and due time. A repeated

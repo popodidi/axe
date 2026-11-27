@@ -1194,7 +1194,15 @@ fn a_bots_retro_window_follows_its_interval() {
         ..Default::default()
     };
     // 14 days: the card does not lose its first week.
-    bot::edit(&mut c, &Actor::new("human"), "a", &edit("14d", None), "w").unwrap();
+    bot::edit(
+        &mut c,
+        &Actor::new("human"),
+        "a",
+        &edit("14d", None),
+        "w",
+        &|_| Ok(()),
+    )
+    .unwrap();
     assert_eq!(held(&c), [format!("m{new}"), format!("m{old}")]);
     let r = ask::bot_retro(&c, now() + 1, "a", None).unwrap();
     assert!(
@@ -1210,6 +1218,7 @@ fn a_bots_retro_window_follows_its_interval() {
         "a",
         &edit("14d", Some(1)),
         "w",
+        &|_| Ok(()),
     )
     .unwrap();
     assert_eq!(held(&c).len(), 1);

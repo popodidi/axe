@@ -56,6 +56,11 @@ pub trait Store: Send + Sync + 'static {
     fn runtime_add(&self, _harness: &str) -> anyhow::Result<String> {
         anyhow::bail!("runtime changes need an axe server")
     }
+    /// Whether a bot may run on `name` (a primary or backup), the check
+    /// every bot edit makes ([`crate::bot::edit`]).
+    fn bot_runtime_ok(&self, _name: &str) -> anyhow::Result<()> {
+        anyhow::bail!("runtime checks need an axe server")
+    }
     /// Removes node runtime `runtime` (`runtime::Registry::remove`);
     /// returns what happened to its login files.
     fn runtime_remove(&self, _runtime: &str) -> anyhow::Result<String> {

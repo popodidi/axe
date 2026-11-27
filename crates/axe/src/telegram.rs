@@ -1473,9 +1473,19 @@ impl Gateway {
                             ..Default::default()
                         };
                         let why = "its first runtime, logged in from /runtimes";
-                        if let Err(e) =
-                            bot::edit(&mut store.conn(), &owner_actor(), &b.name(), &e, why)
-                        {
+                        // The node just created it; its report may not list it yet.
+                        let check = |n: &str| match n == name {
+                            true => Ok(()),
+                            false => store.bot_runtime_ok(n),
+                        };
+                        if let Err(e) = bot::edit(
+                            &mut store.conn(),
+                            &owner_actor(),
+                            &b.name(),
+                            &e,
+                            why,
+                            &check,
+                        ) {
                             eprintln!("telegram: bot {}: primary {name}: {e:#}", b.name());
                         }
                         store.changed();
@@ -1498,21 +1508,8 @@ impl Gateway {
                     );
                     return Ok(true);
                 };
-                let live = r["in_use"].as_u64().unwrap_or(0);
+                // The node refuses a runtime with live runs (`Registry::remove`).
                 let harness = r["harness"].as_str().unwrap_or("?");
-                if live > 0 {
-                    say(
-                        &format!(
-                            "Runtime {name} ({harness}) has {live} live run{}: it cannot be \
-                             removed now. Remove it once {} finished.",
-                            if live == 1 { "" } else { "s" },
-                            if live == 1 { "it has" } else { "they have" }
-                        ),
-                        &[],
-                        json!({}),
-                    );
-                    return Ok(true);
-                }
                 let mut text = format!(
                     "Remove runtime {name} ({harness})? No run goes to it afterwards; a \
                      session that ran on it starts fresh elsewhere. Its stored credentials \
@@ -1562,14 +1559,6 @@ impl Gateway {
             }
             RuntimePress::Primary(name) | RuntimePress::Backup(name) => {
                 let primary = matches!(press, RuntimePress::Primary(_));
-                if reported(name).is_none() {
-                    say(
-                        &format!("The node reports no runtime {name}."),
-                        &[],
-                        json!({}),
-                    );
-                    return Ok(true);
-                }
                 let e = bot::Edit {
                     agent: primary.then(|| name.to_string()),
                     backup: (!primary).then(|| name.to_string()),
@@ -1577,7 +1566,9 @@ impl Gateway {
                 };
                 let me = b.name();
                 let why = "owner via /runtimes";
-                let text = match bot::edit(&mut store.conn(), &owner_actor(), &me, &e, why) {
+                let check = |n: &str| store.bot_runtime_ok(n);
+                let text = match bot::edit(&mut store.conn(), &owner_actor(), &me, &e, why, &check)
+                {
                     Ok(_) if primary => format!(
                         "{name} is now the primary of {me}. Its next run starts a fresh session \
                          there; notes are kept."
@@ -1597,12 +1588,14 @@ impl Gateway {
                     ..Default::default()
                 };
                 let me = b.name();
+                let check = |n: &str| store.bot_runtime_ok(n);
                 let text = match bot::edit(
                     &mut store.conn(),
                     &owner_actor(),
                     &me,
                     &e,
                     "owner via /runtimes",
+                    &check,
                 ) {
                     Ok(_) => format!("{me} has no backup runtime now."),
                     Err(e) => format!("Not changed: {e:#}"),
@@ -2330,9 +2323,13 @@ impl Gateway {
                 "reset" => bot::change(&mut conn, &actor, &b.name(), "reset")
                     .map(|_| "session cleared; the next run starts fresh".to_string()),
                 _ => {
-                    let note = if arg.is_empty() { "owner /wake" } else { arg };
-                    let key = format!("tg-update-{uid}");
-                    bot::add_wake(&mut conn, &actor, &b.name(), now(), note, Some(&key), now())
+                    let w = bot::WakeRequest {
+                        now: true,
+                        note: if arg.is_empty() { "owner /wake" } else { arg }.into(),
+                        key: Some(format!("tg-update-{uid}")),
+                        ..Default::default()
+                    };
+                    bot::request_wake(&mut conn, &actor, &b.name(), &w, now())
                         .map(|(w, _)| format!("wake {w} queued"))
                 }
             };
