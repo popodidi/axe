@@ -30,7 +30,10 @@ fn rig(dir: &Path) -> Server {
         std::fs::write(&p, script).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    for (name, harness, agent) in [("codex-1", "codex", "codex"), ("claude-1", "claude-code", "claude")] {
+    for (name, harness, agent) in [
+        ("codex-1", "codex", "codex"),
+        ("claude-1", "claude-code", "claude"),
+    ] {
         let rt = dir.join("runtimes").join(name);
         std::fs::create_dir_all(rt.join("home")).unwrap();
         std::fs::write(
@@ -129,7 +132,13 @@ fn a_bot_fails_over_to_its_backup_and_returns_to_its_primary() {
     let dir = tmp.path();
     let srv = rig(dir);
     let out = srv.ok(&[
-        "bot", "edit", "b", "--backup", "claude-1", "--why", "owner msg #5052",
+        "bot",
+        "edit",
+        "b",
+        "--backup",
+        "claude-1",
+        "--why",
+        "owner msg #5052",
     ]);
     assert!(out.contains("backup runtime claude-1"), "{out}");
     assert_eq!(srv.get("/api/bots/b")["backup"], "claude-1");
@@ -160,18 +169,29 @@ fn a_bot_fails_over_to_its_backup_and_returns_to_its_primary() {
     srv.ok(&["bot", "wake", "b", "--now", "--note", "still down"]);
     dispatch_once(&srv, dir);
     let s = start(&srv, 3);
-    assert_eq!((&s["agent"], &s["mode"]), (&json!("claude-1"), &json!("resume")), "{s}");
+    assert_eq!(
+        (&s["agent"], &s["mode"]),
+        (&json!("claude-1"), &json!("resume")),
+        "{s}"
+    );
 
     // Primary healthy again: back to codex-1, in a fresh session.
     set_state(dir, "codex-1", "ok");
     srv.ok(&["bot", "wake", "b", "--now", "--note", "back"]);
     dispatch_once(&srv, dir);
     let s = start(&srv, 4);
-    assert_eq!((&s["agent"], &s["mode"]), (&json!("codex-1"), &json!("fresh")), "{s}");
+    assert_eq!(
+        (&s["agent"], &s["mode"]),
+        (&json!("codex-1"), &json!("fresh")),
+        "{s}"
+    );
     assert_eq!(s["rule"], "bot primary");
     assert_eq!(srv.get("/api/bots/b")["session_agent"], "codex-1");
     let log = srv.ok(&["bot", "log", "b", "--full"]);
-    assert!(log.contains("none -> claude-1"), "the backup is recorded: {log}");
+    assert!(
+        log.contains("none -> claude-1"),
+        "the backup is recorded: {log}"
+    );
 }
 
 #[test]
@@ -211,7 +231,15 @@ fn switching_the_primary_keeps_notes_and_clears_a_backup_it_names() {
 
     // The owner makes the backup primary: fresh session there, notes kept,
     // no backup left.
-    srv.ok(&["bot", "edit", "b", "--agent", "claude-1", "--why", "owner switch"]);
+    srv.ok(&[
+        "bot",
+        "edit",
+        "b",
+        "--agent",
+        "claude-1",
+        "--why",
+        "owner switch",
+    ]);
     let b = srv.get("/api/bots/b");
     assert_eq!(b["agent"], "claude-1");
     assert!(b["backup"].is_null(), "{b}");
@@ -220,7 +248,11 @@ fn switching_the_primary_keeps_notes_and_clears_a_backup_it_names() {
     srv.ok(&["bot", "wake", "b", "--now", "--note", "after switch"]);
     dispatch_once(&srv, dir);
     let s = start(&srv, 2);
-    assert_eq!((&s["agent"], &s["mode"]), (&json!("claude-1"), &json!("fresh")), "{s}");
+    assert_eq!(
+        (&s["agent"], &s["mode"]),
+        (&json!("claude-1"), &json!("fresh")),
+        "{s}"
+    );
 
     // `none` clears a backup.
     srv.ok(&["bot", "edit", "b", "--backup", "codex-1", "--why", "w"]);

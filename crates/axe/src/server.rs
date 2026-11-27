@@ -3924,7 +3924,14 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
             ));
         }
         // The CLI waits for the code the page shows: a sealed form takes it.
-        let sent = login_form(st, bot, runtime, &harness, "code", "code from the sign-in page")?;
+        let sent = login_form(
+            st,
+            bot,
+            runtime,
+            &harness,
+            "code",
+            "code from the sign-in page",
+        )?;
         return Ok(format!(
             "Log in runtime {runtime} ({harness}): open the link below and sign in, then paste \
              the code the page shows into the sealed form ({sent}).\n\n{output}"

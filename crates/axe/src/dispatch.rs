@@ -543,7 +543,11 @@ impl Dispatcher {
     /// `name`'s default login), else a runtime of agent template `name`
     /// that no runtime adopts in place (`claude-1`, added from /runtimes with
     /// its own login), a healthy one first.
-    pub(crate) fn pin_runtime<'a>(&'a self, name: &'a str, now: i64) -> Option<&'a runtime::Runtime> {
+    pub(crate) fn pin_runtime<'a>(
+        &'a self,
+        name: &'a str,
+        now: i64,
+    ) -> Option<&'a runtime::Runtime> {
         self.runtimes.resolve(name).or_else(|| {
             self.runtimes
                 .of_agent(name)

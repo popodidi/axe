@@ -669,7 +669,11 @@ impl Registry {
         };
         // One login at a time per harness: a runtime still waiting for its
         // first login is reused, its wait started again.
-        if let Some(rt) = self.runtimes.iter_mut().find(|r| r.harness == harness && r.pending()) {
+        if let Some(rt) = self
+            .runtimes
+            .iter_mut()
+            .find(|r| r.harness == harness && r.pending())
+        {
             rt.health.added_at = Some(unix_now());
             rt.save()?;
             return Ok(rt.name.clone());
@@ -1402,26 +1406,38 @@ pub fn resolve_listed<'a>(list: &'a [Value], name: &str) -> Option<&'a Value> {
         .or_else(|| of().next())
 }
 
-/// Adds each runtime's `uses` to a [`view`]: `primary of <bot>` and
-/// `backup of <bot>` for each bot `(name, primary, backup)`, and `tasks`
+/// Adds each runtime's `uses` to a [`view`]: `primary of <bots>` and
+/// `backup of <bots>` from each bot `(name, primary, backup)`, and `tasks`
 /// when its harness is in `task_harnesses` (what selection rules pick for
 /// tasks).
-pub fn with_uses(view: &mut Value, bots: &[(String, String, Option<String>)], task_harnesses: &[String]) {
+pub fn with_uses(
+    view: &mut Value,
+    bots: &[(String, String, Option<String>)],
+    task_harnesses: &[String],
+) {
     let list = view["runtimes"].as_array().cloned().unwrap_or_default();
-    let mut uses: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // runtime -> role -> bots
+    let mut roles: BTreeMap<String, [Vec<&str>; 2]> = BTreeMap::new();
     for (bot, primary, backup) in bots {
-        for (role, name) in [("primary", Some(primary)), ("backup", backup.as_ref())] {
+        for (i, name) in [Some(primary), backup.as_ref()].into_iter().enumerate() {
             let Some(rt) = name.and_then(|n| resolve_listed(&list, n)) else {
                 continue;
             };
             let rt = rt["name"].as_str().unwrap_or_default().to_string();
-            uses.entry(rt).or_default().push(format!("{role} of {bot}"));
+            roles.entry(rt).or_default()[i].push(bot);
         }
     }
     if let Some(l) = view["runtimes"].as_array_mut() {
         for r in l {
             let name = r["name"].as_str().unwrap_or_default().to_string();
-            let mut u = uses.remove(&name).unwrap_or_default();
+            let mut u: Vec<String> = match roles.get(&name) {
+                Some([p, b]) => [("primary", p), ("backup", b)]
+                    .into_iter()
+                    .filter(|(_, bots)| !bots.is_empty())
+                    .map(|(role, bots)| format!("{role} of {}", bots.join(", ")))
+                    .collect(),
+                None => vec![],
+            };
             let harness = r["harness"].as_str().unwrap_or_default();
             if r["pending"] != true && task_harnesses.iter().any(|h| h == harness) {
                 u.push("tasks".into());
@@ -1493,7 +1509,7 @@ pub fn render(v: &Value) -> String {
             .map(|u| u.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
         if !uses.is_empty() {
-            line.push_str(&format!("; {}", uses.join(", ")));
+            line.push_str(&format!("; {}", uses.join("; ")));
         }
         out.push(line);
     }
@@ -1704,7 +1720,10 @@ exit 2
                 tx.send(ok).unwrap();
             })
             .unwrap();
-        assert_eq!(out.output, "Open https://example.test/device\nCode: ABCD-1234");
+        assert_eq!(
+            out.output,
+            "Open https://example.test/device\nCode: ABCD-1234"
+        );
         assert!(out.code.is_none(), "Codex reads no code");
         assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap());
     }
@@ -1738,7 +1757,10 @@ echo "Login successful."
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
             dir.join("runtimes/claude-2/runtime.toml"),
-            format!("harness = \"claude-code\"\nlogin_dir = \"{}\"\n", home.display()),
+            format!(
+                "harness = \"claude-code\"\nlogin_dir = \"{}\"\n",
+                home.display()
+            ),
         )
         .unwrap();
         let cfg = Config::parse(&format!(
@@ -1768,11 +1790,18 @@ echo "Login successful."
             rx.recv_timeout(Duration::from_secs(10)).unwrap()
         };
         assert!(!login("bad#code"), "a refused code fails the login");
-        assert!(rt.env().0.iter().any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"));
+        assert!(rt
+            .env()
+            .0
+            .iter()
+            .any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(login("good#state"));
         assert!(home.join(".credentials.json").exists());
         assert!(
-            !rt.env().0.iter().any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"),
+            !rt.env()
+                .0
+                .iter()
+                .any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"),
             "the stale token was removed"
         );
     }

@@ -215,16 +215,22 @@ first bot). Without `[runtimes]`, every agent is a runtime on the default
 login and always healthy.
 
 **Managing runtimes from Telegram.** On a node with `[runtimes] dir`,
-`/runtimes` lists every runtime on one line (harness, state with its last
-failure when not ok, live runs, quota) with *Log in* (never logged in) or
-*Re-login* and *Remove* per
-runtime and *Add Claude* / *Add Codex* (`Registry::create`, `Registry::remove`):
+`/runtimes` lists every logged-in runtime on one line in plain words
+(Logged in, Login expired) with its uses: `primary of <bots>`, `backup of
+<bots>`, `tasks` (selection rules pick its harness) (`runtime::with_uses`,
+`telegram::list_text`; `axe runtimes` shows the same uses). With none it
+says "Log in Claude or Codex to start me." Per runtime: *Log in* when its
+login expired, *Primary* / *Backup* (or *No backup*) for the chat's bot
+(`bot edit --agent` / `--backup`), and *Remove*; then *Add Claude* / *Add
+Codex* (`Registry::create`, `Registry::remove`):
 
-- **Add** writes `<dir>/<name>/runtime.toml` under the next free name
+- **Add** (login first) writes `<dir>/<name>/runtime.toml` under the next free name
   (`claude-2`) with its own `login_dir` (`<dir>/<name>/home`, linking the
   owner's instructions, settings and skills from the CLI's default directory,
-  never its credentials) and opens its login menu. It takes no runs until its login check passes; then it shares
-  the harness's work with the others. An Add that does not end in a login
+  never its credentials) and opens its login menu. It is not listed and
+  takes no runs until its login check passes (`Runtime::pending`; a second
+  Add of that harness reuses it); then it shares the harness's work with the
+  others. A chat bot with no runtime gets it as its primary. An Add that does not end in a login
   leaves nothing behind: the runtime is removed when its first login fails
   its check, or when none passed within `runtime::ADD_LOGIN_WAIT` (the
   longest sealed form plus 10 minutes; `added_at` in its `state.json`), and
@@ -240,7 +246,11 @@ is the state, so hand-written runtimes keep working beside them.
 **Logins from Telegram.** *Log in* / *Re-login* offers the runtime's login methods
 (`runtime::login_methods`):
 
-- **Claude Code.** A `claude setup-token` token or an API key arrives in a
+- **Claude Code.** *Web sign-in*: the node runs `claude auth login` with its
+  stdin kept open, relays the claude.ai link, and the code the page shows
+  comes back in a sealed form and goes to that stdin (`Runtime::device_login`,
+  `sealed::Desk::relay_code`); a passing login removes a stored token or API
+  key, which would hide it. Or a `claude setup-token` token or an API key arrives in a
   sealed form (see below). It is kept as `<name>/login/CLAUDE_CODE_OAUTH_TOKEN`
   or `ANTHROPIC_API_KEY` (0600) and set in the runtime's environment, where it
   takes precedence over the login directory.

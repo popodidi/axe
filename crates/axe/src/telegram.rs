@@ -198,10 +198,7 @@ fn roles(view: &Value, me: Option<&bot::Bot>) -> (Option<String>, Option<String>
 
 /// A harness for people: `Claude`, `Codex`.
 fn harness_name(h: &str) -> &str {
-    ADDABLE
-        .iter()
-        .find(|(a, _)| *a == h)
-        .map_or(h, |(_, n)| n)
+    ADDABLE.iter().find(|(a, _)| *a == h).map_or(h, |(_, n)| n)
 }
 
 /// A runtime's login state in plain words, with a limit's end.
@@ -248,7 +245,7 @@ fn list_text(view: &Value) -> String {
         );
         match uses.is_empty() {
             true => line.push_str(". Not used"),
-            false => line.push_str(&format!(". {}", capitalize(&uses.join(", ")))),
+            false => line.push_str(&format!(". {}", capitalize(&uses.join("; ")))),
         }
         out.push(line);
     }
@@ -1481,7 +1478,9 @@ impl Gateway {
                             ..Default::default()
                         };
                         let why = "its first runtime, logged in from /runtimes";
-                        if let Err(e) = bot::edit(&mut store.conn(), &owner_actor(), &b.name(), &e, why) {
+                        if let Err(e) =
+                            bot::edit(&mut store.conn(), &owner_actor(), &b.name(), &e, why)
+                        {
                             eprintln!("telegram: bot {}: primary {name}: {e:#}", b.name());
                         }
                         store.changed();
@@ -1569,7 +1568,11 @@ impl Gateway {
             RuntimePress::Primary(name) | RuntimePress::Backup(name) => {
                 let primary = matches!(press, RuntimePress::Primary(_));
                 if reported(name).is_none() {
-                    say(&format!("The node reports no runtime {name}."), &[], json!({}));
+                    say(
+                        &format!("The node reports no runtime {name}."),
+                        &[],
+                        json!({}),
+                    );
                     return Ok(true);
                 }
                 let e = bot::Edit {
@@ -1599,7 +1602,13 @@ impl Gateway {
                     ..Default::default()
                 };
                 let me = b.name();
-                let text = match bot::edit(&mut store.conn(), &owner_actor(), &me, &e, "owner via /runtimes") {
+                let text = match bot::edit(
+                    &mut store.conn(),
+                    &owner_actor(),
+                    &me,
+                    &e,
+                    "owner via /runtimes",
+                ) {
                     Ok(_) => format!("{me} has no backup runtime now."),
                     Err(e) => format!("Not changed: {e:#}"),
                 };

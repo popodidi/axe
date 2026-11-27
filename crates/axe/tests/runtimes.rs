@@ -591,6 +591,13 @@ fn the_heartbeat_carries_state_and_quota_but_no_login_or_secret() {
         "last_failure",
         "quota",
         "in_use",
+        // The agent template, whether it adopts the CLI's default login and
+        // whether it waits for its first login: names and flags, so the
+        // server can show which bots use it (`uses`).
+        "agent",
+        "default_login",
+        "pending",
+        "uses",
     ];
     for r in list {
         let mut got: Vec<&str> = r.as_object().unwrap().keys().map(|k| k.as_str()).collect();

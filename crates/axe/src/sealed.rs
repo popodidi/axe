@@ -1595,9 +1595,11 @@ impl Desk {
             .with_context(|| format!("runtime {runtime}: pass the code to the login"))?;
         // Kept open until the CLI exits: it may still be reading.
         codes.insert(runtime.to_string(), stdin);
-        Ok(json!({"target": format!("runtime {runtime} login (code)"), "runtime": runtime,
+        Ok(
+            json!({"target": format!("runtime {runtime} login (code)"), "runtime": runtime,
                   "note": "the code was passed to the login; a runtime card follows with the \
-                           result"}))
+                           result"}),
+        )
     }
 
     fn deliver(&self, q: &Value, now: i64) -> Result<Value> {

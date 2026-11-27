@@ -145,7 +145,8 @@ impl Dispatcher {
                 .and_then(|r| r.uses.iter().find(|u| u.harness == rt.harness).cloned()),
             profile: None,
         };
-        let usable = |rt: &&crate::runtime::Runtime| rt.healthy(now) && self.can_run(&rt.name, true, false);
+        let usable =
+            |rt: &&crate::runtime::Runtime| rt.healthy(now) && self.can_run(&rt.name, true, false);
         let primary_rt = self.pin_runtime(primary, now);
         if let Some(rt) = primary_rt.filter(usable) {
             return Ok(Ok(pick(rt, "bot primary".into())));
@@ -170,10 +171,7 @@ impl Dispatcher {
         };
         Ok(Err(NoPick::Unhealthy {
             until: self.runtimes.next_healthy(&harnesses, now),
-            note: format!(
-                "bot runtimes unhealthy: {}{backup_note}",
-                states.join(", ")
-            ),
+            note: format!("bot runtimes unhealthy: {}{backup_note}", states.join(", ")),
         }))
     }
 
