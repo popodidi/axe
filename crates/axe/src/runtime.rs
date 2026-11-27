@@ -469,6 +469,9 @@ pub struct Registry {
     pub runtimes: Vec<Runtime>,
     /// Loaded from `[runtimes] dir`: health is tracked and acted on.
     pub managed: bool,
+    /// `[runtimes] dir`, where [`Registry::create`] and [`Registry::remove`]
+    /// keep their changes; `None` for implicit runtimes.
+    dir: Option<PathBuf>,
     /// Running probes: the child, when it started, and its Unix start.
     probes: BTreeMap<String, (Child, Instant, i64)>,
     probed: BTreeMap<String, Instant>,
@@ -516,26 +519,149 @@ impl Registry {
             runtimes.push(rt);
         }
         runtimes.sort_by(|a, b| a.name.cmp(&b.name));
-        // Never two runtimes on one login (#2779): quota and expiry are a login's.
-        for (i, a) in runtimes.iter().enumerate() {
-            for b in &runtimes[i + 1..] {
-                if a.harness == b.harness && a.login_dir == b.login_dir {
-                    bail!(
-                        "runtimes {} and {} share one {} login; give each its own login_dir",
-                        a.name,
-                        b.name,
-                        a.harness
-                    );
+        check_logins(&runtimes)?;
+        let mut reg = Registry::new(runtimes, true);
+        reg.dir = Some(dir);
+        Ok(reg)
+    }
+
+    /// Adds a runtime of `harness` and persists it in the registry
+    /// directory: the next free name (`claude-2`, `codex-3`), its own login
+    /// directory under `<name>/home` (sharing [`shared_entries`] with the
+    /// CLI's default directory), and the agent template the harness's
+    /// other runtimes use. It starts as needing a login (no card: the owner
+    /// just asked for it), so no run goes to it before its login check
+    /// passes. Returns its name.
+    pub fn create(&mut self, cfg: &Config, harness: &str) -> Result<String> {
+        let Some(dir) = self.dir.clone() else {
+            bail!("this node has no runtime registry ([runtimes] dir)");
+        };
+        let Some(prefix) = name_prefix(harness) else {
+            bail!("runtimes of harness {harness:?} cannot be added here");
+        };
+        let agent = match self.of(harness).next() {
+            Some(r) => r.agent.clone(),
+            None => {
+                let of: Vec<&String> = cfg
+                    .agents
+                    .iter()
+                    .filter(|(_, a)| a.harness() == Some(harness))
+                    .map(|(n, _)| n)
+                    .collect();
+                match of[..] {
+                    [] => bail!("no [agents.*] entry drives harness {harness}"),
+                    [one, ..] => one.clone(),
+                }
+            }
+        };
+        let name = (1..)
+            .map(|n| format!("{prefix}-{n}"))
+            .find(|n| self.get(n).is_none() && !dir.join(n).exists())
+            .expect("a free name");
+        let home = dir.join(&name);
+        let login_dir = home.join("home");
+        std::fs::create_dir_all(&login_dir)
+            .with_context(|| format!("create {}", login_dir.display()))?;
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for d in [&home, &login_dir] {
+                std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        if let Some((_, default)) = login_var(harness) {
+            let default = expand_tilde(default);
+            for e in shared_entries(harness) {
+                // Linked even when missing, so a later install shows up too.
+                if let Err(err) = std::os::unix::fs::symlink(default.join(e), login_dir.join(e)) {
+                    eprintln!("axe node: runtime {name}: share {e}: {err}");
                 }
             }
         }
-        Ok(Registry::new(runtimes, true))
+        let made = (|| -> Result<Runtime> {
+            let toml = format!(
+                "# Added from /runtimes; remove it there too.\n\
+                 harness = {}\nagent = {}\nlogin_dir = {}\n",
+                toml_str(harness),
+                toml_str(&agent),
+                toml_str(&login_dir.display().to_string())
+            );
+            let health = Health {
+                state: NEEDS_LOGIN.into(),
+                alerted: Some(NEEDS_LOGIN.into()),
+                ..Health::default()
+            };
+            std::fs::write(home.join("state.json"), serde_json::to_vec_pretty(&health)?)?;
+            crate::sealed::write_private_file(&home.join("runtime.toml"), toml.as_bytes())?;
+            let rt = Runtime::read(cfg, &name, &home.join("runtime.toml"))?;
+            let mut all = self.runtimes.clone();
+            all.push(rt.clone());
+            check_logins(&all)?;
+            Ok(rt)
+        })();
+        let rt = match made {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&home);
+                return Err(e.context(format!("add runtime {name}")));
+            }
+        };
+        self.runtimes.push(rt);
+        self.runtimes.sort_by(|a, b| a.name.cmp(&b.name));
+        eprintln!("axe node: runtime {name} ({harness}) added; it needs a login");
+        Ok(name)
+    }
+
+    /// Removes runtime `name` from the registry and its directory, refused
+    /// while it has `live` runs. Its stored credentials and a login
+    /// directory inside its registry folder are deleted with it; a login
+    /// directory elsewhere (the CLI's default one) is left in place. Returns
+    /// what happened to its login files, for the owner.
+    pub fn remove(&mut self, name: &str, live: usize) -> Result<String> {
+        let Some(dir) = self.dir.clone() else {
+            bail!("this node has no runtime registry ([runtimes] dir)");
+        };
+        let Some(rt) = self.get(name) else {
+            bail!("no runtime {name} on this node");
+        };
+        if live > 0 {
+            bail!(
+                "runtime {name} has {live} live run{}; remove it once {} finished",
+                if live == 1 { "" } else { "s" },
+                if live == 1 { "it has" } else { "they have" }
+            );
+        }
+        let home = dir.join(name);
+        let login = match (&rt.login_dir, login_var(&rt.harness)) {
+            (Some(d), _) if d.starts_with(&home) => {
+                "its login (stored credentials and login directory) was deleted with it".to_string()
+            }
+            (Some(_), _) => "its stored credentials were deleted; its login directory outside \
+                 the registry was left in place"
+                .to_string(),
+            (None, Some((_, default))) => format!(
+                "its stored credentials were deleted; the CLI's default login ({default}) was \
+                 left in place"
+            ),
+            (None, None) => "its stored credentials were deleted".to_string(),
+        };
+        if let Some((mut child, _, _)) = self.probes.remove(name) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        std::fs::remove_dir_all(&home).with_context(|| format!("remove {}", home.display()))?;
+        self.probed.remove(name);
+        self.checks.remove(name);
+        self.ready.retain(|a| a.runtime != name);
+        self.runtimes.retain(|r| r.name != name);
+        eprintln!("axe node: runtime {name} removed");
+        Ok(login)
     }
 
     pub fn new(runtimes: Vec<Runtime>, managed: bool) -> Registry {
         Registry {
             runtimes,
             managed,
+            dir: None,
             probes: BTreeMap::new(),
             probed: BTreeMap::new(),
             checks: Default::default(),
@@ -878,6 +1004,55 @@ impl Registry {
     }
 }
 
+/// Never two runtimes on one login (#2779): quota and expiry are a login's.
+fn check_logins(runtimes: &[Runtime]) -> Result<()> {
+    for (i, a) in runtimes.iter().enumerate() {
+        for b in &runtimes[i + 1..] {
+            if a.harness == b.harness && a.login_dir == b.login_dir {
+                bail!(
+                    "runtimes {} and {} share one {} login; give each its own login_dir",
+                    a.name,
+                    b.name,
+                    a.harness
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What a runtime [`Registry::create`] adds shares with the CLI's default
+/// directory, as links: the owner's instructions, settings and skills, so a
+/// run behaves the same on every login. Never a credential or a session.
+fn shared_entries(harness: &str) -> &'static [&'static str] {
+    match harness {
+        "claude-code" => &[
+            "CLAUDE.md",
+            "settings.json",
+            "skills",
+            "agents",
+            "commands",
+            "plugins",
+        ],
+        "codex" => &["AGENTS.md", "config.toml", "skills"],
+        _ => &[],
+    }
+}
+
+/// The name stem of runtimes [`Registry::create`] adds, per harness.
+fn name_prefix(harness: &str) -> Option<&'static str> {
+    match harness {
+        "claude-code" => Some("claude"),
+        "codex" => Some("codex"),
+        _ => None,
+    }
+}
+
+/// A TOML basic string.
+fn toml_str(s: &str) -> String {
+    toml::Value::String(s.to_string()).to_string()
+}
+
 impl Runtime {
     fn read(cfg: &Config, name: &str, path: &Path) -> Result<Runtime> {
         crate::db::validate_name("runtime", name)?;
@@ -1017,7 +1192,18 @@ fn when(t: &Value) -> String {
     t.as_i64().map_or("-".into(), crate::bot::ts)
 }
 
-/// One line per runtime of a [`view`], for `axe runtimes` and `/runtimes`.
+/// A runtime state for people: `needs login`, `failing`.
+fn state_label(state: &str) -> &str {
+    match state {
+        NEEDS_LOGIN => "needs login",
+        DEGRADED => "failing",
+        s => s,
+    }
+}
+
+/// One short line per runtime of a [`view`], for `axe runtimes` and
+/// `/runtimes`: name, harness, state (with its last failure when not ok),
+/// plan, live runs and quota when known.
 pub fn render(v: &Value) -> String {
     let list = v["runtimes"].as_array().cloned().unwrap_or_default();
     if list.is_empty() {
@@ -1028,14 +1214,19 @@ pub fn render(v: &Value) -> String {
     }
     let mut out = Vec::new();
     for r in &list {
+        let state = r["state"].as_str().unwrap_or("?");
         let mut line = format!(
             "{} ({}): {}",
             r["name"].as_str().unwrap_or("?"),
             r["harness"].as_str().unwrap_or("?"),
-            r["state"].as_str().unwrap_or("?")
+            state_label(state)
         );
         if !r["until"].is_null() {
             line.push_str(&format!(" until {}", when(&r["until"])));
+        }
+        let f = &r["last_failure"];
+        if let (false, Some(c)) = (state == OK, f["class"].as_str()) {
+            line.push_str(&format!(" (last failure {} at {})", c, when(&f["at"])));
         }
         if let Some(p) = r["plan"].as_str() {
             line.push_str(&format!(", plan {p}"));
@@ -1049,10 +1240,6 @@ pub fn render(v: &Value) -> String {
                 q["window"].as_str().unwrap_or("window"),
                 when(&q["resets_at"])
             ));
-        }
-        let f = &r["last_failure"];
-        if let Some(c) = f["class"].as_str() {
-            line.push_str(&format!("\n  last failure {} at {}", c, when(&f["at"])));
         }
         out.push(line);
     }
@@ -1399,5 +1586,116 @@ exit 2
             .mark("claude-1", &expired, 60, login_at + 200, login_at)
             .is_some());
         assert_eq!(reg.get("claude-1").unwrap().health.state, NEEDS_LOGIN);
+    }
+
+    #[test]
+    fn runtimes_added_and_removed_persist_with_their_own_logins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, mut reg) = registry(tmp.path());
+        let dir = tmp.path().join("runtimes");
+
+        // A second and a third Claude: next free names, each its own login.
+        assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-2");
+        assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-3");
+        assert_eq!(reg.create(&cfg, "codex").unwrap(), "codex-2");
+        assert!(reg.create(&cfg, "gemini").is_err());
+        let names = |r: &Registry| {
+            r.runtimes
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&reg),
+            ["claude-1", "claude-2", "claude-3", "codex-1", "codex-2"]
+        );
+        let two = reg.get("claude-2").unwrap();
+        assert_eq!((two.agent.as_str(), two.state(0)), ("claude", NEEDS_LOGIN));
+        // No card for a runtime the owner just added.
+        assert_eq!(two.health.alerted.as_deref(), Some(NEEDS_LOGIN));
+        let home = dir.join("claude-2/home");
+        assert_eq!(
+            two.env().0,
+            vec![("CLAUDE_CONFIG_DIR", home.display().to_string())]
+        );
+        assert_eq!(
+            std::fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // It shares the owner's instructions, never the default login.
+        assert_eq!(
+            std::fs::read_link(home.join("CLAUDE.md")).unwrap(),
+            expand_tilde("~/.claude").join("CLAUDE.md")
+        );
+        assert!(std::fs::symlink_metadata(home.join(".credentials.json")).is_err());
+        // Its login goes to its own folder.
+        two.login(&cfg, "token", "oat-two").unwrap();
+        assert!(dir.join("claude-2/login/CLAUDE_CODE_OAUTH_TOKEN").is_file());
+
+        // A restart loads the same runtimes, with their state.
+        let mut reg = Registry::load(&cfg).unwrap();
+        assert_eq!(
+            names(&reg),
+            ["claude-1", "claude-2", "claude-3", "codex-1", "codex-2"]
+        );
+        assert_eq!(reg.get("claude-3").unwrap().health.state, NEEDS_LOGIN);
+
+        // Removal is refused while it has live runs, and works when idle.
+        let e = reg.remove("claude-2", 1).unwrap_err().to_string();
+        assert!(e.contains("has 1 live run"), "{e}");
+        assert!(dir.join("claude-2/runtime.toml").is_file());
+        let note = reg.remove("claude-2", 0).unwrap();
+        assert!(note.contains("deleted with it"), "{note}");
+        assert!(!dir.join("claude-2").exists());
+        assert!(reg.remove("claude-2", 0).is_err());
+        // Its links went with it, not what they point at.
+        let codex_two = dir.join("codex-2/home");
+        let target = std::fs::read_link(codex_two.join("AGENTS.md")).unwrap();
+        assert_eq!(target, expand_tilde("~/.codex").join("AGENTS.md"));
+        // A runtime on the CLI's default login leaves that login in place.
+        let note = reg.remove("claude-1", 0).unwrap();
+        assert!(
+            note.contains("default login (~/.claude) was left in place"),
+            "{note}"
+        );
+        // A login directory outside the registry is kept.
+        let note = reg.remove("codex-1", 0).unwrap();
+        assert!(
+            note.contains("outside the registry was left in place"),
+            "{note}"
+        );
+        assert!(tmp.path().join("codex-home").is_dir());
+        // The next add reuses the lowest free name.
+        assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-1");
+        let reg = Registry::load(&cfg).unwrap();
+        assert_eq!(names(&reg), ["claude-1", "claude-3", "codex-2"]);
+
+        // Implicit runtimes cannot change.
+        let plain =
+            Config::parse("[agents.claude]\ncmd = [\"claude\"]\nharness = \"claude-code\"\n")
+                .unwrap();
+        let mut implicit = Registry::load(&plain).unwrap();
+        assert!(implicit.create(&plain, "claude-code").is_err());
+        assert!(implicit.remove("claude", 0).is_err());
+    }
+
+    #[test]
+    fn the_list_is_one_line_per_runtime_with_failures_only_when_not_ok() {
+        let v = json!({"runtimes": [
+            {"name":"claude-1","harness":"claude-code","state":"ok","in_use":1,
+             "last_failure":{"class":"auth_invalid","at":1800000000},
+             "quota":{"utilization":0.67,"window":"seven_day","resets_at":1800000000}},
+            {"name":"claude-2","harness":"claude-code","state":"needs_login","in_use":0,
+             "last_failure":null},
+            {"name":"codex-1","harness":"codex","state":"degraded","in_use":0,"until":1800000000,
+             "last_failure":{"class":"provider_unavailable","at":1800000000}}],
+            "report_age_seconds": 1, "stale": false});
+        assert_eq!(
+            render(&v),
+            "claude-1 (claude-code): ok, 1 live, quota 67% of seven_day (resets 2027-01-15T08:00:00Z)\n\
+             claude-2 (claude-code): needs login, 0 live\n\
+             codex-1 (codex): failing until 2027-01-15T08:00:00Z (last failure \
+             provider_unavailable at 2027-01-15T08:00:00Z), 0 live"
+        );
     }
 }

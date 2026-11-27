@@ -578,8 +578,33 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// Applies the owner's registry changes (`/runtimes` Add and Remove):
+    /// between picks, so no run starts on a runtime being removed. Each
+    /// answer is `{"runtime", "note"}` or `{"error"}`.
+    fn runtime_jobs(&mut self) {
+        let jobs = std::mem::take(&mut *self.store.runtime_jobs.lock().unwrap());
+        for (q, reply) in jobs {
+            let r = match q["kind"].as_str() {
+                Some("runtime_add") => self
+                    .runtimes
+                    .create(&self.cfg, q["harness"].as_str().unwrap_or(""))
+                    .map(|name| json!({"runtime": name})),
+                Some("runtime_remove") => {
+                    let name = q["runtime"].as_str().unwrap_or("");
+                    let live = self.in_use(name);
+                    self.runtimes
+                        .remove(name, live)
+                        .map(|note| json!({"runtime": name, "note": note}))
+                }
+                _ => Err(anyhow::anyhow!("unknown runtime job")),
+            };
+            let _ = reply.try_send(r.unwrap_or_else(|e| json!({"error": format!("{e:#}")})));
+        }
+    }
+
     /// Lapses limits, probes logins and sends pending runtime cards.
     fn runtime_tick(&mut self) {
+        self.runtime_jobs();
         if !self.runtimes.managed {
             return;
         }

@@ -569,3 +569,69 @@ fn a_registry_that_shares_one_login_is_rejected() {
         "{err:#}"
     );
 }
+
+/// Task 1933: a Claude runtime added from `/runtimes` (`Registry::create`,
+/// as the node applies it) persists: a node started afterwards lists it and
+/// picks it as well as the first, each on its own login; once removed, no
+/// run goes to it.
+#[test]
+fn an_added_runtime_survives_a_restart_and_shares_the_work() {
+    let rig = Rig::new(&[(
+        "claude-1",
+        &format!("{CLAUDE}login_dir = \"~/.claude\"\n"),
+        "",
+    )]);
+    let cfg_path = rig.dir.path().join("config.toml");
+    let cfg = axe::config::Config::parse(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    let mut reg = axe::runtime::Registry::load(&cfg).unwrap();
+    assert_eq!(reg.create(&cfg, "claude-code").unwrap(), "claude-2");
+    let home = rig
+        .dir
+        .path()
+        .join("runtimes/claude-2/home")
+        .display()
+        .to_string();
+    // It needs a login first: no run goes to it.
+    let a = rig.add();
+    let stderr = rig.dispatch();
+    assert!(
+        stderr.contains(
+            "axe node: runtimes claude-1 (claude-code, ok), claude-2 (claude-code, needs_login)"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(rig.calls(), [format!("{a} fresh default default")]);
+
+    // Logged in (its check passed): both share the work.
+    rig.set_state("claude-2", r#"{"state":"ok"}"#);
+    std::fs::write(rig.out().join("sleep"), "").unwrap();
+    let (b, c) = (rig.add(), rig.add());
+    rig.dispatch();
+    let mut logins: Vec<String> = rig.calls()[1..]
+        .iter()
+        .map(|l| l.split_once(' ').unwrap().1.to_string())
+        .collect();
+    logins.sort();
+    assert_eq!(
+        logins,
+        [
+            format!("fresh {home} default"),
+            "fresh default default".to_string()
+        ],
+        "one of tasks {b} and {c} on each login"
+    );
+
+    // Removed while idle: the next node runs only on claude-1.
+    let mut reg = axe::runtime::Registry::load(&cfg).unwrap();
+    reg.remove("claude-2", 0).unwrap();
+    let d = rig.add();
+    let stderr = rig.dispatch();
+    assert!(
+        stderr.contains("axe node: runtimes claude-1 (claude-code, ok)\n"),
+        "{stderr}"
+    );
+    assert_eq!(
+        rig.calls().last().unwrap(),
+        &format!("{d} fresh default default")
+    );
+}

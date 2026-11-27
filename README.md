@@ -209,8 +209,26 @@ or needs_login sends the owner one card (`[telegram] ops_bot`, default the
 first bot). Without `[runtimes]`, every agent is a runtime on the default
 login and always healthy.
 
-**Logins from Telegram.** `/runtimes` has a *Log in* button per registered
-runtime (`runtime::login_methods`):
+**Managing runtimes from Telegram.** On a node with `[runtimes] dir`,
+`/runtimes` lists every runtime on one line (harness, state with its last
+failure when not ok, live runs, quota) with *Re-login* and *Remove* per
+runtime and *Add Claude* / *Add Codex* (`Registry::create`, `Registry::remove`):
+
+- **Add** writes `<dir>/<name>/runtime.toml` under the next free name
+  (`claude-2`) with its own `login_dir` (`<dir>/<name>/home`, linking the
+  owner's instructions, settings and skills from the CLI's default directory,
+  never its credentials) and opens its login menu. It takes no runs until its login check passes; then it shares
+  the harness's work with the others.
+- **Remove** asks to confirm, is refused while the runtime has live runs and
+  deletes `<dir>/<name>` (its stored credentials, and its login directory when
+  that is inside); a login directory elsewhere, such as the CLI's default, is
+  left in place. A session that ran on it starts fresh elsewhere.
+
+The node applies both between picks, and they persist: the registry directory
+is the state, so hand-written runtimes keep working beside them.
+
+**Logins from Telegram.** *Re-login* offers the runtime's login methods
+(`runtime::login_methods`):
 
 - **Claude Code.** A `claude setup-token` token or an API key arrives in a
   sealed form (see below). It is kept as `<name>/login/CLAUDE_CODE_OAUTH_TOKEN`

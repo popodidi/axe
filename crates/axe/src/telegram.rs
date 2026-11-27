@@ -100,6 +100,113 @@ const RUNTIMES_BUTTON: &str = "runtimes";
 /// `rtlogin:<runtime>` opens the method menu, `rtlogin:<runtime>:<method>`
 /// starts that login.
 const LOGIN_BUTTON: &str = "rtlogin:";
+/// `rtrm:<runtime>` asks to confirm removing a runtime; `rtrm!:<runtime>`
+/// removes it and `rtrm-` cancels.
+const REMOVE_BUTTON: &str = "rtrm:";
+const REMOVE_CONFIRM: &str = "rtrm!:";
+const REMOVE_CANCEL: &str = "rtrm-";
+/// `rtadd:<harness>` adds a runtime of that harness.
+const ADD_BUTTON: &str = "rtadd:";
+/// Harnesses `/runtimes` can add a runtime of, with their button labels.
+const ADDABLE: &[(&str, &str)] = &[("claude-code", "Add Claude"), ("codex", "Add Codex")];
+
+/// A press on a `/runtimes` button, by its callback data.
+#[derive(Debug, PartialEq)]
+enum RuntimePress<'a> {
+    /// A runtime card's button: the list.
+    List,
+    /// Re-login: the runtime's login methods.
+    Menu(&'a str),
+    Login(&'a str, &'a str),
+    Remove(&'a str),
+    Confirm(&'a str),
+    Cancel,
+    Add(&'a str),
+}
+
+impl<'a> RuntimePress<'a> {
+    fn parse(data: &'a str) -> Option<RuntimePress<'a>> {
+        if data == RUNTIMES_BUTTON {
+            return Some(RuntimePress::List);
+        }
+        if data == REMOVE_CANCEL {
+            return Some(RuntimePress::Cancel);
+        }
+        if let Some(l) = data.strip_prefix(LOGIN_BUTTON) {
+            return Some(match l.split_once(':') {
+                Some((name, method)) => RuntimePress::Login(name, method),
+                None => RuntimePress::Menu(l),
+            });
+        }
+        if let Some(n) = data.strip_prefix(REMOVE_CONFIRM) {
+            return Some(RuntimePress::Confirm(n));
+        }
+        if let Some(n) = data.strip_prefix(REMOVE_BUTTON) {
+            return Some(RuntimePress::Remove(n));
+        }
+        let h = data.strip_prefix(ADD_BUTTON)?;
+        ADDABLE
+            .iter()
+            .any(|(a, _)| *a == h)
+            .then_some(RuntimePress::Add(h))
+    }
+}
+
+/// The `/runtimes` list's keyboard on a node that manages its runtimes:
+/// Re-login and Remove per runtime (one row each), then the Add buttons.
+fn list_buttons(view: &Value) -> (Vec<(String, String)>, Vec<usize>) {
+    if view["managed"] != true {
+        return (vec![], vec![]);
+    }
+    let mut buttons = Vec::new();
+    let mut rows = Vec::new();
+    for r in view["runtimes"].as_array().cloned().unwrap_or_default() {
+        let Some(n) = r["name"].as_str() else {
+            continue;
+        };
+        let mut row = vec![];
+        if !crate::runtime::login_methods(r["harness"].as_str().unwrap_or("")).is_empty() {
+            row.push((format!("Re-login {n}"), format!("{LOGIN_BUTTON}{n}")));
+        }
+        row.push((format!("Remove {n}"), format!("{REMOVE_BUTTON}{n}")));
+        row.retain(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT);
+        if !row.is_empty() {
+            rows.push(row.len());
+            buttons.extend(row);
+        }
+    }
+    for (h, label) in ADDABLE {
+        buttons.push((label.to_string(), format!("{ADD_BUTTON}{h}")));
+    }
+    rows.push(ADDABLE.len());
+    (buttons, rows)
+}
+
+/// A runtime's login method menu: (text, one button per method). `added`:
+/// the runtime was just added for that harness.
+fn login_menu(name: &str, harness: &str, added: Option<&str>) -> (String, Vec<(String, String)>) {
+    let buttons: Vec<(String, String)> = crate::runtime::login_methods(harness)
+        .iter()
+        .map(|(m, _, label)| (capitalize(label), format!("{LOGIN_BUTTON}{name}:{m}")))
+        .filter(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT)
+        .collect();
+    let head = match added {
+        Some(h) => format!(
+            "Added runtime {name} ({h}) with its own login. It takes no runs until it is \
+             logged in. "
+        ),
+        None => String::new(),
+    };
+    let text = if buttons.is_empty() {
+        format!("{head}Runtime {name} cannot be logged in from here.")
+    } else {
+        format!(
+            "{head}Log in runtime {name} ({harness}). A credential goes through a sealed \
+             form, so only the node reads it."
+        )
+    };
+    (text, buttons)
+}
 /// First wait after a failed board edit; it doubles up to [`BOARD_RETRY_MAX`].
 const BOARD_RETRY: Duration = Duration::from_secs(5);
 const BOARD_RETRY_MAX: Duration = Duration::from_secs(300);
@@ -1151,8 +1258,8 @@ impl Gateway {
         Ok(())
     }
 
-    /// A press on a runtime card's button: replies with the runtime list and
-    /// wakes no bot. False when the message is not a runtime card.
+    /// A press on a runtime card's or `/runtimes` list's button: replies
+    /// in place of waking a bot. False when the message is not ours.
     fn runtimes_press(
         &self,
         b: &TgBot,
@@ -1162,10 +1269,9 @@ impl Gateway {
         data: &str,
         query: Option<&str>,
     ) -> Result<bool> {
-        let login = data.strip_prefix(LOGIN_BUTTON);
-        if data != RUNTIMES_BUTTON && login.is_none() {
+        let Some(press) = RuntimePress::parse(data) else {
             return Ok(false);
-        }
+        };
         let stored = {
             let conn = store.conn();
             let id = bot_id(&conn, &b.name())?;
@@ -1175,9 +1281,13 @@ impl Gateway {
             }
         };
         let flags = stored.map(|m| m.flags).unwrap_or_default();
-        let ours = match login {
-            None => flags["runtime_alert"] == true,
-            Some(_) => flags["runtimes_list"] == true || flags["runtime_menu"] == true,
+        let ours = match &press {
+            RuntimePress::List => flags["runtime_alert"] == true,
+            RuntimePress::Menu(_) | RuntimePress::Login(..) => {
+                flags["runtimes_list"] == true || flags["runtime_menu"] == true
+            }
+            RuntimePress::Remove(_) | RuntimePress::Add(_) => flags["runtimes_list"] == true,
+            RuntimePress::Confirm(_) | RuntimePress::Cancel => flags["runtime_remove"] == true,
         };
         if !ours {
             return Ok(false);
@@ -1190,51 +1300,109 @@ impl Gateway {
                 eprintln!("telegram: bot {}: {e}", b.name());
             }
         }
-        let thread = None;
-        match login.map(|l| l.split_once(':')) {
-            None => self.runtimes_reply(b, store, chat, Some(tg_msg), thread),
-            Some(None) => {
-                let name = login.unwrap_or_default();
-                let view = store.runtimes();
-                let harness = view["runtimes"]
-                    .as_array()
-                    .and_then(|l| l.iter().find(|r| r["name"] == name))
-                    .and_then(|r| r["harness"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let buttons: Vec<(String, String)> = crate::runtime::login_methods(&harness)
-                    .iter()
-                    .map(|(m, _, label)| (capitalize(label), format!("{LOGIN_BUTTON}{name}:{m}")))
-                    .filter(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT)
-                    .collect();
-                let text = if buttons.is_empty() {
-                    format!("Runtime {name} cannot be logged in from here.")
-                } else {
-                    format!(
-                        "Log in runtime {name} ({harness}). A credential goes through a sealed \
-                         form, so only the node reads it."
-                    )
-                };
-                let rows = vec![1; buttons.len()];
-                self.system_say(
-                    b,
-                    store,
-                    chat,
-                    tg_msg,
-                    &text,
-                    &buttons,
-                    &rows,
-                    json!({"runtime_menu": true}),
-                );
+        let say = |text: &str, buttons: &[(String, String)], extra: Value| {
+            let rows = vec![1; buttons.len()];
+            self.system_say(b, store, chat, tg_msg, text, buttons, &rows, extra);
+        };
+        let reported = |name: &str| {
+            store.runtimes()["runtimes"]
+                .as_array()
+                .and_then(|l| l.iter().find(|r| r["name"] == name).cloned())
+        };
+        match press {
+            RuntimePress::List => self.runtimes_reply(b, store, chat, Some(tg_msg), None),
+            RuntimePress::Menu(name) => {
+                let harness = reported(name)
+                    .and_then(|r| r["harness"].as_str().map(String::from))
+                    .unwrap_or_default();
+                let (text, buttons) = login_menu(name, &harness, None);
+                say(&text, &buttons, json!({"runtime_menu": true}));
             }
-            Some(Some((name, method))) => {
+            RuntimePress::Login(name, method) => {
                 let text = store
                     .runtime_login(&b.name(), name, method)
                     .unwrap_or_else(|e| format!("Login of runtime {name} not started: {e:#}"));
-                self.system_say(b, store, chat, tg_msg, &text, &[], &[], json!({}));
+                say(&text, &[], json!({}));
+            }
+            RuntimePress::Add(harness) => match store.runtime_add(harness) {
+                Ok(name) => {
+                    let (text, buttons) = login_menu(&name, harness, Some(harness));
+                    say(&text, &buttons, json!({"runtime_menu": true}));
+                }
+                Err(e) => say(
+                    &format!("No {harness} runtime added: {e:#}"),
+                    &[],
+                    json!({}),
+                ),
+            },
+            RuntimePress::Remove(name) => {
+                let Some(r) = reported(name) else {
+                    say(
+                        &format!("The node reports no runtime {name}."),
+                        &[],
+                        json!({}),
+                    );
+                    return Ok(true);
+                };
+                let live = r["in_use"].as_u64().unwrap_or(0);
+                let harness = r["harness"].as_str().unwrap_or("?");
+                if live > 0 {
+                    say(
+                        &format!(
+                            "Runtime {name} ({harness}) has {live} live run{}: it cannot be \
+                             removed now. Remove it once {} finished.",
+                            if live == 1 { "" } else { "s" },
+                            if live == 1 { "it has" } else { "they have" }
+                        ),
+                        &[],
+                        json!({}),
+                    );
+                    return Ok(true);
+                }
+                let text = format!(
+                    "Remove runtime {name} ({harness})? No run goes to it afterwards; a \
+                     session that ran on it starts fresh elsewhere. Its stored credentials \
+                     are deleted, and its login directory too when it has its own; the \
+                     CLI's default login is left in place."
+                );
+                let buttons = vec![
+                    (format!("Remove {name}"), format!("{REMOVE_CONFIRM}{name}")),
+                    ("Cancel".to_string(), REMOVE_CANCEL.to_string()),
+                ];
+                let buttons: Vec<_> = buttons
+                    .into_iter()
+                    .filter(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT)
+                    .collect();
+                say(
+                    &text,
+                    &buttons,
+                    json!({"runtime_remove": true, "runtime": name}),
+                );
+            }
+            RuntimePress::Confirm(name) => {
+                self.clear_buttons(b, chat, tg_msg);
+                let text = match store.runtime_remove(name) {
+                    Ok(note) if note.is_empty() => format!("Runtime {name} removed."),
+                    Ok(note) => format!("Runtime {name} removed: {note}."),
+                    Err(e) => format!("Runtime {name} not removed: {e:#}"),
+                };
+                say(&text, &[], json!({}));
+            }
+            RuntimePress::Cancel => {
+                self.clear_buttons(b, chat, tg_msg);
+                say("Nothing removed.", &[], json!({}));
             }
         }
         Ok(true)
+    }
+
+    /// Removes the keyboard of Telegram message `tg_msg` (best effort).
+    fn clear_buttons(&self, b: &TgBot, chat: i64, tg_msg: i64) {
+        let p = json!({"chat_id": chat, "message_id": tg_msg,
+                       "reply_markup": {"inline_keyboard": []}});
+        if let Err(e) = b.api.call("editMessageReplyMarkup", &p) {
+            eprintln!("telegram: bot {}: clear buttons: {e}", b.name());
+        }
     }
 
     /// The runtime list, with a login button per runtime the node
@@ -1249,22 +1417,7 @@ impl Gateway {
     ) {
         let view = store.runtimes();
         let text = crate::runtime::render(&view);
-        let buttons: Vec<(String, String)> = if view["managed"] == true {
-            view["runtimes"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .filter(|r| {
-                    !crate::runtime::login_methods(r["harness"].as_str().unwrap_or("")).is_empty()
-                })
-                .filter_map(|r| r["name"].as_str().map(String::from))
-                .map(|n| (format!("Log in {n}"), format!("{LOGIN_BUTTON}{n}")))
-                .filter(|(_, d)| d.len() <= CALLBACK_DATA_LIMIT)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let (buttons, rows) = list_buttons(&view);
         let mut p = json!({"chat_id": chat, "text": text});
         if let Some(r) = reply_to {
             p["reply_parameters"] = json!({"message_id": r, "allow_sending_without_reply": true});
@@ -1273,7 +1426,7 @@ impl Gateway {
             p["message_thread_id"] = json!(t);
         }
         if !buttons.is_empty() {
-            p["reply_markup"] = keyboard(&buttons, &[]);
+            p["reply_markup"] = keyboard(&buttons, &rows);
         }
         match b.paced(store, chat, || b.api.call("sendMessage", &p)) {
             Ok(sent) => {

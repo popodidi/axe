@@ -739,6 +739,9 @@ pub struct Store {
     /// Runtimes a sealed form or device login just logged in; the node
     /// checks each login at once (`runtime::Registry::check_now`).
     pub logins: Arc<Mutex<Vec<String>>>,
+    /// Runtime registry changes from the owner (`runtime_add`,
+    /// `runtime_remove`), applied by the node between picks.
+    pub runtime_jobs: crate::sealed::RuntimeJobs,
     pub client: Client,
     pub journal: Arc<Mutex<Journal>>,
     path: PathBuf,
@@ -835,6 +838,7 @@ impl Store {
         Ok(Self {
             aborts: Arc::default(),
             logins: Arc::default(),
+            runtime_jobs: Arc::default(),
             client,
             journal: Arc::new(Mutex::new(journal)),
             path,
@@ -929,7 +933,9 @@ impl Store {
             let id = self.journal.lock().unwrap().id.clone();
             match crate::sealed::Desk::open(cfg, &id) {
                 Ok(d) => {
-                    let d = d.with_logged_in(Arc::clone(&self.logins));
+                    let d = d
+                        .with_logged_in(Arc::clone(&self.logins))
+                        .with_runtime_jobs(Arc::clone(&self.runtime_jobs));
                     eprintln!(
                         "axe node: sealed form key {} ({})",
                         d.key().fingerprint(),
@@ -1112,7 +1118,16 @@ impl Store {
                                 Ok(text) => json!({"text":text}),
                                 Err(e) => json!({"unavailable":format!("{e:#}")}),
                             }
-                        } else if q["kind"] == "form_sign" || q["kind"] == "form_deliver" {
+                        } else if matches!(
+                            q["kind"].as_str(),
+                            Some(
+                                "form_sign"
+                                    | "form_deliver"
+                                    | "runtime_login"
+                                    | "runtime_add"
+                                    | "runtime_remove"
+                            )
+                        ) {
                             match &desk {
                                 Some(d) => d.handle(&q, epoch()),
                                 None => {

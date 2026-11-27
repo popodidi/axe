@@ -1195,7 +1195,15 @@ pub struct Desk {
     reply_key: PathBuf,
     /// Runtimes just logged in, for the node to check at once.
     logged_in: std::sync::Arc<Mutex<Vec<String>>>,
+    /// Registry changes for the node; `None`: refused.
+    runtime_jobs: Option<RuntimeJobs>,
 }
+
+/// Registry changes the desk hands the node: the job and where its answer goes.
+pub type RuntimeJobs = std::sync::Arc<Mutex<Vec<(Value, std::sync::mpsc::SyncSender<Value>)>>>;
+
+/// How long the desk waits for the node to apply a registry change.
+pub const RUNTIME_JOB_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
 
 fn push_login(logged_in: &Mutex<Vec<String>>, runtime: &str) {
     let mut l = logged_in.lock().unwrap_or_else(|e| e.into_inner());
@@ -1230,6 +1238,7 @@ impl Desk {
             cfg: None,
             logins: Default::default(),
             logged_in: Default::default(),
+            runtime_jobs: None,
         }
     }
 
@@ -1260,6 +1269,27 @@ impl Desk {
         self
     }
 
+    /// The desk handing registry changes (`runtime_add`, `runtime_remove`)
+    /// to the node, which applies them between picks and answers.
+    pub fn with_runtime_jobs(mut self, jobs: RuntimeJobs) -> Desk {
+        self.runtime_jobs = Some(jobs);
+        self
+    }
+
+    /// Hands `q` to the node and waits for its answer.
+    fn runtime_job(&self, q: &Value) -> Result<Value> {
+        let jobs = self
+            .runtime_jobs
+            .as_ref()
+            .context("this node cannot change its runtimes")?;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        jobs.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((q.clone(), tx));
+        rx.recv_timeout(RUNTIME_JOB_WAIT)
+            .map_err(|_| anyhow::anyhow!("the node did not answer in time"))
+    }
+
     fn logged_in(&self, runtime: &str) {
         push_login(&self.logged_in, runtime);
     }
@@ -1286,6 +1316,7 @@ impl Desk {
             Some("form_sign") => self.sign(q, now),
             Some("form_deliver") => self.deliver(q, now),
             Some("runtime_login") => self.device_login(q),
+            Some("runtime_add" | "runtime_remove") => self.runtime_job(q),
             _ => Err(anyhow::anyhow!("unknown form job")),
         };
         r.unwrap_or_else(|e| json!({"error": format!("{e:#}")}))
