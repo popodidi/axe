@@ -5503,3 +5503,201 @@ fn runtimes_log_in_first_then_set_the_bots_primary_and_backup() {
         .contains("codex-1 (codex): ok, 0 live; primary of aux"));
     assert!(rig.message_wakes().is_empty(), "no bot was woken");
 }
+
+/// The owner's actions on bot `cos` since event `after`, as the core
+/// records them: event kind and body, then queued wakes' kind and note,
+/// with actor, time and Telegram-only keys left out.
+fn owner_trace(rig: &Rig, after: i64) -> Vec<(String, Value)> {
+    let conn = rig.db();
+    let mut out: Vec<(String, Value)> = conn
+        .prepare(
+            "SELECT kind, body FROM bot_events WHERE id > ?1 AND actor != 'system' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([after], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|r| {
+            let (kind, body) = r.unwrap();
+            let mut v = serde_json::from_str(&body).unwrap_or(Value::String(body));
+            if let Some(o) = v.as_object_mut() {
+                for k in ["at", "due_at", "key", "wake", "id"] {
+                    o.remove(k);
+                }
+            }
+            (kind, v)
+        })
+        .collect();
+    let wakes: Vec<(String, Value)> = conn
+        .prepare(
+            "SELECT kind, body FROM bot_wakes WHERE kind='wake' AND actor != 'system' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                format!("queued {}", r.get::<_, String>(0)?),
+                Value::String(r.get(1)?),
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    out.extend(wakes);
+    out
+}
+
+fn last_event(rig: &Rig) -> i64 {
+    rig.db()
+        .query_row("SELECT coalesce(max(id), 0) FROM bot_events", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+}
+
+/// Contract (layering review, section 4): each owner command with an API
+/// twin records the same core action whichever way it comes in. Telegram
+/// `/stop /pause /resume /reset /wake` against `axe bot stop|pause|resume|
+/// reset|wake`.
+#[test]
+fn owner_commands_and_their_api_twins_record_the_same_actions() {
+    let live_run = |rig: &Rig| {
+        let mut conn = rig.db();
+        let tx = conn.transaction().unwrap();
+        bot::claim(&tx, "cos", None, "c1", "d", "g", axe::remote::epoch())
+            .unwrap()
+            .unwrap();
+        tx.commit().unwrap();
+    };
+    // Telegram.
+    let tg = Rig::new();
+    live_run(&tg);
+    let tg_from = last_event(&tg);
+    for (i, c) in [
+        "/stop",
+        "/pause",
+        "/resume",
+        "/reset",
+        "/wake look at PR 12",
+    ]
+    .iter()
+    .enumerate()
+    {
+        tg.stub
+            .push(text_msg(100 + i as i64, 200 + i as i64, OWNER, OWNER, c));
+    }
+    tg.stub.wait_confirmed(104);
+    wait_for("5 replies", 20, || tg.sent_to(OWNER).len() >= 5);
+    // The API.
+    let api = Rig::new();
+    live_run(&api);
+    let api_from = last_event(&api);
+    for a in [
+        &["bot", "stop", "cos"][..],
+        &["bot", "pause", "cos"],
+        &["bot", "resume", "cos"],
+        &["bot", "reset", "cos"],
+        &["bot", "wake", "cos", "--now", "--note", "look at PR 12"],
+    ] {
+        // Like Telegram, a refused action (reset with a live run) is an
+        // answer, not a change.
+        let _ = api.srv().run(a);
+    }
+    let want = owner_trace(&api, api_from);
+    assert!(!want.is_empty());
+    assert_eq!(owner_trace(&tg, tg_from), want);
+}
+
+/// Runtimes `claude-1` (agent `claude`) and `codex-1` in `dir`, logged in
+/// and ok, and the `[runtimes]`/`[agents]` config lines for them.
+fn ok_runtimes(dir: &Path) -> String {
+    for (name, harness, agent) in [
+        ("claude-1", "claude-code", "claude"),
+        ("codex-1", "codex", "codex"),
+    ] {
+        let rt = dir.join("runtimes").join(name);
+        std::fs::create_dir_all(rt.join("home")).unwrap();
+        std::fs::write(
+            rt.join("runtime.toml"),
+            format!(
+                "harness = \"{harness}\"\nagent = \"{agent}\"\nlogin_dir = \"{}\"\nprobe = []\n",
+                rt.join("home").display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(rt.join("state.json"), r#"{"state":"ok"}"#).unwrap();
+    }
+    format!(
+        "[runtimes]\ndir = \"{}\"\n[agents.claude]\ncmd = [\"true\"]\nharness = \"claude-code\"\nbot_args = []\n\
+         [agents.codex]\ncmd = [\"true\"]\nharness = \"codex\"\nsession = \"none\"\nbot_args = []\n",
+        dir.join("runtimes").display()
+    )
+}
+
+/// Contract: the /runtimes Backup, Primary and No backup buttons record the
+/// same bot edits as `axe bot edit --backup|--agent`.
+#[test]
+fn runtime_buttons_and_bot_edit_record_the_same_actions() {
+    let rts = tempfile::tempdir().unwrap();
+    // Telegram: the chat bot's buttons on the /runtimes list.
+    let tg = Rig::with(&ok_runtimes(rts.path()));
+    tg.srv().ok(&["bot", "pause", "cos"]);
+    let _node = tg.srv().dispatcher(&[], &[]);
+    wait_for("codex-1 reported", 30, || {
+        tg.srv().ok(&["runtimes"]).contains("codex-1 (codex): ok")
+    });
+    let tg_from = last_event(&tg);
+    let mut update = 300;
+    for data in ["rtbak:codex-1", "rtbak-", "rtbak:codex-1", "rtpri:codex-1"] {
+        let n = tg.sent_to(OWNER).len();
+        tg.stub
+            .push(text_msg(update, update + 1000, OWNER, OWNER, "/runtimes"));
+        wait_for("the /runtimes list", 20, || tg.sent_to(OWNER).len() > n);
+        let list = tg
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| m.2.starts_with("Runtimes"))
+            .unwrap()
+            .3;
+        let n = tg.sent_to(OWNER).len();
+        tg.stub.push(press(update + 1, list, data));
+        tg.stub.wait_confirmed(update + 1);
+        wait_for("the press reply", 20, || tg.sent_to(OWNER).len() > n);
+        update += 2;
+    }
+    // The API.
+    let api_rts = tempfile::tempdir().unwrap();
+    let api = Rig::with(&ok_runtimes(api_rts.path()));
+    api.srv().ok(&["bot", "pause", "cos"]);
+    let _node = api.srv().dispatcher(&[], &[]);
+    wait_for("codex-1 reported", 30, || {
+        api.srv().ok(&["runtimes"]).contains("codex-1 (codex): ok")
+    });
+    let api_from = last_event(&api);
+    let why = "owner via /runtimes";
+    for a in [
+        &["bot", "edit", "cos", "--backup", "codex-1", "--why", why][..],
+        &["bot", "edit", "cos", "--backup", "none", "--why", why],
+        &["bot", "edit", "cos", "--backup", "codex-1", "--why", why],
+        &["bot", "edit", "cos", "--agent", "codex-1", "--why", why],
+    ] {
+        api.srv().ok(a);
+    }
+    let want = owner_trace(&api, api_from);
+    let kinds: Vec<&str> = want.iter().map(|(k, _)| k.as_str()).collect();
+    // A new primary that was the backup also clears the backup.
+    assert_eq!(
+        kinds,
+        [
+            "backup",
+            "backup",
+            "backup",
+            "agent",
+            "backup",
+            "queued wake"
+        ],
+        "{want:?}"
+    );
+    assert_eq!(owner_trace(&tg, tg_from), want);
+}
