@@ -1356,6 +1356,80 @@ pub fn set_task(conn: &mut Connection, actor: &Actor, id: i64, c: &Changes) -> R
     Ok(changed)
 }
 
+/// A task waiting: on prerequisites `on`, else until `until` (a wake time,
+/// `+15m` or RFC3339). One transaction: an in_progress task is parked,
+/// gets its edges and goes back to pending, or nothing changes.
+pub fn wait(
+    conn: &mut Connection,
+    actor: &Actor,
+    id: i64,
+    on: &[i64],
+    until: Option<&str>,
+    note: &str,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !on.is_empty() {
+        // Edges cannot be added to an in_progress task: park it, add, resume.
+        let park = Changes {
+            state: Some("blocked".into()),
+            ..Default::default()
+        };
+        apply_changes(&tx, actor, id, &park, None)?;
+        for p in dedup(on) {
+            add_dep_in(&tx, actor, id, p)?;
+        }
+        let back = Changes {
+            state: Some("pending".into()),
+            note: Some(format!("waiting on {}: {note}", ids(on))),
+            ..Default::default()
+        };
+        apply_changes(&tx, actor, id, &back, None)?;
+    } else {
+        let Some(until) = until else {
+            bail!("wait needs on or until");
+        };
+        let when = parse_wake(until)?;
+        let c = Changes {
+            state: Some("pending".into()),
+            note: Some(format!("waiting until {when}: {note}")),
+            not_before: Some(when),
+            ..Default::default()
+        };
+        apply_changes(&tx, actor, id, &c, None)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Escalates a task for a human: what blocks it, who resolves it and how,
+/// and when it resumes, all non-empty, with its class.
+pub fn escalate(
+    conn: &mut Connection,
+    actor: &Actor,
+    id: i64,
+    blocked: &str,
+    resolver: &str,
+    resume: &str,
+    class: &str,
+) -> Result<bool> {
+    for (flag, v) in [
+        ("--blocked", blocked),
+        ("--resolver", resolver),
+        ("--resume", resume),
+    ] {
+        if v.trim().is_empty() {
+            bail!("{flag} must not be empty");
+        }
+    }
+    let c = Changes {
+        state: Some("escalated".into()),
+        note: Some(block_note(blocked, resolver, resume)),
+        escalation_class: Some(class.into()),
+        ..Default::default()
+    };
+    set_task(conn, actor, id, &c)
+}
+
 /// Corrects a task's escalation class and/or its workload; latest wins. The class
 /// applies to the latest escalation episode, or to the 1-based `episode` (in
 /// event order; see `axe task log`), which is recorded as `episode=N`.

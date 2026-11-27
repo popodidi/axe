@@ -1384,6 +1384,17 @@ pub type RuntimeJobs = std::sync::Arc<Mutex<Vec<(Value, std::sync::mpsc::SyncSen
 /// How long the desk waits for the node to apply a registry change.
 pub const RUNTIME_JOB_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// Hands job `q` to the node's main loop (`Dispatcher::runtime_jobs`) and
+/// waits for its answer.
+pub fn node_job(jobs: &RuntimeJobs, q: &Value) -> Result<Value> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    jobs.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((q.clone(), tx));
+    rx.recv_timeout(RUNTIME_JOB_WAIT)
+        .map_err(|_| anyhow::anyhow!("the node did not answer in time"))
+}
+
 fn push_login(logged_in: &Mutex<Vec<String>>, runtime: &str) {
     let mut l = logged_in.lock().unwrap_or_else(|e| e.into_inner());
     if !l.iter().any(|r| r == runtime) {
@@ -1462,12 +1473,7 @@ impl Desk {
             .runtime_jobs
             .as_ref()
             .context("this node cannot change its runtimes")?;
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        jobs.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((q.clone(), tx));
-        rx.recv_timeout(RUNTIME_JOB_WAIT)
-            .map_err(|_| anyhow::anyhow!("the node did not answer in time"))
+        node_job(jobs, q)
     }
 
     fn logged_in(&self, runtime: &str) {

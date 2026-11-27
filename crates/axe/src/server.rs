@@ -206,6 +206,18 @@ impl channel::Store for State {
     }
 }
 
+/// Has the node set or release its admission hold (a file on its host).
+fn node_admission_job(st: &State, job: serde_json::Value) -> Result<serde_json::Value> {
+    let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT).map_err(anyhow::Error::msg)?;
+    if let Some(e) = v["error"].as_str() {
+        bail!("{e}");
+    }
+    if v.get("ok").is_some() {
+        bail!("the node is too old to take an admission hold from the server");
+    }
+    Ok(v)
+}
+
 /// Has the node apply a registry change (`runtime_add`, `runtime_remove`).
 fn runtime_job(st: &State, job: serde_json::Value) -> Result<serde_json::Value> {
     let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT).map_err(anyhow::Error::msg)?;
@@ -1776,6 +1788,35 @@ struct AddBody {
 }
 
 #[derive(Deserialize)]
+struct HoldBody {
+    until: String,
+    reason: Option<String>,
+    #[serde(flatten)]
+    who: Who,
+}
+
+#[derive(Deserialize)]
+struct WaitBody {
+    #[serde(default)]
+    on: Vec<i64>,
+    until: Option<String>,
+    #[serde(default)]
+    note: String,
+    #[serde(flatten)]
+    who: Who,
+}
+
+#[derive(Deserialize)]
+struct EscalateBody {
+    blocked: String,
+    resolver: String,
+    resume: String,
+    class: String,
+    #[serde(flatten)]
+    who: Who,
+}
+
+#[derive(Deserialize)]
 struct DepsBody {
     #[serde(default)]
     add: Vec<i64>,
@@ -2399,6 +2440,31 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             ok(200, &v)
         }
         ("GET", ["api", "admission"]) => ok(200, &st.admission()),
+        ("POST", ["api", "admission", "hold"]) => {
+            let b: HoldBody = req.json()?;
+            let until = db::parse_wake(&b.until)?;
+            let at = time::OffsetDateTime::parse(
+                &until,
+                &time::format_description::well_known::Rfc3339,
+            )?;
+            if at <= time::OffsetDateTime::now_utc() {
+                bail!("--until {until} is not in the future");
+            }
+            let hold = admission::Hold {
+                until,
+                reason: b.reason,
+                set_at: Some(db::now()),
+                set_by: Some(b.who.actor().name),
+            };
+            ok(
+                200,
+                &node_admission_job(st, json!({"kind": "admission_hold", "hold": hold}))?,
+            )
+        }
+        ("DELETE", ["api", "admission", "hold"]) => ok(
+            200,
+            &node_admission_job(st, json!({"kind": "admission_release"}))?,
+        ),
         ("GET", ["api", "node", "metrics"]) => ok(
             200,
             &node_metrics::query(
@@ -2571,6 +2637,38 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             let result =
                 remote::protect(&st.conn(), id, b.clear, b.note.as_deref(), &b.who.actor())?;
             ok(200, &result)
+        }
+        ("POST", ["api", "tasks", id, "wait"]) => {
+            let id = task_id(id)?;
+            let b: WaitBody = req.json()?;
+            let mut conn = st.conn();
+            db::wait(
+                &mut conn,
+                &b.who.actor(),
+                id,
+                &b.on,
+                b.until.as_deref(),
+                &b.note,
+            )?;
+            ok(200, &json!({ "task": db::get_task(&conn, id)? }))
+        }
+        ("POST", ["api", "tasks", id, "escalate"]) => {
+            let id = task_id(id)?;
+            let b: EscalateBody = req.json()?;
+            let mut conn = st.conn();
+            let changed = db::escalate(
+                &mut conn,
+                &b.who.actor(),
+                id,
+                &b.blocked,
+                &b.resolver,
+                &b.resume,
+                &b.class,
+            )?;
+            ok(
+                200,
+                &json!({ "changed": changed, "task": db::get_task(&conn, id)? }),
+            )
         }
         ("POST", ["api", "tasks", id, "deps"]) => {
             let id = task_id(id)?;

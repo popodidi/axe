@@ -754,9 +754,10 @@ fn describe(cfg: &Resources, s: &Signal, path: &Path) -> String {
 /// A manual, expiring hold on task admission (`axe admission hold`): while
 /// it is active the node claims no task for a new session. Running
 /// sessions, deferred fallbacks of already claimed tasks and bot runs are not
-/// affected. The hold is a file on the node host, so it needs no server
-/// change and survives restarts of either process; it ends by itself at
-/// `until`, or when `axe admission release` removes the file.
+/// affected. The hold is a file on the node host, written by the node when
+/// the server relays `POST /api/admission/hold` (`Dispatcher::runtime_jobs`),
+/// so it survives restarts of either process; it ends by itself at `until`,
+/// or when `axe admission release` has the node remove the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Hold {
     /// RFC3339 instant the hold ends.
