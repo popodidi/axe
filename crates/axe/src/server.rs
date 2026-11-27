@@ -196,6 +196,9 @@ impl channel::Store for State {
         eprintln!("axe server: runtime {name} ({harness}) added from /runtimes");
         Ok(name.to_string())
     }
+    fn bot_runtime_ok(&self, name: &str) -> Result<()> {
+        bot_runtime_ok(self, name)
+    }
     fn runtime_remove(&self, runtime: &str) -> Result<String> {
         let v = runtime_job(self, json!({"kind": "runtime_remove", "runtime": runtime}))?;
         eprintln!("axe server: runtime {runtime} removed from /runtimes");
@@ -3014,14 +3017,8 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
     }
     #[derive(Deserialize)]
     struct WakeBody {
-        in_seconds: Option<i64>,
-        at: Option<String>,
-        #[serde(default)]
-        now: bool,
-        note: String,
-        key: Option<String>,
-        /// Labels the wake `[goal NAME]`; the goal must exist.
-        goal: Option<String>,
+        #[serde(flatten)]
+        wake: bot::WakeRequest,
         #[serde(flatten)]
         who: Who,
     }
@@ -3239,17 +3236,17 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("PATCH", ["api", "bots", name]) => {
             let b: EditBody = req.json()?;
-            if let Some(a) = b.edit.agent.as_deref().map(str::trim) {
-                bot_runtime_ok(st, a)?;
-            }
-            if let Some(a) = b.edit.backup.as_deref().map(str::trim) {
-                if !matches!(a, "" | "none") {
-                    bot_runtime_ok(st, a)?;
-                }
-            }
+            let check = |a: &str| bot_runtime_ok(st, a);
             ok(
                 200,
-                &bot::edit(&mut st.conn(), &b.who.actor(), name, &b.edit, &b.why)?,
+                &bot::edit(
+                    &mut st.conn(),
+                    &b.who.actor(),
+                    name,
+                    &b.edit,
+                    &b.why,
+                    &check,
+                )?,
             )
         }
         ("PUT", ["api", "bots", name, "notes"]) => {
@@ -3261,32 +3258,8 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("POST", ["api", "bots", name, "wakes"]) => {
             let b: WakeBody = req.json()?;
-            let due = match (b.in_seconds, &b.at, b.now) {
-                (Some(s), None, false) if s > 0 => now + s,
-                (None, Some(at), false) => {
-                    bot::epoch_of(&db::parse_wake(at)?).context("invalid wake time")?
-                }
-                (None, None, true) => now,
-                _ => bail!("give exactly one of in_seconds (> 0), at or now"),
-            };
-            let mut conn = st.conn();
-            let goal = match &b.goal {
-                Some(g) if !b.note.trim().is_empty() => goal::resolve(&conn, g)?,
-                _ => None,
-            };
-            let note = match goal {
-                Some(g) => goal::label(&g.name, &b.note),
-                None => b.note,
-            };
-            let (id, due_at) = bot::add_wake(
-                &mut conn,
-                &b.who.actor(),
-                name,
-                due,
-                &note,
-                b.key.as_deref(),
-                now,
-            )?;
+            let (id, due_at) =
+                bot::request_wake(&mut st.conn(), &b.who.actor(), name, &b.wake, now)?;
             ok(201, &json!({"wake":id,"due_at":due_at}))
         }
         ("POST", ["api", "bots", name, "inbox"]) => {

@@ -3969,21 +3969,23 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     assert_eq!(rig.stub.calls("answerCallbackQuery").len(), 1);
     assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
 
-    // Remove is refused while the runtime has live runs.
+    // A runtime with live runs still gets the confirmation: the node refuses
+    // the remove itself, once (`Registry::remove`).
     wait_for("the list recorded", 20, || {
         rig.messages().last().unwrap().2.contains("codex-1")
     });
     let list_tg = rig.messages().last().unwrap().3;
     rig.stub.push(press(102, list_tg, "rtrm:codex-1"));
     rig.stub.wait_confirmed(102);
-    wait_for("the refusal", 20, || rig.sent_to(OWNER).len() >= 4);
-    let refused = rig.sent_to(OWNER).pop().unwrap();
-    assert_eq!(
-        refused["text"],
-        "Runtime codex-1 (codex) has 1 live run: it cannot be removed now. Remove it once \
-         it has finished."
+    wait_for("the confirmation", 20, || rig.sent_to(OWNER).len() >= 4);
+    let confirm = rig.sent_to(OWNER).pop().unwrap();
+    assert!(
+        confirm["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Remove runtime codex-1 (codex)?"),
+        "{confirm}"
     );
-    assert!(refused["reply_markup"].is_null(), "{refused}");
     assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
 }
 

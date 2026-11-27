@@ -853,7 +853,7 @@ fn a_heartbeat_value_is_refused_clearly_and_null_is_accepted() {
         heartbeat: Some("4h".into()),
         ..Default::default()
     };
-    let err = bot::edit(&mut conn, &human, "b", &edit, "w").unwrap_err();
+    let err = bot::edit(&mut conn, &human, "b", &edit, "w", &|_| Ok(())).unwrap_err();
     assert!(err.to_string().contains("heartbeat was removed"), "{err}");
 
     // Through the server, as an older CLI sends it.
@@ -960,7 +960,7 @@ fn field_caps() {
         conduct: Some("x".repeat(bot::CONDUCT_CAP + 1)),
         ..Default::default()
     };
-    assert!(bot::edit(&mut conn, &human, "b", &edit, "test").is_err());
+    assert!(bot::edit(&mut conn, &human, "b", &edit, "test", &|_| Ok(())).is_err());
     let e =
         bot::set_notes(&mut conn, &human, "b", &"n".repeat(bot::NOTES_CAP + 1), "w").unwrap_err();
     assert!(e.to_string().contains("cap is 32768 bytes"), "{e}");
@@ -980,7 +980,7 @@ fn field_caps() {
         identity: Some("new identity\n".into()),
         ..Default::default()
     };
-    bot::edit(&mut conn, &human, "b", &edit, "sharpen focus").unwrap();
+    bot::edit(&mut conn, &human, "b", &edit, "sharpen focus", &|_| Ok(())).unwrap();
     let events = bot::events(&conn, "b", 10).unwrap();
     let identity = events.iter().find(|e| e.kind == "identity").unwrap();
     assert!(identity.body.starts_with("why: sharpen focus\n"));
@@ -1191,7 +1191,7 @@ fn a_bot_rotation_threshold_and_inline_notes_apply_to_that_bot_only() {
             }),
             ..Default::default()
         };
-        bot::edit(conn, &human, "trial", &e, "trial")
+        bot::edit(conn, &human, "trial", &e, "trial", &|_| Ok(()))
     };
     // Defaults: 200k, warned at 150k, notes not inlined.
     let r = bot::get(&conn, "trial").unwrap().rotation.unwrap();

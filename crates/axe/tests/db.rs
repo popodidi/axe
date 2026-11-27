@@ -796,7 +796,7 @@ fn migrates_v17_bot_repos_and_keeps_them_after_downgrade() {
         repos: Some(vec!["a".into(), "b".into()]),
         ..Default::default()
     };
-    axe::bot::edit(&mut c, &Actor::new("test"), "b", &edit, "test").unwrap();
+    axe::bot::edit(&mut c, &Actor::new("test"), "b", &edit, "test", &|_| Ok(())).unwrap();
     c.pragma_update(None, "user_version", 17).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();
@@ -845,7 +845,15 @@ fn migrates_v19_bot_retro_and_keeps_it_after_downgrade() {
         }),
         ..Default::default()
     };
-    axe::bot::edit(&mut c, &Actor::new("human"), "b", &edit, "test").unwrap();
+    axe::bot::edit(
+        &mut c,
+        &Actor::new("human"),
+        "b",
+        &edit,
+        "test",
+        &|_| Ok(()),
+    )
+    .unwrap();
     c.pragma_update(None, "user_version", 19).unwrap();
     drop(c);
     let c = db::open(&path).unwrap();

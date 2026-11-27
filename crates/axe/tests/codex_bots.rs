@@ -285,7 +285,15 @@ fn a_runtime_switch_is_refused_during_a_live_run() {
         agent: Some("codex".into()),
         ..Default::default()
     };
-    let err = bot::edit(&mut conn, &Actor::new("human"), "b", &edit, "w").unwrap_err();
+    let err = bot::edit(
+        &mut conn,
+        &Actor::new("human"),
+        "b",
+        &edit,
+        "w",
+        &|_| Ok(()),
+    )
+    .unwrap_err();
     assert!(format!("{err:#}").contains("live run"), "{err:#}");
     assert_eq!(bot::get(&conn, "b").unwrap().agent, "claude");
 }
