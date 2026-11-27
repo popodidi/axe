@@ -3188,6 +3188,9 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("PATCH", ["api", "bots", name]) => {
             let b: EditBody = req.json()?;
+            if let Some(a) = b.edit.agent.as_deref().map(str::trim) {
+                st.check_agent(|c| c.validate_bot_agent(a))?;
+            }
             ok(
                 200,
                 &bot::edit(&mut st.conn(), &b.who.actor(), name, &b.edit, &b.why)?,

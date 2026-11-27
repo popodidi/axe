@@ -459,7 +459,9 @@ impl Dispatcher {
         self.runtimes
             .get(name)
             .and_then(|r| self.cfg.agents.get(&r.agent))
-            .is_some_and(|a| (!bot || a.bot_args.is_some()) && (!resume || a.resume_cmd.is_some()))
+            .is_some_and(|a| {
+                (!bot || a.bot_args().is_some()) && (!resume || a.resume_cmd.is_some())
+            })
     }
 
     /// The least-used healthy runtime of `harness` (then by name); bots also

@@ -48,8 +48,9 @@ pub struct Agent {
     #[serde(default = "default_session")]
     pub session: String,
     /// Bot runs only: arguments spliced in before the `{prompt}` argument of
-    /// `cmd`/`resume_cmd`. May also use `{system_prompt_file}` and
-    /// `{settings_file}`. Agents without it cannot run bots.
+    /// `cmd`/`resume_cmd`. May also use [`BOT_VARS`]. Omitted: the harness
+    /// default when `cmd` runs `claude` or `codex` ([`Agent::bot_args`]);
+    /// other agents without it cannot run bots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_args: Option<Vec<String>>,
     /// The harness this agent drives (`rule::HARNESSES`), so selection rules
@@ -78,6 +79,22 @@ impl Agent {
             "codex" => Some("codex"),
             _ => None,
         }
+    }
+
+    /// The arguments a bot run splices in: `bot_args`, else the harness
+    /// default when `cmd` runs the `claude` or `codex` CLI, else `None` (the
+    /// agent cannot run bots).
+    pub fn bot_args(&self) -> Option<Vec<String>> {
+        if let Some(a) = &self.bot_args {
+            return Some(a.clone());
+        }
+        let bin = Path::new(self.cmd.first()?).file_name()?.to_str()?;
+        let args: &[&str] = match bin {
+            "claude" => &CLAUDE_BOT_ARGS,
+            "codex" => &CODEX_BOT_ARGS,
+            _ => return None,
+        };
+        Some(args.iter().map(|a| a.to_string()).collect())
     }
 
     pub fn session_mode(&self) -> Result<SessionMode> {
@@ -1109,6 +1126,30 @@ fn default_session() -> String {
     "none".into()
 }
 
+/// Claude Code bot runs: the system prompt appended from a file and the
+/// inbox hooks (`bot::settings_json`) from a settings file.
+pub const CLAUDE_BOT_ARGS: [&str; 6] = [
+    "--system-prompt-snapshot",
+    "off",
+    "--append-system-prompt-file",
+    "{system_prompt_file}",
+    "--settings",
+    "{settings_file}",
+];
+
+/// Codex bot runs (`codex exec` and `codex exec resume`, verified on
+/// codex-cli 0.172): the system prompt as `developer_instructions` (added to
+/// Codex's own instructions, not replacing them) and the same inbox hooks as
+/// an inline `hooks` table. Codex runs only hooks it has trusted; these are
+/// axe's own, written per run, so trust is bypassed for the run.
+pub const CODEX_BOT_ARGS: [&str; 5] = [
+    "--dangerously-bypass-hook-trust",
+    "-c",
+    "developer_instructions={system_prompt_toml}",
+    "-c",
+    "hooks={hooks_toml}",
+];
+
 fn builtin_claude() -> Agent {
     Agent {
         resume_cmd: Some(
@@ -1142,18 +1183,7 @@ fn builtin_claude() -> Agent {
         .map(String::from)
         .to_vec(),
         session: "preset".into(),
-        bot_args: Some(
-            [
-                "--system-prompt-snapshot",
-                "off",
-                "--append-system-prompt-file",
-                "{system_prompt_file}",
-                "--settings",
-                "{settings_file}",
-            ]
-            .map(String::from)
-            .to_vec(),
-        ),
+        bot_args: Some(CLAUDE_BOT_ARGS.map(String::from).to_vec()),
         harness: None,
     }
 }
@@ -1222,12 +1252,21 @@ impl Config {
         Ok(cfg)
     }
 
-    /// A bot's agent must exist and define `bot_args`.
+    /// A bot's agent must be an `[agents.*]` entry, or a runtime of this
+    /// node's registry (`codex-1`), whose template has bot arguments
+    /// ([`Agent::bot_args`]).
     pub fn validate_bot_agent(&self, agent: &str) -> Result<()> {
-        match self.agents.get(agent) {
+        let runtime = match (self.agents.contains_key(agent), &self.runtimes) {
+            (false, Some(_)) => crate::runtime::Registry::load(self)
+                .ok()
+                .and_then(|r| r.get(agent).map(|rt| rt.agent.clone())),
+            _ => None,
+        };
+        let template = runtime.as_deref().unwrap_or(agent);
+        match self.agents.get(template) {
             None => bail!("unknown agent {agent:?}"),
-            Some(a) if a.bot_args.is_none() => {
-                bail!("agent {agent:?} has no bot_args; it cannot run bots")
+            Some(a) if a.bot_args().is_none() => {
+                bail!("agent {template:?} has no bot_args; it cannot run bots")
             }
             Some(_) => Ok(()),
         }
@@ -1508,7 +1547,6 @@ impl Config {
 /// Placeholders an agent command template may use.
 pub const TEMPLATE_VARS: [&str; 5] = ["session_id", "prompt", "cwd", "task_id", "project"];
 
-/// Extra placeholders only `bot_args` may use.
 /// The config `axe init` writes: a `stub` agent for a first run without a
 /// model. It must parse (`tests/config.rs`).
 pub const STARTER: &str = r#"# axe config: `axe config` prints it resolved; every field is in `Config`
@@ -1529,7 +1567,16 @@ cmd = ["sh", "-c", "axe task note \"$AXE_TASK\" \"stub agent ran in $PWD\" && ax
 session = "none"
 "#;
 
-pub const BOT_VARS: [&str; 2] = ["system_prompt_file", "settings_file"];
+/// Extra placeholders only `bot_args` may use. `system_prompt_toml` and
+/// `hooks_toml` are the system prompt and the inbox
+/// hooks as TOML values, for CLIs that take them as config overrides (Codex
+/// `-c key=value`).
+pub const BOT_VARS: [&str; 4] = [
+    "system_prompt_file",
+    "settings_file",
+    "system_prompt_toml",
+    "hooks_toml",
+];
 
 /// Rejects `{name}` placeholders that are not in [`TEMPLATE_VARS`] or `extra`.
 fn check_vars(arg: &str, extra: &[&str]) -> Result<()> {
