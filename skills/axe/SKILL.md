@@ -176,3 +176,9 @@ Node task sessions have `AXE_ACTOR=agent`, `AXE_SESSION`, `AXE_TASK`,
 `AXE_SERVER` and `AXE_WORKTREE` (the task's run workspace) set. Bot sessions have
 `AXE_ACTOR=bot:<name>`, `AXE_BOT`, `AXE_BOT_RUN`, `AXE_SESSION` and
 `AXE_WORKTREE`, and no `AXE_TASK`.
+
+In a Claude Code task session, notes, spec edits and other changes someone
+else makes to the task arrive after your next tool call
+(`axe task inbox --hook post-tool`, installed in the run folder's
+`.claude/settings.json`). They may amend or cancel your work: re-read the spec
+before continuing.
