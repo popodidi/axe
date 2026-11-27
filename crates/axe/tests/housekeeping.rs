@@ -1310,6 +1310,89 @@ fn idle_worktrees_lose_ignored_build_output_only() {
     assert!(wt(4).join("web/node_modules").exists());
 }
 
+/// Rule C covers every task not in progress, idle since its last run: a
+/// ready or waiting pending task loses its build output after `idle`, while
+/// in-progress tasks and recent runs keep theirs, and source, uncommitted
+/// changes and non-cache directories stay.
+#[test]
+fn idle_pending_tasks_lose_build_output_after_their_last_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tmp.path().canonicalize().unwrap();
+    let workspace = tmp.join("workspace");
+    let src = workspace.join("src");
+    repo(&src);
+    fs::write(src.join(".gitignore"), "/target/\n/scratch/\n").unwrap();
+    git(&src, &["add", ".gitignore"]);
+    git(&src, &["commit", "-q", "-m", "ignore"]);
+    let runs = workspace.join(".runs");
+    let folder = |id: u64| runs.join(format!("task-{id}"));
+    let wt = |id: u64| folder(id).join("repos/src");
+    for id in [60, 61, 62, 63, 64] {
+        run_folder(&folder(id), &[(&src, "src")]);
+        write_mib(&wt(id).join("target/debug/axe"), 1);
+        // Uncommitted work and ignored non-cache files.
+        fs::write(wt(id).join("tracked.txt"), "edited").unwrap();
+        fs::write(wt(id).join("new.rs"), "fn main() {}").unwrap();
+        fs::create_dir_all(wt(id).join("scratch")).unwrap();
+        fs::write(wt(id).join("scratch/notes"), "keep").unwrap();
+    }
+    let runs_at = |routes: &mut HashMap<String, Value>, id: u64, end: &str| {
+        routes.insert(
+            format!("/api/tasks/{id}/events"),
+            json!([
+                {"at": OLD, "kind": "created", "to_value": null},
+                {"at": OLD, "kind": "run_start", "to_value": null},
+                {"at": end, "kind": "run_end", "to_value": null},
+            ]),
+        );
+    };
+    // 60 ready, last run 2h ago (updated just now); 61 waiting, last run 2h
+    // ago; 62 ready, last run 10 minutes ago; 63 in progress, last run long
+    // ago; 64 escalated, last run 2h ago.
+    let mut routes = HashMap::new();
+    let (two_h, just) = (ago(Duration::hours(2)), ago(Duration::minutes(1)));
+    held_task(&mut routes, 60, "pending", "pending", &just);
+    runs_at(&mut routes, 60, &two_h);
+    held_task(&mut routes, 61, "pending", "blocked", &two_h);
+    runs_at(&mut routes, 61, &two_h);
+    held_task(&mut routes, 62, "pending", "pending", OLD);
+    runs_at(&mut routes, 62, &ago(Duration::minutes(10)));
+    held_task(&mut routes, 63, "in_progress", "in_progress", OLD);
+    runs_at(&mut routes, 63, OLD);
+    held_task(&mut routes, 64, "escalated", "escalated", &just);
+    runs_at(&mut routes, 64, &two_h);
+    let url = serve(routes, 200).url;
+    let cfg = config(
+        &workspace,
+        &format!("{}[housekeeping.build_output]\nidle = \"1h\"\n", calm(&tmp)),
+    );
+
+    let tick = keeper(&cfg, &url, true, &tmp).tick(None, &AtomicBool::new(false));
+    assert!(tick.ok, "{:?}", tick.lines);
+    let lines = kind_lines(&tick.lines, "build_output");
+    for (id, status) in [(60, "pending"), (61, "blocked"), (64, "escalated")] {
+        let (task, decision, why) = &lines[&wt(id).join("target")];
+        assert_eq!((task, decision.as_str()), (&json!(id), "deleted"), "{why}");
+        assert!(why.starts_with(&format!("{status}, idle")), "{why}");
+        assert!(
+            why.contains("since last run") && why.contains(" bytes"),
+            "{why}"
+        );
+        assert!(!wt(id).join("target").exists());
+    }
+    for id in [60, 61, 62, 63, 64] {
+        let w = wt(id);
+        assert_eq!(fs::read_to_string(w.join("tracked.txt")).unwrap(), "edited");
+        assert!(w.join("new.rs").exists() && w.join("scratch/notes").exists());
+        assert!(!lines.contains_key(&w.join("scratch")), "{lines:?}");
+    }
+    // A recent run or a run in progress: kept and not reported.
+    for id in [62, 63] {
+        assert!(wt(id).join("target/debug/axe").exists(), "task {id}");
+        assert!(!lines.keys().any(|p| p.starts_with(wt(id))), "{lines:?}");
+    }
+}
+
 /// Rule D: cache-root entries no task path claims.
 #[test]
 fn orphan_caches_go_once_unused() {

@@ -19,7 +19,8 @@
 //! Optional reclaim rules for what that misses:
 //! - `[housekeeping.build_output]`: git-ignored build output (`target`,
 //!   `node_modules`, ...) in the worktrees of done tasks (once no run is live)
-//!   and of idle blocked or escalated tasks, including the `repos/<name>`
+//!   and of any other task not in progress whose last run is `idle` old
+//!   (pending, waiting, blocked or escalated), including the `repos/<name>`
 //!   worktrees of a retained run folder; source and commits stay. Run folders
 //!   get this every tick, not only on the (hourly, unpressured) full sweep.
 //! - `[housekeeping.tmp]`: task-named scratch in a temp directory once the task
@@ -323,11 +324,30 @@ impl TaskRow {
         Ok(format!("{status}, idle {age}s"))
     }
 
-    /// Rule C's gate: a done task's build output may go at once (nothing
-    /// resumes a done task on its own); a held task's waits for `idle`.
-    fn build_idle(&self, idle: u64, now: i64) -> Result<String, String> {
-        let idle = if self.status() == "done" { 0 } else { idle };
-        self.idle_for(idle, now)
+    /// Rule C's gate: any task not in progress whose last run (start or end
+    /// in `events`; `updated_at` when it never ran) is `idle` old. A done
+    /// task's build output may go at once (nothing resumes a done task on its
+    /// own); a pending, blocked or escalated task rebuilds when it resumes.
+    fn build_idle(&self, events: &[Event], idle: u64, now: i64) -> Result<String, String> {
+        let status = self.status();
+        if self.state == "in_progress" || status == "in_progress" {
+            return Err(format!("task status is {status:?}"));
+        }
+        let idle = if status == "done" { 0 } else { idle };
+        let (what, at) = events
+            .iter()
+            .rev()
+            .find(|e| matches!(e.kind.as_str(), "run_start" | "run_end"))
+            .map_or(("updated", self.updated_at.as_str()), |e| {
+                ("last run", e.at.as_str())
+            });
+        let at = OffsetDateTime::parse(at, &Rfc3339)
+            .map_err(|e| format!("bad {what} time {at:?}: {e}"))?;
+        let age = (now - at.unix_timestamp()).max(0);
+        if age < idle as i64 {
+            return Err(format!("{status}, {what} {age}s ago, idle {idle}s"));
+        }
+        Ok(format!("{status}, idle {age}s since {what}"))
     }
 }
 
@@ -1260,10 +1280,11 @@ impl Keeper {
         if task.project != project {
             return Err(format!("task belongs to project {:?}", task.project));
         }
-        let reason = task.build_idle(bo.idle, unix_now())?;
-        if run_is_live(&self.events(id, fresh)?) {
+        let events = self.events(id, fresh)?;
+        if run_is_live(&events) {
             return Err("task has a live run".into());
         }
+        let reason = task.build_idle(&events, bo.idle, unix_now())?;
         git_ignored_untracked(dir)?;
         let stats = self.removable(dir, fresh)?;
         Ok(format!("{reason}, git-ignored, {} bytes", stats.bytes))
@@ -1285,9 +1306,13 @@ impl Keeper {
         if dirs.is_empty() {
             return true;
         }
-        let idle = self
-            .task_row(c.task, false)
-            .is_ok_and(|t| t.project == project && t.build_idle(bo.idle, unix_now()).is_ok());
+        let idle = self.task_row(c.task, false).is_ok_and(|t| {
+            t.project == project
+                && t.state != "in_progress"
+                && self
+                    .events(c.task, false)
+                    .is_ok_and(|ev| t.build_idle(&ev, bo.idle, unix_now()).is_ok())
+        });
         if !idle {
             return true;
         }
@@ -2051,6 +2076,58 @@ mod tests {
             .is_err());
         assert!(row("blocked", "blocked", "garbage")
             .idle_for(0, now)
+            .is_err());
+    }
+
+    #[test]
+    fn build_idle_counts_from_the_last_run_of_any_task_not_in_progress() {
+        let row = |state: &str, status: &str| TaskRow {
+            id: 1,
+            project: "p".into(),
+            state: state.into(),
+            status: status.into(),
+            updated_at: "2026-11-12T11:59:00Z".into(),
+        };
+        let run = |kind: &str, at: &str| Event {
+            at: at.into(),
+            kind: kind.into(),
+            to_value: None,
+        };
+        let now = OffsetDateTime::parse("2026-11-12T12:00:00Z", &Rfc3339)
+            .unwrap()
+            .unix_timestamp();
+        let old = [
+            run("run_start", "2026-11-12T09:00:00Z"),
+            run("run_end", "2026-11-12T10:00:00Z"),
+        ];
+        let recent = [
+            run("run_end", "2026-11-12T10:00:00Z"),
+            run("run_start", "2026-11-12T11:30:00Z"),
+            run("run_end", "2026-11-12T11:40:00Z"),
+        ];
+        // Ready, waiting, blocked, escalated: the last run counts, not updated_at.
+        for (state, status) in [
+            ("pending", "pending"),
+            ("pending", "blocked"),
+            ("blocked", "blocked"),
+            ("escalated", "escalated"),
+        ] {
+            let ok = row(state, status).build_idle(&old, 3600, now);
+            assert!(
+                ok.as_ref().is_ok_and(|r| r.contains("since last run")),
+                "{ok:?}"
+            );
+            assert!(row(state, status).build_idle(&recent, 3600, now).is_err());
+        }
+        // Never ran: updated_at counts.
+        assert!(row("pending", "pending")
+            .build_idle(&[], 3600, now)
+            .is_err());
+        assert!(row("pending", "pending").build_idle(&[], 60, now).is_ok());
+        // Done goes at once; in progress never.
+        assert!(row("done", "done").build_idle(&recent, 3600, now).is_ok());
+        assert!(row("in_progress", "in_progress")
+            .build_idle(&old, 0, now)
             .is_err());
     }
 
