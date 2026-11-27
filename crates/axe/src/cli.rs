@@ -2546,8 +2546,8 @@ enum BotCmd {
 #[derive(Subcommand)]
 enum AdmissionCmd {
     /// Admit no new task sessions until a time. Running sessions continue and
-    /// bot runs are unaffected. Run it on the node host: the hold is a
-    /// file there ($AXE_ADMISSION_HOLD, default
+    /// bot runs are unaffected. The server has the node write it: a file on
+    /// the node host ($AXE_ADMISSION_HOLD, default
     /// ~/.local/state/axe/admission-hold.json). Replaces any current hold
     Hold {
         /// When the hold ends by itself (RFC3339, e.g. 2026-11-10T23:00Z, or +<n>[smhd])
@@ -4816,36 +4816,27 @@ fn run_cmd(cli: &Cli) -> Result<()> {
             command: Some(command),
             ..
         } => {
-            let path = crate::admission::hold_path();
             let want = match command {
                 AdmissionCmd::Hold { until, reason } => {
-                    let until = db::parse_wake(until)?;
-                    let at = time::OffsetDateTime::parse(
-                        &until,
-                        &time::format_description::well_known::Rfc3339,
+                    let v: Value = client().send(
+                        "POST",
+                        "/api/admission/hold",
+                        json!({"until": until, "reason": reason}),
                     )?;
-                    if at <= time::OffsetDateTime::now_utc() {
-                        anyhow::bail!("--until {until} is not in the future");
-                    }
-                    let hold = crate::admission::Hold {
-                        until,
-                        reason: reason.clone(),
-                        set_at: Some(db::now()),
-                        set_by: Some(cli.actor.clone()),
-                    };
-                    crate::admission::write_hold(&path, &hold)?;
                     println!(
                         "admission hold set until {} ({})",
-                        hold.until,
-                        path.display()
+                        v["hold"]["until"].as_str().unwrap_or("?"),
+                        v["path"].as_str().unwrap_or("?")
                     );
-                    crate::admission::HoldState::Active(hold).json()
+                    v["hold"].clone()
                 }
                 AdmissionCmd::Release => {
-                    if crate::admission::remove_hold(&path)? {
-                        println!("admission hold released ({})", path.display());
+                    let v: Value = client().send("DELETE", "/api/admission/hold", json!({}))?;
+                    let path = v["path"].as_str().unwrap_or("?");
+                    if v["released"] == true {
+                        println!("admission hold released ({path})");
                     } else {
-                        println!("no admission hold was set ({})", path.display());
+                        println!("no admission hold was set ({path})");
                     }
                     Value::Null
                 }
@@ -4862,8 +4853,7 @@ fn run_cmd(cli: &Cli) -> Result<()> {
                 }
                 if std::time::Instant::now() >= deadline {
                     anyhow::bail!(
-                        "the node has not reported this change within {} s (it reports {}): \
-                         run this on the node host with a node that supports holds",
+                        "the node has not reported this change within {} s (it reports {})",
                         HOLD_CONFIRM.as_secs(),
                         a.get("hold")
                             .map_or("no hold support".to_string(), |h| h.to_string())
@@ -5109,20 +5099,11 @@ fn run_task(client: &dyn Fn() -> Client, command: &TaskCmd) -> Result<()> {
             resume,
             class,
         } => {
-            for (flag, v) in [
-                ("--blocked", blocked),
-                ("--resolver", resolver),
-                ("--resume", resume),
-            ] {
-                if v.trim().is_empty() {
-                    anyhow::bail!("{flag} must not be empty");
-                }
-            }
-            let note = db::block_note(blocked, resolver, resume);
-            patch(
-                &client(),
-                *id,
-                json!({ "state": "escalated", "note": note, "escalation_class": class }),
+            let _: Value = client().send(
+                "POST",
+                &format!("/api/tasks/{id}/escalate"),
+                json!({ "blocked": blocked, "resolver": resolver, "resume": resume,
+                        "class": class }),
             )?;
         }
         TaskCmd::Classify {
@@ -5144,29 +5125,17 @@ fn run_task(client: &dyn Fn() -> Client, command: &TaskCmd) -> Result<()> {
             for_,
             note,
         } => {
-            if !on.is_empty() {
-                // Edges cannot be added to an in_progress task: park it, add, resume.
-                patch(&client(), *id, json!({ "state": "blocked" }))?;
-                let _: Value = client().send(
-                    "POST",
-                    &format!("/api/tasks/{id}/deps"),
-                    json!({ "add": on, "remove": [] }),
-                )?;
-                let note = format!("waiting on {}: {note}", db::ids(on));
-                patch(&client(), *id, json!({ "state": "pending", "note": note }))?;
-            } else {
-                let when = match (until, for_) {
-                    (Some(t), _) => db::parse_wake(t)?,
-                    (None, Some(d)) => db::parse_wake(&format!("+{}", d.trim_start_matches('+')))?,
-                    (None, None) => unreachable!("clap requires --on, --until or --for"),
-                };
-                let note = format!("waiting until {when}: {note}");
-                patch(
-                    &client(),
-                    *id,
-                    json!({ "state": "pending", "not_before": when, "note": note }),
-                )?;
-            }
+            let until = match (until, for_) {
+                _ if !on.is_empty() => None,
+                (Some(t), _) => Some(t.clone()),
+                (None, Some(d)) => Some(format!("+{}", d.trim_start_matches('+'))),
+                (None, None) => unreachable!("clap requires --on, --until or --for"),
+            };
+            let _: Value = client().send(
+                "POST",
+                &format!("/api/tasks/{id}/wait"),
+                json!({ "on": on, "until": until, "note": note }),
+            )?;
         }
         TaskCmd::Note { id, text, file } => {
             let body = match (text, file) {
@@ -5218,11 +5187,6 @@ fn run_task(client: &dyn Fn() -> Client, command: &TaskCmd) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-fn patch(client: &Client, id: i64, body: Value) -> Result<()> {
-    let _: Value = client.send("PATCH", &format!("/api/tasks/{id}"), body)?;
     Ok(())
 }
 

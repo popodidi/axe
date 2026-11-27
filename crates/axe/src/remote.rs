@@ -934,6 +934,7 @@ impl Store {
         let base = self.client.base().to_owned();
         let token = self.client.token()?;
         let control = self.client.clone();
+        let node_jobs = Arc::clone(&self.runtime_jobs);
         // Sealed forms: the node key is made on first start.
         let desk = {
             let id = self.journal.lock().unwrap().id.clone();
@@ -1126,6 +1127,12 @@ impl Store {
                                 Ok(text) => json!({"text":text}),
                                 Err(e) => json!({"unavailable":format!("{e:#}")}),
                             }
+                        } else if matches!(
+                            q["kind"].as_str(),
+                            Some("admission_hold" | "admission_release")
+                        ) {
+                            crate::sealed::node_job(&node_jobs, &q)
+                                .unwrap_or_else(|e| json!({"error": format!("{e:#}")}))
                         } else if matches!(
                             q["kind"].as_str(),
                             Some(

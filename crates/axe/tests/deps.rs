@@ -828,3 +828,41 @@ fn cli_and_api_fan_in_fixture_with_separate_manual_hold() {
         "{log}"
     );
 }
+
+/// `axe task wait --on` is one server action (`db::wait`): a refused edge
+/// leaves the task as it was, not parked in `blocked`.
+#[test]
+fn wait_on_is_atomic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = open(&dir);
+    let pre = add(&mut conn, &[]);
+    let t = add(&mut conn, &[]);
+    assert_eq!(claim(&mut conn), Some(pre));
+    assert_eq!(claim(&mut conn), Some(t));
+    let who = Actor::new("agent");
+    assert!(db::wait(&mut conn, &who, t, &[9999], None, "n").is_err());
+    assert_eq!(get(&conn, t).state, "in_progress");
+    db::wait(&mut conn, &who, t, &[pre], None, "after pre").unwrap();
+    let got = get(&conn, t);
+    assert_eq!(got.state, "pending");
+    assert_eq!(ids(&got.deps.blocked_by), [pre]);
+    // A timed wait needs a time.
+    assert!(db::wait(&mut conn, &who, pre, &[], None, "n").is_err());
+    db::wait(&mut conn, &who, pre, &[], Some("+15m"), "check").unwrap();
+    assert!(get(&conn, pre).not_before.is_some());
+}
+
+/// The escalation note policy is the server's (`db::escalate`), not the CLI's.
+#[test]
+fn escalate_needs_every_part_of_the_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = open(&dir);
+    let t = add(&mut conn, &[]);
+    let who = Actor::new("agent");
+    let e = err(db::escalate(
+        &mut conn, &who, t, " ", "owner: x", "y", "decision",
+    ));
+    assert!(e.contains("--blocked must not be empty"), "{e}");
+    db::escalate(&mut conn, &who, t, "b", "owner: x", "y", "decision").unwrap();
+    assert_eq!(get(&conn, t).state, "escalated");
+}

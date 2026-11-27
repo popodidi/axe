@@ -94,14 +94,12 @@ const LOCAL: &[&str] = &[
     "fs::remove_file",
     "fs::create_dir",
     "OpenOptions",
-    "admission::write_hold",
-    "admission::remove_hold",
 ];
 
 /// `(enclosing fn, trimmed line, why it is local)`: today's allowed uses.
 /// Entrypoints that run where they act (server, node, init, config, skill,
 /// upgrade, repo sync, workspace, form key) and client-side downloads stay;
-/// the rest are review step 4.
+/// nothing else.
 const CLI_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
         "run_doc",
@@ -176,16 +174,6 @@ const CLI_ALLOWLIST: &[(&str, &str, &str)] = &[
     ("run_cmd", "let cfg = Config::load(&cfg_path)?;", "config"),
     ("run_cmd", "std::fs::create_dir_all(dir)", "init"),
     ("run_cmd", "std::fs::OpenOptions::new()", "init"),
-    (
-        "run_cmd",
-        "crate::admission::write_hold(&path, &hold)?;",
-        "admission hold: a node-host file (review step 4)",
-    ),
-    (
-        "run_cmd",
-        "if crate::admission::remove_hold(&path)? {",
-        "admission hold: a node-host file (review step 4)",
-    ),
     (
         "run_usage",
         "None => Config::load(&config::default_path()?)?.log_dir(),",

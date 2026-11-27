@@ -618,6 +618,17 @@ impl Dispatcher {
                         .remove(name, live)
                         .map(|note| json!({"runtime": name, "note": note}))
                 }
+                // `axe admission hold|release` through the server: the hold
+                // stays a file on this host, read before every claim.
+                Some("admission_hold") => serde_json::from_value(q["hold"].clone())
+                    .map_err(anyhow::Error::from)
+                    .and_then(|h: admission::Hold| {
+                        admission::write_hold(&self.hold_path, &h)?;
+                        Ok(json!({"hold": admission::HoldState::Active(h).json(),
+                                  "path": self.hold_path.display().to_string()}))
+                    }),
+                Some("admission_release") => admission::remove_hold(&self.hold_path)
+                    .map(|r| json!({"released": r, "path": self.hold_path.display().to_string()})),
                 _ => Err(anyhow::anyhow!("unknown runtime job")),
             };
             let _ = reply.try_send(r.unwrap_or_else(|e| json!({"error": format!("{e:#}")})));
