@@ -28,20 +28,18 @@ prompt and its system prompt or run instructions; the run page's details
 (`/api/runs/<id>/meta`, `/api/bot-runs/<id>/meta`) join them with the run's
 events and usage (`run_meta.rs`).
 
-**Selection rules.** A task's first run starts fresh with the agent from its
-`--agent` pin, or else from the stored rule that matches it (`axe rule
-add/list/rm/log`, `rule.rs`). A rule matches any of workload, repo, goal,
-label (the project counts), bot and owner; the most specific matching rule
-wins, then the higher priority, then the newer rule. Its ordered `use` list
-of `harness[:model[:effort]]` (`claude-code`, `codex`) is walked down to the
-first harness the node has an agent for (an agent's `harness`, or
-inferred from its command), least used first; the model and effort go to the
-CLI, and the task gets a `runtime:<name>` label. A bot runs its own agent
-unless a rule names it (`bot=`). Every edit is a logged event. The
-node imports the config's `[defaults]`/`[[rule]]` agent lists once
-(`Config::rules_to_import`); those keys are deprecated and keep picking only
-when stored rules cannot express them (an agent with no harness, two agents
-of one harness, round-robin), with a startup line saying why.
+**Selection rules.** One resolver, `runtime_config.rs`, merges a run's
+layers: the built-in default harness, the project (the node config's
+limits and the most specific stored rule, `axe rule add/list/rm/log`,
+`rule.rs`), the bot (its primary and backup) and the task (its `--agent`
+pin); the node only applies runtime health to the result (`Dispatcher::pick`).
+`axe rule explain --task N | --bot NAME` shows what a task or bot resolves to.
+A rule matches workload, repo, goal, label (the project counts), bot and
+owner; a bot sees only rules that name it. The node imports the config's
+deprecated `[defaults]`/`[[rule]]` agent lists once
+(`Config::rules_to_import`); one stored rules cannot express is the
+resolver's config layer instead (`runtime_config::ConfigLayer`), with a
+startup line saying why.
 
 **Session continuity.** Every later run resumes the first run's session with
 the agent's `resume_cmd`. A failed resume with no axe change

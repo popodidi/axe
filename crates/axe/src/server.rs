@@ -295,18 +295,40 @@ fn runtimes_view(st: &State) -> serde_json::Value {
             crate::rule::list(&conn).unwrap_or_default(),
         )
     };
+    // Each bot's primary and backup, and the harnesses tasks may run on,
+    // as the resolver gives them (`runtime_config`).
+    use crate::runtime_config::{BotLayer, Layers, Limits, RuntimeConfig};
+    let limits = Limits::of(&st.cfg, "");
     let bots: Vec<(String, String, Option<String>)> = bots
         .into_iter()
-        .map(|b| (b.name, b.agent, b.backup))
+        .map(|b| {
+            let l = Layers {
+                bot: Some(BotLayer {
+                    name: b.name.clone(),
+                    primary: b.agent,
+                    backup: b.backup,
+                }),
+                ..Default::default()
+            };
+            let c = RuntimeConfig::resolve(&l, limits);
+            (b.name, c.runtime.unwrap_or_default(), c.backup)
+        })
         .collect();
-    let mut tasks: Vec<String> = rules
+    let task_rules: Vec<Layers> = match rules.is_empty() {
+        true => vec![Layers::default()],
+        false => rules
+            .into_iter()
+            .filter(|r| r.matcher.bot.is_none())
+            .map(|r| Layers {
+                rule: Some(r),
+                ..Default::default()
+            })
+            .collect(),
+    };
+    let tasks: Vec<String> = task_rules
         .iter()
-        .filter(|r| r.matcher.bot.is_none())
-        .flat_map(|r| r.uses.iter().map(|u| u.harness.clone()))
+        .flat_map(|l| RuntimeConfig::resolve(l, limits).harnesses())
         .collect();
-    if rules.is_empty() {
-        tasks.push(crate::harness::DEFAULT_HARNESS.into());
-    }
     crate::runtime::with_uses(&mut v, &bots, &tasks);
     v
 }
@@ -2556,6 +2578,26 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             .map_err(|e| HttpError(400, format!("{e:#}")))?,
         ),
         ("GET", ["api", "runtimes"]) => ok(200, &runtimes_view(st)),
+        // A task's or bot's resolved runtime config, before runtime health
+        // (`runtime_config`; the node config's limits as this server reads
+        // them).
+        ("GET", ["api", "runtime-config"]) => {
+            use crate::runtime_config::{Layers, Limits, RuntimeConfig};
+            let conn = st.conn();
+            let (layers, project) = match (req.query("task"), req.query("bot")) {
+                (Some(t), None) => {
+                    let id = task_id(t)?;
+                    (
+                        Layers::of_task(&conn, id)?,
+                        db::get_task(&conn, id)?.project,
+                    )
+                }
+                (None, Some(b)) => (Layers::of_bot(&conn, b)?, String::new()),
+                _ => bail!("give exactly one of task or bot"),
+            };
+            let config = RuntimeConfig::resolve(&layers, Limits::of(&st.cfg, &project));
+            ok(200, &json!({"layers": layers, "config": config}))
+        }
         ("POST", ["api", "runtimes"]) => {
             let b: RuntimeAddBody = req.json()?;
             ok(

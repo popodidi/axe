@@ -12,7 +12,7 @@ pub const STATES: [&str; 5] = ["pending", "in_progress", "blocked", "escalated",
 pub const ESCALATION_CLASSES: [&str; 4] = ["decision", "capability", "coordination", "runtime"];
 pub const WORKLOADS: [&str; 4] = ["prod-bug", "infra", "feature", "ops"];
 
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS dispatcher (
@@ -117,6 +117,26 @@ fn migrate_bot_repos(tx: &Transaction) -> Result<()> {
 /// v20: a bot's retro card settings, `bots.retro` (a JSON object; NULL means
 /// the defaults, `ask::RetroConfig::default`). Additive and idempotent like
 /// [`migrate_bot_repos`].
+/// v25: `bots.backup`, the bot's backup runtime (the bot layer of
+/// `runtime_config`), backfilled from each bot's latest `backup` event's `to`
+/// (the events stay). Additive and idempotent, so a lowered `user_version`
+/// upgrades again.
+fn migrate_bot_backup(tx: &Transaction) -> Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='backup')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        tx.execute_batch(
+            "ALTER TABLE bots ADD COLUMN backup TEXT;
+             UPDATE bots SET backup = (SELECT json_extract(e.body,'$.to') FROM bot_events e
+               WHERE e.bot_id=bots.id AND e.kind='backup' ORDER BY e.id DESC LIMIT 1);",
+        )?;
+    }
+    Ok(())
+}
+
 fn migrate_bot_retro(tx: &Transaction) -> Result<()> {
     let has: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bots') WHERE name='retro')",
@@ -171,7 +191,7 @@ pub fn default_path() -> Result<PathBuf> {
         .context("cannot determine home directory")
 }
 
-/// Opens the database: creates a fresh v24 schema, or migrates v8-v23 to v24. Older
+/// Opens the database: creates a fresh v25 schema, or migrates v8-v24 to v25. Older
 /// schemas are refused; migrate them to v8 with an earlier axe release first.
 /// v12, v13 and v15 only add bot tables (`bot::SCHEMA`), v14 only adds usage
 /// tables (`usage::SCHEMA`), v16 only adds goal tables and a nullable column
@@ -182,8 +202,9 @@ pub fn default_path() -> Result<PathBuf> {
 /// repo registry table (`repo::SCHEMA`), v22 only adds the services table
 /// (`service::SCHEMA`), v23 only adds `services.schedule`
 /// (`service::migrate`) and v24 only adds the node metrics tables
-/// (`node_metrics::SCHEMA`), so a database lowered to
-/// `user_version` 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12 or 11
+/// (`node_metrics::SCHEMA`) and v25 only adds `bots.backup`
+/// ([`migrate_bot_backup`]), so a database lowered to
+/// `user_version` 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12 or 11
 /// still opens with that binary and upgrades again in place.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -216,6 +237,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         migrate_task_fields(&tx)?;
         migrate_bot_repos(&tx)?;
         migrate_bot_retro(&tx)?;
+        migrate_bot_backup(&tx)?;
         tx.execute_batch(crate::repo::SCHEMA)?;
         tx.execute_batch(crate::service::SCHEMA)?;
         crate::service::migrate(&tx)?;
@@ -224,7 +246,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         tx.commit()?;
         return Ok(conn);
     }
-    if (11..=23).contains(&version) {
+    if (11..=24).contains(&version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(crate::rule::SCHEMA)?;
         tx.execute_batch(crate::bot::SCHEMA)?;
@@ -233,6 +255,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         migrate_task_fields(&tx)?;
         migrate_bot_repos(&tx)?;
         migrate_bot_retro(&tx)?;
+        migrate_bot_backup(&tx)?;
         tx.execute_batch(crate::repo::SCHEMA)?;
         tx.execute_batch(crate::service::SCHEMA)?;
         crate::service::migrate(&tx)?;
@@ -260,6 +283,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         migrate_task_fields(&tx)?;
         migrate_bot_repos(&tx)?;
         migrate_bot_retro(&tx)?;
+        migrate_bot_backup(&tx)?;
         tx.execute_batch(crate::repo::SCHEMA)?;
         tx.execute_batch(crate::service::SCHEMA)?;
         crate::service::migrate(&tx)?;
@@ -290,6 +314,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     migrate_task_fields(&tx)?;
     migrate_bot_repos(&tx)?;
     migrate_bot_retro(&tx)?;
+    migrate_bot_backup(&tx)?;
     tx.execute_batch(crate::repo::SCHEMA)?;
     tx.execute_batch(crate::service::SCHEMA)?;
     crate::service::migrate(&tx)?;
