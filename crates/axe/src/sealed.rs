@@ -1006,7 +1006,7 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Writes `bytes` to `path` as a 0600 file, replacing it atomically.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
     let r = (|| -> Result<()> {
         let mut f = std::fs::OpenOptions::new()

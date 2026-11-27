@@ -275,3 +275,64 @@ fn forms_need_the_token_to_read() {
     let parsed = Sealed::parse("sealed.v1.00000000000000000000000000000000.AAAA");
     assert!(parsed.is_err());
 }
+
+#[test]
+fn an_open_form_survives_a_server_restart() {
+    let (dir, mut srv) = setup();
+    let task = srv
+        .ok(&[
+            "add",
+            "--project",
+            "a",
+            "--title",
+            "t",
+            "--state",
+            "blocked",
+        ])
+        .trim()
+        .trim_start_matches("added ")
+        .parse::<i64>()
+        .ok()
+        .unwrap_or(1);
+    let task_s = task.to_string();
+    let mut disp = srv.dispatcher(&[], &[]);
+    let v = ask(
+        &srv,
+        &[
+            "--task",
+            &task_s,
+            "--purpose",
+            "p",
+            "--field",
+            "token:secret:required",
+        ],
+    );
+    let spec = signed(v["link"].as_str().unwrap()).decode().unwrap();
+
+    // The deploy restarts the server (and the node).
+    stop(&mut disp.0);
+    stop(&mut srv.child);
+    let config = srv.config.clone();
+    drop(srv);
+    let srv = Server::start_with(dir.path(), &config, Some(TOKEN), &[], &[]);
+    let shown: Value =
+        serde_json::from_str(&srv.ok(&["form", "show", &spec.form, "--json"])).unwrap();
+    assert_eq!(shown["state"], "open");
+    let _disp = srv.dispatcher(&[], &[]);
+
+    // Accepted (delivered, or held until the new node connects).
+    let reply = sealed::seal(&spec, &json!({"token": DUMMY})).unwrap();
+    let out = srv.run(&["form", "submit", &reply.text()]);
+    assert!(out.status.success(), "{out:?}");
+    let waited = srv.ok(&["form", "wait", &spec.form, "--timeout", "30s", "--json"]);
+    let waited: Value = serde_json::from_str(&waited).unwrap();
+    assert_eq!(waited["state"], "delivered", "{waited}");
+    let secrets = dir.path().join(format!("ws/.runs/task-{task}/.secrets"));
+    assert_eq!(
+        std::fs::read_to_string(secrets.join("token")).unwrap(),
+        DUMMY
+    );
+    // The file kept only the signed spec, and drops the form once used.
+    assert!(!contains(&dir.path().join("forms.json"), DUMMY));
+    assert!(!contains(&dir.path().join("forms.json"), &spec.form));
+}

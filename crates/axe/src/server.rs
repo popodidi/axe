@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -135,7 +135,7 @@ struct State {
     blobs: blob::Store,
     /// The doc store; `None` when it could not open (no `git`).
     docs: Option<doc::Store>,
-    /// Sealed forms, in memory only (`form.rs`).
+    /// Sealed forms; open ones kept in `forms.json` next to the db (`form.rs`).
     forms: form::Forms,
     /// Open web login codes (`login.rs`).
     logins: crate::login::Codes,
@@ -262,6 +262,11 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         );
     }
 
+    let forms_path = opts
+        .db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("forms.json");
     let state = Arc::new(State {
         metrics: crate::metrics::Metrics::new(&cfg.metrics.projects),
         cfg: cfg.clone(),
@@ -284,7 +289,7 @@ pub fn run(opts: Options, cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         telegram: None,
         blobs,
         docs,
-        forms: form::Forms::default(),
+        forms: form::Forms::open(forms_path, remote::epoch()),
         logins: crate::login::Codes::default(),
     });
     {

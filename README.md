@@ -460,8 +460,12 @@ axe form ask --bot ops --purpose "Deploy token" --field token:secret:required:en
   key and returns `sealed.v1.<form>.<ciphertext>`: through the Telegram Mini
   App button the server sends the owner, pasted into the chat, a `.sealed`
   file, or `axe form submit`.
-- The server keeps forms and ciphertext in memory only, until the node
-  takes the reply (or 15 minutes pass), and records only names and outcomes.
+- The server keeps ciphertext in memory only, until the node takes the
+  reply (or 15 minutes pass), and records only names and outcomes. Open
+  forms' signed specs (no reply, sealed or not) are kept in `forms.json`
+  next to the database, so a server restart keeps their links working until
+  they expire; a reply held at the restart is dropped and must be sent again
+  (`Forms::open` in `form.rs`).
   The node checks its signature, the expiry and one use, decrypts, and
   writes each value as a 0600 file in the target: the task's or bot's
   `$AXE_SECRETS_DIR` (`<run_root>/task-<id>/.secrets`, outside `repos/`;
