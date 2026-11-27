@@ -25,8 +25,7 @@ fn code_lines(file: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Database access in channel code: SQL calls, and the raw connection that
-/// `channel::Store::conn` hands out.
+/// Database access in channel code: SQL calls, and a raw connection.
 const SQL: &[&str] = &[
     "rusqlite",
     ".execute(",
@@ -38,16 +37,33 @@ const SQL: &[&str] = &[
 ];
 const CONN: &[&str] = &[".conn()"];
 
-/// Today's counts per file (review step 1); steps 3-6 shrink them. After
-/// step 6, storage is private to `core` and the compiler enforces this.
+/// Counts per file. Telegram reaches the database only through `core::Axe`
+/// actions since step 6 (zero). `channel.rs`, `board.rs` and `owner_views.rs`
+/// are the storage and queries those actions call (`bot_messages`, the
+/// board, the views): their SQL stays there, counted so it moves only on
+/// purpose. Server route arms keep their raw SQL until they call actions.
 const CHANNEL_ALLOWLIST: &[(&str, &str, usize)] = &[
-    ("telegram.rs", "sql", 33),
-    ("telegram.rs", "conn", 70),
+    ("telegram.rs", "sql", 0),
+    ("telegram.rs", "conn", 0),
     ("owner_views.rs", "sql", 1),
     ("board.rs", "sql", 24),
-    ("channel.rs", "sql", 6),
+    ("channel.rs", "sql", 31),
     ("server.rs", "sql", 15),
 ];
+
+/// The core's own hooks: only `core.rs` actions call them.
+const CORE_HOOKS: &[&str] = &[".db()", ".changed()", "Axe::db(", "Axe::changed("];
+
+#[test]
+fn telegram_calls_core_actions_not_the_database_hooks() {
+    let (n, hits) = count("telegram.rs", CORE_HOOKS);
+    assert_eq!(
+        n,
+        0,
+        "telegram.rs calls the core's database hooks; add a core::Axe action instead:\n  {}",
+        hits.join("\n  ")
+    );
+}
 
 fn count(file: &str, pats: &[&str]) -> (usize, Vec<String>) {
     let hits: Vec<String> = code_lines(file)

@@ -1502,3 +1502,20 @@ fn healthz_answers_while_the_db_is_busy() {
     other.execute_batch("COMMIT").unwrap();
     assert_eq!(writer.join().unwrap(), 201);
 }
+
+/// The owner views Telegram shows (`/status`, `/tasks`, ...) are core
+/// queries the API serves too (`GET /api/views/<view>`).
+#[test]
+fn owner_views_are_served_by_the_api() {
+    let d = tempfile::tempdir().unwrap();
+    let s = Server::start(d.path());
+    std::fs::create_dir_all(d.path().join("ws/p")).ok();
+    let f = d.path().join("bot.json");
+    std::fs::write(&f, r#"{"name":"cos","project":"p"}"#).unwrap();
+    s.ok(&["bot", "create", "--file", f.to_str().unwrap()]);
+    let v = s.get("/api/views/status?bot=cos");
+    assert_eq!(v["view"], "status");
+    assert!(v["text"].as_str().unwrap().contains("cos"), "{v}");
+    let r = s.request("/api/views/nope?bot=cos").call();
+    assert!(r.is_err(), "an unknown view is refused");
+}

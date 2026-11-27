@@ -3,8 +3,6 @@
 //! gateway is Telegram (`telegram.rs`, cargo feature `telegram`); messages are
 //! stored with `channel = 'telegram'`.
 
-use std::sync::MutexGuard;
-
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -17,61 +15,6 @@ pub const PHOTO_UPLOAD_LIMIT: u64 = 10 * 1024 * 1024;
 pub const UPLOAD_LIMIT: u64 = 50 * 1024 * 1024;
 /// `callback_data` is 1-64 bytes.
 pub const CALLBACK_DATA_LIMIT: usize = 64;
-
-/// What a channel gateway needs from the server.
-pub trait Store: Send + Sync + 'static {
-    fn conn(&self) -> MutexGuard<'_, Connection>;
-    /// A database change was committed (wakes SSE clients).
-    fn changed(&self);
-    /// The change counter that [`Store::changed`] bumps.
-    fn seq(&self) -> u64;
-    /// Waits until the counter moves past `seen` or `timeout` elapses; returns
-    /// the counter.
-    fn wait_changed(&self, seen: u64, timeout: std::time::Duration) -> u64;
-    fn stopping(&self) -> bool;
-    /// The node's runtimes (`runtime::view`); none outside a server.
-    fn runtimes(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-    /// Takes a channel's sealed form reply and delivers it to the node
-    /// (`form.rs`); returns the form after the attempt.
-    fn form_submit(&self, _sealed: &str) -> anyhow::Result<crate::form::Form> {
-        anyhow::bail!("sealed forms need an axe server")
-    }
-    /// Claims closing a finished form's prompt from the reply's `bot` and
-    /// `chat` (`form::Forms::claim_close`): `Some(open)` when the caller
-    /// re-sends the keyboard with the `open` forms' buttons (purpose, link;
-    /// none: removes it), `None` when it does nothing.
-    fn form_close(&self, _form: &str, _bot: &str, _chat: i64) -> Option<Vec<(String, String)>> {
-        None
-    }
-    /// Starts a login of a node runtime by `method`
-    /// (`runtime::login_methods`) on behalf of the owner, prompted through
-    /// `bot`; returns the text for the owner.
-    fn runtime_login(&self, _bot: &str, _runtime: &str, _method: &str) -> anyhow::Result<String> {
-        anyhow::bail!("runtime logins need an axe server")
-    }
-    /// Adds a node runtime of `harness` (`runtime::Registry::create`); a
-    /// `bot` with no runtime yet gets it as its primary. Returns its name.
-    fn runtime_add(
-        &self,
-        _actor: &crate::db::Actor,
-        _harness: &str,
-        _bot: Option<&str>,
-    ) -> anyhow::Result<String> {
-        anyhow::bail!("runtime changes need an axe server")
-    }
-    /// Whether a bot may run on `name` (a primary or backup), the check
-    /// every bot edit makes ([`crate::bot::edit`]).
-    fn bot_runtime_ok(&self, _name: &str) -> anyhow::Result<()> {
-        anyhow::bail!("runtime checks need an axe server")
-    }
-    /// Removes node runtime `runtime` (`runtime::Registry::remove`);
-    /// returns what happened to its login files.
-    fn runtime_remove(&self, _runtime: &str) -> anyhow::Result<String> {
-        anyhow::bail!("runtime changes need an axe server")
-    }
-}
 
 /// Options of `axe bot tg send`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -142,6 +85,235 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<StoredMessage> {
         flags: parse(r.get(12)?),
         at: r.get(13)?,
     })
+}
+
+/// Kinds whose `message_id` is a Telegram update id, not a message.
+const SYNTHETIC: &str = "('edit','button','reaction')";
+
+/// Local id of Telegram message `message_id` in `chat`.
+pub fn local_id(conn: &Connection, bot: i64, chat: i64, message_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT id FROM bot_messages WHERE bot_id=?1 AND chat_id=?2 AND message_id=?3
+                 AND kind NOT IN {SYNTHETIC} ORDER BY id LIMIT 1"
+            ),
+            params![bot, chat, message_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Whether a Telegram row (`message_id`, `kind`) of `chat` is stored: a
+/// redelivered update.
+pub fn is_recorded(
+    conn: &Connection,
+    bot: i64,
+    chat: i64,
+    message_id: i64,
+    kind: &str,
+) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM bot_messages WHERE bot_id=?1 AND channel='telegram' AND chat_id=?2
+               AND message_id=?3 AND kind=?4",
+            params![bot, chat, message_id, kind],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// The chat of bot `bot`'s latest inbound message.
+pub fn last_inbound_chat(conn: &Connection, bot: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT chat_id FROM bot_messages WHERE bot_id=?1 AND direction='in' ORDER BY id DESC LIMIT 1",
+            [bot],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Sets flag `path` of message `msg` to `v`.
+pub fn set_flag(conn: &Connection, msg: i64, path: &str, v: &Value) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,?1,json(?2)) WHERE id=?3",
+        params![path, v.to_string(), msg],
+    )?;
+    Ok(())
+}
+
+/// Records the press that answered message `msg`'s keyboard.
+pub fn mark_answered(conn: &Connection, msg: i64, answer: &Value) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,'$.answered',json(?1)) WHERE id=?2",
+        params![answer.to_string(), msg],
+    )?;
+    Ok(())
+}
+
+/// Marks message `msg` as the runtime card of `runtime`.
+pub fn mark_runtime_alert(conn: &Connection, msg: i64, runtime: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,'$.runtime_alert',json('true'),'$.runtime',?1) WHERE id=?2",
+        params![runtime, msg],
+    )?;
+    Ok(())
+}
+
+/// Records an edit of message `msg`: its new text (without `buttons`,
+/// Telegram drops the keyboard, so the card closes) and its new keyboard (a
+/// new keyboard takes fresh presses; `html` is its parse mode).
+pub fn record_edit(
+    conn: &Connection,
+    msg: i64,
+    text: Option<&str>,
+    buttons: Option<&[(String, String)]>,
+    html: bool,
+) -> Result<()> {
+    if let Some(t) = text {
+        conn.execute(
+            // A hand edit of a goal pin is rendered over on the next pass.
+            "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key','$.goal_board_key','$.goal_pin_key') WHERE id=?2",
+            params![t, msg],
+        )?;
+        if buttons.is_none() {
+            conn.execute(
+                "UPDATE bot_messages SET flags=json_remove(flags,'$.buttons') WHERE id=?1",
+                [msg],
+            )?;
+        }
+    }
+    if let Some(bs) = buttons {
+        conn.execute(
+            "UPDATE bot_messages SET flags=json_remove(json_set(flags,'$.buttons',json(?1),'$.html',json(?2)),'$.answered') WHERE id=?3",
+            params![serde_json::json!(bs).to_string(), serde_json::json!(html).to_string(), msg],
+        )?;
+        if !bs.is_empty() {
+            conn.execute(
+                "UPDATE bot_messages SET flags=json_set(flags,'$.ask',json('true')) WHERE id=?1",
+                [msg],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Records a manual pin or unpin of message `msg`: it is no longer a card
+/// pin the inbox pass manages.
+pub fn record_pin(conn: &Connection, msg: i64, pin: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_remove(json_set(flags,'$.pinned',json(?1)),'$.card_pin') WHERE id=?2",
+        params![serde_json::json!(pin).to_string(), msg],
+    )?;
+    Ok(())
+}
+
+/// Marks message `msg` deleted; the row stays (history is never deleted).
+pub fn mark_deleted(conn: &Connection, msg: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,'$.deleted',json('true')) WHERE id=?1",
+        [msg],
+    )?;
+    Ok(())
+}
+
+/// Records the server's edit of message `msg` to `text`.
+pub fn set_text_edited(conn: &Connection, msg: i64, text: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.edited',json('true')) WHERE id=?2",
+        params![text, msg],
+    )?;
+    Ok(())
+}
+
+/// Closes card `msg`: no keyboard, `flags.closed` says why.
+pub fn close_card(conn: &Connection, msg: i64, reason: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.buttons'),'$.closed',?1) WHERE id=?2",
+        params![reason, msg],
+    )?;
+    Ok(())
+}
+
+/// Closes card `msg` with `text` if it still has a keyboard; 0 when another
+/// pass closed it first.
+pub fn claim_close(conn: &Connection, msg: i64, text: &str, reason: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE bot_messages SET text=?1, flags=json_set(json_remove(flags,'$.buttons'),'$.closed',?2)
+         WHERE id=?3 AND json_type(flags,'$.buttons')='array'",
+        params![text, reason, msg],
+    )?)
+}
+
+/// Records card `msg` pinned by the inbox pass, in one write so a reader
+/// never sees a pin without its kind.
+pub fn mark_card_pinned(conn: &Connection, msg: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json('true'),'$.card_pin',json('true')) WHERE id=?1",
+        [msg],
+    )?;
+    Ok(())
+}
+
+/// Board message `msg` is no longer an overview: unpinned, no board keys.
+pub fn clear_board_flags(conn: &Connection, msg: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.board_key','$.board_from','$.board_buttons'),'$.pinned',json('false')) WHERE id=?1",
+        [msg],
+    )?;
+    Ok(())
+}
+
+/// Pin `msg` no longer stands for its goal (`goal_pin`, the JSON of its
+/// `flags.goal_pin`).
+pub fn drop_goal_pin(conn: &Connection, msg: i64, goal_pin: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.goal_pin','$.goal_pin_key'),'$.pinned',json('false'),'$.goal_unpinned',json(?1)) WHERE id=?2",
+        params![goal_pin, msg],
+    )?;
+    Ok(())
+}
+
+/// Records goal pin `msg` edited to `text`.
+pub fn set_goal_pin_text(conn: &Connection, msg: i64, text: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.goal_pin_key',?1,'$.edited',json('true')) WHERE id=?2",
+        params![text, msg],
+    )?;
+    Ok(())
+}
+
+/// Bot `name`'s runtime cards that still have buttons, oldest first.
+pub fn open_runtime_cards(conn: &Connection, name: &str) -> Result<Vec<StoredMessage>> {
+    let b = bot_id(conn, name)?;
+    let ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM bot_messages WHERE bot_id=?1 AND direction='out'
+               AND json_extract(flags,'$.runtime_alert')=1
+               AND json_type(flags,'$.buttons')='array' AND json_array_length(flags,'$.buttons')>0
+               AND json_type(flags,'$.deleted') IS NULL ORDER BY id",
+        )?
+        .query_map([b], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.into_iter()
+        .map(|id| get_message(conn, name, id))
+        .collect()
+}
+
+/// (chat, thread) of the messages whose wakes the bot's live run took.
+pub fn live_chats(conn: &Connection, name: &str) -> Result<Vec<(i64, Option<i64>)>> {
+    Ok(conn
+        .prepare(
+            "SELECT DISTINCT m.chat_id, m.thread_id FROM bots b
+             JOIN bot_runs r ON r.bot_id=b.id AND r.ended_at IS NULL
+             JOIN bot_wakes w ON w.run_id=r.id
+             JOIN bot_messages m ON m.id=w.message_ref
+             WHERE b.name=?1 AND m.direction='in'",
+        )?
+        .query_map([name], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 pub(crate) fn bot_id(conn: &Connection, name: &str) -> Result<i64> {
