@@ -1299,6 +1299,19 @@ impl Dispatcher {
             .clone();
         let session_mode = agent.session_mode()?;
         let (cwd, repos_cloned) = self.run_dir(task, pick)?;
+        // Changes by others reach the session after its next tool call
+        // (`task_inbox`); only in a generated run folder, never a legacy
+        // worktree's checkout.
+        if rt.harness == "claude-code" && cwd.starts_with(self.cfg.run_root()) {
+            // After an atomic binary replacement Linux reports
+            // "<path> (deleted)"; the hook must call the installed path.
+            let exe = std::env::current_exe().context("locate the axe binary")?;
+            let exe = exe.display().to_string();
+            let exe = exe.strip_suffix(" (deleted)").unwrap_or(&exe);
+            let settings = cwd.join(".claude/settings.json");
+            std::fs::write(&settings, crate::task_inbox::settings_json(exe))
+                .with_context(|| format!("write {}", settings.display()))?;
+        }
         let log_dir = self.cfg.log_dir();
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("create log dir {}", log_dir.display()))?;

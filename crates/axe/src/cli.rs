@@ -409,6 +409,15 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Notes, spec edits and other changes by someone else since the last
+    /// call in this run: the Claude Code PostToolUse hook the node installs
+    /// in task run folders. Prints hook JSON or nothing and never fails
+    Inbox {
+        #[arg(env = "AXE_TASK")]
+        id: i64,
+        #[arg(long, value_parser = PossibleValuesParser::new(["post-tool"]))]
+        hook: String,
+    },
     /// Show a task's event log (long body lines truncated unless --full)
     Log {
         id: i64,
@@ -3902,6 +3911,35 @@ fn subscription_project(project: &Option<String>, all: bool) -> Option<String> {
     }
 }
 
+/// `axe task inbox --hook post-tool`: hook JSON on stdout, or nothing. Never
+/// fails, so a server problem cannot break the agent's tool calls. Runs in a
+/// node task run (`$AXE_WORKTREE` holds the cursor); elsewhere it is silent.
+fn task_inbox_hook(c: &Client, id: i64) {
+    use std::io::{IsTerminal, Read};
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::copy(&mut std::io::stdin().take(1 << 20), &mut std::io::sink());
+    }
+    let Some(dir) = std::env::var_os("AXE_WORKTREE").filter(|d| !d.is_empty()) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let events: Vec<db::Event> = match c.get(&format!("/api/tasks/{id}/events"), &[]) {
+        Ok(v) => v,
+        Err(e) => return eprintln!("axe task inbox: {e:#}"),
+    };
+    let session = std::env::var("AXE_SESSION").ok().filter(|s| !s.is_empty());
+    let cursor = crate::task_inbox::read_cursor(&dir);
+    let (news, next) = crate::task_inbox::news(&events, session.as_deref(), cursor);
+    if let Some(next) = next.filter(|n| Some(*n) != cursor) {
+        if let Err(e) = crate::task_inbox::write_cursor(&dir, next) {
+            return eprintln!("axe task inbox: {e}");
+        }
+    }
+    if let Some(out) = crate::task_inbox::hook_output(id, &news) {
+        println!("{out}");
+    }
+}
+
 /// `axe bot inbox --hook`: hook JSON on stdout, or nothing. Never fails, so
 /// a server problem cannot break the agent's tool calls.
 fn inbox_hook(c: &Client, name: &str, run: Option<i64>, hook: &str) {
@@ -4974,6 +5012,7 @@ fn run_task(client: &dyn Fn() -> Client, command: &TaskCmd) -> Result<()> {
                 }
             }
         }
+        TaskCmd::Inbox { id, hook: _ } => task_inbox_hook(&client(), *id),
         TaskCmd::Log { id, json, full } => {
             let events: Vec<db::Event> = client().get(&format!("/api/tasks/{id}/events"), &[])?;
             if *json {
@@ -5264,6 +5303,7 @@ mod tests {
             "--json",
         ],
         &["show", "7", "--json"],
+        &["inbox", "7", "--hook", "post-tool"],
         &["log", "7", "--full"],
         &[
             "set",
