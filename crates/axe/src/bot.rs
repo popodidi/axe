@@ -269,6 +269,12 @@ pub struct Bot {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub rotation: Option<Rotation>,
+    /// The runtime the bot runs on while its own ([`Bot::agent`], the
+    /// primary) is unhealthy: the latest `backup` event's `to`, so the
+    /// setting needs no column. `None`: no backup.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub backup: Option<String>,
     /// Derived: the live run, if any.
     #[serde(default)]
     pub live_run: Option<i64>,
@@ -300,7 +306,9 @@ const BOT_COLS: &str = "b.*,
  (SELECT json_extract(e.body,'$.from') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='rename'
   ORDER BY e.id LIMIT 1) AS first_name,
  (SELECT json_extract(e.body,'$.to') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='rotation'
-  ORDER BY e.id DESC LIMIT 1) AS rotation";
+  ORDER BY e.id DESC LIMIT 1) AS rotation,
+ (SELECT json_extract(e.body,'$.to') FROM bot_events e WHERE e.bot_id=b.id AND e.kind='backup'
+  ORDER BY e.id DESC LIMIT 1) AS backup";
 
 impl Bot {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -337,6 +345,7 @@ impl Bot {
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default(),
             ),
+            backup: r.get("backup")?,
             live_run: r.get("live_run")?,
             next_wake: r.get("next_wake")?,
             queued: r.get("queued")?,
@@ -699,6 +708,11 @@ pub struct Edit {
     /// on it; notes, wakes and history stay. Refused during a live run.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Sets the bot's backup runtime ([`Bot::backup`]); `none` clears it.
+    /// The session is kept: a run goes to the backup only while the primary
+    /// is unhealthy.
+    #[serde(default)]
+    pub backup: Option<String>,
 }
 
 /// A change to a bot's rotation settings ([`Rotation`]); `None` keeps the
@@ -772,6 +786,31 @@ pub fn edit(conn: &mut Connection, actor: &Actor, name: &str, e: &Edit, why: &st
             )?;
             changed = true;
         }
+    }
+    let primary = e.agent.as_deref().map_or(b.agent.as_str(), str::trim);
+    let backup = match e.backup.as_deref().map(str::trim) {
+        None => b.backup.clone(),
+        Some("" | "none") => None,
+        Some(n) if n.chars().any(char::is_whitespace) => bail!("invalid backup {n:?}"),
+        Some(n) if n == primary => {
+            bail!("{n} is bot {name}'s primary runtime; a backup is another runtime")
+        }
+        Some(n) => Some(n.to_string()),
+    };
+    // A backup made primary is no longer its backup.
+    let backup = backup.filter(|n| n != primary);
+    if backup != b.backup {
+        let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "none".into());
+        event(
+            &tx,
+            b.id,
+            actor,
+            "backup",
+            &json!({"why": why, "owner_ref": owner_ref, "from": b.backup, "to": backup,
+                "change": format!("{} -> {}", show(&b.backup), show(&backup))})
+            .to_string(),
+        )?;
+        changed = true;
     }
     if let Some(r) = retro_edit {
         let old = b.retro.clone().unwrap_or_default();

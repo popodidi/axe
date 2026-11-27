@@ -215,6 +215,18 @@ fn runtime_job(st: &State, job: serde_json::Value) -> Result<serde_json::Value> 
     Ok(v)
 }
 
+/// A bot may run on `name`: a runtime the node reports, or an agent (or
+/// runtime) the server config can check ([`Config::validate_bot_agent`]).
+fn bot_runtime_ok(st: &State, name: &str) -> Result<()> {
+    let reported = crate::runtime::view(&st.admission())["runtimes"]
+        .as_array()
+        .is_some_and(|l| l.iter().any(|r| r["name"] == name));
+    if reported {
+        return Ok(());
+    }
+    st.check_agent(|c| c.validate_bot_agent(name))
+}
+
 impl State {
     fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
@@ -3193,7 +3205,12 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         ("PATCH", ["api", "bots", name]) => {
             let b: EditBody = req.json()?;
             if let Some(a) = b.edit.agent.as_deref().map(str::trim) {
-                st.check_agent(|c| c.validate_bot_agent(a))?;
+                bot_runtime_ok(st, a)?;
+            }
+            if let Some(a) = b.edit.backup.as_deref().map(str::trim) {
+                if !matches!(a, "" | "none") {
+                    bot_runtime_ok(st, a)?;
+                }
             }
             ok(
                 200,
