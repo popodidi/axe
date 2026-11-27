@@ -5362,14 +5362,15 @@ fn runtimes_log_in_first_then_set_the_bots_primary_and_backup() {
             p["text"] == "Runtime claude-1 (claude-code): the new login works; the runtime is ok."
         })
     });
-    assert!(rig
-        .sent_to(OWNER)
-        .iter()
-        .any(|p| {
-            p["text"].as_str().unwrap().starts_with(
-            "Sealed form delivered: runtime claude-1 login (code). The code was passed to the login"
-        )
-        }));
+    const DELIVERED: &str =
+        "Sealed form delivered: runtime claude-1 login (code). The code was passed to the login";
+    let delivered = rig.sent_to(OWNER);
+    assert!(
+        delivered
+            .iter()
+            .any(|p| p["text"].as_str().unwrap().starts_with(DELIVERED)),
+        "{delivered:?}"
+    );
     assert!(reg.join("claude-1/home/.credentials.json").is_file());
 
     // Log in Codex with an API key: codex-1, logged in, is listed too.

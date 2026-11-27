@@ -1528,7 +1528,9 @@ fn undeliver(conn: &Connection, run: i64) -> Result<usize> {
 /// failures; a node stop also returns the prompt's wakes. `api_error` (the
 /// dispatcher saw a model-API outage end the run) keeps the session and the
 /// failure count, and returns the prompt's wakes due after a backoff that grows
-/// with consecutive outage runs. Anything else is a failure:
+/// with consecutive outage runs (due at once for a bot with a backup, which
+/// takes the retry while the node holds its primary unhealthy). Anything
+/// else is a failure:
 /// prompt wakes return, failures increment, the session is cleared at
 /// [`FAILURES_FRESH`] and the bot pauses at [`FAILURES_PAUSE`].
 pub fn finish(
@@ -1595,7 +1597,22 @@ pub fn finish(
         returned = undeliver(conn, run)?;
         save("")?;
         let streak = outage_streak(conn, bot)?;
-        let at = ts(now + crate::agent_proc::api_backoff_seconds(streak));
+        // With a backup, no wait: the node marked the primary unhealthy, so
+        // the retry goes to the backup (or waits for a healthy runtime).
+        let backup: Option<String> = conn
+            .query_row(
+                "SELECT json_extract(body,'$.to') FROM bot_events WHERE bot_id=?1
+                 AND kind='backup' ORDER BY id DESC LIMIT 1",
+                [bot],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let wait = match backup {
+            Some(_) => 0,
+            None => crate::agent_proc::api_backoff_seconds(streak),
+        };
+        let at = ts(now + wait);
         conn.execute(
             "UPDATE bot_wakes SET due_at=MAX(due_at, ?1)
              WHERE bot_id=?2 AND run_id IS NULL AND redelivered=1",

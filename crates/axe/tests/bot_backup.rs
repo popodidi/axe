@@ -13,6 +13,10 @@ use serde_json::{json, Value};
 /// prints a `thread.started` line like `codex exec --json`.
 const FAKE_CODEX: &str = r#"#!/bin/sh
 for a in "$@"; do printf '%s\0' "$a"; done > "$BOTTEST_OUT/args-$AXE_BOT_RUN"
+if [ -f "$BOTTEST_OUT/down" ]; then
+  echo '{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable"}}'
+  exit 1
+fi
 echo '{"type":"thread.started","thread_id":"thread-'"$AXE_BOT_RUN"'"}'
 "#;
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
@@ -260,4 +264,35 @@ fn switching_the_primary_keeps_notes_and_clears_a_backup_it_names() {
     let out = srv.ok(&["bot", "edit", "b", "--backup", "none", "--why", "w"]);
     assert!(out.contains("no backup runtime"), "{out}");
     assert!(srv.get("/api/bots/b")["backup"].is_null());
+}
+
+#[test]
+fn an_outage_of_the_primary_is_retried_at_once_on_the_backup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let srv = rig(dir);
+    srv.ok(&["bot", "edit", "b", "--backup", "claude-1", "--why", "w"]);
+    dispatch_once(&srv, dir);
+    // The provider fails the next run: the node marks codex-1 degraded and
+    // the wake comes back due now, not after the outage backoff.
+    std::fs::write(dir.join("out/down"), "").unwrap();
+    srv.ok(&["bot", "wake", "b", "--now", "--note", "during the outage"]);
+    dispatch_once(&srv, dir);
+    let r = runs(&srv);
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert_eq!(r[1]["stop_reason"], "api_error", "{r:?}");
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("runtimes/codex-1/state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["state"], "degraded", "{state}");
+    // The retry runs on the backup, in a fresh session, with that wake.
+    dispatch_once(&srv, dir);
+    let s = start(&srv, 3);
+    assert_eq!(
+        (&s["agent"], &s["mode"]),
+        (&json!("claude-1"), &json!("fresh")),
+        "{s}"
+    );
+    let prompt = std::fs::read_to_string(dir.join("logs/bots/b/3.prompt.md")).unwrap();
+    assert!(prompt.contains("during the outage"), "{prompt}");
 }
