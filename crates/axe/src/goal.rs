@@ -345,7 +345,7 @@ fn owner_ref<'a>(actor: &Actor, owner_ref: Option<&'a str>, what: &str) -> Resul
 }
 
 #[allow(clippy::too_many_arguments)]
-fn event(
+pub(crate) fn event(
     conn: &Connection,
     goal: i64,
     actor: &Actor,

@@ -32,6 +32,30 @@ fn state_parser() -> PossibleValuesParser {
 }
 
 #[derive(Subcommand)]
+enum ProjectCmd {
+    /// Rename a project (an owner decision) in one transaction: its tasks,
+    /// runs, bots, subscriptions, feed, goals, routines and their
+    /// occurrences, the label (tasks, routines, rules), and in the doc store
+    /// its `NAME/` docs, the attachments of paths under them and the
+    /// `label:NAME` scope. Refused when NEW_NAME is in use, a task of NAME is
+    /// in progress or a run is live. The old name is not kept as an alias
+    Rename {
+        name: String,
+        new_name: String,
+        #[arg(long)]
+        why: String,
+        /// Owner decision this rests on (e.g. "msg #873"); required unless human
+        #[arg(long)]
+        owner_ref: Option<String>,
+        /// Print what would move (rows per table, doc paths) and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Tasks: queue work, follow it, hold it for a human, record evidence
     Task {
@@ -190,6 +214,11 @@ enum Cmd {
     },
     /// Download a consistent server-side snapshot of the database to a new file
     Backup { to: PathBuf },
+    /// Projects: rename one everywhere at once
+    Project {
+        #[command(subcommand)]
+        command: ProjectCmd,
+    },
     /// Content-addressed files, shared through signed, expiring links
     ///
     /// Blobs are immutable and kept by the server
@@ -4284,6 +4313,51 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
     Ok(())
 }
 
+/// `axe project rename` output: rows per table, then the doc store part.
+fn print_project_rename(r: &Value) {
+    let m = &r["renamed"];
+    let (from, to) = (
+        m["from"].as_str().unwrap_or_default(),
+        m["to"].as_str().unwrap_or_default(),
+    );
+    if m["dry_run"].as_bool().unwrap_or(false) {
+        println!("dry run: project {from} -> {to} would move:");
+    } else {
+        println!("project {from} renamed to {to}:");
+    }
+    for (table, n) in m["tables"].as_object().into_iter().flatten() {
+        println!("  {table:<22} {n}");
+    }
+    let docs = &m["docs"];
+    if docs.is_null() {
+        println!("  docs: no doc store");
+        return;
+    }
+    let list = |k: &str| docs[k].as_array().cloned().unwrap_or_default();
+    println!(
+        "  docs                   {} under {from}/ -> {to}/",
+        list("docs").len()
+    );
+    println!(
+        "  attachments            {} path(s) moved, label:{from} -> label:{to} holds {}",
+        list("attachments").len(),
+        docs["label_attachments"]
+    );
+    for a in list("attachments") {
+        println!(
+            "    {} {}",
+            a["scope"].as_str().unwrap_or_default(),
+            a["path"].as_str().unwrap_or_default()
+        );
+    }
+    for p in list("docs") {
+        println!("    {}", p.as_str().unwrap_or_default());
+    }
+    if let Some(v) = docs["version"].as_str() {
+        println!("  doc store version      {v}");
+    }
+}
+
 /// The sections of `axe --help`, each a list of top-level commands. Every
 /// visible command is in exactly one section (a test checks it).
 const HELP_SECTIONS: &[(&str, &[&str])] = &[
@@ -4308,6 +4382,7 @@ const HELP_SECTIONS: &[(&str, &[&str])] = &[
             "web",
             "usage",
             "stats",
+            "project",
             "skill",
             "upgrade",
         ],
@@ -4604,6 +4679,31 @@ fn run_cmd(cli: &Cli) -> Result<()> {
             println!("  axe task add --project demo --title \"first task\" --agent stub");
             println!("  axe node --once");
             println!("  axe task list --all");
+        }
+        Cmd::Project {
+            command:
+                ProjectCmd::Rename {
+                    name,
+                    new_name,
+                    why,
+                    owner_ref,
+                    dry_run,
+                    json,
+                },
+        } => {
+            let r: Value = client().send(
+                "POST",
+                &format!("/api/projects/{name}/rename"),
+                json!({"to": new_name, "why": why, "owner_ref": owner_ref, "dry_run": dry_run}),
+            )?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                print_project_rename(&r);
+            }
+            for w in r["warnings"].as_array().into_iter().flatten() {
+                eprintln!("warning: {}", w.as_str().unwrap_or_default());
+            }
         }
         Cmd::Backup { to } => {
             client().backup(to)?;

@@ -113,6 +113,10 @@ failures. To rename a bot
 and keep everything it has: `axe bot rename OLD NEW --why "..." --owner-ref
 "msg #N"` (an owner decision; refused while it runs). The old name stays
 reserved, and the Telegram bot keeps talking for it without a config change.
+To rename a project (its tasks, runs, bots, subscriptions, goals, routines,
+label and `OLD/` docs at once): `axe project rename OLD NEW --why "..."
+--owner-ref "msg #N" --dry-run` first, then without `--dry-run` (an owner
+decision; refused while its tasks run). The old name is not kept as an alias.
 
 Bots pursuing goals: see [references/goals.md](references/goals.md).
 

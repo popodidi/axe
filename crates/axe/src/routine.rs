@@ -204,7 +204,13 @@ pub fn get(conn: &Connection, id: i64) -> Result<Routine> {
         .optional()?
         .context("routine not found")
 }
-fn audit(conn: &Connection, id: i64, actor: &Actor, kind: &str, body: &str) -> Result<()> {
+pub(crate) fn audit(
+    conn: &Connection,
+    id: i64,
+    actor: &Actor,
+    kind: &str,
+    body: &str,
+) -> Result<()> {
     conn.execute("INSERT INTO routine_events(routine_id,at,actor,session,kind,body) VALUES (?1,?2,?3,?4,?5,?6)", params![id, db::now(), actor.name, actor.session, kind, body])?;
     Ok(())
 }
