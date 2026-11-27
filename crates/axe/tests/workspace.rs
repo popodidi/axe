@@ -768,3 +768,15 @@ fn verbose_prints_steps_and_vv_the_git_and_http_calls() {
     let sync = stderr(&l.axe(&["workspace", "sync", d, "-v"]));
     assert!(sync.contains("write the attached docs"), "{sync}");
 }
+
+#[test]
+fn a_folder_deleted_by_hand_is_built_again() {
+    let l = Laptop::new();
+    let id = l.task("one");
+    let dir = l.base.join("w");
+    let d = dir.to_str().unwrap();
+    l.ok(&["workspace", &id, "--dir", d]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    l.ok(&["workspace", &id, "--dir", d]);
+    assert!(dir.join("repos/one/README.md").is_file());
+}

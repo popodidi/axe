@@ -364,7 +364,8 @@ fn git_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
 /// worktree of the canonical clone stops the session. With `from_origin`, a
 /// branch missing locally but pushed to `origin` is created from (and tracks)
 /// `origin/<branch>` instead of the default branch: a local workspace picks up
-/// the work a run pushed.
+/// the work a run pushed; and the canonical clone's worktrees whose folders
+/// were deleted are pruned first.
 pub fn allocate_from(
     ready: &Ready,
     path: &Path,
@@ -413,6 +414,13 @@ pub fn allocate_from(
     )
     .is_ok();
     let pushed = format!("refs/remotes/origin/{branch}");
+    if from_origin {
+        // A local workspace folder deleted by hand leaves its worktrees
+        // registered, and `worktree add` refuses a registered path or a
+        // branch checked out there; forget the worktrees whose folders are
+        // gone.
+        git(&ready.canonical, &["worktree", "prune"])?;
+    }
     if exists {
         git(&ready.canonical, &["worktree", "add", path_str, branch])?;
     } else if from_origin
