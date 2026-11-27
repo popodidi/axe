@@ -51,6 +51,16 @@ pub trait Store: Send + Sync + 'static {
     fn runtime_login(&self, _bot: &str, _runtime: &str, _method: &str) -> anyhow::Result<String> {
         anyhow::bail!("runtime logins need an axe server")
     }
+    /// Adds a node runtime of `harness` (`runtime::Registry::create`);
+    /// returns its name.
+    fn runtime_add(&self, _harness: &str) -> anyhow::Result<String> {
+        anyhow::bail!("runtime changes need an axe server")
+    }
+    /// Removes node runtime `runtime` (`runtime::Registry::remove`);
+    /// returns what happened to its login files.
+    fn runtime_remove(&self, _runtime: &str) -> anyhow::Result<String> {
+        anyhow::bail!("runtime changes need an axe server")
+    }
 }
 
 /// Options of `axe bot tg send`.

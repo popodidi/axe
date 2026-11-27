@@ -3905,10 +3905,12 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
     let reply = rig.sent_to(OWNER)[0]["text"].as_str().unwrap().to_string();
     assert!(
-        reply.contains("claude-1 (claude-code): needs_login, 0 live"),
+        reply.contains(
+            "claude-1 (claude-code): needs login (last failure auth_invalid at \
+             2027-01-15T08:00:00Z), 0 live"
+        ),
         "{reply}"
     );
-    assert!(reply.contains("last failure auth_invalid"), "{reply}");
     assert!(
         reply.contains("codex-1 (codex): ok, plan pro, 1 live"),
         "{reply}"
@@ -3955,9 +3957,26 @@ fn runtimes_command_and_one_card_per_runtime_alert() {
     assert!(listed["text"]
         .as_str()
         .unwrap()
-        .contains("claude-1 (claude-code): needs_login"));
+        .contains("claude-1 (claude-code): needs login"));
     assert_eq!(listed["reply_parameters"]["message_id"], tg_id);
     assert_eq!(rig.stub.calls("answerCallbackQuery").len(), 1);
+    assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
+
+    // Remove is refused while the runtime has live runs.
+    wait_for("the list recorded", 20, || {
+        rig.messages().last().unwrap().2.contains("codex-1")
+    });
+    let list_tg = rig.messages().last().unwrap().3;
+    rig.stub.push(press(102, list_tg, "rtrm:codex-1"));
+    rig.stub.wait_confirmed(102);
+    wait_for("the refusal", 20, || rig.sent_to(OWNER).len() >= 4);
+    let refused = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        refused["text"],
+        "Runtime codex-1 (codex) has 1 live run: it cannot be removed now. Remove it once \
+         it has finished."
+    );
+    assert!(refused["reply_markup"].is_null(), "{refused}");
     assert!(rig.message_wakes().is_empty(), "the press wakes no bot");
 }
 
@@ -4487,17 +4506,33 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
             .contains("claude-1 (claude-code)")
     });
 
-    // /runtimes lists the runtime with a login button.
+    // /runtimes lists the runtime with Re-login and Remove, then Add.
     rig.stub
         .push_to(AUX_TOKEN, text_msg(100, 200, OWNER, OWNER, "/runtimes"));
     wait_for("the /runtimes reply", 20, || !rig.sent_to(OWNER).is_empty());
     let list = rig.sent_to(OWNER).pop().unwrap();
+    let kb = |rows: &[&[(&str, &str)]]| -> Vec<Vec<(String, String)>> {
+        rows.iter()
+            .map(|r| {
+                r.iter()
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect()
+            })
+            .collect()
+    };
+    let add_row: &[(&str, &str)] = &[
+        ("Add Claude", "rtadd:claude-code"),
+        ("Add Codex", "rtadd:codex"),
+    ];
     assert_eq!(
         keyboard_of(&list),
-        vec![vec![(
-            "Log in claude-1".to_string(),
-            "rtlogin:claude-1".to_string()
-        )]]
+        kb(&[
+            &[
+                ("Re-login claude-1", "rtlogin:claude-1"),
+                ("Remove claude-1", "rtrm:claude-1")
+            ],
+            add_row
+        ])
     );
     wait_for("the list recorded", 20, || rig.messages().len() == 1);
     let list_tg = rig.messages().last().unwrap().3;
@@ -4596,6 +4631,141 @@ fn runtimes_log_in_from_telegram_through_a_sealed_form() {
         rig.srv()
             .ok(&["runtimes"])
             .contains("claude-1 (claude-code): ok")
+    });
+    assert!(rig.message_wakes().is_empty(), "no bot was woken");
+
+    // Add Claude: the node adds claude-2 on its own login and its login
+    // menu follows.
+    let sent = rig.sent_to(OWNER).len();
+    press_on(104, list_tg, "rtadd:claude-code");
+    wait_for("the added runtime's menu", 20, || {
+        rig.sent_to(OWNER).len() > sent
+    });
+    let added = rig.sent_to(OWNER).pop().unwrap();
+    assert!(
+        added["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Added runtime claude-2 (claude-code) with its own login."),
+        "{added}"
+    );
+    assert_eq!(
+        keyboard_of(&added),
+        kb(&[
+            &[("Setup-token token", "rtlogin:claude-2:token")],
+            &[("API key", "rtlogin:claude-2:api_key")]
+        ])
+    );
+    let toml = std::fs::read_to_string(reg.join("claude-2/runtime.toml")).unwrap();
+    assert!(toml.contains("claude-2/home"), "{toml}");
+    wait_for("both runtimes reported", 20, || {
+        let out = rig.srv().ok(&["runtimes"]);
+        out.contains("claude-1 (claude-code): ok")
+            && out.contains("claude-2 (claude-code): needs login, 0 live")
+    });
+    let added_tg = rig
+        .messages()
+        .iter()
+        .rev()
+        .find(|m| m.2.starts_with("Added runtime claude-2"))
+        .unwrap()
+        .3;
+
+    // Both are listed, each with its buttons.
+    let sent = rig.sent_to(OWNER).len();
+    rig.stub
+        .push_to(AUX_TOKEN, text_msg(105, 201, OWNER, OWNER, "/runtimes"));
+    wait_for("the second list", 20, || rig.sent_to(OWNER).len() > sent);
+    let list = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        keyboard_of(&list),
+        kb(&[
+            &[
+                ("Re-login claude-1", "rtlogin:claude-1"),
+                ("Remove claude-1", "rtrm:claude-1")
+            ],
+            &[
+                ("Re-login claude-2", "rtlogin:claude-2"),
+                ("Remove claude-2", "rtrm:claude-2")
+            ],
+            add_row
+        ])
+    );
+    wait_for("the list recorded", 20, || {
+        rig.messages()
+            .last()
+            .unwrap()
+            .2
+            .contains("claude-2 (claude-code)")
+    });
+    let list_tg = rig.messages().last().unwrap().3;
+
+    // Its login flow is the chosen runtime's: a sealed form for claude-2.
+    let sent = rig.sent_to(OWNER).len();
+    press_on(106, added_tg, "rtlogin:claude-2:token");
+    wait_for("the form for claude-2", 20, || {
+        rig.sent_to(OWNER).len() >= sent + 2
+    });
+    let prompt = rig.sent_to(OWNER)[sent..]
+        .iter()
+        .find(|p| p["reply_markup"]["keyboard"].is_array())
+        .cloned()
+        .unwrap();
+    let link = prompt["reply_markup"]["keyboard"][0][0]["web_app"]["url"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        form_spec(&json!({ "link": link })).target,
+        axe::sealed::Target::Runtime {
+            runtime: "claude-2".into(),
+            login: "token".into()
+        }
+    );
+
+    // Remove asks first and says what happens to the login.
+    let sent = rig.sent_to(OWNER).len();
+    press_on(107, list_tg, "rtrm:claude-2");
+    wait_for("the confirmation", 20, || rig.sent_to(OWNER).len() > sent);
+    let confirm = rig.sent_to(OWNER).pop().unwrap();
+    assert!(
+        confirm["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Remove runtime claude-2 (claude-code)?"),
+        "{confirm}"
+    );
+    assert_eq!(
+        keyboard_of(&confirm),
+        kb(&[
+            &[("Remove claude-2", "rtrm!:claude-2")],
+            &[("Cancel", "rtrm-")]
+        ])
+    );
+    wait_for("the confirmation recorded", 20, || {
+        rig.messages()
+            .last()
+            .unwrap()
+            .2
+            .starts_with("Remove runtime")
+    });
+    let confirm_tg = rig.messages().last().unwrap().3;
+    let sent = rig.sent_to(OWNER).len();
+    press_on(108, confirm_tg, "rtrm!:claude-2");
+    wait_for("the removal", 20, || rig.sent_to(OWNER).len() > sent);
+    let done = rig.sent_to(OWNER).pop().unwrap();
+    assert_eq!(
+        done["text"],
+        "Runtime claude-2 removed: its login (stored credentials and login directory) was \
+         deleted with it."
+    );
+    assert!(!reg.join("claude-2").exists());
+    assert!(rig
+        .stub
+        .calls("editMessageReplyMarkup")
+        .iter()
+        .any(|c| c.params["message_id"] == confirm_tg));
+    wait_for("claude-2 gone from the report", 20, || {
+        !rig.srv().ok(&["runtimes"]).contains("claude-2")
     });
     assert!(rig.message_wakes().is_empty(), "no bot was woken");
 

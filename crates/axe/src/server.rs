@@ -190,6 +190,29 @@ impl channel::Store for State {
     fn runtime_login(&self, bot: &str, runtime: &str, method: &str) -> Result<String> {
         runtime_login(self, bot, runtime, method)
     }
+    fn runtime_add(&self, harness: &str) -> Result<String> {
+        let v = runtime_job(self, json!({"kind": "runtime_add", "harness": harness}))?;
+        let name = v["runtime"].as_str().context("the node named no runtime")?;
+        eprintln!("axe server: runtime {name} ({harness}) added from /runtimes");
+        Ok(name.to_string())
+    }
+    fn runtime_remove(&self, runtime: &str) -> Result<String> {
+        let v = runtime_job(self, json!({"kind": "runtime_remove", "runtime": runtime}))?;
+        eprintln!("axe server: runtime {runtime} removed from /runtimes");
+        Ok(v["note"].as_str().unwrap_or("").to_string())
+    }
+}
+
+/// Has the node apply a registry change (`runtime_add`, `runtime_remove`).
+fn runtime_job(st: &State, job: serde_json::Value) -> Result<serde_json::Value> {
+    let v = relay_job(st, job, None, FORM_RELAY_TIMEOUT).map_err(anyhow::Error::msg)?;
+    if let Some(e) = v["error"].as_str() {
+        bail!("{e}");
+    }
+    if v.get("ok").is_some() {
+        bail!("the node is too old to change its runtimes");
+    }
+    Ok(v)
 }
 
 impl State {
@@ -3787,7 +3810,8 @@ fn runtime_login(st: &State, bot: &str, runtime: &str, method: &str) -> Result<S
         }
         eprintln!("axe server: runtime {runtime}: device login started");
         return Ok(format!(
-            "Log in runtime {runtime} ({harness}) with a device code: open the link below and              enter the code. The runtime is ok again at its next login check.\n\n{}",
+            "Log in runtime {runtime} ({harness}) with a device code: open the link below and \
+             enter the code. The runtime is ok again at its next login check.\n\n{}",
             v["output"].as_str().unwrap_or("")
         ));
     }
