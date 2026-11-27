@@ -515,7 +515,10 @@ pub fn create(conn: &mut Connection, actor: &Actor, b: &NewBot, now: i64) -> Res
     check_cap("identity", &b.identity, IDENTITY_CAP)?;
     check_cap("conduct", &b.conduct, CONDUCT_CAP)?;
     check_cap("notes", &b.notes, NOTES_CAP)?;
-    let agent = b.agent.clone().unwrap_or_else(|| "claude".into());
+    let agent = b
+        .agent
+        .clone()
+        .unwrap_or_else(|| crate::harness::DEFAULT_AGENT.into());
     let nudge = b.nudge_after.as_deref().map_or(Ok(600), parse_duration)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let exists: bool = tx.query_row(

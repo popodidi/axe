@@ -112,8 +112,6 @@ const ADD_BUTTON: &str = "rtadd:";
 const PRIMARY_BUTTON: &str = "rtpri:";
 const BACKUP_BUTTON: &str = "rtbak:";
 const NO_BACKUP: &str = "rtbak-";
-/// Harnesses `/runtimes` can add a runtime of, with their names.
-const ADDABLE: &[(&str, &str)] = &[("claude-code", "Claude"), ("codex", "Codex")];
 /// What `/runtimes` says when no runtime is logged in yet.
 const NO_RUNTIME: &str = "Log in Claude or Codex to start me.";
 
@@ -164,10 +162,7 @@ impl<'a> RuntimePress<'a> {
             return Some(RuntimePress::Remove(n));
         }
         let h = data.strip_prefix(ADD_BUTTON)?;
-        ADDABLE
-            .iter()
-            .any(|(a, _)| *a == h)
-            .then_some(RuntimePress::Add(h))
+        crate::harness::known(h).then_some(RuntimePress::Add(h))
     }
 }
 
@@ -198,7 +193,7 @@ fn roles(view: &Value, me: Option<&bot::Bot>) -> (Option<String>, Option<String>
 
 /// A harness for people: `Claude`, `Codex`.
 fn harness_name(h: &str) -> &str {
-    ADDABLE.iter().find(|(a, _)| *a == h).map_or(h, |(_, n)| n)
+    crate::harness::get(h).map_or(h, |x| x.display)
 }
 
 /// A runtime's login state in plain words, with a limit's end.
@@ -309,14 +304,14 @@ fn list_buttons(view: &Value, me: Option<&bot::Bot>) -> (Vec<(String, String)>, 
             buttons.extend(row);
         }
     }
-    for (h, name) in ADDABLE {
+    for h in crate::harness::HARNESSES {
         let label = match list.is_empty() {
-            true => format!("Log in {name}"),
-            false => format!("Add {name}"),
+            true => format!("Log in {}", h.display),
+            false => format!("Add {}", h.display),
         };
-        buttons.push((label, format!("{ADD_BUTTON}{h}")));
+        buttons.push((label, format!("{ADD_BUTTON}{}", h.name)));
     }
-    rows.push(ADDABLE.len());
+    rows.push(crate::harness::HARNESSES.len());
     (buttons, rows)
 }
 

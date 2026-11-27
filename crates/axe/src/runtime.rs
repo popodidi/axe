@@ -205,71 +205,39 @@ pub type LoginEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
 /// The CLI's login directory variable and default directory, per harness.
 fn login_var(harness: &str) -> Option<(&'static str, &'static str)> {
-    match harness {
-        "claude-code" => Some(("CLAUDE_CONFIG_DIR", "~/.claude")),
-        "codex" => Some(("CODEX_HOME", "~/.codex")),
-        _ => None,
-    }
+    crate::harness::get(harness).map(|h| h.login_var)
 }
 
-/// How each harness can be logged in from a sealed form or a relayed
-/// device code: (method, the environment variable it stores, or `None` for
-/// the CLI's own login; label).
+/// How each harness can be logged in ([`crate::harness::Harness::logins`]).
 pub fn login_methods(
     harness: &str,
 ) -> &'static [(&'static str, Option<&'static str>, &'static str)] {
-    match harness {
-        // `claude auth login` prints a claude.ai URL and reads the code
-        // the page shows from stdin (relayed from a sealed form); Claude Code
-        // reads an API key, or a `claude setup-token` token, from the
-        // environment ahead of its login directory.
-        "claude-code" => &[
-            ("device", None, "web sign-in"),
-            (
-                "token",
-                Some("CLAUDE_CODE_OAUTH_TOKEN"),
-                "setup-token token",
-            ),
-            ("api_key", Some("ANTHROPIC_API_KEY"), "API key"),
-        ],
-        // `codex login --with-api-key` reads the key on stdin;
-        // `codex login --device-auth` prints a URL and a code.
-        "codex" => &[
-            ("device", None, "device code"),
-            ("api_key", None, "API key"),
-        ],
-        _ => &[],
-    }
+    crate::harness::get(harness).map_or(&[], |h| h.logins)
 }
 
 /// The format a login method's credential has, for the sealed form and
 /// [`Runtime::login`]: the CLI would take a malformed one and only fail on
 /// a later run.
 pub fn login_check(harness: &str, method: &str) -> Option<crate::sealed::Check> {
-    let (prefix, min, max) = match (harness, method) {
-        // `claude setup-token` prints `sk-ant-oat01-` and about 95 more
-        // characters, wrapped on a narrow terminal.
-        ("claude-code", "token") => ("sk-ant-oat01-", 90, 256),
-        ("claude-code", "api_key") => ("sk-ant-", 40, 256),
-        ("codex", "api_key") => ("sk-", 20, 512),
-        _ => return None,
-    };
+    let (_, prefix, min, max) = crate::harness::get(harness)?
+        .login_checks
+        .iter()
+        .find(|(m, ..)| *m == method)?;
     Some(crate::sealed::Check {
-        prefix: prefix.into(),
-        min: Some(min),
-        max: Some(max),
+        prefix: (*prefix).into(),
+        min: Some(*min),
+        max: Some(*max),
         chars: Some(crate::sealed::Chars::Nospace),
     })
 }
 
 /// Exits 0 while logged in: `claude auth status`, `codex login status`.
 fn default_probe(harness: &str) -> Vec<String> {
-    let argv: &[&str] = match harness {
-        "claude-code" => &["claude", "auth", "status"],
-        "codex" => &["codex", "login", "status"],
-        _ => &[],
-    };
-    argv.iter().map(|s| s.to_string()).collect()
+    crate::harness::get(harness)
+        .map_or(&[][..], |h| h.probe)
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 impl Runtime {
@@ -368,7 +336,10 @@ impl Runtime {
                 }
                 Ok(())
             }
-            None => self.cli_login(cfg, &["login", "--with-api-key"], value),
+            None => {
+                let args = crate::harness::get(&self.harness).map_or(&[][..], |h| h.stdin_login);
+                self.cli_login(cfg, args, value)
+            }
         }
     }
 
@@ -400,13 +371,14 @@ impl Runtime {
         let Some(secrets) = self.login_secrets.clone() else {
             bail!("runtime {} is not in the runtime registry", self.name);
         };
-        let claude = self.harness == "claude-code";
-        let (args, stdin): (&[&str], Stdio) = match claude {
-            true => (&["auth", "login", "--claudeai"], Stdio::piped()),
-            false => (&["login", "--device-auth"], Stdio::null()),
+        let (args, reads_code) =
+            crate::harness::get(&self.harness).map_or((&[][..], false), |h| h.device_login);
+        let stdin = match reads_code {
+            true => Stdio::piped(),
+            false => Stdio::null(),
         };
         let mut cmd = self.cli(cfg, args)?;
-        if claude {
+        if reads_code {
             // No browser on the node: the URL goes to the owner.
             cmd.env("BROWSER", "/bin/false");
         }
@@ -456,13 +428,12 @@ impl Runtime {
             }
         }
         let name = self.name.clone();
-        let stale: Vec<&'static str> = match claude {
-            true => login_methods(&self.harness)
-                .iter()
-                .filter_map(|(_, v, _)| *v)
-                .collect(),
-            false => vec![],
-        };
+        // A passing login replaces the credentials stored for the CLI's
+        // environment (Claude Code reads them ahead of its new login).
+        let stale: Vec<&'static str> = login_methods(&self.harness)
+            .iter()
+            .filter_map(|(_, v, _)| *v)
+            .collect();
         let printed = !lines.is_empty();
         std::thread::spawn(move || {
             // Drain the rest so the CLI never blocks on a full pipe.
@@ -498,7 +469,7 @@ impl Runtime {
         }
         Ok(DeviceLogin {
             output: lines.join("\n"),
-            code: code.filter(|_| claude),
+            code: code.filter(|_| reads_code),
         })
     }
 
@@ -1218,30 +1189,14 @@ fn check_logins(runtimes: &[Runtime]) -> Result<()> {
 }
 
 /// What a runtime [`Registry::create`] adds shares with the CLI's default
-/// directory, as links: the owner's instructions, settings and skills, so a
-/// run behaves the same on every login. Never a credential or a session.
+/// directory, as links ([`crate::harness::Harness::shared`]).
 fn shared_entries(harness: &str) -> &'static [&'static str] {
-    match harness {
-        "claude-code" => &[
-            "CLAUDE.md",
-            "settings.json",
-            "skills",
-            "agents",
-            "commands",
-            "plugins",
-        ],
-        "codex" => &["AGENTS.md", "config.toml", "skills"],
-        _ => &[],
-    }
+    crate::harness::get(harness).map_or(&[], |h| h.shared)
 }
 
 /// The name stem of runtimes [`Registry::create`] adds, per harness.
 fn name_prefix(harness: &str) -> Option<&'static str> {
-    match harness {
-        "claude-code" => Some("claude"),
-        "codex" => Some("codex"),
-        _ => None,
-    }
+    crate::harness::get(harness).map(|h| h.name_prefix)
 }
 
 /// A TOML basic string.
@@ -1258,7 +1213,7 @@ impl Runtime {
             bail!(
                 "unknown harness {:?} (expected one of {})",
                 f.harness,
-                crate::rule::HARNESSES.join(", ")
+                crate::harness::names()
             );
         };
         let agent = match f.agent {

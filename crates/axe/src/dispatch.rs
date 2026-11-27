@@ -500,7 +500,7 @@ impl Dispatcher {
     /// matching rule means `claude-code`. Bots also need `bot_args`.
     fn pick_from(&self, rule: Option<&rule::Rule>, bot: bool) -> std::result::Result<Pick, NoPick> {
         let fallback = [Use {
-            harness: "claude-code".into(),
+            harness: crate::harness::DEFAULT_HARNESS.into(),
             model: None,
             effort: None,
         }];
@@ -1327,7 +1327,8 @@ impl Dispatcher {
         // Changes by others reach the session after its next tool call
         // (`task_inbox`); only in a generated run folder, never a legacy
         // worktree's checkout.
-        if rt.harness == "claude-code" && cwd.starts_with(self.cfg.run_root()) {
+        let hook = crate::harness::get(&rt.harness).is_some_and(|h| h.inbox_hook);
+        if hook && cwd.starts_with(self.cfg.run_root()) {
             // After an atomic binary replacement Linux reports
             // "<path> (deleted)"; the hook must call the installed path.
             let exe = std::env::current_exe().context("locate the axe binary")?;
@@ -1707,7 +1708,7 @@ fn with_profile(
     let Some(p) = profile.filter(|p| p.model.is_some() || p.effort.is_some()) else {
         return with.cloned();
     };
-    if !rule::HARNESSES.contains(&harness) {
+    if !crate::harness::known(harness) {
         return with.cloned();
     }
     Some(Use {

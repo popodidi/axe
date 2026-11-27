@@ -135,7 +135,9 @@ impl Dispatcher {
             .client
             .get::<serde_json::Value>(&format!("/api/bots/{name}"), &[])?;
         let now = now_unix();
-        let primary = bot["agent"].as_str().unwrap_or("claude");
+        let primary = bot["agent"]
+            .as_str()
+            .unwrap_or(crate::harness::DEFAULT_AGENT);
         let backup = bot["backup"].as_str();
         let pick = |rt: &crate::runtime::Runtime, why: String| Pick {
             agent: rt.name.clone(),

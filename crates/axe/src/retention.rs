@@ -315,10 +315,10 @@ pub fn login_roots(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
 pub fn scan_sessions(roots: &[(String, PathBuf)]) -> Vec<Item> {
     let mut items = Vec::new();
     for (harness, dir) in roots {
-        match harness.as_str() {
-            "claude-code" => items.extend(scan_claude(dir)),
-            "codex" => items.extend(scan_codex(dir)),
-            _ => {}
+        match crate::harness::get(harness).map(|h| h.transcripts) {
+            Some(crate::harness::Transcripts::Claude) => items.extend(scan_claude(dir)),
+            Some(crate::harness::Transcripts::Codex) => items.extend(scan_codex(dir)),
+            None => {}
         }
     }
     items

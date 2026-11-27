@@ -237,7 +237,7 @@ fn runtimes_view(st: &State) -> serde_json::Value {
         .flat_map(|r| r.uses.iter().map(|u| u.harness.clone()))
         .collect();
     if rules.is_empty() {
-        tasks.push("claude-code".into());
+        tasks.push(crate::harness::DEFAULT_HARNESS.into());
     }
     crate::runtime::with_uses(&mut v, &bots, &tasks);
     v
@@ -3226,7 +3226,14 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
         }
         ("POST", ["api", "bots"]) => {
             let b: Create = req.json()?;
-            st.check_agent(|c| c.validate_bot_agent(b.bot.agent.as_deref().unwrap_or("claude")))?;
+            st.check_agent(|c| {
+                c.validate_bot_agent(
+                    b.bot
+                        .agent
+                        .as_deref()
+                        .unwrap_or(crate::harness::DEFAULT_AGENT),
+                )
+            })?;
             let created = bot::create(&mut st.conn(), &b.who.actor(), &b.bot, now)?;
             ok(201, &created)
         }
