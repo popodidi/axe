@@ -2554,6 +2554,9 @@ fn rename_keeps_the_bot_and_moves_what_names_it() {
         ),
         "{stdout}"
     );
+    // The owned task's owner moved with an `owner` event, as any owner change.
+    let log = srv.ok(&["log", &owned]);
+    assert!(log.contains("owner bot:b -> bot:b2"), "{log}");
 
     // The same bot under the new name; the old name fails clearly.
     let after = srv.get("/api/bots/b2");
