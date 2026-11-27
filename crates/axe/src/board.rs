@@ -11,9 +11,11 @@
 //!   A weekly retro card (`flags.retro`) is never one: it is not pinned, and
 //!   one pinned before is unpinned like a closed card.
 //!
-//! An escalated task with no card since its escalation gets one: the bot is
-//! woken to post it with its real options, and [`CARD_WAIT`] after that wake
-//! the server posts a minimal card itself ([`fallback_card`]). The gateway pins each open
+//! An escalated task with no card since its escalation gets one, from one
+//! bot: its owner bot, else its project's bot, else (neither exists) each bot
+//! subscribed to its project ([`card_needs`]). That bot is woken to post it
+//! with its real options, and [`CARD_WAIT`] after that wake the server posts a
+//! minimal card itself ([`fallback_card`]). The gateway pins each open
 //! card silently (`flags.card_pin`) and unpins it once it is closed.
 //!
 //! The inbox is on for a bot with a board message: its own text message with
@@ -235,10 +237,30 @@ fn escalated(conn: &Connection, bot: i64) -> Result<Vec<(i64, String, String, i6
     if !all && projects.is_empty() {
         return Ok(vec![]);
     }
+    Ok(escalated_tasks(conn)?
+        .into_iter()
+        .filter(|t| all || projects.contains(&t.project))
+        .map(|t| (t.id, t.project, t.title, t.since))
+        .collect())
+}
+
+/// An escalated task, in any project.
+struct Escalated {
+    id: i64,
+    project: String,
+    title: String,
+    /// When it was escalated (epoch seconds).
+    since: i64,
+    owner: Option<String>,
+}
+
+/// Every escalated task, by id.
+fn escalated_tasks(conn: &Connection) -> Result<Vec<Escalated>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.project, t.title, t.updated_at,
                 (SELECT MAX(e.at) FROM events e WHERE e.task_id=t.id
-                   AND e.kind='state' AND e.to_value='escalated')
+                   AND e.kind='state' AND e.to_value='escalated'),
+                t.owner
          FROM tasks t WHERE t.state='escalated' ORDER BY t.id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -248,22 +270,46 @@ fn escalated(conn: &Connection, bot: i64) -> Result<Vec<(i64, String, String, i6
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
             r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, project, title, updated, escalated) = row?;
-        if !all && !projects.contains(&project) {
-            continue;
-        }
+        let (id, project, title, updated, escalated, owner) = row?;
         let since = escalated
             .as_deref()
             .and_then(epoch_of)
             .or_else(|| epoch_of(&updated))
             .unwrap_or(0);
-        out.push((id, project, title, since));
+        out.push(Escalated {
+            id,
+            project,
+            title,
+            since,
+            owner,
+        });
     }
     Ok(out)
+}
+
+/// The one bot that posts the card of an escalated task (its card wake and
+/// fallback): its owner bot (`owner` is `bot:<name>`, renames followed), else
+/// the bot whose home project is the task's (an active one first, then the
+/// oldest). `None`: neither exists, and every bot subscribed to the project
+/// gets it.
+fn card_bot(conn: &Connection, owner: Option<&str>, project: &str) -> Result<Option<i64>> {
+    if let Some(name) = owner.and_then(|o| o.strip_prefix("bot:")) {
+        if let Some(name) = bot::bound_name(conn, name)? {
+            return Ok(Some(bot_id(conn, &name)?));
+        }
+    }
+    Ok(conn
+        .query_row(
+            "SELECT id FROM bots WHERE project=?1 ORDER BY state!='active', id LIMIT 1",
+            [project],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// SQL condition on `bot_messages` for an open card.
@@ -350,18 +396,34 @@ pub fn lines(conn: &Connection, name: &str) -> Result<Vec<Line>> {
     Ok(out)
 }
 
-/// Escalated tasks of bot `name` with no card sent since their escalation
-/// (open or already closed), oldest first.
+/// Escalated tasks whose card bot ([`card_bot`]) is bot `name`, with no card
+/// sent for them by any bot since their escalation (open or already closed),
+/// oldest first.
 pub fn card_needs(conn: &Connection, name: &str) -> Result<Vec<CardNeed>> {
     let b = bot::get(conn, name)?;
+    let (all, projects) = projects(conn, b.id)?;
     let mut out = Vec::new();
-    for (task, project, title, since) in escalated(conn, b.id)? {
+    for e in escalated_tasks(conn)? {
+        let mine = match card_bot(conn, e.owner.as_deref(), &e.project)? {
+            Some(id) => id == b.id,
+            None => all || projects.contains(&e.project),
+        };
+        if !mine {
+            continue;
+        }
+        let Escalated {
+            id: task,
+            project,
+            title,
+            since,
+            ..
+        } = e;
         let sent: Vec<String> = conn
             .prepare(
-                "SELECT at FROM bot_messages WHERE bot_id=?1 AND direction='out'
-                   AND json_extract(flags,'$.task')=?2",
+                "SELECT at FROM bot_messages WHERE direction='out'
+                   AND json_extract(flags,'$.task')=?1",
             )?
-            .query_map(params![b.id, task], |r| r.get(0))?
+            .query_map([task], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         if sent
             .iter()

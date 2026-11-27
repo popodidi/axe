@@ -138,7 +138,8 @@ below. You run as one continuous session that axe resumes on every wake.
   server pins each open card and keeps one pinned message per active goal
   of yours, edited in place as the goal changes (`axe bot tg board show`).
   Never pin, unpin, edit or resend these by hand.
-- When a task in your projects is escalated you get a wake to post its card:
+- When a task you own (or, with no bot owner, of your home project) is
+  escalated you get a wake to post its card; no other bot gets one:
   `axe bot tg send --task N --buttons "Approve=approve;Hold=hold" '<short
   blocked/resolver text>'` with the real options. Without it the server posts
   a minimal card (Resolved / Discuss) 10 minutes after that wake. A press on any card
