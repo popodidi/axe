@@ -195,6 +195,15 @@ pub fn login_methods(
     }
 }
 
+/// A token or API key as the CLI needs it: whitespace removed. Neither ever
+/// holds any, but one copied from a wrapped terminal line keeps the wrap as
+/// spaces or a line break, which the CLI's status check accepts and the API
+/// refuses ("Not logged in"). Applied on login and on read, so a credential
+/// stored before this works as it is.
+fn credential(value: &str) -> String {
+    value.split_whitespace().collect()
+}
+
 /// Exits 0 while logged in: `claude auth status`, `codex login status`.
 fn default_probe(harness: &str) -> Vec<String> {
     let argv: &[&str] = match harness {
@@ -243,7 +252,7 @@ impl Runtime {
             for (_, v, _) in login_methods(&self.harness) {
                 let Some(v) = v else { continue };
                 if let Ok(value) = std::fs::read_to_string(dir.join(v)) {
-                    set.push((v, value.trim().to_string()));
+                    set.push((v, credential(&value)));
                 }
             }
         }
@@ -271,8 +280,9 @@ impl Runtime {
         if method == "device" {
             bail!("a device code login takes no value");
         }
-        if value.is_empty() || value.contains(['\n', '\r', '\0']) {
-            bail!("the credential must be one line");
+        let value = &credential(value);
+        if value.is_empty() || value.contains('\0') {
+            bail!("the credential is empty or not text");
         }
         match var {
             Some(var) => {
@@ -1372,7 +1382,19 @@ exit 2
         assert!(!set.iter().any(|(k, _)| *k == "CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(rt.login(&cfg, "device", "").is_err());
         assert!(rt.login(&cfg, "bogus", "x").is_err());
-        assert!(rt.login(&cfg, "token", "a\nb").is_err());
+        assert!(rt.login(&cfg, "token", " \n").is_err());
+        // A token copied from a wrapped terminal line keeps the wrap as
+        // spaces or a line break: they are removed when it is stored...
+        rt.login(&cfg, "token", " sk-ant-oat01-ab cd\r\nef \n")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "sk-ant-oat01-abcdef"
+        );
+        // ...and when one stored with them is read.
+        std::fs::write(&file, "sk-ant-oat01-ab  cd ef\n").unwrap();
+        let (set, _) = rt.env();
+        assert!(set.contains(&("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-abcdef".into())));
         // Without a registry there is nowhere to keep a login.
         let plain =
             Config::parse("[agents.claude]\ncmd = [\"claude\"]\nharness = \"claude-code\"\n")
