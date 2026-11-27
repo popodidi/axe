@@ -48,6 +48,7 @@ use anyhow::{bail, Context, Result};
 use crate::config::Config;
 use crate::context::{self, frontmatter};
 use crate::db::Task;
+use crate::trace::step;
 use crate::worktree;
 
 /// Most docs listed per repo in `docs/index.md`.
@@ -113,14 +114,14 @@ pub fn build_task(
 ) -> Result<Built> {
     let branch = format!("{}task-{}--work", branch_prefix(cfg), task.id);
     let (built, cloned) = checkout(cfg, dir, repos, &branch, mode, store)?;
-    let skills = link_skills(dir, &built, only)?;
+    let skills = step("link the repos' skills", || link_skills(dir, &built, only))?;
     let mut attached = match (store, mode) {
         (Some(src), Mode::Run) => {
             context::resolve_or_empty(src, &context::task_scopes(task), &own(&skills))
         }
-        (Some(src), Mode::Local) => {
-            context::resolve(src, &context::task_scopes(task), &own(&skills))?
-        }
+        (Some(src), Mode::Local) => step("resolve the attached docs and skills", || {
+            context::resolve(src, &context::task_scopes(task), &own(&skills))
+        })?,
         (None, _) => context::Resolution::default(),
     };
     if let Some(only) = only {
@@ -130,7 +131,11 @@ pub fn build_task(
     if let Some(src) = store {
         match mode {
             Mode::Run => context::write_skills(&dir.join("skills"), &attached, src)?,
-            Mode::Local => stored = write_skills_local(dir, &attached, src)?,
+            Mode::Local => {
+                stored = step("write the attached skills", || {
+                    write_skills_local(dir, &attached, src)
+                })?
+            }
         }
     }
     let mut docs = docs_index(&built, mode)?;
@@ -144,7 +149,9 @@ pub fn build_task(
         &agents_md(task, &branch, &built, &skills, &attached, mode),
     )?;
     if let (Some(src), Mode::Local) = (store, mode) {
-        stored.extend(write_docs_local(dir, &attached, src)?);
+        stored.extend(step("write the attached docs", || {
+            write_docs_local(dir, &attached, src)
+        })?);
     }
     Ok(Built {
         cloned,
@@ -197,12 +204,15 @@ pub fn build_bot_in(
     let mut refreshed = Vec::new();
     for (repo, path) in built.iter().filter(|_| mode == Mode::Local) {
         let ready = worktree::repo_readiness(cfg, repo).map_err(anyhow::Error::msg)?;
+        let refresh = step(format_args!("refresh repos/{repo}"), || {
+            Ok::<_, anyhow::Error>(worktree::refresh(&ready, path))
+        })?;
         refreshed.push(RepoRefresh {
             repo: repo.clone(),
-            refresh: worktree::refresh(&ready, path),
+            refresh,
         });
     }
-    let skills = link_skills(dir, &built, None)?;
+    let skills = step("link the repos' skills", || link_skills(dir, &built, None))?;
     let skills_only = context::Resolution {
         scopes: attached.scopes.clone(),
         items: attached
@@ -218,7 +228,9 @@ pub fn build_bot_in(
     match mode {
         Mode::Run => context::write_skills(&dir.join("skills"), &skills_only, store)?,
         Mode::Local => {
-            stored = write_skills_local(dir, &skills_only, store)?;
+            stored = step("write the attached skills", || {
+                write_skills_local(dir, &skills_only, store)
+            })?;
             docs.push_str(&local_docs_section(attached));
         }
     }
@@ -228,7 +240,9 @@ pub fn build_bot_in(
         &bot_agents_md(name, &branch, &built, &skills, &skills_only, mode),
     )?;
     if mode == Mode::Local {
-        stored.extend(write_docs_local(dir, attached, store)?);
+        stored.extend(step("write the attached docs", || {
+            write_docs_local(dir, attached, store)
+        })?);
     }
     Ok(Built {
         cloned,
@@ -389,7 +403,10 @@ fn checkout(
     for name in repos {
         crate::db::validate_name("repo", name)?;
         let url = worktree::clone_url(cfg, name, &|n| store.map_or(Ok(None), |s| s.repo_url(n)));
-        if worktree::ensure_clone_from(cfg, name, url.url())? {
+        let fresh = step(format_args!("clone repo {name} if missing"), || {
+            worktree::ensure_clone_from(cfg, name, url.url())
+        })?;
+        if fresh {
             eprintln!(
                 "{}: cloned repo {name} into {}",
                 match mode {
@@ -401,12 +418,18 @@ fn checkout(
             cloned.push(name.clone());
         }
         let ready = worktree::repo_readiness_with(cfg, name, &url).map_err(anyhow::Error::msg)?;
-        let path = worktree::allocate_from(
-            &ready,
-            &dir.join("repos").join(name),
-            branch,
-            mode == Mode::Local,
-        )?;
+        let path = step(format_args!("worktree repos/{name}"), || {
+            worktree::allocate_from(
+                &ready,
+                &dir.join("repos").join(name),
+                branch,
+                mode == Mode::Local,
+            )
+        })
+        .map_err(|e| match mode {
+            Mode::Run => e,
+            Mode::Local => e.context(format!("set up repos/{name}")),
+        })?;
         built.push((name.clone(), path));
     }
     Ok((built, cloned))

@@ -317,6 +317,7 @@ fn git_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
         let _ = err.read_to_string(&mut s);
         s
     });
+    let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -324,10 +325,28 @@ fn git_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
         if Instant::now() >= end {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("git {} timed out", args.join(" "));
+            crate::trace::detail(
+                start.elapsed(),
+                format_args!("git -C {} {}  (timed out)", dir.display(), args.join(" ")),
+            );
+            bail!(
+                "git {} timed out after {}s in {}",
+                args.join(" "),
+                timeout.as_secs(),
+                dir.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    crate::trace::detail(
+        start.elapsed(),
+        format_args!(
+            "git -C {} {}{}",
+            dir.display(),
+            args.join(" "),
+            if status.success() { "" } else { "  (failed)" }
+        ),
+    );
     let stdout = reader.join().unwrap_or_default();
     let stderr = err_reader.join().unwrap_or_default();
     ensure!(
@@ -345,7 +364,8 @@ fn git_timeout(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
 /// worktree of the canonical clone stops the session. With `from_origin`, a
 /// branch missing locally but pushed to `origin` is created from (and tracks)
 /// `origin/<branch>` instead of the default branch: a local workspace picks up
-/// the work a run pushed.
+/// the work a run pushed; and the canonical clone's worktrees whose folders
+/// were deleted are pruned first.
 pub fn allocate_from(
     ready: &Ready,
     path: &Path,
@@ -394,6 +414,13 @@ pub fn allocate_from(
     )
     .is_ok();
     let pushed = format!("refs/remotes/origin/{branch}");
+    if from_origin {
+        // A local workspace folder deleted by hand leaves its worktrees
+        // registered, and `worktree add` refuses a registered path or a
+        // branch checked out there; forget the worktrees whose folders are
+        // gone.
+        git(&ready.canonical, &["worktree", "prune"])?;
+    }
     if exists {
         git(&ready.canonical, &["worktree", "add", path_str, branch])?;
     } else if from_origin

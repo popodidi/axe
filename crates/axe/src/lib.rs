@@ -32,6 +32,7 @@ pub mod skill;
 pub mod subscription;
 #[cfg(feature = "telegram")]
 pub mod telegram;
+pub mod trace;
 pub mod upgrade;
 pub mod usage;
 #[cfg(feature = "embed-ui")]

@@ -216,7 +216,12 @@ enum Cmd {
     /// worktrees), with the attached docs in full under docs/store/. Claims
     /// nothing and records no run; refuses an in_progress task. `axe
     /// workspace sync` writes edits to its store-backed files back to the
-    /// doc store
+    /// doc store.
+    ///
+    /// The server is read without retries and a host lookup gives up after
+    /// 10s, so a network failure ends the command at once. A build that did
+    /// not finish resumes when run again; a folder an older build left
+    /// behind needs --force
     #[command(args_conflicts_with_subcommands = true)]
     Workspace {
         #[command(subcommand)]
@@ -226,6 +231,15 @@ enum Cmd {
         /// Folder to build in (default ~/axe/task-<id> or ~/axe/bot-<name>)
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Rebuild the generated files and repo worktrees from scratch;
+        /// refuses, listing them, while a repo has uncommitted changes or a
+        /// store-backed file has an unsynced edit
+        #[arg(long)]
+        force: bool,
+        /// Print each step with its duration; -vv adds each git command and
+        /// HTTP call
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
     },
     /// The agent skill built into this binary: install it, show its state
     ///
@@ -291,6 +305,10 @@ enum WorkspaceCmd {
     Sync {
         /// The workspace (default: the one holding the current directory)
         dir: Option<PathBuf>,
+        /// Print each step with its duration; -vv adds each git command and
+        /// HTTP call
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
     },
 }
 
@@ -984,6 +1002,8 @@ fn run_blob(c: &Client, command: &BlobCmd) -> Result<()> {
     Ok(())
 }
 
+/// How long `axe workspace` waits for the server host's DNS lookup.
+const WORKSPACE_DNS_SECS: u64 = 10;
 /// How long `axe admission hold|release` waits for the node to report it.
 const HOLD_CONFIRM: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -4406,16 +4426,24 @@ fn run_cmd(cli: &Cli) -> Result<()> {
             command,
             target,
             dir,
+            force,
+            verbose,
         } => {
             let cfg = Config::load(&config::default_path()?)?;
+            let client = || {
+                Client::from_env(cli.actor.clone())
+                    .fail_fast(std::time::Duration::from_secs(WORKSPACE_DNS_SECS))
+            };
             match (command, target) {
-                (Some(WorkspaceCmd::Sync { dir }), _) => {
+                (Some(WorkspaceCmd::Sync { dir, verbose }), _) => {
+                    crate::trace::set_level(*verbose);
                     let dir = crate::workspace::find(dir.as_deref())?;
                     crate::workspace::sync(&client(), &cfg, &dir)?;
                 }
                 (None, Some(t)) => {
+                    crate::trace::set_level(*verbose);
                     let t = crate::workspace::Target::parse(t);
-                    let dir = crate::workspace::build(&client(), &cfg, &t, dir.as_deref())?;
+                    let dir = crate::workspace::build(&client(), &cfg, &t, dir.as_deref(), *force)?;
                     println!("{}", dir.display());
                 }
                 (None, None) => anyhow::bail!("name a task id or bot name, or `sync`"),
