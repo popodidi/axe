@@ -3810,7 +3810,12 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
                         .collect();
                     line.push_str(&format!(" [files: {}]", names.join(", ")));
                 }
-                if !m.text.is_empty() {
+                let voice = (m.kind == "voice")
+                    .then(|| crate::transcribe::prompt_text(&m.flags, &m.text))
+                    .flatten();
+                if let Some(v) = voice {
+                    line.push_str(&format!(": {v}"));
+                } else if !m.text.is_empty() {
                     line.push_str(&format!(": {}", m.text));
                 }
                 println!("{line}");

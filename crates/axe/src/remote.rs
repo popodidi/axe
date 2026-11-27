@@ -270,6 +270,13 @@ pub fn operation(conn: &Connection, v: &Value) -> Result<Value> {
             )?;
             Value::Null
         }
+        "bot_transcript" => {
+            let run = check_bot_run()?;
+            let t: crate::transcribe::Transcript =
+                serde_json::from_value(b["transcript"].clone()).context("transcript")?;
+            crate::bot::set_transcript(&tx, run, number(b, "message")?, &t)?;
+            Value::Null
+        }
         "bot_activity" => {
             let run = check_bot_run()?;
             crate::bot::set_activity(&tx, run, field(b, "activity")?)?;

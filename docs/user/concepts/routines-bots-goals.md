@@ -20,6 +20,11 @@ code gains no branches for them.
   identities with one agent session resumed on every wake. Wakes come from the
   bot itself, named cron schedules (`schedule.rs`), task-event subscriptions
   (`subscription.rs`) and the Telegram gateway (`telegram.rs`, `board.rs`).
+  A voice message reaches the bot as a local transcript marked
+  `[voice message, auto-transcribed, may contain errors]`: the node runs
+  SenseVoice-Small (sherpa-onnx) in a child process before the run, with no
+  API or key, and keeps the audio as the message's attachment
+  (`transcribe.rs`; off with `[defaults] transcribe_voice = false`).
   Design: [docs/design/bots.md](../../../docs/design/bots.md).
 - **Services** (`axe service`, `service.rs`, `dispatch/services.rs`) are
   long-running processes a bot declares: name, shell command, cwd (default

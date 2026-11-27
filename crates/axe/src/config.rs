@@ -25,6 +25,10 @@ pub struct Defaults {
     pub strategy: Strategy,
     #[serde(default = "default_max_runs")]
     pub max_runs: i64,
+    /// Bot voice messages reach the bot as a local transcript
+    /// (`transcribe.rs`); `false` turns it off. Omitted: on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcribe_voice: Option<bool>,
 }
 
 impl Default for Defaults {
@@ -34,6 +38,7 @@ impl Default for Defaults {
             agents: default_agents(),
             strategy: default_strategy(),
             max_runs: default_max_runs(),
+            transcribe_voice: None,
         }
     }
 }
@@ -1091,6 +1096,8 @@ pub struct Resolved {
     pub max_runs: i64,
     /// Round-robin cursor key: the match of the rule that supplied `agents`.
     pub rule_key: String,
+    /// `[defaults] transcribe_voice`.
+    pub transcribe_voice: Option<bool>,
 }
 
 fn default_workspace_root() -> String {
@@ -1526,6 +1533,7 @@ impl Config {
             strategy: d.strategy,
             max_runs: d.max_runs,
             rule_key: "defaults".into(),
+            transcribe_voice: d.transcribe_voice,
         };
         for r in rules {
             if let Some(m) = r.max_resumes {

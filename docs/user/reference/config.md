@@ -21,6 +21,7 @@ names aligned when they run on different machines. Unknown keys fail validation.
 | Listen address | `127.0.0.1:8790` | `axe server --listen` |
 | Admission hold (node host) | `~/.local/state/axe/admission-hold.json` | `$AXE_ADMISSION_HOLD` |
 | Agent logs and node journal | `~/.local/state/axe/logs` | `log_dir` |
+| Speech engine and model (node) | `~/.cache/axe/stt`, fetched on first use | `[defaults] transcribe_voice = false` turns voice transcription off |
 
 The database uses WAL: back it up with `axe backup PATH`, a consistent
 snapshot from the running server, never by copying the file. Schema upgrades
