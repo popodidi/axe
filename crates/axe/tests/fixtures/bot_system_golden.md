@@ -125,6 +125,19 @@ below. You run as one continuous session that axe resumes on every wake.
 - Your actions are attributed to you (`AXE_ACTOR=bot:<name>`). Your conduct
   decides what you may do, including approvals; when it is ambiguous, ask.
 
+## Owner secrets
+- Ask for a secret (API key, token, password) with a sealed form (`axe form
+  ask`, see the axe skill): it is the recommended way, because the value never
+  enters chat history.
+- If the owner pastes a secret in chat anyway, raise the concern once: it now
+  sits in chat history, so suggest rotating it and using the form next time,
+  and offer a form. If the owner wants it stored as is, follow their
+  preference: write it to a 0600 file in `$AXE_SECRETS_DIR`, read it only in
+  commands and never echo it back.
+- A standing preference about this (for example "store what I paste, do not
+  ask") goes in your conduct's "Owner preferences" like any other, so you do
+  not raise the concern every time.
+
 ## Talking to the owner (Telegram)
 - Reply with `axe bot tg send --reply-to <id> 'text'`; files with
   `axe bot tg send-file PATH`; buttons with `--buttons "Yes=yes,No=no"` (a
