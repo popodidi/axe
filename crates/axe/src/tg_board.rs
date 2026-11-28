@@ -14,10 +14,16 @@ use crate::board::{age, cap, escape, utf16, Board, BoardLine, FOOTER_ROOM, TEXT_
 
 /// Decide lines that get a jump button.
 pub const JUMP_BUTTONS: usize = 5;
-/// Entries of a Tick… or Park… menu.
-pub const MENU_ENTRIES: usize = 8;
-/// Characters of a menu button's label.
-const LABEL_CAP: usize = 30;
+/// Entries of a Mark done or Park menu; more items get a web board link.
+pub const MENU_ENTRIES: usize = 12;
+/// Characters of a menu button's label (one full-width row on a phone).
+const LABEL_CAP: usize = 36;
+/// The main row's button that opens the item picker.
+pub const TICK_LABEL: &str = "☑ Mark done…";
+/// The main row's button that opens the decision picker.
+pub const PARK_LABEL: &str = "⏸ Park…";
+/// The button that closes a picker.
+pub const BACK_LABEL: &str = "‹ Back";
 /// Callback data prefix of the board's buttons.
 pub const PREFIX: &str = "brd:";
 /// Text a board pin is edited to when a newer one replaces it.
@@ -185,10 +191,13 @@ fn target(l: &BoardLine) -> String {
     format!("{}:{}", l.kind, l.id)
 }
 
-/// The pin's inline keyboard: the main row (`menu` `None`): a jump button
-/// per Decide line (up to [`JUMP_BUTTONS`]), Tick… and Park… when they have
-/// entries, and Web; or the Tick… (`tick`) or Park… (`park`) menu, one entry
-/// per row and a Back button. Empty: no keyboard.
+/// The pin's inline keyboard. The main view (`menu` `None`): a row of jump
+/// buttons, one per numbered Decide line (up to [`JUMP_BUTTONS`]); a row
+/// with Mark done… and Park… when they have entries; and a row with the web
+/// board. A picker (`tick`: open Review and Items lines; `park`: Decide
+/// lines) lists one entry per full-width row, labelled with the line's own
+/// text so a press says what it does, then "+N more" on the web when it is
+/// cut, and Back. Empty: no keyboard.
 pub fn keyboard(board: &Board, menu: Option<&str>, web: Option<&str>) -> Value {
     let decide: Vec<&BoardLine> = board
         .sections
@@ -203,7 +212,14 @@ pub fn keyboard(board: &Board, menu: Option<&str>, web: Option<&str>) -> Value {
         .flat_map(|s| &s.lines)
         .filter(|l| l.kind == "item" && l.state == "open")
         .collect();
-    let back = vec![data("‹ Back", format!("{PREFIX}m:"))];
+    let back = vec![data(BACK_LABEL, format!("{PREFIX}m:"))];
+    let more = |n: usize| -> Option<Vec<Value>> {
+        let w = web.filter(|_| n > MENU_ENTRIES)?;
+        Some(vec![json!({
+            "text": format!("+{} more on the web board", n - MENU_ENTRIES),
+            "url": web_url(w, &board.bot)
+        })])
+    };
     let rows: Vec<Vec<Value>> = match menu {
         Some("tick") if !items.is_empty() => items
             .iter()
@@ -214,6 +230,7 @@ pub fn keyboard(board: &Board, menu: Option<&str>, web: Option<&str>) -> Value {
                     format!("{PREFIX}d:{}", l.id),
                 )]
             })
+            .chain(more(items.len()))
             .chain([back])
             .collect(),
         Some("park") if !decide.is_empty() => decide
@@ -222,33 +239,33 @@ pub fn keyboard(board: &Board, menu: Option<&str>, web: Option<&str>) -> Value {
             .enumerate()
             .map(|(i, l)| {
                 vec![data(
-                    &format!("{}. {}", i + 1, cap(&l.text, LABEL_CAP)),
+                    &format!("⏸ {}. {}", i + 1, cap(&l.text, LABEL_CAP)),
                     format!("{PREFIX}p:{}", target(l)),
                 )]
             })
+            .chain(more(decide.len()))
             .chain([back])
             .collect(),
         _ => {
-            let mut row: Vec<Value> = decide
+            let jumps: Vec<Value> = decide
                 .iter()
                 .take(JUMP_BUTTONS)
                 .enumerate()
                 .map(|(i, l)| data(&(i + 1).to_string(), format!("{PREFIX}j:{}", target(l))))
                 .collect();
+            let mut actions = Vec::new();
             if !items.is_empty() {
-                row.push(data("Tick…", format!("{PREFIX}m:tick")));
+                actions.push(data(TICK_LABEL, format!("{PREFIX}m:tick")));
             }
             if !decide.is_empty() {
-                row.push(data("Park…", format!("{PREFIX}m:park")));
+                actions.push(data(PARK_LABEL, format!("{PREFIX}m:park")));
             }
-            if let Some(w) = web {
-                row.push(json!({"text": "Web", "url": web_url(w, &board.bot)}));
-            }
-            if row.is_empty() {
-                vec![]
-            } else {
-                vec![row]
-            }
+            let web_row = web.map(|w| vec![json!({"text": "Web board", "url": web_url(w, &board.bot)})]);
+            [jumps, actions]
+                .into_iter()
+                .chain(web_row)
+                .filter(|r| !r.is_empty())
+                .collect()
         }
     };
     json!({ "inline_keyboard": rows })
@@ -429,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_main_row_and_menus() {
+    fn keyboard_main_view_and_pickers() {
         let mut done = l("item", 9, "Done");
         done.state = "done".into();
         let b = board(vec![
@@ -438,38 +455,63 @@ mod tests {
                 "Decide",
                 vec![l("task", 12, "Deploy"), l("card", 40, "Which one?")],
             ),
+            ("review", "Review", vec![l("item", 3, "Core fixes")]),
             ("items", "Items", vec![l("item", 7, &"a".repeat(80)), done]),
         ]);
         let k = keyboard(&b, None, Some("http://axe/"));
         assert_eq!(
             k,
-            json!({"inline_keyboard": [[
-                {"text": "1", "callback_data": "brd:j:task:12"},
-                {"text": "2", "callback_data": "brd:j:card:40"},
-                {"text": "Tick…", "callback_data": "brd:m:tick"},
-                {"text": "Park…", "callback_data": "brd:m:park"},
-                {"text": "Web", "url": "http://axe/?bot=cos&tab=board"}
-            ]]})
+            json!({"inline_keyboard": [
+                [
+                    {"text": "1", "callback_data": "brd:j:task:12"},
+                    {"text": "2", "callback_data": "brd:j:card:40"}
+                ],
+                [
+                    {"text": "☑ Mark done…", "callback_data": "brd:m:tick"},
+                    {"text": "⏸ Park…", "callback_data": "brd:m:park"}
+                ],
+                [{"text": "Web board", "url": "http://axe/?bot=cos&tab=board"}]
+            ]})
         );
+        // The item picker: each open Review and Items line by its own text,
+        // then Back; a done item is not offered.
         let tick = keyboard(&b, Some("tick"), None);
         let rows = tick["inline_keyboard"].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "one open item and Back: {tick}");
-        assert_eq!(rows[0][0]["callback_data"], "brd:d:7");
+        assert_eq!(rows.len(), 3, "two open items and Back: {tick}");
+        assert_eq!(rows[0][0], json!({"text": "☑ Core fixes", "callback_data": "brd:d:3"}));
+        assert_eq!(rows[1][0]["callback_data"], "brd:d:7");
         assert_eq!(
-            rows[0][0]["text"].as_str().unwrap().chars().count(),
+            rows[1][0]["text"].as_str().unwrap().chars().count(),
             2 + LABEL_CAP
         );
-        assert_eq!(rows[1][0]["callback_data"], "brd:m:");
+        assert_eq!(rows[2][0], json!({"text": "‹ Back", "callback_data": "brd:m:"}));
         let park = keyboard(&b, Some("park"), None);
         assert_eq!(
-            park["inline_keyboard"][1][0]["callback_data"],
-            "brd:p:card:40"
+            park["inline_keyboard"][1][0],
+            json!({"text": "⏸ 2. Which one?", "callback_data": "brd:p:card:40"})
         );
         for row in rows {
             for btn in row.as_array().unwrap() {
                 assert!(btn["callback_data"].as_str().unwrap().len() <= 64);
             }
         }
+        // More open items than a picker holds: the rest are on the web.
+        let many: Vec<BoardLine> = (0..15).map(|i| l("item", i, &format!("item {i}"))).collect();
+        let b = board(vec![("items", "Items", many)]);
+        let tick = keyboard(&b, Some("tick"), Some("http://axe"));
+        let rows = tick["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), MENU_ENTRIES + 2);
+        assert_eq!(
+            rows[MENU_ENTRIES][0],
+            json!({"text": "+3 more on the web board", "url": "http://axe/?bot=cos&tab=board"})
+        );
+        // No Decide line: no jump row and no Park.
+        assert_eq!(
+            keyboard(&b, None, None),
+            json!({"inline_keyboard": [[{"text": "☑ Mark done…", "callback_data": "brd:m:tick"}]]})
+        );
+        // A picker with nothing left falls back to the main view.
+        assert_eq!(keyboard(&b, Some("park"), None), keyboard(&b, None, None));
         assert_eq!(
             keyboard(&board(vec![]), None, None),
             json!({"inline_keyboard": []})

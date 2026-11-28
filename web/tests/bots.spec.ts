@@ -191,3 +191,35 @@ test("bot list columns stay put while a live run updates and fit narrow widths",
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   }
 });
+// Task 2044: on a phone the bot pane stayed on its skeleton. The server
+// reports a change a second or more while runs are live, and each change
+// aborted the pane's reads and started them again, so on a slow link they
+// never finished. Changes now queue one more read after the read in flight.
+test("bot pane loads while changes stream faster than its reads", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await mockBots(page);
+  let changes = 0;
+  // Each connection delivers a burst of changes, then the browser reconnects
+  // 100 ms later: several changes a second, as live runs make them.
+  await page.route("http://axe.test/api/stream", (route) => {
+    const body =
+      "retry: 100\n\n" +
+      Array.from({ length: 3 }, () => `event: change\ndata: {"seq":${++changes}}\n\n`).join("");
+    return route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream", "Access-Control-Allow-Origin": "*" },
+      body,
+    });
+  });
+  // Every bot pane read takes longer than the gap between changes.
+  await page.route(/^http:\/\/axe\.test\/api\/bots\/ops-bot/, async (route) => {
+    await new Promise((r) => setTimeout(r, 700));
+    return route.fallback();
+  });
+  await page.goto(base + "&view=bots&bot=ops-bot&tab=board");
+  const detail = page.getByRole("region", { name: "Bot detail" });
+  await expect(detail.getByRole("region", { name: "Decide" })).toContainText("2 to decide", {
+    timeout: 8000,
+  });
+  expect(changes).toBeGreaterThan(6);
+});

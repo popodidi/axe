@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
+import { useLive } from "../../lib/live-load";
 import Markdown from "../../app/markdown";
 import {
   Alert,
@@ -97,51 +98,39 @@ export type BotListData = {
  * message times (one metadata read per bot). Reloads on every server change.
  */
 export function useBots(base: string, enabled: boolean, revision: number) {
-  const [state, setState] = useState<BotListData>({
-    bots: null,
-    admission: null,
-    live: new Map(),
-    last: new Map(),
-    error: "",
-  });
-  useEffect(() => {
-    if (!enabled) return;
-    const c = new AbortController();
-    (async () => {
-      try {
-        const [bots, live, admission] = await Promise.all([
-          get<BotSummary[]>(base + "/api/bots", c.signal),
-          get<BotRun[]>(base + "/api/bot-runs?live=1&limit=1000", c.signal),
-          // Slot counters are optional: an older server or a failed read
-          // leaves the list itself usable.
-          get<Admission>(base + "/api/admission", c.signal).catch(() => null),
-        ]);
-        const last = new Map(
-          await Promise.all(
-            bots.map(async (b) => {
-              const a = await get<Activity>(
-                `${base}/api/bots/${encodeURIComponent(b.name)}/activity?limit=200`,
-                c.signal,
-              ).catch(() => null);
-              return [b.name, a ? lastMessages(a.messages) : { in: null, out: null }] as const;
-            }),
-          ),
-        );
-        if (!c.signal.aborted)
-          setState({
-            bots,
-            admission,
-            live: new Map(live.map((r) => [r.id, r])),
-            last,
-            error: "",
-          });
-      } catch (e) {
-        if (!c.signal.aborted) setState((s) => ({ ...s, error: String(e) }));
-      }
-    })();
-    return () => c.abort();
-  }, [base, enabled, revision]);
-  return state;
+  const live = useLive<Omit<BotListData, "error">>(
+    async (signal) => {
+      const [bots, live, admission] = await Promise.all([
+        get<BotSummary[]>(base + "/api/bots", signal),
+        get<BotRun[]>(base + "/api/bot-runs?live=1&limit=1000", signal),
+        // Slot counters are optional: an older server or a failed read
+        // leaves the list itself usable.
+        get<Admission>(base + "/api/admission", signal).catch(() => null),
+      ]);
+      const last = new Map(
+        await Promise.all(
+          bots.map(async (b) => {
+            const a = await get<Activity>(
+              `${base}/api/bots/${encodeURIComponent(b.name)}/activity?limit=200`,
+              signal,
+            ).catch(() => null);
+            return [b.name, a ? lastMessages(a.messages) : { in: null, out: null }] as const;
+          }),
+        ),
+      );
+      return { bots, admission, live: new Map(live.map((r) => [r.id, r])), last };
+    },
+    base,
+    revision,
+    enabled,
+  );
+  return {
+    bots: live.value?.bots ?? null,
+    admission: live.value?.admission ?? null,
+    live: live.value?.live ?? new Map(),
+    last: live.value?.last ?? new Map(),
+    error: live.error,
+  };
 }
 export function BotList({
   state: { bots, admission, live, last, error },
@@ -321,37 +310,29 @@ export function BotPane({
   onWatch: (run: number) => void;
   onCopy: (command: string) => void;
 }) {
-  const [detail, setDetail] = useState<Detail | null>(null);
-  const [error, setError] = useState("");
   const tab = botTabs.includes(params.get("tab") || "")
     ? params.get("tab")!
     : "board";
-  useEffect(() => {
-    const c = new AbortController();
-    const path = `${base}/api/bots/${encodeURIComponent(name)}`;
-    const n = BOT_READ_LIMIT;
-    Promise.all([
-      get<Bot>(path, c.signal),
-      get<Wake[]>(`${path}/wakes?limit=${n}`, c.signal),
-      get<BotEvent[]>(`${path}/events?limit=${n}`, c.signal),
-      get<BotRun[]>(
-        `${base}/api/bot-runs?bot=${encodeURIComponent(name)}&limit=${n}`,
-        c.signal,
-      ),
-      get<Activity>(`${path}/activity?limit=${n}`, c.signal),
-      get<BotSchedule[]>(`${path}/schedules`, c.signal),
-      get<Board>(`${path}/board`, c.signal).catch(() => null),
-    ])
-      .then(([bot, wakes, events, runs, activity, schedules, board]) => {
-        if (c.signal.aborted) return;
-        setDetail({ bot, wakes, events, runs, activity, schedules, board });
-        setError("");
-      })
-      .catch((e) => {
-        if (!c.signal.aborted) setError(String(e));
-      });
-    return () => c.abort();
-  }, [base, name, revision]);
+  const live = useLive<Detail>(
+    async (signal) => {
+      const path = `${base}/api/bots/${encodeURIComponent(name)}`;
+      const n = BOT_READ_LIMIT;
+      const [bot, wakes, events, runs, activity, schedules, board] = await Promise.all([
+        get<Bot>(path, signal),
+        get<Wake[]>(`${path}/wakes?limit=${n}`, signal),
+        get<BotEvent[]>(`${path}/events?limit=${n}`, signal),
+        get<BotRun[]>(`${base}/api/bot-runs?bot=${encodeURIComponent(name)}&limit=${n}`, signal),
+        get<Activity>(`${path}/activity?limit=${n}`, signal),
+        get<BotSchedule[]>(`${path}/schedules`, signal),
+        get<Board>(`${path}/board`, signal).catch(() => null),
+      ]);
+      return { bot, wakes, events, runs, activity, schedules, board };
+    },
+    `${base} ${name}`,
+    revision,
+  );
+  const detail = live.value;
+  const error = live.error;
   const d = detail?.bot.name === name ? detail : null;
   return (
     <ItemPane

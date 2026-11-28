@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useLive } from "../../lib/live-load";
 import Markdown from "../../app/markdown";
 import {
   Alert,
@@ -46,21 +46,14 @@ async function get<T>(url: string, signal: AbortSignal): Promise<T> {
 }
 export type GoalListData = { goals: Goal[] | null; error: string };
 /** Every goal with its 7-day spend; reloads on every server change. */
-export function useGoals(base: string, enabled: boolean, revision: number) {
-  const [state, setState] = useState<GoalListData>({ goals: null, error: "" });
-  useEffect(() => {
-    if (!enabled) return;
-    const c = new AbortController();
-    get<Goal[]>(base + "/api/goals", c.signal)
-      .then((goals) => {
-        if (!c.signal.aborted) setState({ goals, error: "" });
-      })
-      .catch((e) => {
-        if (!c.signal.aborted) setState((s) => ({ ...s, error: String(e) }));
-      });
-    return () => c.abort();
-  }, [base, enabled, revision]);
-  return state;
+export function useGoals(base: string, enabled: boolean, revision: number): GoalListData {
+  const live = useLive<Goal[]>(
+    (signal) => get<Goal[]>(base + "/api/goals", signal),
+    base,
+    revision,
+    enabled,
+  );
+  return { goals: live.value, error: live.error };
 }
 const tones: Record<string, Tone> = { proposed: "pending", active: "active", paused: "warn", done: "ok" };
 function State({ state }: { state: string }) {
@@ -205,25 +198,20 @@ export function GoalPane({
   onOpenTask: (id: number) => void;
   onCopy: (command: string) => void;
 }) {
-  const [detail, setDetail] = useState<Detail | null>(null);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    const c = new AbortController();
-    const path = `${base}/api/goals/${encodeURIComponent(name)}`;
-    Promise.all([
-      get<GoalDetail>(path, c.signal),
-      get<GoalEvent[]>(`${path}/events?trajectory=1&limit=${TRAJECTORY_LIMIT}`, c.signal),
-    ])
-      .then(([goal, trajectory]) => {
-        if (c.signal.aborted) return;
-        setDetail({ goal, trajectory });
-        setError("");
-      })
-      .catch((e) => {
-        if (!c.signal.aborted) setError(String(e));
-      });
-    return () => c.abort();
-  }, [base, name, revision]);
+  const live = useLive<Detail>(
+    async (signal) => {
+      const path = `${base}/api/goals/${encodeURIComponent(name)}`;
+      const [goal, trajectory] = await Promise.all([
+        get<GoalDetail>(path, signal),
+        get<GoalEvent[]>(`${path}/events?trajectory=1&limit=${TRAJECTORY_LIMIT}`, signal),
+      ]);
+      return { goal, trajectory };
+    },
+    `${base} ${name}`,
+    revision,
+  );
+  const detail = live.value;
+  const error = live.error;
   const d = detail?.goal.name === name ? detail : null;
   const g = d?.goal;
   const open = g ? openTasks(g.tasks) : [];
