@@ -74,10 +74,17 @@ success. Logs follow the tail only while the user is at it.
 
 ## Boundaries
 
-The browser only reads: it keeps no token and has no mutation UI. Every page
-and read needs a read session, an HttpOnly cookie the owner gets once per
-browser from a one-time `axe web login-link` (or the token on `/login`); a
-browser without one gets the login page.
+The browser keeps no token and its only mutation UI is the bot Board tab's
+presses (tick or reopen an item, park a decision), the same the Telegram pin
+offers; the server takes them from a read session only from its own pages
+(`board_press` and `same_origin` in `crates/axe/src/server.rs`) and records
+them as the owner. Every page and read needs a read session, an HttpOnly
+cookie the owner gets once per browser from a one-time `axe web login-link`
+(or the token on `/login`); a browser without one gets the login page, and
+signing in there returns to the page it asked for.
+Panes follow server changes without restarting a read in flight
+(`web/lib/live-load.ts`): changes come a second or more apart while runs are
+live, and a restart on each never finished on a slow phone link.
 Store previews never run content on the dashboard's origin: HTML renders in
 a frame sandboxed without scripts or same-origin access, and the server
 serves every blob with `Content-Security-Policy: sandbox`.

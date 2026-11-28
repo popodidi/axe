@@ -778,8 +778,9 @@ fn session(st: &State, req: &Request) -> Option<i64> {
 }
 
 /// A new read-session cookie and its expiry. `SameSite=Lax`, so a sign-in
-/// link opened from another app lands signed in; the cookie only reads, and
-/// every write needs the token, so it carries no cross-site write.
+/// link opened from another app lands signed in. The cookie reads; its only
+/// writes are the owner's board presses from this server's own pages
+/// ([`board_press`], [`same_origin`]), so it carries no cross-site write.
 fn session_cookie(st: &State) -> (String, i64) {
     let exp = remote::epoch() + blob::SESSION_SECS;
     let cookie = format!(
@@ -792,7 +793,8 @@ fn session_cookie(st: &State) -> (String, i64) {
 
 /// `/api/session` and `/api/session-end`: the browser's read session. A
 /// `POST /api/session` with the token (or a redeemed login code, `/login`)
-/// sets an HttpOnly cookie that lets the browser make reads (never writes)
+/// sets an HttpOnly cookie that lets the browser make reads (and board
+/// presses, [`allowed`])
 /// for [`blob::SESSION_SECS`], so the page keeps no token. `GET` reports it;
 /// `POST /api/session-end` clears it. Returns the response and the
 /// `Set-Cookie` value, if any.
