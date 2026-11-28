@@ -26,6 +26,7 @@ use crate::config;
 pub use crate::core::Axe;
 use crate::db::{Actor, Forbidden};
 use crate::goal_board;
+use crate::transcribe;
 
 pub use crate::channel::{
     check_buttons, check_upload, get_message, history, pct_encode, safe_name, SendOpts,
@@ -1185,6 +1186,7 @@ impl Gateway {
                 .unwrap_or("text")
                 .to_string()
         };
+        let voice = kind == "voice";
         let (dup, msg) = store.record_inbound(
             &b.name(),
             edit.then_some(tg_id),
@@ -1212,6 +1214,9 @@ impl Gateway {
                 );
                 if let Err(e) = r {
                     eprintln!("telegram: bot {}: ack #{msg}: {e}", b.name());
+                }
+                if voice {
+                    voice_ack(b, store, chat, m["message_thread_id"].as_i64(), tg_id, msg);
                 }
             }
             b.typing(chat, m["message_thread_id"].as_i64());
@@ -2640,6 +2645,7 @@ fn inbox_pass(b: &TgBot, store: &dyn Axe) -> Result<()> {
     if store.bot_id(&b.name()).is_err() {
         return Ok(());
     }
+    voice_acks(b, store)?;
     runtime_cards(b, store)?;
     let goal_board = store.goal_board_message(&b.name())?;
     let Some(m) = store.board_message(&b.name())? else {
@@ -2654,6 +2660,59 @@ fn inbox_pass(b: &TgBot, store: &dyn Axe) -> Result<()> {
     task_cards(b, store, m.chat_id, m.thread_id)?;
     sync_pins(b, store)?;
     goal_pins(b, store, m.chat_id, m.thread_id)?;
+    Ok(())
+}
+
+/// Replies [`transcribe::ACK`] to voice message `msg` (Telegram message
+/// `tg_msg`), at once, so the owner sees it is being transcribed;
+/// [`voice_acks`] edits it into the transcript. Best effort.
+fn voice_ack(b: &TgBot, store: &dyn Axe, chat: i64, thread: Option<i64>, tg_msg: i64, msg: i64) {
+    let mut p = json!({"chat_id": chat, "text": transcribe::ACK,
+        "reply_parameters": {"message_id": tg_msg, "allow_sending_without_reply": true},
+        "disable_notification": true});
+    if let Some(t) = thread {
+        p["message_thread_id"] = json!(t);
+    }
+    let sent = match b.paced(store, chat, || b.api.call("sendMessage", &p)) {
+        Ok(s) => s,
+        Err(e) => return eprintln!("telegram: bot {}: voice ack #{msg}: {e}", b.name()),
+    };
+    let flags = json!({"system": true, "voice_ack": msg});
+    let r = record_out(
+        store,
+        &b.name(),
+        &sent,
+        "text",
+        transcribe::ACK,
+        Some(msg),
+        json!([]),
+        flags,
+    );
+    if let Err(e) = r {
+        eprintln!("telegram: bot {}: record voice ack #{msg}: {e:#}", b.name());
+    }
+}
+
+/// Edits each voice ack whose voice message got its transcript (stored by
+/// the node before the bot's run) into the transcript or a failure line;
+/// a run that started without one makes it [`transcribe::NOT_TRANSCRIBED`].
+/// A refused edit (400, e.g. the ack was deleted) is logged and dropped.
+fn voice_acks(b: &TgBot, store: &dyn Axe) -> Result<()> {
+    for (ack, voice) in store.due_voice_acks(&b.name())? {
+        let text = transcribe::ack_text(&voice.flags)
+            .unwrap_or_else(|| transcribe::NOT_TRANSCRIBED.into());
+        let p = json!({"chat_id": ack.chat_id, "message_id": ack.message_id, "text": text});
+        match b.paced(store, ack.chat_id, || b.api.call("editMessageText", &p)) {
+            Ok(_) => store.settle_voice_ack(ack.id, Some(&text))?,
+            Err(e) if e.description.contains("message is not modified") => {
+                store.settle_voice_ack(ack.id, Some(&text))?
+            }
+            Err(e) => {
+                skip_refused(b, store, "voice_ack", ack.id, e)?;
+                store.settle_voice_ack(ack.id, None)?;
+            }
+        }
+    }
     Ok(())
 }
 

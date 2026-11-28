@@ -1852,9 +1852,10 @@ pub fn shrink_after(
     }
     // Replies are not threaded reliably, so the rule is by order: the owner's
     // latest message (not a button press or reaction) needs a later reply.
+    // The server's voice ack (`telegram.rs`) is not one.
     let (last_in, last_out): (Option<i64>, Option<i64>) = conn.query_row(
         "SELECT MAX(CASE WHEN direction='in' AND kind NOT IN ('button','reaction') THEN id END),
-                MAX(CASE WHEN direction='out' THEN id END)
+                MAX(CASE WHEN direction='out' AND json_type(flags,'$.voice_ack') IS NULL THEN id END)
          FROM bot_messages WHERE bot_id=?1",
         [bot],
         |r| Ok((r.get(0)?, r.get(1)?)),

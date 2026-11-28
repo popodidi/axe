@@ -107,6 +107,34 @@ pub fn prompt_text(flags: &Value, caption: &str) -> Option<String> {
     Some(s)
 }
 
+/// The server's reply to a voice message while it waits for the transcript
+/// (`telegram.rs`); edited into [`ack_text`] once it is stored.
+pub const ACK: &str = "Transcribing…";
+
+/// The text the voice ack is edited to, from the voice message's `flags`:
+/// the transcript, or a short failure line. `None` while it has none.
+pub fn ack_text(flags: &Value) -> Option<String> {
+    let t: Transcript = serde_json::from_value(flags.get("transcript")?.clone()).ok()?;
+    Some(match (&t.text, &t.error) {
+        (Some(text), _) if !text.trim().is_empty() => {
+            // Telegram's text limit is 4096 UTF-16 units; audio is at most
+            // 300 s, so this only guards a runaway engine.
+            let text = text.trim();
+            match text.char_indices().nth(3500) {
+                Some((i, _)) => format!("Transcript: {}…", &text[..i]),
+                None => format!("Transcript: {text}"),
+            }
+        }
+        (Some(_), _) => "Transcription failed: no speech recognized".into(),
+        (None, Some(e)) => format!("Transcription failed: {}", one_line(e)),
+        (None, None) => return None,
+    })
+}
+
+/// The ack's text when the bot's run started without a transcript
+/// (transcription off on the node, or storing it failed).
+pub const NOT_TRANSCRIBED: &str = "Not transcribed.";
+
 /// A speech-to-text engine: 16 kHz mono samples in, text and language out.
 pub trait Engine {
     /// The engine and model, recorded on each transcript.
@@ -706,6 +734,16 @@ mod tests {
             "[voice message, transcription failed: no speech recognized]"
         );
         assert_eq!(prompt_text(&json!({}), "x"), None);
+        assert_eq!(ack_text(&ok).unwrap(), "Transcript: 明天开会");
+        assert_eq!(
+            ack_text(&failed).unwrap(),
+            "Transcription failed: too long (301s or more; the limit is 300s)"
+        );
+        assert_eq!(
+            ack_text(&silent).unwrap(),
+            "Transcription failed: no speech recognized"
+        );
+        assert_eq!(ack_text(&json!({})), None);
         assert!(needs_transcript("voice", &json!({})));
         assert!(!needs_transcript("voice", &ok));
         assert!(!needs_transcript("photo", &json!({})));

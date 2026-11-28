@@ -1295,6 +1295,36 @@ fn voice_messages_reach_the_bot_as_marked_transcripts() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(ids.len(), 2);
+    // Each voice message gets one "Transcribing…" reply at once, before any
+    // node has seen it.
+    let acks = || -> Vec<Call> {
+        rig.stub
+            .calls("sendMessage")
+            .into_iter()
+            .filter(|c| c.params["text"] == "Transcribing…")
+            .collect()
+    };
+    wait_for("two voice acks", 10, || acks().len() == 2);
+    let acked: Vec<i64> = acks()
+        .iter()
+        .map(|c| c.params["reply_parameters"]["message_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(acked, [95, 96]);
+    let ack_ids: Vec<i64> = rig
+        .db()
+        .prepare(
+            "SELECT id FROM bot_messages WHERE direction='out'
+               AND json_type(flags,'$.voice_ack') IS NOT NULL ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(ack_ids.len(), 2);
+    // Nothing to edit until a transcript is stored.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(rig.stub.calls("editMessageText").is_empty());
     rig.db()
         .execute("UPDATE bot_wakes SET due_at='2026-01-01T00:00:00Z'", [])
         .unwrap();
@@ -1390,6 +1420,60 @@ fn voice_messages_reach_the_bot_as_marked_transcripts() {
         history.contains("[voice message, auto-transcribed, may contain errors] ship it on friday"),
         "{history}"
     );
+    // The same acks are edited into the transcript and the failure line.
+    wait_for("two ack edits", 10, || {
+        rig.stub.calls("editMessageText").len() == 2
+    });
+    let edits: Vec<(i64, String)> = rig
+        .stub
+        .calls("editMessageText")
+        .iter()
+        .map(|c| {
+            (
+                c.params["message_id"].as_i64().unwrap(),
+                c.params["text"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let ack_tg: Vec<i64> = acks()
+        .iter()
+        .map(|c| c.params["chat_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ack_tg, [OWNER, OWNER]);
+    let tg_of = |id: i64| -> i64 {
+        rig.db()
+            .query_row(
+                "SELECT message_id FROM bot_messages WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        edits[0],
+        (
+            tg_of(ack_ids[0]),
+            "Transcript: ship it on friday".to_string()
+        )
+    );
+    assert_eq!(edits[1].0, tg_of(ack_ids[1]));
+    assert!(
+        edits[1]
+            .1
+            .starts_with("Transcription failed: could not fetch the voice file"),
+        "{edits:?}"
+    );
+    // Stored as edited, once: later passes leave them alone.
+    assert!(flags(ack_ids[0])["voice_ack_done"] == true);
+    let history = rig.tg_ok(&["history", "--limit", "10"]);
+    assert!(
+        history.contains("Transcript: ship it on friday"),
+        "{history}"
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(rig.stub.calls("editMessageText").len(), 2);
+    assert_eq!(acks().len(), 2);
+
     // The wake view, which never carries message content, hides it too.
     let public = rig.srv().get("/api/bots/cos/wakes");
     assert!(public.as_array().is_some_and(|w| !w.is_empty()), "{public}");
@@ -1397,6 +1481,59 @@ fn voice_messages_reach_the_bot_as_marked_transcripts() {
         !public.to_string().contains("ship it on friday"),
         "{public}"
     );
+}
+
+/// Only voice messages get the "Transcribing…" ack; with transcription off
+/// on the node, the run starts without a transcript and the ack says so.
+#[test]
+fn voice_ack_is_voice_only_and_says_when_not_transcribed() {
+    let extra = "\n[agents.fake]\ncmd = [\"true\"]\nsession = \"preset\"\nbot_args = []\n\
+                 [defaults]\ntranscribe_voice = false\n";
+    let rig = Rig::with(extra);
+    rig.srv()
+        .ok(&["bot", "edit", "cos", "--agent", "fake", "--why", "test"]);
+    rig.stub.push(text_msg(80, 85, OWNER, OWNER, "plain text"));
+    rig.stub.push(
+        json!({"update_id": 81, "message": {"message_id": 86, "date": 0,
+        "from": user(OWNER), "chat": {"id": OWNER, "type": "private"},
+        "voice": {"file_id": "v9", "file_unique_id": "u", "duration": 2,
+            "mime_type": "audio/ogg", "file_size": 10}}}),
+    );
+    rig.stub.wait_confirmed(81);
+    let acks = || -> Vec<Value> {
+        rig.sent_to(OWNER)
+            .into_iter()
+            .filter(|p| p["text"] == "Transcribing…")
+            .collect()
+    };
+    wait_for("the voice ack", 10, || acks().len() == 1);
+    // The text message got none, the voice message one.
+    assert_eq!(acks()[0]["reply_parameters"]["message_id"], 86);
+    assert_eq!(rig.sent_to(OWNER).len(), 1, "{:?}", rig.sent_to(OWNER));
+    rig.db()
+        .execute("UPDATE bot_wakes SET due_at='2026-01-01T00:00:00Z'", [])
+        .unwrap();
+    let o = rig.srv().dispatcher(&["--once"], &[]).wait();
+    assert!(o.status.success(), "{o:?}");
+    assert!(
+        !String::from_utf8_lossy(&o.stderr).contains("transcribing voice"),
+        "{o:?}"
+    );
+    wait_for("the ack edit", 10, || {
+        !rig.stub.calls("editMessageText").is_empty()
+    });
+    let edits = rig.stub.calls("editMessageText");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].params["text"], "Not transcribed.");
+    let ack_tg: i64 = rig
+        .db()
+        .query_row(
+            "SELECT message_id FROM bot_messages WHERE json_type(flags,'$.voice_ack') IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(edits[0].params["message_id"], ack_tg);
 }
 
 #[test]
