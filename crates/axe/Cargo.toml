@@ -1,6 +1,6 @@
 [package]
 name = "axe-os"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 rust-version = "1.88"
 description = "A self-hosted task queue and dispatcher for coding agents"
