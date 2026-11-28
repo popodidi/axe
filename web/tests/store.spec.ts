@@ -1101,6 +1101,40 @@ test("an HTML doc with its own contents or few headings gets none", async ({ pag
   }
 });
 
+test("the doc page's theme toggle stays in place while the window scrolls", async ({ page }) => {
+  await mockStore(page, true);
+  for (const [width, height] of [
+    [1440, 900],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width, height });
+    await page.goto(`/doc?server=http://axe.test&path=${longDocPath}`);
+    await expect(page.getByText("The end of the long report.")).toBeAttached();
+    const toggle = page.getByRole("button", { name: "Light theme" });
+    const before = (await toggle.boundingBox())!;
+    await page.evaluate(() => window.scrollTo(0, document.scrollingElement!.scrollHeight / 2));
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(height);
+    const after = (await toggle.boundingBox())!;
+    // Same place in the window, at the top right, still the topmost element.
+    expect(Math.abs(after.x - before.x)).toBeLessThanOrEqual(1);
+    expect(after.y).toBeGreaterThanOrEqual(0);
+    expect(after.y).toBeLessThan(48);
+    expect(after.x + after.width).toBeGreaterThan(width - 48);
+    const hit = await page.evaluate(
+      ([x, y]) => !!document.elementFromPoint(x, y)?.closest("button[aria-label='Light theme']"),
+      [after.x + after.width / 2, after.y + after.height / 2],
+    );
+    expect(hit).toBe(true);
+    // Clear of the metadata rail while it sticks (wide) and of the doc body.
+    const head = (await page.getByLabel("Doc metadata").locator("header").boundingBox())!;
+    if (width >= 1280) expect(after.y + after.height).toBeLessThanOrEqual(head.y);
+    await toggle.click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await toggle.click();
+    await expect(page.locator("html")).not.toHaveAttribute("data-theme", "light");
+  }
+});
+
 test("the doc page's theme toggle is the portal's, on the same saved choice", async ({ page }) => {
   await mockStore(page, true);
   await page.setViewportSize({ width: 1440, height: 900 });
