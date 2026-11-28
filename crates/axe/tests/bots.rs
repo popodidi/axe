@@ -325,6 +325,76 @@ fn burst_debounce_delivers_one_run_and_caps_at_fifteen_seconds() {
     assert_eq!(claim(&mut conn, "b", T0 + 221).unwrap().wakes.len(), 2);
 }
 
+/// A voice message arriving mid-run is not taken by a hook before it has a
+/// transcript: it waits for the follow-up run, whose node transcribes it
+/// (`transcribe.rs`). Text taken alongside it still goes through the hook.
+#[test]
+fn hooks_leave_untranscribed_voice_messages_for_the_next_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = db::open(&dir.path().join("t.db")).unwrap();
+    bot::create(&mut conn, &Actor::new("human"), &new_bot("b"), T0).unwrap();
+    let c = claim(&mut conn, "b", T0).unwrap();
+    let (voice, _) =
+        bot::record_message(&mut conn, "b", &message(1, "voice", ""), T0 + 10).unwrap();
+    let (text, _) =
+        bot::record_message(&mut conn, "b", &message(2, "text", "and this"), T0 + 11).unwrap();
+    let take = |conn: &mut rusqlite::Connection, hook: Option<&str>, now: i64| {
+        bot::inbox(
+            conn,
+            &Actor::new("bot:b"),
+            "b",
+            Some(c.run),
+            true,
+            hook,
+            None,
+            now,
+        )
+        .unwrap()
+        .wakes
+        .iter()
+        .map(|w| w.message.as_ref().map_or(0, |m| m.id))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(take(&mut conn, Some("post-tool"), T0 + 30), [text]);
+    assert_eq!(take(&mut conn, Some("stop"), T0 + 31), Vec::<i64>::new());
+    finish(&conn, c.run, 0, T0 + 32);
+    // Left for the next run, which the node transcribes before its prompt.
+    let next = claim(&mut conn, "b", T0 + 33).unwrap();
+    let ids: Vec<i64> = next
+        .wakes
+        .iter()
+        .filter_map(|w| w.message.as_ref().map(|m| m.id))
+        .collect();
+    assert_eq!(ids, [voice]);
+    assert_eq!(axe::dispatch::voice_wakes(&next), [voice]);
+
+    // With a transcript (a voice message transcribed earlier) a hook takes it.
+    let (later, _) =
+        bot::record_message(&mut conn, "b", &message(3, "voice", ""), T0 + 40).unwrap();
+    conn.execute(
+        "UPDATE bot_messages SET flags=json_set(flags,'$.transcript',json('{\"text\":\"hi\"}')) WHERE id=?1",
+        [later],
+    )
+    .unwrap();
+    let take2 = bot::inbox(
+        &mut conn,
+        &Actor::new("bot:b"),
+        "b",
+        Some(next.run),
+        true,
+        Some("post-tool"),
+        None,
+        T0 + 60,
+    )
+    .unwrap();
+    let got: Vec<i64> = take2
+        .wakes
+        .iter()
+        .filter_map(|w| w.message.as_ref().map(|m| m.id))
+        .collect();
+    assert_eq!(got, [later]);
+}
+
 #[test]
 fn edits_render_as_edit_of_the_original_message() {
     let dir = tempfile::tempdir().unwrap();

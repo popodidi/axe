@@ -1959,11 +1959,20 @@ pub fn inbox(
         bail!("run {run} is not the live run of bot {name}");
     }
     let via = if hook.is_some() { "hook" } else { "prompt" };
+    // A hook never takes a voice message still without a transcript: it stays
+    // queued for the follow-up run, whose node transcribes it before the
+    // prompt (`transcribe.rs`, `dispatch/bots.rs`).
+    let held = if hook.is_some() {
+        " AND NOT EXISTS (SELECT 1 FROM bot_messages m WHERE m.id=bot_wakes.message_ref
+           AND m.kind='voice' AND json_extract(m.flags,'$.transcript') IS NULL)"
+    } else {
+        ""
+    };
     let ids: Vec<i64> = tx
-        .prepare(
-            "SELECT id FROM bot_wakes WHERE bot_id=?1 AND run_id IS NULL AND due_at<=?2
-             ORDER BY due_at, id",
-        )?
+        .prepare(&format!(
+            "SELECT id FROM bot_wakes WHERE bot_id=?1 AND run_id IS NULL AND due_at<=?2{held}
+             ORDER BY due_at, id"
+        ))?
         .query_map(params![b.id, ts(now)], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for id in &ids {

@@ -24,7 +24,7 @@ use crate::runtime_config::{self, RuntimeConfig};
 mod bots;
 mod pre_check;
 pub mod services;
-pub use bots::splice_bot_args;
+pub use bots::{splice_bot_args, voice_wakes};
 
 const TICK: Duration = Duration::from_secs(2);
 /// Longest gap between admission reports while no new sample was taken.
