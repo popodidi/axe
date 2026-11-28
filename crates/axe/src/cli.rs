@@ -2578,6 +2578,16 @@ enum BotCmd {
         #[command(subcommand)]
         command: ScheduleCmd,
     },
+    /// The bot's board: what the owner should see, derived from tasks,
+    /// cards and goals plus the bot's own small items (one pin per chat on
+    /// Telegram, and the Board tab on the web)
+    Board {
+        /// Bot name (default $AXE_BOT)
+        #[arg(long, env = "AXE_BOT", global = true)]
+        bot: Option<String>,
+        #[command(subcommand)]
+        command: BoardCmd,
+    },
     /// Talk on Telegram through the server (bots never hold the token)
     Tg {
         /// Bot name (default $AXE_BOT)
@@ -3464,19 +3474,6 @@ enum TgCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// The pinned inbox the server keeps: each open card and one message per
-    /// active goal (the old pinned overview is retired)
-    Board {
-        #[command(subcommand)]
-        command: BoardCmd,
-    },
-    /// The goal lines of the bot's open goals; each active goal has its own
-    /// pinned message (`board show`). The goal board message is retired
-    /// (`unset` only)
-    GoalBoard {
-        #[command(subcommand)]
-        command: GoalBoardCmd,
-    },
     /// Conversation history, both directions, oldest first
     History {
         #[arg(long, default_value_t = 50)]
@@ -3494,35 +3491,90 @@ enum TgCmd {
 
 #[derive(Subcommand)]
 enum BoardCmd {
-    /// Show the inbox: whether it is on, what waits on the owner and the
-    /// goal pins
+    /// Show the board: Decide, Review, Goals, the item sections, Done today,
+    /// and where it is shown
     Show {
         #[arg(long)]
         json: bool,
     },
-    /// Turn the inbox on in the chat of one of the bot's own text messages:
-    /// the server pins each open card and keeps one pinned message per
-    /// active goal there. The message itself is not rendered or pinned (an
-    /// old overview is unpinned and edited to a pointer). A new bot's first
-    /// plain `send` does this by default
-    SetMessage { msg: i64 },
-    /// Turn the inbox off: stop pinning cards and goals for this bot
-    Clear,
-}
-
-#[derive(Subcommand)]
-enum GoalBoardCmd {
-    /// Show the goal lines of the bot's open goals
-    Show {
+    /// Add an item (up to 200 characters; 50 open at most). A ref links its
+    /// source: task:N, goal:N, card:N, doc:PATH, blob:SHA256 or a URL. An
+    /// item on a task, goal or card already on the board becomes that line's
+    /// note; with a task:, goal: or card: ref the text may be empty
+    Add {
+        text: Option<String>,
+        #[arg(long = "ref")]
+        reference: Option<String>,
+        /// Items (default), Review, or a named section (3 at most)
         #[arg(long)]
-        json: bool,
+        section: Option<String>,
+        /// Shown as overdue after this: a time, a date or a duration (3d)
+        #[arg(long)]
+        until: Option<String>,
     },
-    /// Refused: each active goal has its own pinned message
-    #[command(visible_alias = "set-message")]
-    Set { msg: i64 },
-    /// Stop rendering an old goal board message
-    #[command(visible_alias = "clear")]
-    Unset,
+    /// Change an item; an empty --ref, --section or --until clears it
+    Edit {
+        id: i64,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long = "ref")]
+        reference: Option<String>,
+        #[arg(long)]
+        section: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        /// Position in its section (lower first)
+        #[arg(long)]
+        pos: Option<i64>,
+    },
+    /// Move an item within its section (lower first)
+    Move { id: i64, pos: i64 },
+    /// Tick an item
+    Done {
+        id: i64,
+        #[arg(long, default_value = "")]
+        why: String,
+    },
+    /// Drop an item (it leaves the board; its history stays)
+    Drop {
+        id: i64,
+        #[arg(long, default_value = "")]
+        why: String,
+    },
+    /// Reopen a ticked or dropped item
+    Reopen {
+        id: i64,
+        #[arg(long, default_value = "")]
+        why: String,
+    },
+    /// Park a decision for review: a card (it closes), a task (it leaves
+    /// Decide), or text alone; --ref doc:PATH is its decision doc
+    Park {
+        text: Option<String>,
+        #[arg(long)]
+        card: Option<i64>,
+        #[arg(long)]
+        task: Option<i64>,
+        #[arg(long = "ref")]
+        reference: Option<String>,
+    },
+    /// List where the board is shown, or change one chat's view: its pin,
+    /// its button row and its repost cadence (cron in the bot's timezone,
+    /// or off)
+    View {
+        #[arg(long)]
+        chat: Option<i64>,
+        #[arg(long, default_value_t = 0)]
+        thread: i64,
+        #[arg(long, default_value = "telegram")]
+        channel: String,
+        #[arg(long, value_parser = ["on", "off"])]
+        pin: Option<String>,
+        #[arg(long, value_parser = ["on", "off"])]
+        buttons: Option<String>,
+        #[arg(long)]
+        repost: Option<String>,
+    },
 }
 
 /// Inline buttons and their row sizes (empty: one row), as the API takes them.
@@ -3560,6 +3612,179 @@ fn parse_buttons(spec: &str) -> Result<Buttons> {
         buttons.extend(r);
     }
     Ok((buttons, rows))
+}
+
+/// Prints one board line for `board show`.
+fn board_line(l: &Value, n: Option<usize>) -> String {
+    let what = match (l["kind"].as_str().unwrap_or(""), l["item"].as_i64()) {
+        ("item", _) => format!("item {}", l["id"]),
+        ("goal", _) => format!("goal {}", l["text"].as_str().unwrap_or("")),
+        (k, _) => format!("{k} #{}", l["id"]),
+    };
+    let mut out = match n {
+        Some(n) => format!("  {n}. {what}  "),
+        None => format!("  {what}  "),
+    };
+    if l["kind"] != "goal" {
+        out.push_str(l["text"].as_str().unwrap_or(""));
+    }
+    for k in ["detail", "link_label", "link"] {
+        if let Some(v) = l[k].as_str() {
+            out.push_str(&format!(" · {v}"));
+        }
+    }
+    if l["overdue"] == true {
+        out.push_str(" · overdue");
+    }
+    if let (Some(i), true) = (l["item"].as_i64(), l["kind"] != "item") {
+        out.push_str(&format!(" (item {i})"));
+    }
+    if let Some(note) = l["note"].as_str() {
+        out.push_str(&format!(" — {note}"));
+    }
+    out
+}
+
+fn run_board(c: &Client, bot: &str, command: &BoardCmd) -> Result<()> {
+    let base = format!("/api/bots/{bot}/board");
+    let item = |v: &Value, verb: &str| {
+        println!(
+            "{verb} item {}: {}",
+            v["id"],
+            v["text"].as_str().unwrap_or("")
+        );
+    };
+    match command {
+        BoardCmd::Show { json } => {
+            let v: Value = c.get(&base, &[])?;
+            if *json {
+                return print_json(&v);
+            }
+            let sections = v["sections"].as_array().cloned().unwrap_or_default();
+            if sections.is_empty() {
+                println!("{}", crate::board::EMPTY);
+            }
+            for s in &sections {
+                println!("{}", s["title"].as_str().unwrap_or(""));
+                let decide = s["key"] == "decide";
+                for (i, l) in s["lines"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .enumerate()
+                {
+                    println!("{}", board_line(l, decide.then_some(i + 1)));
+                }
+            }
+            for w in v["views"].as_array().cloned().unwrap_or_default() {
+                let thread = match w["thread_id"].as_i64() {
+                    Some(t) if t != 0 => format!(" thread {t}"),
+                    _ => String::new(),
+                };
+                println!(
+                    "view: {} chat {}{thread}: pin {}, buttons {}, repost {}",
+                    w["channel"].as_str().unwrap_or(""),
+                    w["chat_id"],
+                    if w["pin"] == true { "on" } else { "off" },
+                    if w["keyboard"] == true { "on" } else { "off" },
+                    w["repost"].as_str().unwrap_or("off")
+                );
+            }
+        }
+        BoardCmd::Add {
+            text,
+            reference,
+            section,
+            until,
+        } => {
+            let v: Value = c.send(
+                "POST",
+                &format!("{base}/items"),
+                json!({"text": text.clone().unwrap_or_default(), "ref": reference,
+                       "section": section, "until": until}),
+            )?;
+            item(&v, "added");
+        }
+        BoardCmd::Edit {
+            id,
+            text,
+            reference,
+            section,
+            until,
+            pos,
+        } => {
+            let mut body = json!({});
+            for (k, v) in [
+                ("text", text),
+                ("ref", reference),
+                ("section", section),
+                ("until", until),
+            ] {
+                if let Some(v) = v {
+                    body[k] = json!(v);
+                }
+            }
+            if let Some(p) = pos {
+                body["pos"] = json!(p);
+            }
+            let v: Value = c.send("PATCH", &format!("{base}/items/{id}"), body)?;
+            item(&v, "edited");
+        }
+        BoardCmd::Move { id, pos } => {
+            let v: Value = c.send("PATCH", &format!("{base}/items/{id}"), json!({"pos": pos}))?;
+            item(&v, "moved");
+        }
+        BoardCmd::Done { id, why } | BoardCmd::Drop { id, why } | BoardCmd::Reopen { id, why } => {
+            let (action, verb) = match command {
+                BoardCmd::Done { .. } => ("done", "ticked"),
+                BoardCmd::Drop { .. } => ("drop", "dropped"),
+                _ => ("reopen", "reopened"),
+            };
+            let v: Value = c.send(
+                "POST",
+                &format!("{base}/items/{id}/{action}"),
+                json!({"why": why}),
+            )?;
+            item(&v, verb);
+        }
+        BoardCmd::Park {
+            text,
+            card,
+            task,
+            reference,
+        } => {
+            let v: Value = c.send(
+                "POST",
+                &format!("{base}/park"),
+                json!({"text": text.clone().unwrap_or_default(), "card": card, "task": task,
+                       "ref": reference}),
+            )?;
+            item(&v, "parked");
+        }
+        BoardCmd::View {
+            chat,
+            thread,
+            channel,
+            pin,
+            buttons,
+            repost,
+        } => {
+            let changes = pin.is_some() || buttons.is_some() || repost.is_some();
+            let v: Value = match (chat, changes) {
+                (Some(chat), true) => c.send(
+                    "PUT",
+                    &format!("{base}/views/{channel}/{chat}"),
+                    json!({"thread": thread, "pin": pin.as_deref().map(|p| p == "on"),
+                           "keyboard": buttons.as_deref().map(|b| b == "on"), "repost": repost}),
+                )?,
+                (None, true) => anyhow::bail!("give --chat CHAT to change a view"),
+                _ => c.get(&format!("{base}/views"), &[])?,
+            };
+            print_json(&v)?;
+        }
+    }
+    Ok(())
 }
 
 fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
@@ -3713,67 +3938,6 @@ fn run_tg(c: &Client, bot: &str, command: &TgCmd) -> Result<()> {
             std::fs::write(&file, &bytes).with_context(|| format!("write {}", file.display()))?;
             println!("{}", file.display());
         }
-        TgCmd::Board { command } => match command {
-            BoardCmd::Show { json } => {
-                let v: Value = c.get_private(&format!("{base}/board"), &[])?;
-                if *json {
-                    return print_json(&v);
-                }
-                match v["message"].as_i64() {
-                    Some(m) => println!("inbox on (board message #{m})"),
-                    None => println!("inbox off (turn it on with `board set-message MSG`)"),
-                }
-                let lines = v["lines"].as_array().cloned().unwrap_or_default();
-                if lines.is_empty() {
-                    println!("{}", crate::board::EMPTY);
-                }
-                for l in &lines {
-                    let what = match (l["kind"].as_str(), l["task"].as_i64()) {
-                        (Some("task"), _) => format!("task #{} (no card yet)", l["id"]),
-                        (_, Some(t)) => format!("card #{} for task #{t}", l["id"]),
-                        _ => format!("card #{}", l["id"]),
-                    };
-                    println!("{what}: {}", l["title"].as_str().unwrap_or(""));
-                }
-                for g in v["goals"].as_array().cloned().unwrap_or_default() {
-                    let state = match g["message"].as_i64() {
-                        Some(m) if g["current"] == true => format!("pin #{m} (current)"),
-                        Some(m) => format!("pin #{m} (edit pending)"),
-                        None => "pin pending".to_string(),
-                    };
-                    println!("goal {}: {state}", g["goal"].as_str().unwrap_or(""));
-                }
-            }
-            BoardCmd::SetMessage { msg } => {
-                let _: Value = c.send("POST", &format!("{base}/board"), json!({"msg":msg}))?;
-                println!("board is #{msg}");
-            }
-            BoardCmd::Clear => {
-                let _: Value = c.send("POST", &format!("{base}/board"), json!({"msg":null}))?;
-                println!("board cleared");
-            }
-        },
-        TgCmd::GoalBoard { command } => match command {
-            GoalBoardCmd::Show { json } => {
-                let v: Value = c.get_private(&format!("{base}/goal-board"), &[])?;
-                if *json {
-                    return print_json(&v);
-                }
-                if let Some(m) = v["message"].as_i64() {
-                    println!("old goal board #{m} (retired on the next inbox pass)");
-                }
-                println!("{}", v["text"].as_str().unwrap_or(""));
-            }
-            GoalBoardCmd::Set { msg } => {
-                let _: Value = c.send("POST", &format!("{base}/goal-board"), json!({"msg":msg}))?;
-                println!("goal board is #{msg}");
-            }
-            GoalBoardCmd::Unset => {
-                let _: Value =
-                    c.send("POST", &format!("{base}/goal-board"), json!({"msg":null}))?;
-                println!("goal board cleared");
-            }
-        },
         TgCmd::History {
             limit,
             before,
@@ -4444,6 +4608,13 @@ fn run_bot(c: &Client, command: &BotCmd) -> Result<()> {
                 .filter(|b| !b.is_empty())
                 .context("give --bot NAME or set $AXE_BOT")?;
             run_schedule(c, bot, command)?;
+        }
+        BotCmd::Board { bot, command } => {
+            let bot = bot
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .context("give --bot NAME or set $AXE_BOT")?;
+            run_board(c, bot, command)?;
         }
         BotCmd::Tg { bot, command } => {
             let bot = bot

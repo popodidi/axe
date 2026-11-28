@@ -42,6 +42,7 @@ import {
   botTabs,
   profileHistory,
 } from "../../lib/bots";
+import type { Board, BoardLine } from "../../lib/api";
 import { Facts, ItemPane, ListEmpty, PaneSection, StateBadge } from "./side-pane";
 import styles from "./bots.module.css";
 // Generic bot monitoring. Read-only
@@ -294,9 +295,11 @@ type Detail = {
   runs: BotRun[];
   activity: Activity;
   schedules: BotSchedule[];
+  /** Null from a server without the board. */
+  board: Board | null;
 };
-// One bot in the side pane: facts, commands, then its tabs (profile, wakes,
-// runs, events, stats).
+// One bot in the side pane: facts, commands, then its tabs (board, profile,
+// wakes, runs, events, stats).
 export function BotPane({
   base,
   name,
@@ -322,7 +325,7 @@ export function BotPane({
   const [error, setError] = useState("");
   const tab = botTabs.includes(params.get("tab") || "")
     ? params.get("tab")!
-    : "profile";
+    : "board";
   useEffect(() => {
     const c = new AbortController();
     const path = `${base}/api/bots/${encodeURIComponent(name)}`;
@@ -337,10 +340,11 @@ export function BotPane({
       ),
       get<Activity>(`${path}/activity?limit=${n}`, c.signal),
       get<BotSchedule[]>(`${path}/schedules`, c.signal),
+      get<Board>(`${path}/board`, c.signal).catch(() => null),
     ])
-      .then(([bot, wakes, events, runs, activity, schedules]) => {
+      .then(([bot, wakes, events, runs, activity, schedules, board]) => {
         if (c.signal.aborted) return;
-        setDetail({ bot, wakes, events, runs, activity, schedules });
+        setDetail({ bot, wakes, events, runs, activity, schedules, board });
         setError("");
       })
       .catch((e) => {
@@ -400,7 +404,9 @@ export function BotPane({
             value={tab}
             onChange={(t) => onChange({ tab: t })}
           />
-          {tab === "wakes" ? (
+          {tab === "board" ? (
+            <BoardTab board={d.board} now={now} />
+          ) : tab === "wakes" ? (
             <Wakes wakes={d.wakes} />
           ) : tab === "runs" ? (
             <RunList
@@ -493,6 +499,66 @@ function Profile({ bot, events }: { bot: Bot; events: BotEvent[] }) {
           </PaneSection>
         );
       })}
+    </>
+  );
+}
+// `2d` once a line is a day old, as the Telegram pin shows it.
+function lineAge(l: BoardLine, now: number) {
+  const days = Math.floor((now / 1000 - l.since) / 86400);
+  return l.since > 0 && days >= 1 ? `${days}d` : "";
+}
+// The bot's board (crates/axe/src/board.rs): Decide, Review, Goals, the item
+// sections and Done today, in that order, with no length limit. Read-only.
+function BoardTab({ board, now }: { board: Board | null; now: number }) {
+  if (!board) return <EmptyState>This server has no board</EmptyState>;
+  const views = board.views
+    .map(
+      (v) =>
+        `${v.channel} ${v.chat_id}${v.thread_id ? `/${v.thread_id}` : ""}: pin ${v.pin ? "on" : "off"}`,
+    )
+    .join(" · ");
+  return (
+    <>
+      {!board.sections.length && <EmptyState>Nothing on the board</EmptyState>}
+      {board.sections.map((s) => (
+        <Panel key={s.key + s.title} aria-label={s.title}>
+          <PanelHead
+            label={s.title}
+            meta={s.key === "decide" ? `${s.lines.length} to decide` : `${s.lines.length}`}
+          />
+          <Table>
+            <tbody>
+              {s.lines.map((l, i) => (
+                <tr key={l.kind + l.id} id={`board-${l.kind}-${l.id}`}>
+                  <Td>
+                    <span className={l.state === "done" ? styles.boardDone : undefined}>
+                      {s.key === "decide" ? `${i + 1}. ` : ""}
+                      {l.text}
+                    </span>
+                    {l.overdue && <span className={styles.sub}> · overdue</span>}
+                    {l.detail && <div className={styles.sub}>{l.detail}</div>}
+                    {l.note && <div className={styles.sub}>{l.note}</div>}
+                  </Td>
+                  <Td>
+                    {l.link_label &&
+                      (l.link ? (
+                        <a href={l.link} target="_blank" rel="noreferrer">
+                          {l.link_label}
+                        </a>
+                      ) : (
+                        <Tag mono>{l.link_label}</Tag>
+                      ))}
+                  </Td>
+                  <Td mono className={styles.optional}>
+                    {lineAge(l, now)}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </Panel>
+      ))}
+      <div className={styles.sub}>{views ? `Pinned in ${views}` : "Not pinned in any chat"}</div>
     </>
   );
 }

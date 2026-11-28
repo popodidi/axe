@@ -174,8 +174,8 @@ pub fn record_edit(
 ) -> Result<()> {
     if let Some(t) = text {
         conn.execute(
-            // A hand edit of a goal pin is rendered over on the next pass.
-            "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key','$.goal_board_key','$.goal_pin_key') WHERE id=?2",
+            // A hand edit of the board pin is rendered over on the next pass.
+            "UPDATE bot_messages SET text=?1, flags=json_remove(json_set(flags,'$.edited',json('true')),'$.board_key') WHERE id=?2",
             params![t, msg],
         )?;
         if buttons.is_none() {
@@ -200,11 +200,10 @@ pub fn record_edit(
     Ok(())
 }
 
-/// Records a manual pin or unpin of message `msg`: it is no longer a card
-/// pin the inbox pass manages.
+/// Records a pin or unpin of message `msg`.
 pub fn record_pin(conn: &Connection, msg: i64, pin: bool) -> Result<()> {
     conn.execute(
-        "UPDATE bot_messages SET flags=json_remove(json_set(flags,'$.pinned',json(?1)),'$.card_pin') WHERE id=?2",
+        "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json(?1)) WHERE id=?2",
         params![serde_json::json!(pin).to_string(), msg],
     )?;
     Ok(())
@@ -247,42 +246,113 @@ pub fn claim_close(conn: &Connection, msg: i64, text: &str, reason: &str) -> Res
     )?)
 }
 
-/// Records card `msg` pinned by the inbox pass, in one write so a reader
-/// never sees a pin without its kind.
-pub fn mark_card_pinned(conn: &Connection, msg: i64) -> Result<()> {
+/// Keys of the retired pins: card pins, goal pins, the overview and the
+/// goal board (the board replaced them, `board.rs`).
+const LEGACY_PIN_KEYS: [&str; 9] = [
+    "card_pin",
+    "goal_pin",
+    "goal_pin_key",
+    "board",
+    "board_from",
+    "board_buttons",
+    "board_retired",
+    "goal_board",
+    "goal_board_key",
+];
+
+/// Bot `name`'s messages that still carry a retired pin's flags, oldest
+/// first: the gateway unpins each once and clears them ([`clear_legacy_pin`]).
+pub fn legacy_pins(conn: &Connection, name: &str) -> Result<Vec<StoredMessage>> {
+    let b = bot_id(conn, name)?;
+    let cond = LEGACY_PIN_KEYS
+        .iter()
+        .map(|k| format!("json_type(flags,'$.{k}') IS NOT NULL"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let ids: Vec<i64> = conn
+        .prepare(&format!(
+            "SELECT id FROM bot_messages WHERE bot_id=?1 AND ({cond}) ORDER BY id"
+        ))?
+        .query_map([b], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.into_iter()
+        .map(|id| get_message(conn, name, id))
+        .collect()
+}
+
+/// Message `msg` no longer carries a retired pin's flags; `unpinned`
+/// records that the gateway unpinned it.
+pub fn clear_legacy_pin(conn: &Connection, msg: i64, unpinned: bool) -> Result<()> {
+    let paths = LEGACY_PIN_KEYS
+        .iter()
+        .map(|k| format!("'$.{k}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let pinned = if unpinned {
+        ",'$.pinned',json('false')"
+    } else {
+        ""
+    };
     conn.execute(
-        "UPDATE bot_messages SET flags=json_set(flags,'$.pinned',json('true'),'$.card_pin',json('true')) WHERE id=?1",
+        &format!(
+            "UPDATE bot_messages SET flags=json_set(json_remove(flags,{paths},'$.board_key'),'$.legacy_pin',json('true'){pinned}) WHERE id=?1"
+        ),
         [msg],
     )?;
     Ok(())
 }
 
-/// Board message `msg` is no longer an overview: unpinned, no board keys.
-pub fn clear_board_flags(conn: &Connection, msg: i64) -> Result<()> {
+/// Bot `name`'s board pins (`flags.board_view`, the view's id), oldest
+/// first.
+pub fn board_pins(conn: &Connection, name: &str) -> Result<Vec<StoredMessage>> {
+    let b = bot_id(conn, name)?;
+    let ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM bot_messages WHERE bot_id=?1
+               AND json_type(flags,'$.board_view')='integer' ORDER BY id",
+        )?
+        .query_map([b], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.into_iter()
+        .map(|id| get_message(conn, name, id))
+        .collect()
+}
+
+/// Board pin `msg` shows `text` now (`key` is its text and keyboard).
+pub fn set_board_text(conn: &Connection, msg: i64, text: &str, key: &str) -> Result<()> {
     conn.execute(
-        "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.board_key','$.board_from','$.board_buttons'),'$.pinned',json('false')) WHERE id=?1",
-        [msg],
+        "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.board_key',?2,'$.edited',json('true')) WHERE id=?3",
+        params![text, key, msg],
     )?;
     Ok(())
 }
 
-/// Pin `msg` no longer stands for its goal (`goal_pin`, the JSON of its
-/// `flags.goal_pin`).
-pub fn drop_goal_pin(conn: &Connection, msg: i64, goal_pin: &str) -> Result<()> {
+/// Message `msg` is no longer a board pin (unpinned, or moved to a newer
+/// one); `text` is what it was edited to, if anything.
+pub fn drop_board_pin(conn: &Connection, msg: i64, text: Option<&str>) -> Result<()> {
     conn.execute(
-        "UPDATE bot_messages SET flags=json_set(json_remove(flags,'$.goal_pin','$.goal_pin_key'),'$.pinned',json('false'),'$.goal_unpinned',json(?1)) WHERE id=?2",
-        params![goal_pin, msg],
-    )?;
-    Ok(())
-}
-
-/// Records goal pin `msg` edited to `text`.
-pub fn set_goal_pin_text(conn: &Connection, msg: i64, text: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE bot_messages SET text=?1, flags=json_set(flags,'$.goal_pin_key',?1,'$.edited',json('true')) WHERE id=?2",
+        "UPDATE bot_messages SET text=COALESCE(?1, text),
+           flags=json_set(json_remove(flags,'$.board_view','$.board_key','$.board_menu','$.board_posted'),'$.pinned',json('false'))
+         WHERE id=?2",
         params![text, msg],
     )?;
     Ok(())
+}
+
+/// Cards of bot `name` parked for review whose Telegram keyboard is still
+/// shown (`flags.parked` without `flags.parked_cleared`).
+pub fn parked_cards(conn: &Connection, name: &str) -> Result<Vec<StoredMessage>> {
+    let b = bot_id(conn, name)?;
+    let ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM bot_messages WHERE bot_id=?1 AND json_type(flags,'$.parked') IS NOT NULL
+               AND json_type(flags,'$.parked_cleared') IS NULL ORDER BY id",
+        )?
+        .query_map([b], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.into_iter()
+        .map(|id| get_message(conn, name, id))
+        .collect()
 }
 
 /// Bot `name`'s runtime cards that still have buttons, oldest first.

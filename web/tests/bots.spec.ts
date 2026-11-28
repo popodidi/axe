@@ -50,12 +50,27 @@ test("bot detail tabs, stats and the bot run log overlay", async ({ page }, info
   const detail = page.getByRole("region", { name: "Bot detail" });
   await expect(detail.getByRole("heading", { name: "ops-bot" })).toBeVisible();
   await expect(detail).toContainText("claude · 4 resumes");
+  // Board, the first tab: every section in order, links, notes, done.
+  await expect(detail.getByRole("tab", { name: "board" })).toHaveAttribute("aria-selected", "true");
+  const decide = detail.getByRole("region", { name: "Decide" });
+  await expect(decide).toContainText("2 to decide");
+  await expect(decide.locator("#board-task-12")).toContainText("1. Deploy the site");
+  await expect(decide.locator("#board-task-12")).toContainText("waits on your CI host");
+  await expect(decide.getByRole("link", { name: "task #12" })).toHaveAttribute("href", "http://axe.test/?task=12");
+  await expect(detail.getByRole("region", { name: "Review" }).getByRole("link", { name: "doc" })).toBeVisible();
+  await expect(detail.getByRole("region", { name: "Goals" })).toContainText("on track · $41/$60 wk");
+  await expect(detail.getByRole("region", { name: "Items" })).toContainText("overdue");
+  await expect(detail.getByRole("region", { name: "Done today" })).toContainText("Old thing");
+  await expect(detail).toContainText("Pinned in telegram 111: pin on");
+  await page.screenshot({ path: info.outputPath("bot-board.png"), fullPage: true });
+  // Profile: identity, conduct and notes with their edit history.
+  await detail.getByRole("tab", { name: "profile" }).click();
+  await expect(page).toHaveURL(/tab=profile/);
+  await expect(detail.getByRole("tab", { name: "profile" })).toHaveAttribute("aria-selected", "true");
   // Schedules list with their next fire time.
   const schedules = page.getByRole("region", { name: "Schedules" });
   await expect(schedules.locator("#schedule-weekly-digest")).toContainText("Send the weekly digest");
   await expect(schedules.locator("#schedule-cleanup")).toContainText("Paused");
-  // Profile: identity, conduct and notes with their edit history.
-  await expect(detail.getByRole("tab", { name: "profile" })).toHaveAttribute("aria-selected", "true");
   await expect(detail).toContainText("Keeps the owner's queue moving.");
   const conduct = detail.getByRole("region", { name: "conduct" });
   await conduct.getByText("History (1 edit)").click();

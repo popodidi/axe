@@ -200,6 +200,14 @@ impl crate::core::Axe for State {
     fn runtime_remove(&self, runtime: &str) -> Result<String> {
         runtime_remove(self, runtime)
     }
+    fn blob_link(&self, sha: &str) -> Option<String> {
+        // A stable expiry (one to two weeks out, on a week boundary), so a
+        // board that links a blob is not re-rendered for a new signature.
+        const WEEK: i64 = 7 * 86_400;
+        let exp = (remote::epoch() / WEEK + 2) * WEEK;
+        let path = self.blobs.link_path(sha, None, exp);
+        self.blobs.link_base().map(|base| format!("{base}{path}"))
+    }
 }
 
 /// Adds a node runtime of `harness` (`runtime::Registry::create`): login
@@ -3234,6 +3242,7 @@ fn bot_renamed(st: &State, actor: &Actor, b: bot::Bot, moved: bot::Renamed) -> s
 }
 
 fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response>> {
+    use crate::core::Axe as _;
     #[derive(Deserialize)]
     struct Create {
         bot: bot::NewBot,
@@ -3556,36 +3565,98 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                 )?,
             )
         }
-        ("GET", ["api", "bots", name, "tg", "board"]) => ok(
-            200,
-            &crate::board::show(&st.conn(), name, st.blobs.public_url.as_deref())?,
-        ),
-        ("POST", ["api", "bots", name, "tg", "board"]) => {
-            #[derive(Deserialize)]
-            struct Board {
-                msg: Option<i64>,
+        ("GET", ["api", "bots", name, "board"]) => {
+            let since = req.query("since").map(task_id).transpose()?;
+            let mut b = st.board(name, since, st.blobs.public_url.as_deref())?;
+            // A dashboard read session sees no message text: a card is its id.
+            if !authorized(st, req) {
+                for l in b.sections.iter_mut().flat_map(|s| s.lines.iter_mut()) {
+                    if l.kind == "card" {
+                        l.text = format!("Card #{}", l.id);
+                    }
+                }
             }
-            let b: Board = req.json()?;
-            let msg = crate::board::set_message(&mut st.conn(), name, b.msg)?;
-            ok(200, &json!({"message": msg}))
+            ok(200, &b)
         }
-        ("GET", ["api", "bots", name, "tg", "goal-board"]) => ok(
-            200,
-            &crate::goal_board::show(
-                &st.conn(),
-                name,
-                crate::remote::epoch(),
-                st.blobs.public_url.as_deref(),
-            )?,
-        ),
-        ("POST", ["api", "bots", name, "tg", "goal-board"]) => {
+        ("GET", ["api", "bots", name, "board", "items"]) => ok(200, &st.board_items(name)?),
+        ("POST", ["api", "bots", name, "board", "items"]) => {
             #[derive(Deserialize)]
-            struct Board {
-                msg: Option<i64>,
+            struct Body {
+                #[serde(flatten)]
+                who: Who,
+                #[serde(flatten)]
+                item: crate::board::NewItem,
             }
-            let b: Board = req.json()?;
-            let msg = crate::goal_board::set_message(&mut st.conn(), name, b.msg)?;
-            ok(200, &json!({"message": msg}))
+            let b: Body = req.json()?;
+            ok(201, &st.board_add(&b.who.actor(), name, &b.item)?)
+        }
+        ("PATCH", ["api", "bots", name, "board", "items", id]) => {
+            #[derive(Deserialize)]
+            struct Body {
+                #[serde(flatten)]
+                who: Who,
+                #[serde(flatten)]
+                edit: crate::board::ItemEdit,
+            }
+            let b: Body = req.json()?;
+            ok(
+                200,
+                &st.board_edit(&b.who.actor(), name, task_id(id)?, &b.edit)?,
+            )
+        }
+        (
+            "POST",
+            ["api", "bots", name, "board", "items", id, action @ ("done" | "drop" | "reopen")],
+        ) => {
+            #[derive(Deserialize)]
+            struct Body {
+                #[serde(flatten)]
+                who: Who,
+                #[serde(default)]
+                why: String,
+            }
+            let b: Body = req.json()?;
+            let actor = b.who.actor();
+            ok(
+                200,
+                &st.board_state(&actor, name, task_id(id)?, action, &b.why)?,
+            )
+        }
+        ("POST", ["api", "bots", name, "board", "park"]) => {
+            #[derive(Deserialize)]
+            struct Body {
+                #[serde(flatten)]
+                who: Who,
+                #[serde(flatten)]
+                park: crate::board::Park,
+                /// Ask the bot for the doc (the owner parked it).
+                #[serde(default)]
+                wake: bool,
+            }
+            let b: Body = req.json()?;
+            let actor = b.who.actor();
+            ok(201, &st.board_park(&actor, name, &b.park, b.wake)?)
+        }
+        ("GET", ["api", "bots", name, "board", "views"]) => ok(200, &st.board_views(name)?),
+        ("PUT", ["api", "bots", name, "board", "views", channel, chat]) => {
+            #[derive(Deserialize)]
+            struct Body {
+                #[serde(flatten)]
+                who: Who,
+                #[serde(default)]
+                thread: i64,
+                #[serde(flatten)]
+                edit: crate::board::ViewEdit,
+            }
+            let b: Body = req.json()?;
+            let chat: i64 = chat
+                .parse()
+                .map_err(|_| HttpError(400, format!("chat {chat:?} is not a chat id")))?;
+            let actor = b.who.actor();
+            ok(
+                200,
+                &st.board_view_set(&actor, name, channel, chat, b.thread, &b.edit)?,
+            )
         }
         ("POST", ["api", "bots", name, "tg", action]) => tg_route(st, req, name, action),
         _ => return Ok(None),

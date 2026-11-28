@@ -36,6 +36,7 @@ pub mod task_inbox;
 pub mod task_policy;
 #[cfg(feature = "telegram")]
 pub mod telegram;
+pub mod tg_board;
 pub mod trace;
 pub mod upgrade;
 pub mod usage;
