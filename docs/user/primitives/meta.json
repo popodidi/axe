@@ -1,0 +1,13 @@
+{
+  "title": "Primitives: the tools",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "task",
+    "routine",
+    "goal",
+    "bot",
+    "service",
+    "store"
+  ]
+}
