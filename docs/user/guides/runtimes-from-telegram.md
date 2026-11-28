@@ -54,4 +54,5 @@ runtime is ok again when the check passes, and the owner gets a runtime card
 with the outcome. A runtime that needs a login is also rechecked every few
 minutes (`runtime::PROBE_EVERY`). Once a runtime is ok again its open cards
 close: their buttons go and the text gains a resolved line
-(`telegram::close_runtime_card`).
+(`telegram::close_runtime_card`). Removing a runtime closes its open cards
+the same way, with a closed line, so its login card leaves the board.

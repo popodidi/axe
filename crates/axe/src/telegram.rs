@@ -1960,7 +1960,7 @@ impl Gateway {
             let b = self.bot(&name)?;
             for m in store.open_runtime_cards(&name)? {
                 if card_runtime(&m).as_deref() == Some(runtime) {
-                    close_runtime_card(b, store, &m, runtime)?;
+                    close_runtime_card(b, store, &m, runtime, Closed::Ok)?;
                 }
             }
         }
@@ -2974,8 +2974,10 @@ fn task_cards(b: &TgBot, store: &dyn Axe, chat: i64, thread: Option<i64>) -> Res
 
 /// Open runtime cards ([`Gateway::runtime_alert`]) of runtimes the node
 /// reports ok again close ([`close_runtime_card`]); a runtime can recover
-/// without a card of its own (its periodic probe passes). Nothing closes on
-/// a stale report.
+/// without a card of its own (its periodic probe passes). Cards of runtimes
+/// the node no longer lists close too: the runtime was removed. Nothing
+/// closes on a stale report, nor as removed on a node that does not manage
+/// its runtimes (its list is not the registry).
 fn runtime_cards(b: &TgBot, store: &dyn Axe) -> Result<()> {
     let open = store.open_runtime_cards(&b.name())?;
     if open.is_empty() {
@@ -2990,14 +2992,27 @@ fn runtime_cards(b: &TgBot, store: &dyn Axe) -> Result<()> {
         let Some(name) = card_runtime(&m) else {
             continue;
         };
-        let ok = list
-            .iter()
-            .any(|r| r["name"] == name.as_str() && r["state"] == crate::runtime::OK);
-        if ok {
-            close_runtime_card(b, store, &m, &name)?;
+        let listed = list.iter().find(|r| r["name"] == name.as_str());
+        match listed {
+            Some(r) if r["state"] == crate::runtime::OK => {
+                close_runtime_card(b, store, &m, &name, Closed::Ok)?
+            }
+            None if view["managed"] == true => {
+                close_runtime_card(b, store, &m, &name, Closed::Removed)?
+            }
+            _ => {}
         }
     }
     Ok(())
+}
+
+/// Why a runtime card closes.
+#[derive(Clone, Copy)]
+enum Closed {
+    /// The runtime is ok again.
+    Ok,
+    /// The runtime was removed from the node.
+    Removed,
 }
 
 /// The runtime a card is about: `flags.runtime`, or (cards sent before it
@@ -3012,12 +3027,28 @@ fn card_runtime(m: &StoredMessage) -> Option<String> {
 }
 
 /// Closes runtime card `m` as task cards close: its keyboard goes (the
-/// text gains a resolved line when it fits) and `flags.closed` says why.
-/// The stored card is claimed first, so a card closes once however many
-/// passes see it; the Telegram edit is best effort (a refusal is logged).
-fn close_runtime_card(b: &TgBot, store: &dyn Axe, m: &StoredMessage, runtime: &str) -> Result<()> {
-    let reason = format!("runtime {runtime} is ok");
-    let text = format!("{}\n\nResolved: {reason} again.", m.text);
+/// text gains a resolved or closed line when it fits) and `flags.closed`
+/// says why. The stored card is claimed first, so a card closes once however
+/// many passes see it; the Telegram edit is best effort (a refusal is logged).
+fn close_runtime_card(
+    b: &TgBot,
+    store: &dyn Axe,
+    m: &StoredMessage,
+    runtime: &str,
+    why: Closed,
+) -> Result<()> {
+    let (reason, text) = match why {
+        Closed::Ok => {
+            let reason = format!("runtime {runtime} is ok");
+            let text = format!("{}\n\nResolved: {reason} again.", m.text);
+            (reason, text)
+        }
+        Closed::Removed => {
+            let reason = format!("runtime {runtime} was removed");
+            let text = format!("{}\n\nClosed: {reason}.", m.text);
+            (reason, text)
+        }
+    };
     let fits = utf16_len(&text) <= TEXT_LIMIT && m.flags["html"] != true;
     if !store.claim_close(m.id, if fits { &text } else { &m.text }, &reason)? {
         return Ok(());

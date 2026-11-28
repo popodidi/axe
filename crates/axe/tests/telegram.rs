@@ -4215,6 +4215,83 @@ fn runtime_cards_close_once_the_runtime_is_ok() {
     assert!(rig.stub.calls("editMessageReplyMarkup").is_empty());
 }
 
+#[test]
+fn runtime_cards_close_when_the_runtime_is_removed() {
+    let rig = Rig::new();
+    let (_, pin_tg) = make_board(&rig);
+    let g = post(
+        &rig,
+        "/api/dispatcher/register",
+        json!({"id":"d1","generation":""}),
+    );
+    let g = g["generation"].as_str().unwrap().to_string();
+    report_runtimes(
+        &rig,
+        &g,
+        &[
+            ("claude-1", "claude-code", "ok"),
+            ("codex-2", "codex", "needs_login"),
+        ],
+    );
+    let v = post(
+        &rig,
+        "/api/dispatcher/runtime-alert",
+        json!({"runtime":"codex-2","harness":"codex","state":"needs_login",
+               "class":"auth_invalid","message":"","until":null}),
+    );
+    assert_eq!(v["sent"], true, "{v}");
+    let card = rig.messages().last().unwrap().3;
+    let local: i64 = rig
+        .db()
+        .query_row(
+            "SELECT id FROM bot_messages WHERE direction='out' AND message_id=?1",
+            [card],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // The login card waits on the owner: it is on the board's Decide.
+    wait_board(&rig, "login card on the board", |t| t.contains("codex-2"));
+    let v: Value = serde_json::from_str(&board_ok(&rig, &["show", "--json"])).unwrap();
+    assert_eq!(v["sections"][0]["lines"][0]["id"], local, "{v}");
+
+    // While the node still lists it (needing a login), the card stays open.
+    rig.stub.push(text_msg(100, 200, OWNER, OWNER, "hi"));
+    rig.stub.wait_confirmed(100);
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(stored_card(&rig, card).1["closed"].is_null());
+
+    // The runtime is removed: the node no longer lists it, and its card
+    // closes (keyboard gone, a closed line) and leaves the board.
+    report_runtimes(&rig, &g, &[("claude-1", "claude-code", "ok")]);
+    rig.stub.push(text_msg(101, 201, OWNER, OWNER, "hi"));
+    rig.stub.wait_confirmed(101);
+    wait_for("the codex-2 card to close", 20, || {
+        !stored_card(&rig, card).1["closed"].is_null()
+    });
+    let (stored, flags) = stored_card(&rig, card);
+    assert_eq!(flags["closed"], "runtime codex-2 was removed");
+    assert!(flags.get("buttons").is_none(), "{flags}");
+    assert!(
+        stored.starts_with("Runtime codex-2 (codex) needs a new login.")
+            && stored.ends_with("\n\nClosed: runtime codex-2 was removed."),
+        "{stored}"
+    );
+    let edit = rig
+        .stub
+        .calls("editMessageText")
+        .into_iter()
+        .find(|c| c.params["message_id"] == card)
+        .expect("the card was edited");
+    assert_eq!(edit.params["text"], stored.as_str());
+    assert_eq!(edit.params["reply_markup"], json!({"inline_keyboard": []}));
+    let v: Value = serde_json::from_str(&board_ok(&rig, &["show", "--json"])).unwrap();
+    assert_eq!(v["decide"], 0, "{v}");
+    assert!(!v.to_string().contains("codex-2"), "{v}");
+    let (_, tg, text, _) = wait_board(&rig, "board without the card", |t| !t.contains("codex-2"));
+    assert_eq!(tg, pin_tg, "the board pin is edited in place");
+    assert!(text.contains("nothing to decide"), "{text}");
+}
+
 /// `axe form ask` once the node is connected (it signs the form).
 fn form_ask(rig: &Rig, args: &[&str]) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
