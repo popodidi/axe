@@ -1,0 +1,13 @@
+{
+  "title": "Primitives: what axe gives you",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "task",
+    "routine",
+    "goal",
+    "bot",
+    "service",
+    "store"
+  ]
+}

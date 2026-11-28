@@ -17,7 +17,18 @@ config` prints the resolved configuration, and the modules they name hold
 the exact rules. Task commands live under `axe task`; their older top-level
 forms (`axe add`, `axe show`, ...) still work and are hidden from the help.
 
-## Docs
+## How these docs are organised
+
+- [Get started](getting-started/quickstart.md): every command from install
+  to the point where your agent drives axe on its own.
+- [Levels](levels/index.md): the mental model for how you work with agents,
+  from Level 0 (skill) to Level 2 (autonomy).
+- [Primitives](primitives/index.md): what axe gives you to get there: task,
+  routine, goal, bot, service and store.
+- [How it works](concepts/architecture.md), [Guides](guides/working-locally.md)
+  and [Reference](reference/config.md): internals, how-tos and every setting.
+
+## Design notes
 
 - [docs/design/](../../docs/design/): why axe is shaped this way:
   [one agent per task](../../docs/design/one-agent-per-task.md),
