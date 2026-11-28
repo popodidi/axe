@@ -1,0 +1,198 @@
+/* A doc's history (doc-history.tsx): the versions list in the metadata
+   rail, the older-version notice and the changes view in the body column. */
+.history {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: start;
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.versions {
+  display: grid;
+  gap: var(--space-half);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* One version: when (opens it), who and the short hash, why, and a link to
+   its changes. The open version has a bar at its left. */
+.entry {
+  display: grid;
+  gap: var(--space-quarter);
+  min-width: 0;
+  padding: var(--space-half) 0 var(--space-half) var(--space-snug);
+  box-shadow: inset var(--space-quarter) 0 0 var(--border-subtle);
+}
+.entry.open {
+  box-shadow: inset var(--space-quarter) 0 0 var(--link);
+}
+.when {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-half);
+  align-items: baseline;
+}
+.when a,
+.changes,
+.noticeLinks a,
+.back {
+  color: var(--link);
+  text-underline-offset: 0.18em;
+}
+.when a[aria-current="page"] {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+  text-decoration: none;
+}
+.tag {
+  color: var(--text-tertiary);
+}
+.who {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.why {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.changes {
+  justify-self: start;
+}
+.changes[aria-current="page"] {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+  text-decoration: none;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-half) var(--space-2);
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--status-info-bg);
+  color: var(--text-primary);
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+}
+.noticeLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.diffView {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.diffHead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-half) var(--space-2);
+  align-items: baseline;
+}
+.diffTitle {
+  margin: 0;
+  font-size: var(--text-h3);
+  line-height: var(--lh-h3);
+  font-weight: var(--weight-semibold);
+}
+.back {
+  margin-left: auto;
+  font-size: var(--text-label);
+}
+.counts {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: var(--weight-regular);
+}
+.plus {
+  color: var(--diff-add);
+}
+.minus {
+  color: var(--diff-remove);
+}
+/* From and To side by side, stacked on a phone. */
+.pickers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--space-8) * 2), 1fr));
+  gap: var(--space-1) var(--space-2);
+}
+.same {
+  margin: 0;
+  color: var(--text-secondary);
+}
+.diffFile {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.diffFileName {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+/* The lines: one unified column, wrapped rather than scrolled sideways so
+   a phone reads it whole; a continued line keeps its indent past the mark. */
+.lines {
+  display: grid;
+  padding: var(--space-1) 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: var(--lh-label);
+  color: var(--text-primary);
+}
+.line {
+  display: block;
+  padding: 0 var(--space-2) 0 calc(var(--space-2) + 1.5ch);
+  text-indent: -1.5ch;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+.mark {
+  display: inline-block;
+  width: 1.5ch;
+  text-indent: 0;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+.add {
+  background: var(--status-success-bg);
+}
+.add .mark {
+  color: var(--diff-add);
+}
+.remove {
+  background: var(--status-danger-bg);
+}
+.remove .mark {
+  color: var(--diff-remove);
+}
+.note {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+/* A hunk starts with the new side's line range; between hunks, a rule. */
+.hunk {
+  padding: var(--space-half) var(--space-2);
+  color: var(--text-tertiary);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+  line-height: var(--lh-caption);
+}
+.hunk:not(:first-child) {
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+}

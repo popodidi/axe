@@ -368,7 +368,9 @@ export type DocBody = {
 
 // What the store pane knows about a doc from the listing.
 export type DocInfo = { size: number; updatedAt: string; scopes: string[] };
-export type DocVersion = { version: string; at: string };
+// A `/api/docs/log` entry: the commit, its time, the writer and the
+// write's `-m` message.
+export type DocVersion = { version: string; at: string; author?: string; message?: string };
 
 // The doc's full page (app/doc): this dashboard, pointed at the same server.
 export function docPageHref(base: string, path: string) {
