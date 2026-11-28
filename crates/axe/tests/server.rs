@@ -1508,7 +1508,10 @@ fn signing_in_returns_to_the_page_that_asked() {
     let out = srv.run(&["web", "login-link", "--bot", "cos", "--next", "board"]);
     assert!(out.status.success(), "{out:?}");
     let link = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    assert!(link.ends_with("&next=%2F%3Fbot%3Dcos%26tab%3Dboard"), "{link}");
+    assert!(
+        link.ends_with("&next=%2F%3Fbot%3Dcos%26tab%3Dboard"),
+        "{link}"
+    );
     let path = link.split_once("127.0.0.1").unwrap().1;
     let path = &path[path.find('/').unwrap()..];
     let r = no_redirects()

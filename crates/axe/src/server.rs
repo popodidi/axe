@@ -929,7 +929,9 @@ fn login_route(st: &State, req: &Request) -> (u16, String, String) {
     };
     let next = crate::login::next_or_root(next.as_deref()).to_string();
     let go = |cookie: Option<String>| {
-        let set = cookie.map(|c| format!("Set-Cookie: {c}\r\n")).unwrap_or_default();
+        let set = cookie
+            .map(|c| format!("Set-Cookie: {c}\r\n"))
+            .unwrap_or_default();
         (303, String::new(), format!("{set}Location: {next}\r\n"))
     };
     let refused = |note: &str| (401, crate::login::page(note, &next), String::new());
@@ -943,7 +945,10 @@ fn login_route(st: &State, req: &Request) -> (u16, String, String) {
             None => (200, crate::login::page("", &next), String::new()),
         },
         "POST" => {
-            if token_ok(field("token").unwrap_or_default().trim(), st.token.as_deref()) {
+            if token_ok(
+                field("token").unwrap_or_default().trim(),
+                st.token.as_deref(),
+            ) {
                 go(Some(session_cookie(st).0))
             } else {
                 refused("Wrong token.")

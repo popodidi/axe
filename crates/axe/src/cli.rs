@@ -1432,7 +1432,9 @@ fn run_web(c: &Client, command: WebCmd) -> Result<()> {
                 .unwrap_or(crate::login::DEFAULT_TTL);
             let next = match next.as_deref() {
                 Some("board") => {
-                    let b = bot.as_deref().context("--next board needs --bot (or $AXE_BOT)")?;
+                    let b = bot
+                        .as_deref()
+                        .context("--next board needs --bot (or $AXE_BOT)")?;
                     Some(format!("/?bot={}&tab=board", crate::channel::pct_encode(b)))
                 }
                 n => n.map(str::to_string),

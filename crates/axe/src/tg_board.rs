@@ -260,7 +260,8 @@ pub fn keyboard(board: &Board, menu: Option<&str>, web: Option<&str>) -> Value {
             if !decide.is_empty() {
                 actions.push(data(PARK_LABEL, format!("{PREFIX}m:park")));
             }
-            let web_row = web.map(|w| vec![json!({"text": "Web board", "url": web_url(w, &board.bot)})]);
+            let web_row =
+                web.map(|w| vec![json!({"text": "Web board", "url": web_url(w, &board.bot)})]);
             [jumps, actions]
                 .into_iter()
                 .chain(web_row)
@@ -478,13 +479,19 @@ mod tests {
         let tick = keyboard(&b, Some("tick"), None);
         let rows = tick["inline_keyboard"].as_array().unwrap();
         assert_eq!(rows.len(), 3, "two open items and Back: {tick}");
-        assert_eq!(rows[0][0], json!({"text": "☑ Core fixes", "callback_data": "brd:d:3"}));
+        assert_eq!(
+            rows[0][0],
+            json!({"text": "☑ Core fixes", "callback_data": "brd:d:3"})
+        );
         assert_eq!(rows[1][0]["callback_data"], "brd:d:7");
         assert_eq!(
             rows[1][0]["text"].as_str().unwrap().chars().count(),
             2 + LABEL_CAP
         );
-        assert_eq!(rows[2][0], json!({"text": "‹ Back", "callback_data": "brd:m:"}));
+        assert_eq!(
+            rows[2][0],
+            json!({"text": "‹ Back", "callback_data": "brd:m:"})
+        );
         let park = keyboard(&b, Some("park"), None);
         assert_eq!(
             park["inline_keyboard"][1][0],
@@ -496,7 +503,9 @@ mod tests {
             }
         }
         // More open items than a picker holds: the rest are on the web.
-        let many: Vec<BoardLine> = (0..15).map(|i| l("item", i, &format!("item {i}"))).collect();
+        let many: Vec<BoardLine> = (0..15)
+            .map(|i| l("item", i, &format!("item {i}")))
+            .collect();
         let b = board(vec![("items", "Items", many)]);
         let tick = keyboard(&b, Some("tick"), Some("http://axe"));
         let rows = tick["inline_keyboard"].as_array().unwrap();

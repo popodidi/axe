@@ -730,7 +730,11 @@ fn the_cli_and_api_drive_the_verbs_and_a_read_session_sees_no_card_text() {
         ("/api/bots/cos/board/items/1/drop", Some(own.as_str())),
         ("/api/bots/cos/board/items", Some(own.as_str())),
     ] {
-        assert_eq!(press(path, origin, json!({"text": "x"})).0, 401, "{path} {origin:?}");
+        assert_eq!(
+            press(path, origin, json!({"text": "x"})).0,
+            401,
+            "{path} {origin:?}"
+        );
     }
     let (status, v) = press("/api/bots/cos/board/park", Some(&own), json!({"card": 1}));
     assert_eq!(status, 201, "{v}");
