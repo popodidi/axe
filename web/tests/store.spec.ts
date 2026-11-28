@@ -98,10 +98,27 @@ type Store = {
   read: boolean;
   tokens: string[];
   signed: string[];
+  diffs: string[];
 };
 
+// The store's diff between the two logged versions, as git prints it; one
+// added line is long enough to wrap on a phone.
+const versionDiff = [
+  "diff --git a/harvis/docs/reference/brand-guide.md b/harvis/docs/reference/brand-guide.md",
+  "index 1111111..2222222 100644",
+  "--- a/harvis/docs/reference/brand-guide.md",
+  "+++ b/harvis/docs/reference/brand-guide.md",
+  "@@ -1,3 +1,4 @@",
+  " # Quiet",
+  " ",
+  "-Group first.",
+  "+Group with **space** first.",
+  `+${"A long added sentence that keeps going ".repeat(6).trim()}`,
+  "",
+].join("\n");
+
 async function mockStore(page: Page, read: boolean) {
-  const store: Store = { read, tokens: [], signed: [] };
+  const store: Store = { read, tokens: [], signed: [], diffs: [] };
   await page.route("http://axe.test/**", async (route: Route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -167,6 +184,22 @@ async function mockStore(page: Page, read: boolean) {
           { version: "c".repeat(40), at: "2026-11-10T00:00:00+00:00", author: "axe", message: "edit" },
           { version: "e".repeat(40), at: "2026-11-01T00:00:00+00:00", author: "axe", message: "create" },
         ]);
+      if (p === "/api/docs/diff") {
+        store.diffs.push(`${url.searchParams.get("from")}..${url.searchParams.get("to")}`);
+        return json({
+          path: url.searchParams.get("path"),
+          from: url.searchParams.get("from"),
+          to: url.searchParams.get("to"),
+          diff: url.searchParams.get("from") === url.searchParams.get("to") ? "" : versionDiff,
+        });
+      }
+      if (p === "/api/docs/file" && url.searchParams.get("version") === "e".repeat(40))
+        return json({
+          path: url.searchParams.get("path"),
+          version: "e".repeat(40),
+          kind: "doc",
+          content: "# Quiet\n\nGroup first.",
+        });
       if (p === "/api/docs/file")
         return json({
           path: url.searchParams.get("path"),
@@ -904,6 +937,62 @@ test("the doc page shows its metadata and contents beside the body", async ({ pa
   await page.goto(`/doc?server=http://axe.test&path=${longDocPath}#section-4`);
   await expect(page.getByRole("heading", { name: "Section 4" })).toBeInViewport();
   await expect(toc.getByRole("link", { name: "Section 4" })).toHaveAttribute("aria-current", "location");
+});
+
+test("the doc page lists versions, opens an older one and shows the changes", async ({ page }) => {
+  const store = await mockStore(page, true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const path = "harvis/docs/reference/brand-guide.md";
+  await page.goto(`/doc?server=http://axe.test&path=${path}`);
+  // Newest first: when, who, why; the current one is open.
+  const history = page.getByRole("list", { name: "Doc history" });
+  const entries = history.getByRole("listitem");
+  await expect(entries).toHaveCount(2);
+  await expect(entries.nth(0)).toContainText("current");
+  await expect(entries.nth(0)).toContainText("axe · ccccccc");
+  await expect(entries.nth(0)).toContainText("edit");
+  await expect(entries.nth(1)).toContainText("create");
+  await expect(entries.nth(0).getByRole("link").first()).toHaveAttribute("aria-current", "page");
+
+  // An older version opens read only, with the way back.
+  await entries.nth(1).getByRole("link").first().click();
+  await expect(page).toHaveURL(new RegExp(`version=${"e".repeat(40)}`));
+  const article = page.locator("article");
+  await expect(article.getByText("Group first.")).toBeVisible();
+  const notice = page.getByRole("note", { name: "Older version" });
+  await expect(notice).toContainText("by axe. Read only.");
+  await expect(page.getByLabel("Doc details")).toContainText("e".repeat(40));
+  await notice.getByRole("link", { name: "Current version" }).click();
+  await expect(article.getByText("Group with space first.")).toBeVisible();
+  await expect(notice).toHaveCount(0);
+
+  // The current version's changes: the previous version against it.
+  await entries.nth(0).getByRole("link", { name: /^Changes in/ }).click();
+  await expect(page).toHaveURL(/diff=1/);
+  const changes = page.getByRole("region", { name: "Changes" });
+  await expect(changes.getByLabel("2 added, 1 removed")).toBeVisible();
+  await expect(changes.locator("del")).toHaveText(["−Group first."]);
+  await expect(changes.locator("ins").first()).toHaveText("+Group with **space** first.");
+  await expect(changes.getByText("Lines 1–4")).toBeVisible();
+  expect(store.diffs.at(-1)).toBe(`${"e".repeat(40)}..${"c".repeat(40)}`);
+  await expect(entries.nth(0).getByRole("link", { name: /^Changes in/ })).toHaveAttribute("aria-current", "page");
+  // Any two versions: the same one twice has no changes.
+  await changes.getByRole("combobox", { name: "From" }).click();
+  await page.getByRole("option", { name: /ccccccc/ }).click();
+  await expect(page).toHaveURL(new RegExp(`from=${"c".repeat(40)}`));
+  await expect(changes).toContainText("No changes between these versions.");
+  await page.goBack();
+  await expect(changes.getByLabel("2 added, 1 removed")).toBeVisible();
+
+  // On a phone the diff wraps in the column: no sideways scroll.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const long = changes.locator("ins").nth(1);
+  const height = (l: Locator) => l.evaluate((e) => e.getBoundingClientRect().height);
+  expect(await height(long)).toBeGreaterThan((await height(changes.locator("del"))) * 1.5);
+  const sizes = await page.evaluate(() => ({ sw: document.scrollingElement!.scrollWidth, w: innerWidth }));
+  expect(sizes.sw).toBeLessThanOrEqual(sizes.w);
+  await changes.getByRole("link", { name: "Back to the current version" }).click();
+  await expect(article.getByText("Group with space first.")).toBeVisible();
 });
 
 test("a narrow doc page stacks the metadata and folds the contents", async ({ page }) => {

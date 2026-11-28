@@ -4,6 +4,8 @@
 // column. Narrower windows fold the contents into a "Contents" disclosure
 // first, then stack the metadata above the body. The page scrolls with the
 // window; a rail scrolls itself only when it is taller than the window.
+// The rail lists the doc's versions; an older version or the changes
+// between two show in the center column (doc-history.tsx).
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown from "../../app/markdown";
 import { tocEntries } from "../../lib/doc-toc";
@@ -19,6 +21,13 @@ import {
 } from "../../lib/store";
 import { Alert, cx, Skeleton, TocFold, TocRail, useHeadings, useScrollSpy } from "../ui";
 import { DocFile, type HtmlToc } from "./doc-file";
+import {
+  DocDiffView,
+  DocHistory,
+  OldVersionNotice,
+  type DocHref,
+  type DocView,
+} from "./doc-history";
 import { Facts, fullDate, StoreUnlock, type DocBody, type DocVersion } from "./store-viewer";
 import styles from "./doc-page.module.css";
 
@@ -31,7 +40,17 @@ const isMarkdown = (path: string, content: string, contentType?: string) =>
 // the doc is attached under.
 type StoreFacts = { row: StoreDoc | null; scopes: string[] };
 
-export function DocPage({ base, path }: { base: string; path: string }) {
+export function DocPage({
+  base,
+  path,
+  view = {},
+  href,
+}: {
+  base: string;
+  path: string;
+  view?: DocView;
+  href: DocHref;
+}) {
   const session = useStoreSession(base);
   const [doc, setDoc] = useState<DocBody | null>(null);
   const [versions, setVersions] = useState<DocVersion[] | null>(null);
@@ -42,7 +61,8 @@ export function DocPage({ base, path }: { base: string; path: string }) {
     if (!session.read) return;
     let live = true;
     const q = encodeURIComponent(path);
-    getJson<DocBody>(`${base}/api/docs/file?path=${q}`)
+    const at = view.version ? `&version=${encodeURIComponent(view.version)}` : "";
+    getJson<DocBody>(`${base}/api/docs/file?path=${q}${at}`)
       .then((d) => live && setDoc(d))
       .catch((e) => live && setError((e as Error).message));
     getJson<DocVersion[]>(`${base}/api/docs/log?path=${q}`)
@@ -61,12 +81,18 @@ export function DocPage({ base, path }: { base: string; path: string }) {
     return () => {
       live = false;
     };
-  }, [base, path, session.read]);
+  }, [base, path, session.read, view.version]);
 
   if (session.read === false)
     return <StoreUnlock base={base} reason="Unlock the store to read docs." />;
   if (error) return <Alert>Unable to open this doc: {error}</Alert>;
   if (!doc) return <Skeleton label="Opening…" lines={3} />;
+  const diff = view.diff;
+  // An older version than the current one, read only.
+  const old =
+    !diff && view.version && versions && versions.length && versions[0].version !== doc.version
+      ? versions.find((v) => v.version === doc.version) || { version: doc.version }
+      : null;
   const single = doc.kind !== "folder";
   const files = single ? [{ path: "", content: doc.content || "" }] : doc.files || [];
   // A single markdown doc's frontmatter moves to the metadata rail.
@@ -74,7 +100,7 @@ export function DocPage({ base, path }: { base: string; path: string }) {
     single && isMarkdown(doc.path, files[0].content, doc.content_type)
       ? splitFrontmatter(files[0].content)
       : null;
-  const markdown = files.some((f) =>
+  const markdown = !diff && files.some((f) =>
     isMarkdown(f.path || doc.path, f.content, single ? doc.content_type : undefined),
   );
   // The rail's header: the file name, its folder above it.
@@ -83,8 +109,8 @@ export function DocPage({ base, path }: { base: string; path: string }) {
   return (
     <DocLayout
       markdown={markdown}
-      htmlToc={single ? htmlToc : null}
-      bodyKey={doc.version}
+      htmlToc={single && !diff ? htmlToc : null}
+      bodyKey={`${doc.version}${diff ? ":diff" : ""}`}
       meta={
         <>
           <header className={styles.head}>
@@ -121,6 +147,17 @@ export function DocPage({ base, path }: { base: string; path: string }) {
               ],
             ]}
           />
+          {versions && versions.length > 0 && (
+            <section className={styles.group}>
+              <h2 className={styles.railLabel}>History</h2>
+              <DocHistory
+                versions={versions}
+                shown={doc.version}
+                diffTo={diff ? diff.to || versions[0].version : null}
+                href={href}
+              />
+            </section>
+          )}
           {split && split.meta.length > 0 && (
             <RailFacts
               title="Frontmatter"
@@ -134,6 +171,19 @@ export function DocPage({ base, path }: { base: string; path: string }) {
         </>
       }
     >
+      {diff ? (
+        <DocDiffView
+          base={base}
+          path={doc.path}
+          folder={!single}
+          versions={versions}
+          from={diff.from}
+          to={diff.to}
+          href={href}
+        />
+      ) : (
+        <>
+      {old && <OldVersionNotice version={old} href={href} />}
       {files.map((f, i) => (
         <section key={f.path} aria-label={f.path || doc.path} className={styles.file}>
           {f.path && <h2 className={styles.fileName}>{f.path}</h2>}
@@ -152,6 +202,8 @@ export function DocPage({ base, path }: { base: string; path: string }) {
           />
         </section>
       ))}
+        </>
+      )}
     </DocLayout>
   );
 }
