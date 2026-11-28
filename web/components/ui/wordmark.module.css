@@ -1,0 +1,15 @@
+.wordmark {
+  font-family: var(--font-body);
+  letter-spacing: var(--tracking-wordmark);
+  white-space: nowrap;
+}
+
+.name {
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.product {
+  font-weight: var(--weight-regular);
+  color: var(--wordmark-secondary);
+}

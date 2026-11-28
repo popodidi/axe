@@ -59,19 +59,6 @@
   min-width: 0;
 }
 
-/* Neutral brand tile */
-.brandMark {
-  display: grid;
-  flex-shrink: 0;
-  place-items: center;
-  width: var(--space-4);
-  height: var(--space-4);
-  border-radius: var(--radius-md);
-  background: var(--surface-selected);
-  font-size: var(--text-label);
-  font-weight: var(--weight-semibold);
-}
-
 .navGlyph {
   display: none;
 }
@@ -83,10 +70,10 @@
   white-space: nowrap;
 }
 
+/* Axe OS wordmark (text only, no symbol). */
 .brandName {
-  font-size: var(--text-body);
+  font-size: var(--text-h3);
   line-height: var(--lh-label);
-  font-weight: var(--weight-semibold);
 }
 
 .brandMeta {

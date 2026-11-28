@@ -15,6 +15,8 @@
   --surface-overlay: #242424;
 
   --text-primary: #ededed;
+  /* Axe OS wordmark: the product name ("OS") beside "Axe". */
+  --wordmark-secondary: #8a8a8a;
   --text-secondary: #b0b0b0;
   --text-tertiary: #a0a0a0;
   --text-disabled: #777777;
@@ -49,7 +51,9 @@
   --red-bg: var(--status-danger-bg);
   --green-bg: var(--status-success-bg);
 
-  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* Axe OS: Inter, self-hosted by next/font (--font-inter, app/layout.tsx);
+     system sans until it loads. Mono stays on the system stack. */
+  --font-body: var(--font-inter, -apple-system), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
   --text-h1: 24px;
   --text-h2: 18px;
@@ -71,6 +75,7 @@
   --lh-caption: 15px;
   --tracking-heading: -0.025em;
   --tracking-label: 0;
+  --tracking-wordmark: -0.045em;
 
   /* Explicit micro-spacing; retain the old numbered scale for consumers. */
   --space-2px: 2px;
@@ -130,6 +135,7 @@
   --surface-selected: #ededed;
   --surface-overlay: #ffffff;
   --text-primary: #202020;
+  --wordmark-secondary: #707070;
   --text-secondary: #606060;
   --text-tertiary: #666666;
   --text-disabled: #929292;

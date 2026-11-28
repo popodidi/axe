@@ -29,6 +29,7 @@ import {
   Th,
   choices,
   ThemeToggle,
+  Wordmark,
   cx,
 } from "../components/ui";
 import { ArtifactTable } from "../components/dashboard/artifact-table";
@@ -617,11 +618,10 @@ export default function Dashboard() {
       <aside id="app-nav" className={styles.nav} inert={overlay}>
         <div className={styles.brandRow}>
           <div className={styles.brand}>
-            <span aria-hidden className={styles.brandMark}>
-              A
-            </span>
             <div className={styles.brandText}>
-              <div className={styles.brandName}>axe</div>
+              <div className={styles.brandName}>
+                <Wordmark />
+              </div>
               <div className={styles.brandMeta}>Task queue</div>
             </div>
           </div>
