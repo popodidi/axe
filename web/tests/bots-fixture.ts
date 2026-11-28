@@ -75,7 +75,7 @@ export const board: Board = {
       ],
     },
     { key: "review", title: "Review", lines: [line({ kind: "item", id: 3, item: 3, text: "Core fixes", link: "http://axe.test/doc?path=a.md", link_label: "doc" })] },
-    { key: "goals", title: "Goals", lines: [line({ kind: "goal", id: 1, text: "bot-cost", detail: "on track · $41/$60 wk", link_label: "goal" })] },
+    { key: "goals", title: "Goals", lines: [line({ kind: "goal", id: 1, text: "bot-cost", detail: "on track · $41/$60 wk · attention 1/3 wk", link_label: "goal" })] },
     { key: "items", title: "Items", lines: [line({ kind: "item", id: 5, item: 5, text: "Log retention cap", overdue: true })] },
     { key: "done", title: "Done today", lines: [line({ kind: "item", id: 4, item: 4, text: "Old thing", state: "done" })] },
   ],

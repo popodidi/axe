@@ -1329,16 +1329,15 @@ impl Gateway {
                 };
                 store.set_flag(m.id, "$.board_menu", json!(menu))?;
                 Ok(match menu.as_deref() {
-                    Some("tick") => "Pick an item to tick".into(),
-                    Some(_) => "Pick a decision to park".into(),
+                    Some("tick") => "Tap an item to mark it done; ‹ Back when finished".into(),
+                    Some(_) => "Tap a decision to park it for review; ‹ Back to cancel".into(),
                     None => "Board".into(),
                 })
             }
+            // The picker stays open, so ticking several items is one tap
+            // each; it closes by itself when no open item is left.
             Press::Done(id) => {
                 let i = store.board_state(&actor, &name, id, "done", "ticked on the board")?;
-                if let Some(m) = pin {
-                    store.set_flag(m.id, "$.board_menu", Value::Null)?;
-                }
                 Ok(format!("Done: {}", i.text))
             }
             Press::Park(kind, id) => {

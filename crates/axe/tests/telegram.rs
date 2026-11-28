@@ -2590,12 +2590,14 @@ fn the_board_is_one_silent_pin_per_chat_edited_in_place() {
     assert!(flags_of(&rig, card)["pinned"].is_null());
     let edit = last_edit(&rig, pin_tg).unwrap();
     assert_eq!(
-        edit["reply_markup"]["inline_keyboard"][0],
+        edit["reply_markup"]["inline_keyboard"],
         json!([
-            {"text": "1", "callback_data": format!("brd:j:card:{card}")},
-            {"text": "Tick…", "callback_data": "brd:m:tick"},
-            {"text": "Park…", "callback_data": "brd:m:park"},
-            {"text": "Web", "url": format!("{WEB}/?bot=cos&tab=board")},
+            [{"text": "1", "callback_data": format!("brd:j:card:{card}")}],
+            [
+                {"text": "☑ Mark done…", "callback_data": "brd:m:tick"},
+                {"text": "⏸ Park…", "callback_data": "brd:m:park"},
+            ],
+            [{"text": "Web board", "url": format!("{WEB}/?bot=cos&tab=board")}],
         ])
     );
     let show = board_ok(&rig, &["show"]);
@@ -2614,12 +2616,21 @@ fn the_board_is_one_silent_pin_per_chat_edited_in_place() {
             .iter()
             .any(|p| p["reply_parameters"]["message_id"] == card_tg)
     });
-    // Tick…: a menu of open items in place of the row, then the tick.
+    // Mark done…: a picker of open items, each labelled with its text, in
+    // place of the buttons. It stays open while items are left, so each
+    // further tick is one tap, and closes by itself after the last one.
+    board_ok(&rig, &["add", "Contract"]);
+    wait_board(&rig, "second item", |t| t.contains("☐ Contract"));
     rig.stub.push(press(401, pin_tg, "brd:m:tick"));
     rig.stub.wait_confirmed(401);
-    wait_for("tick menu", 20, || {
+    wait_for("tick picker", 20, || {
         last_edit(&rig, pin_tg).is_some_and(|e| {
-            e["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "brd:d:1"
+            e["reply_markup"]["inline_keyboard"]
+                == json!([
+                    [{"text": "☑ Log retention cap", "callback_data": "brd:d:1"}],
+                    [{"text": "☑ Contract", "callback_data": "brd:d:2"}],
+                    [{"text": "‹ Back", "callback_data": "brd:m:"}],
+                ])
         })
     });
     rig.stub.push(press(402, pin_tg, "brd:d:1"));
@@ -2627,17 +2638,24 @@ fn the_board_is_one_silent_pin_per_chat_edited_in_place() {
     wait_board(&rig, "ticked item", |t| {
         t.contains("\n\n<b>Done today</b>\n☑ <s>Log retention cap</s>")
     });
-    wait_for("main row again", 20, || {
+    wait_for("picker still open", 20, || {
+        last_edit(&rig, pin_tg).is_some_and(|e| {
+            e["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "brd:d:2"
+        })
+    });
+    rig.stub.push(press(403, pin_tg, "brd:d:2"));
+    rig.stub.wait_confirmed(403);
+    wait_for("main buttons again", 20, || {
         last_edit(&rig, pin_tg)
             .is_some_and(|e| e["reply_markup"]["inline_keyboard"][0][0]["text"] == "1")
     });
     // Park…: the decision moves to Review, its card closes, and the bot is
     // asked for a doc.
-    rig.stub.push(press(403, pin_tg, "brd:m:park"));
-    rig.stub.wait_confirmed(403);
-    rig.stub
-        .push(press(404, pin_tg, &format!("brd:p:card:{card}")));
+    rig.stub.push(press(404, pin_tg, "brd:m:park"));
     rig.stub.wait_confirmed(404);
+    rig.stub
+        .push(press(405, pin_tg, &format!("brd:p:card:{card}")));
+    rig.stub.wait_confirmed(405);
     let (_, _, t, _) = wait_board(&rig, "parked", |t| {
         t.contains("<b>Review</b>\n☐ Which one?")
     });
@@ -2650,7 +2668,7 @@ fn the_board_is_one_silent_pin_per_chat_edited_in_place() {
     let park_wake: i64 = rig
         .db()
         .query_row(
-            "SELECT COUNT(*) FROM bot_wakes WHERE key='wake:board-park-2'",
+            "SELECT COUNT(*) FROM bot_wakes WHERE key='wake:board-park-3'",
             [],
             |r| r.get(0),
         )

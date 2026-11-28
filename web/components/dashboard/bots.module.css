@@ -189,3 +189,8 @@
   text-decoration: line-through;
   color: var(--text-tertiary);
 }
+
+.boardActions {
+  text-align: end;
+  white-space: nowrap;
+}
