@@ -734,6 +734,32 @@ fn store_read(req: &Request) -> bool {
     }
 }
 
+/// The owner's board presses a dashboard read session may make (task 2044):
+/// tick or reopen an item and park a decision, as the Telegram pin's buttons
+/// do. Nothing else a session sends writes.
+fn board_press(req: &Request) -> bool {
+    let p: Vec<&str> = req.path.iter().map(String::as_str).collect();
+    req.method == "POST"
+        && matches!(
+            p.as_slice(),
+            ["api", "bots", _, "board", "items", _, "done" | "reopen"]
+                | ["api", "bots", _, "board", "park"]
+        )
+}
+
+/// The request comes from a page of this server: its `Origin` names the
+/// host it was sent to. Browsers send `Origin` on every POST, so a session
+/// write from another site (or with no `Origin`) is refused on top of the
+/// cookie's `SameSite=Lax`.
+fn same_origin(req: &Request) -> bool {
+    let (Some(origin), Some(host)) = (req.headers.get("origin"), req.headers.get("host")) else {
+        return false;
+    };
+    origin
+        .split_once("://")
+        .is_some_and(|(scheme, authority)| matches!(scheme, "http" | "https") && authority == host)
+}
+
 /// Longest sealed message link a Telegram button carries.
 #[cfg(feature = "telegram")]
 const SEALED_LINK_MAX: usize = 4096;
@@ -752,8 +778,9 @@ fn session(st: &State, req: &Request) -> Option<i64> {
 }
 
 /// A new read-session cookie and its expiry. `SameSite=Lax`, so a sign-in
-/// link opened from another app lands signed in; the cookie only reads, and
-/// every write needs the token, so it carries no cross-site write.
+/// link opened from another app lands signed in. The cookie reads; its only
+/// writes are the owner's board presses from this server's own pages
+/// ([`board_press`], [`same_origin`]), so it carries no cross-site write.
 fn session_cookie(st: &State) -> (String, i64) {
     let exp = remote::epoch() + blob::SESSION_SECS;
     let cookie = format!(
@@ -766,7 +793,8 @@ fn session_cookie(st: &State) -> (String, i64) {
 
 /// `/api/session` and `/api/session-end`: the browser's read session. A
 /// `POST /api/session` with the token (or a redeemed login code, `/login`)
-/// sets an HttpOnly cookie that lets the browser make reads (never writes)
+/// sets an HttpOnly cookie that lets the browser make reads (and board
+/// presses, [`allowed`])
 /// for [`blob::SESSION_SECS`], so the page keeps no token. `GET` reports it;
 /// `POST /api/session-end` clears it. Returns the response and the
 /// `Set-Cookie` value, if any.
@@ -846,7 +874,8 @@ fn authorized(st: &State, req: &Request) -> bool {
 
 /// Whether a request may go on past the sign-in gate: with the token,
 /// anything; with a read session (`/api/session`, `/login`), every GET but
-/// message content ([`private_read`]) and the store reads ([`store_read`]).
+/// message content ([`private_read`]), the store reads ([`store_read`]) and,
+/// from this server's own pages, the board presses ([`board_press`]).
 /// `/healthz` and `/metrics` (counters for the scraper) need neither. With
 /// no token configured (loopback only), everything may.
 fn allowed(st: &State, req: &Request) -> bool {
@@ -857,7 +886,20 @@ fn allowed(st: &State, req: &Request) -> bool {
     if authorized(st, req) {
         return true;
     }
-    session(st, req).is_some() && ((read && !private_read(&req.path)) || store_read(req))
+    session(st, req).is_some()
+        && ((read && !private_read(&req.path))
+            || store_read(req)
+            || (board_press(req) && same_origin(req)))
+}
+
+/// Who a board press is from: the body's actor with the token; the owner
+/// from a read session, which cannot name anyone else.
+fn presser(st: &State, req: &Request, who: Who) -> Actor {
+    if authorized(st, req) {
+        who.actor()
+    } else {
+        Actor::new("owner")
+    }
 }
 
 /// A browser page (the dashboard) rather than an API route.
@@ -870,40 +912,49 @@ fn is_page(path: &[String]) -> bool {
 
 /// `/login`: the sign-in page. `GET ?code=` redeems a one-time login code
 /// (`POST /api/login-links`) and `POST` a form with the token; both set the
-/// read-session cookie and go to `/`. Returns the status, page and extra
-/// header lines.
+/// read-session cookie and go to `next` (a page of this server, else `/`),
+/// so a link to a page that asked for a sign-in lands on that page after
+/// it. Returns the status, page and extra header lines.
 fn login_route(st: &State, req: &Request) -> (u16, String, String) {
-    let signed_in = |st: &State| {
-        let (cookie, _) = session_cookie(st);
-        (
-            303,
-            String::new(),
-            format!("Set-Cookie: {cookie}\r\nLocation: /\r\n"),
-        )
+    let body = String::from_utf8_lossy(&req.body);
+    let field = |name: &str| -> Option<String> {
+        body.split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| pct_decode(v, true))
     };
-    let refused = |note: &str| (401, crate::login::page(note), String::new());
+    let next = match req.method.as_str() {
+        "POST" => field("next"),
+        _ => req.query("next").map(str::to_string),
+    };
+    let next = crate::login::next_or_root(next.as_deref()).to_string();
+    let go = |cookie: Option<String>| {
+        let set = cookie
+            .map(|c| format!("Set-Cookie: {c}\r\n"))
+            .unwrap_or_default();
+        (303, String::new(), format!("{set}Location: {next}\r\n"))
+    };
+    let refused = |note: &str| (401, crate::login::page(note, &next), String::new());
     match req.method.as_str() {
         "GET" => match req.query("code") {
-            Some(code) if st.logins.redeem(code, remote::epoch()) => signed_in(st),
+            Some(code) if st.logins.redeem(code, remote::epoch()) => go(Some(session_cookie(st).0)),
+            // A used link in a browser that is signed in already goes on.
+            Some(_) if session(st, req).is_some() => go(None),
             Some(_) => refused("This sign-in link was already used or has expired."),
-            None if session(st, req).is_some() => (303, String::new(), "Location: /\r\n".into()),
-            None => (200, crate::login::page(""), String::new()),
+            None if session(st, req).is_some() => go(None),
+            None => (200, crate::login::page("", &next), String::new()),
         },
         "POST" => {
-            let body = String::from_utf8_lossy(&req.body);
-            let given = body
-                .split('&')
-                .filter_map(|kv| kv.split_once('='))
-                .find(|(k, _)| *k == "token")
-                .map(|(_, v)| pct_decode(v, true))
-                .unwrap_or_default();
-            if token_ok(given.trim(), st.token.as_deref()) {
-                signed_in(st)
+            if token_ok(
+                field("token").unwrap_or_default().trim(),
+                st.token.as_deref(),
+            ) {
+                go(Some(session_cookie(st).0))
             } else {
                 refused("Wrong token.")
             }
         }
-        _ => (405, crate::login::page(""), String::new()),
+        _ => (405, crate::login::page("", &next), String::new()),
     }
 }
 
@@ -1088,7 +1139,13 @@ fn handle(st: &State, stream: TcpStream) -> Result<()> {
     if !allowed(st, &req) {
         observe(401);
         if read && is_page(&req.path) {
-            return Ok(write_page(&mut w, 401, &crate::login::page(""), "")?);
+            // Signing in from here comes back to this page.
+            return Ok(write_page(
+                &mut w,
+                401,
+                &crate::login::page("", &req.target),
+                "",
+            )?);
         }
         return Ok(write_response(&mut w, &error(401, "unauthorized"), None)?);
     }
@@ -2125,8 +2182,18 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             #[derive(Deserialize)]
             struct B {
                 ttl: Option<i64>,
+                /// The page the link lands on after signing in (a path on
+                /// this server, e.g. `/?bot=cos&tab=board`); `/` without.
+                next: Option<String>,
             }
             let b: B = req.json()?;
+            let next = match b.next.as_deref() {
+                None => None,
+                Some(n) if crate::login::next_or_root(Some(n)) == n => Some(n),
+                Some(_) => {
+                    return Err(HttpError(400, "next must be a path on this server".into()).into())
+                }
+            };
             let ttl = b.ttl.unwrap_or(crate::login::DEFAULT_TTL);
             if !(crate::login::MIN_TTL..=crate::login::MAX_TTL).contains(&ttl) {
                 return Err(HttpError(400, "a login link lives 1m to 1h".into()).into());
@@ -2144,7 +2211,13 @@ fn route(st: &State, req: &Request) -> Result<Response> {
             };
             ok(
                 201,
-                &json!({"url": format!("{base}/login?code={code}"),
+                &json!({"url": match next {
+                            Some(n) if n != "/" => format!(
+                                "{base}/login?code={code}&next={}",
+                                crate::channel::pct_encode(n)
+                            ),
+                            _ => format!("{base}/login?code={code}"),
+                        },
                         "expires_at": crate::sealed::format_time(now + ttl)}),
             )
         }
@@ -3616,7 +3689,7 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                 why: String,
             }
             let b: Body = req.json()?;
-            let actor = b.who.actor();
+            let actor = presser(st, req, b.who);
             ok(
                 200,
                 &st.board_state(&actor, name, task_id(id)?, action, &b.why)?,
@@ -3634,8 +3707,11 @@ fn bot_route(st: &State, req: &Request, path: &[&str]) -> Result<Option<Response
                 wake: bool,
             }
             let b: Body = req.json()?;
-            let actor = b.who.actor();
-            ok(201, &st.board_park(&actor, name, &b.park, b.wake)?)
+            // The owner parking from the web asks the bot for its doc, as a
+            // press on the pin does.
+            let wake = b.wake || !authorized(st, req);
+            let actor = presser(st, req, b.who);
+            ok(201, &st.board_park(&actor, name, &b.park, wake)?)
         }
         ("GET", ["api", "bots", name, "board", "views"]) => ok(200, &st.board_views(name)?),
         ("PUT", ["api", "bots", name, "board", "views", channel, chat]) => {

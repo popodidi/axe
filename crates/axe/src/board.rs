@@ -1232,7 +1232,9 @@ fn link_of(conn: &Connection, r: &str, links: &Links) -> Result<(Option<String>,
     })
 }
 
-/// One goal's line detail: status, cost and the next task.
+/// One goal's line detail: status, cost and attention against the weekly
+/// budgets (the last 7 days, as `axe goal show` counts them), and the next
+/// task.
 fn goal_detail(g: &GoalLine) -> String {
     let mut parts = vec![g.status.clone().unwrap_or_else(|| g.state.clone())];
     match g.cost_week {
@@ -1245,6 +1247,10 @@ fn goal_detail(g: &GoalLine) -> String {
         )),
         _ => parts.push(format!("${:.2} spent", g.cost_spent)),
     }
+    parts.push(match g.attention_week {
+        Some(l) => format!("attention {}/{l} wk", g.attention_spent),
+        None => format!("attention {} wk", g.attention_spent),
+    });
     if let Some(n) = &g.next {
         parts.push(format!("next: {} #{}", n.title, n.id));
     }
@@ -1559,6 +1565,42 @@ mod tests {
         }
         assert_eq!(buttons[0].1, format!("task #{} resolved", i64::MAX));
         assert!(card_wake_note(&n, 0).contains(&format!("axe bot tg send --task {}", i64::MAX)));
+    }
+
+    #[test]
+    fn goal_detail_shows_cost_and_attention_budgets() {
+        let mut g = GoalLine {
+            id: 1,
+            name: "bot-cost".into(),
+            state: "active".into(),
+            status: Some("on track".into()),
+            summary: String::new(),
+            metric: None,
+            others: vec![],
+            latest: None,
+            open_tasks: vec![],
+            next: None,
+            needs_you: 0,
+            cost_spent: 2.85,
+            cost_week: Some(35.0),
+            attention_spent: 0,
+            attention_week: Some(3),
+            next_wake: None,
+            idle_since: None,
+            deadline: None,
+            url: None,
+        };
+        assert_eq!(
+            goal_detail(&g),
+            format!(
+                "on track · {} 8% $3/$35 wk · attention 0/3 wk",
+                goal_board::cells(2.85 / 35.0)
+            )
+        );
+        g.cost_week = None;
+        g.attention_week = None;
+        g.attention_spent = 2;
+        assert_eq!(goal_detail(&g), "on track · $2.85 spent · attention 2 wk");
     }
 
     #[test]

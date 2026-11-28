@@ -1357,6 +1357,11 @@ enum WebCmd {
         /// How long the link works: 1m to 1h (default 10m)
         #[arg(long)]
         ttl: Option<String>,
+        /// The page it lands on after signing in: a path such as
+        /// '/?bot=cos&tab=board' (a bot's board), or `board` for the board
+        /// of --bot (default: the dashboard's first page)
+        #[arg(long)]
+        next: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1413,12 +1418,27 @@ fn print_sealed(v: &Value, json: bool) -> Result<()> {
 
 fn run_web(c: &Client, command: WebCmd) -> Result<()> {
     match command {
-        WebCmd::LoginLink { tg, bot, ttl, json } => {
+        WebCmd::LoginLink {
+            tg,
+            bot,
+            ttl,
+            next,
+            json,
+        } => {
             let ttl = ttl
                 .as_deref()
                 .map(crate::bot::parse_duration)
                 .transpose()?
                 .unwrap_or(crate::login::DEFAULT_TTL);
+            let next = match next.as_deref() {
+                Some("board") => {
+                    let b = bot
+                        .as_deref()
+                        .context("--next board needs --bot (or $AXE_BOT)")?;
+                    Some(format!("/?bot={}&tab=board", crate::channel::pct_encode(b)))
+                }
+                n => n.map(str::to_string),
+            };
             let bot = match (tg, bot) {
                 (true, Some(b)) => Some(b),
                 (true, None) => anyhow::bail!("--tg needs --bot (or $AXE_BOT)"),
@@ -1429,7 +1449,11 @@ fn run_web(c: &Client, command: WebCmd) -> Result<()> {
                 let cfg = Config::load(&config::default_path()?).unwrap_or_default();
                 crate::sealed::ReplyKey::load(&cfg.forms.reply_key_path())?;
             }
-            let v: Value = c.send("POST", "/api/login-links", json!({"ttl": ttl}))?;
+            let v: Value = c.send(
+                "POST",
+                "/api/login-links",
+                json!({"ttl": ttl, "next": next}),
+            )?;
             let url = v["url"].as_str().context("no link")?;
             match bot {
                 None if json => print_json(&v),

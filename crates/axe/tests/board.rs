@@ -688,4 +688,63 @@ fn the_cli_and_api_drive_the_verbs_and_a_read_session_sees_no_card_text() {
         .unwrap();
     assert_eq!(read["sections"][0]["lines"][0]["text"], "Card #1", "{read}");
     assert!(!read.to_string().contains("Secret plan"));
+
+    // The web board's presses (task 2044): a read session may tick, reopen
+    // and park from this server's own pages, recorded as the owner, and
+    // nothing else; another site, or no Origin, is refused.
+    let host = srv.url.trim_start_matches("http://").to_string();
+    let press = |path: &str, origin: Option<&str>, body: serde_json::Value| {
+        let mut r = ureq::post(&format!("{}{path}", srv.url)).set("Cookie", &cookie);
+        if let Some(o) = origin {
+            r = r.set("Origin", o);
+        }
+        match r.send_json(body) {
+            Ok(r) => (r.status(), r.into_json::<serde_json::Value>().unwrap()),
+            Err(ureq::Error::Status(s, r)) => (s, r.into_json().unwrap_or_default()),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let own = format!("http://{host}");
+    let (status, v) = press(
+        "/api/bots/cos/board/items/1/done",
+        Some(&own),
+        json!({"actor": "bot:cos", "why": "ticked on the web board"}),
+    );
+    assert_eq!((status, &v["state"]), (200, &json!("done")), "{v}");
+    let actor: String = db::open(&srv.db)
+        .unwrap()
+        .query_row(
+            "SELECT actor FROM bot_events WHERE kind='board' ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(actor, "owner", "a session cannot name another actor");
+    assert_eq!(
+        press("/api/bots/cos/board/items/1/reopen", Some(&own), json!({})).0,
+        200
+    );
+    for (path, origin) in [
+        ("/api/bots/cos/board/items/1/done", Some("http://evil.test")),
+        ("/api/bots/cos/board/items/1/done", None),
+        ("/api/bots/cos/board/items/1/drop", Some(own.as_str())),
+        ("/api/bots/cos/board/items", Some(own.as_str())),
+    ] {
+        assert_eq!(
+            press(path, origin, json!({"text": "x"})).0,
+            401,
+            "{path} {origin:?}"
+        );
+    }
+    let (status, v) = press("/api/bots/cos/board/park", Some(&own), json!({"card": 1}));
+    assert_eq!(status, 201, "{v}");
+    let woken: i64 = db::open(&srv.db)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM bot_wakes WHERE key LIKE 'wake:board-park-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(woken, 1, "a web park asks the bot for its doc");
 }

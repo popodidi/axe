@@ -1,8 +1,10 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useLive } from "../../lib/live-load";
 import Markdown from "../../app/markdown";
 import {
   Alert,
+  Button,
   Command,
   Commands,
   cx,
@@ -97,51 +99,39 @@ export type BotListData = {
  * message times (one metadata read per bot). Reloads on every server change.
  */
 export function useBots(base: string, enabled: boolean, revision: number) {
-  const [state, setState] = useState<BotListData>({
-    bots: null,
-    admission: null,
-    live: new Map(),
-    last: new Map(),
-    error: "",
-  });
-  useEffect(() => {
-    if (!enabled) return;
-    const c = new AbortController();
-    (async () => {
-      try {
-        const [bots, live, admission] = await Promise.all([
-          get<BotSummary[]>(base + "/api/bots", c.signal),
-          get<BotRun[]>(base + "/api/bot-runs?live=1&limit=1000", c.signal),
-          // Slot counters are optional: an older server or a failed read
-          // leaves the list itself usable.
-          get<Admission>(base + "/api/admission", c.signal).catch(() => null),
-        ]);
-        const last = new Map(
-          await Promise.all(
-            bots.map(async (b) => {
-              const a = await get<Activity>(
-                `${base}/api/bots/${encodeURIComponent(b.name)}/activity?limit=200`,
-                c.signal,
-              ).catch(() => null);
-              return [b.name, a ? lastMessages(a.messages) : { in: null, out: null }] as const;
-            }),
-          ),
-        );
-        if (!c.signal.aborted)
-          setState({
-            bots,
-            admission,
-            live: new Map(live.map((r) => [r.id, r])),
-            last,
-            error: "",
-          });
-      } catch (e) {
-        if (!c.signal.aborted) setState((s) => ({ ...s, error: String(e) }));
-      }
-    })();
-    return () => c.abort();
-  }, [base, enabled, revision]);
-  return state;
+  const live = useLive<Omit<BotListData, "error">>(
+    async (signal) => {
+      const [bots, live, admission] = await Promise.all([
+        get<BotSummary[]>(base + "/api/bots", signal),
+        get<BotRun[]>(base + "/api/bot-runs?live=1&limit=1000", signal),
+        // Slot counters are optional: an older server or a failed read
+        // leaves the list itself usable.
+        get<Admission>(base + "/api/admission", signal).catch(() => null),
+      ]);
+      const last = new Map(
+        await Promise.all(
+          bots.map(async (b) => {
+            const a = await get<Activity>(
+              `${base}/api/bots/${encodeURIComponent(b.name)}/activity?limit=200`,
+              signal,
+            ).catch(() => null);
+            return [b.name, a ? lastMessages(a.messages) : { in: null, out: null }] as const;
+          }),
+        ),
+      );
+      return { bots, admission, live: new Map(live.map((r) => [r.id, r])), last };
+    },
+    base,
+    revision,
+    enabled,
+  );
+  return {
+    bots: live.value?.bots ?? null,
+    admission: live.value?.admission ?? null,
+    live: live.value?.live ?? new Map(),
+    last: live.value?.last ?? new Map(),
+    error: live.error,
+  };
 }
 export function BotList({
   state: { bots, admission, live, last, error },
@@ -321,37 +311,29 @@ export function BotPane({
   onWatch: (run: number) => void;
   onCopy: (command: string) => void;
 }) {
-  const [detail, setDetail] = useState<Detail | null>(null);
-  const [error, setError] = useState("");
   const tab = botTabs.includes(params.get("tab") || "")
     ? params.get("tab")!
     : "board";
-  useEffect(() => {
-    const c = new AbortController();
-    const path = `${base}/api/bots/${encodeURIComponent(name)}`;
-    const n = BOT_READ_LIMIT;
-    Promise.all([
-      get<Bot>(path, c.signal),
-      get<Wake[]>(`${path}/wakes?limit=${n}`, c.signal),
-      get<BotEvent[]>(`${path}/events?limit=${n}`, c.signal),
-      get<BotRun[]>(
-        `${base}/api/bot-runs?bot=${encodeURIComponent(name)}&limit=${n}`,
-        c.signal,
-      ),
-      get<Activity>(`${path}/activity?limit=${n}`, c.signal),
-      get<BotSchedule[]>(`${path}/schedules`, c.signal),
-      get<Board>(`${path}/board`, c.signal).catch(() => null),
-    ])
-      .then(([bot, wakes, events, runs, activity, schedules, board]) => {
-        if (c.signal.aborted) return;
-        setDetail({ bot, wakes, events, runs, activity, schedules, board });
-        setError("");
-      })
-      .catch((e) => {
-        if (!c.signal.aborted) setError(String(e));
-      });
-    return () => c.abort();
-  }, [base, name, revision]);
+  const live = useLive<Detail>(
+    async (signal) => {
+      const path = `${base}/api/bots/${encodeURIComponent(name)}`;
+      const n = BOT_READ_LIMIT;
+      const [bot, wakes, events, runs, activity, schedules, board] = await Promise.all([
+        get<Bot>(path, signal),
+        get<Wake[]>(`${path}/wakes?limit=${n}`, signal),
+        get<BotEvent[]>(`${path}/events?limit=${n}`, signal),
+        get<BotRun[]>(`${base}/api/bot-runs?bot=${encodeURIComponent(name)}&limit=${n}`, signal),
+        get<Activity>(`${path}/activity?limit=${n}`, signal),
+        get<BotSchedule[]>(`${path}/schedules`, signal),
+        get<Board>(`${path}/board`, signal).catch(() => null),
+      ]);
+      return { bot, wakes, events, runs, activity, schedules, board };
+    },
+    `${base} ${name}`,
+    revision,
+  );
+  const detail = live.value;
+  const error = live.error;
   const d = detail?.bot.name === name ? detail : null;
   return (
     <ItemPane
@@ -405,7 +387,7 @@ export function BotPane({
             onChange={(t) => onChange({ tab: t })}
           />
           {tab === "board" ? (
-            <BoardTab board={d.board} now={now} />
+            <BoardTab board={d.board} now={now} base={base} onPressed={live.refresh} />
           ) : tab === "wakes" ? (
             <Wakes wakes={d.wakes} />
           ) : tab === "runs" ? (
@@ -507,9 +489,53 @@ function lineAge(l: BoardLine, now: number) {
   const days = Math.floor((now / 1000 - l.since) / 86400);
   return l.since > 0 && days >= 1 ? `${days}d` : "";
 }
+// A press on the web board, as the Telegram pin's buttons make it (task
+// 2044): tick or reopen an item, park a decision. The server takes these
+// from a read session on its own pages and records them as the owner.
+type Press = { label: string; path: string; body: object; done: string };
+function pressesOf(l: BoardLine): Press[] {
+  if (l.kind === "item")
+    return l.state === "done"
+      ? [{ label: "Reopen", path: `items/${l.id}/reopen`, body: { why: "reopened on the web board" }, done: "Reopened" }]
+      : [{ label: "Done", path: `items/${l.id}/done`, body: { why: "ticked on the web board" }, done: "Done" }];
+  if (l.kind === "task" || l.kind === "card")
+    return [{ label: "Park", path: "park", body: { [l.kind]: l.id }, done: "Parked for review" }];
+  return [];
+}
+async function press(base: string, bot: string, p: Press) {
+  const r = await fetch(`${base}/api/bots/${encodeURIComponent(bot)}/board/${p.path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(p.body),
+  });
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try {
+      const e = await r.json();
+      if (e?.error) msg += `: ${e.error}`;
+    } catch {
+      /* Not JSON. */
+    }
+    throw Error(msg);
+  }
+}
 // The bot's board (crates/axe/src/board.rs): Decide, Review, Goals, the item
-// sections and Done today, in that order, with no length limit. Read-only.
-function BoardTab({ board, now }: { board: Board | null; now: number }) {
+// sections and Done today, in that order, with no length limit, and the
+// pin's presses: Done on an item, Park on a decision, and the task link that
+// opens it.
+export function BoardTab({
+  board,
+  now,
+  base,
+  onPressed,
+}: {
+  board: Board | null;
+  now: number;
+  base: string;
+  onPressed: () => void;
+}) {
+  const [busy, setBusy] = useState("");
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   if (!board) return <EmptyState>This server has no board</EmptyState>;
   const views = board.views
     .map(
@@ -517,8 +543,27 @@ function BoardTab({ board, now }: { board: Board | null; now: number }) {
         `${v.channel} ${v.chat_id}${v.thread_id ? `/${v.thread_id}` : ""}: pin ${v.pin ? "on" : "off"}`,
     )
     .join(" · ");
+  const run = (l: BoardLine, p: Press) => {
+    const key = `${l.kind}-${l.id}-${p.path}`;
+    setBusy(key);
+    press(base, board.bot, p)
+      .then(() => {
+        setResult({ ok: true, text: `${p.done}: ${l.text}` });
+        onPressed();
+      })
+      .catch((e) => setResult({ ok: false, text: `${p.label} failed: ${String(e)}` }))
+      .finally(() => setBusy(""));
+  };
   return (
     <>
+      {result &&
+        (result.ok ? (
+          <p role="status" className={styles.note}>
+            {result.text}
+          </p>
+        ) : (
+          <Alert>{result.text}</Alert>
+        ))}
       {!board.sections.length && <EmptyState>Nothing on the board</EmptyState>}
       {board.sections.map((s) => (
         <Panel key={s.key + s.title} aria-label={s.title}>
@@ -536,6 +581,7 @@ function BoardTab({ board, now }: { board: Board | null; now: number }) {
                       {l.text}
                     </span>
                     {l.overdue && <span className={styles.sub}> · overdue</span>}
+                    {lineAge(l, now) && <span className={styles.sub}> · {lineAge(l, now)}</span>}
                     {l.detail && <div className={styles.sub}>{l.detail}</div>}
                     {l.note && <div className={styles.sub}>{l.note}</div>}
                   </Td>
@@ -548,9 +594,19 @@ function BoardTab({ board, now }: { board: Board | null; now: number }) {
                       ) : (
                         <Tag mono>{l.link_label}</Tag>
                       ))}
+                    {!l.link_label && l.kind === "card" && <Tag mono>Telegram</Tag>}
                   </Td>
-                  <Td mono className={styles.optional}>
-                    {lineAge(l, now)}
+                  <Td className={styles.boardActions}>
+                    {pressesOf(l).map((p) => (
+                      <Button
+                        key={p.path}
+                        aria-label={`${p.label}: ${l.text}`}
+                        disabled={busy !== ""}
+                        onClick={() => run(l, p)}
+                      >
+                        {busy === `${l.kind}-${l.id}-${p.path}` ? "…" : p.label}
+                      </Button>
+                    ))}
                   </Td>
                 </tr>
               ))}

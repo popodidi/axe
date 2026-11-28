@@ -56,8 +56,33 @@ fn escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// The login page a browser without a session gets, with `note` on top.
-pub fn page(note: &str) -> String {
+/// Where a sign-in returns to: a path on this server (`/` then not `/` or
+/// `\\`, so never another host), with no control characters, else `/`.
+pub fn next_or_root(next: Option<&str>) -> &str {
+    match next {
+        Some(n)
+            if n.starts_with('/')
+                && !n.starts_with("//")
+                && !n.starts_with("/\\")
+                && n.len() <= 2048
+                && !n.chars().any(char::is_control) =>
+        {
+            n
+        }
+        _ => "/",
+    }
+}
+
+/// The login page a browser without a session gets, with `note` on top;
+/// signing in returns to `next` (a page of this server, see
+/// [`next_or_root`]).
+pub fn page(note: &str, next: &str) -> String {
+    let next = next_or_root(Some(next));
+    let back = if next == "/" {
+        String::new()
+    } else {
+        " Signing in brings you back to this page.".to_string()
+    };
     format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -70,16 +95,18 @@ button{{font:inherit;margin-top:.5rem;padding:.4rem 1rem}}.note{{color:#a33}}</s
 </head><body>
 <h1>axe</h1>
 <p class="note">{note}</p>
-<p>This portal needs a sign-in. Get a one-time link with <code>axe web login-link</code>
-(or <code>axe web login-link --tg</code> to receive it sealed on Telegram) and open it in this browser.</p>
+<p>This portal needs a sign-in.{back} On Telegram, ask your bot for a sign-in link
+(it runs <code>axe web login-link</code>) and open it in this browser.</p>
 <form method="post" action="/login">
+<input type="hidden" name="next" value="{next}">
 <label for="token">Or sign in with the server token</label>
 <input id="token" name="token" type="password" autocomplete="off" required>
 <button type="submit">Sign in</button>
 </form>
 </body></html>
 "#,
-        note = escape(note)
+        note = escape(note),
+        next = escape(next),
     )
 }
 
@@ -105,7 +132,29 @@ mod tests {
     }
 
     #[test]
-    fn the_page_escapes_its_note() {
-        assert!(page("<b>").contains("&lt;b&gt;"));
+    fn the_page_escapes_its_note_and_keeps_where_to_return() {
+        assert!(page("<b>", "/").contains("&lt;b&gt;"));
+        let p = page("", "/?bot=a&tab=board\"><x");
+        assert!(
+            p.contains(r#"name="next" value="/?bot=a&amp;tab=board&quot;&gt;&lt;x""#),
+            "{p}"
+        );
+        assert!(p.contains("brings you back to this page"));
+        assert!(!page("", "/").contains("brings you back"));
+    }
+
+    #[test]
+    fn a_sign_in_returns_only_to_this_server() {
+        assert_eq!(next_or_root(Some("/?bot=a&tab=board")), "/?bot=a&tab=board");
+        for bad in [
+            None,
+            Some(""),
+            Some("http://evil.test/"),
+            Some("//evil.test/"),
+            Some("/\\evil.test"),
+            Some("/a\r\nSet-Cookie: x"),
+        ] {
+            assert_eq!(next_or_root(bad), "/", "{bad:?}");
+        }
     }
 }

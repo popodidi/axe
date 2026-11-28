@@ -222,15 +222,20 @@ characters. Rendering is mechanical: the server keeps every view in step with
 no bot run; a bot spends tokens only on the wording of its own items.
 
 Views are thin adapters. The web shows the board as the first tab of the bot
-pane (a read session sees cards by id only). Telegram renders one pinned
+pane (a read session sees cards by id only), with the pin's presses: Done or
+Reopen on an item and Park on a decision, a task's link to open it. Telegram renders one pinned
 message per chat (`tg_board.rs`), set per chat as a `board_views` row (pin on
 or off, the button row on or off, a repost cadence): it is edited in place on
 every change and, when it changed since it was posted, re-posted at the
 cadence (default workdays 10:00 in the bot's timezone) so it comes back into
 view; Telegram's 4096 limit drops Done today, then items, then Review before
-Decide, with "+N more" linking the web. Its buttons jump to a Decide line,
-tick an item or park a decision, handled by the server with no wake (a park
-asks the bot for a decision doc). `/board pin|buttons on|off` and
+Decide, with "+N more" linking the web. Its buttons, in rows: a number per
+Decide line that jumps to it; "☑ Mark done…" and "⏸ Park…", each opening a
+picker that lists the open items (or decisions) by their own text, one per
+row, so a press says what it does (the item picker stays open for the next
+tick and closes when none is left); and "Web board". The server handles
+presses with no wake (a park asks the bot for a decision doc). A goal line
+shows status, cost and attention against the weekly budgets. `/board pin|buttons on|off` and
 `/board repost off|CRON` set the chat's view. A bot's first send makes a
 view (pin on) in that chat when it has none, and the bot's first pinned view
 is its home chat: escalated tasks get a card there, posted by the server if

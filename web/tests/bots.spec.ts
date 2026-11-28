@@ -58,7 +58,7 @@ test("bot detail tabs, stats and the bot run log overlay", async ({ page }, info
   await expect(decide.locator("#board-task-12")).toContainText("waits on your CI host");
   await expect(decide.getByRole("link", { name: "task #12" })).toHaveAttribute("href", "http://axe.test/?task=12");
   await expect(detail.getByRole("region", { name: "Review" }).getByRole("link", { name: "doc" })).toBeVisible();
-  await expect(detail.getByRole("region", { name: "Goals" })).toContainText("on track · $41/$60 wk");
+  await expect(detail.getByRole("region", { name: "Goals" })).toContainText("on track · $41/$60 wk · attention 1/3 wk");
   await expect(detail.getByRole("region", { name: "Items" })).toContainText("overdue");
   await expect(detail.getByRole("region", { name: "Done today" })).toContainText("Old thing");
   await expect(detail).toContainText("Pinned in telegram 111: pin on");
@@ -190,4 +190,74 @@ test("bot list columns stay put while a live run updates and fit narrow widths",
     expect(spill).toBe(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   }
+});
+// Task 2044: on a phone the bot pane stayed on its skeleton. The server
+// reports a change a second or more while runs are live, and each change
+// aborted the pane's reads and started them again, so on a slow link they
+// never finished. Changes now queue one more read after the read in flight.
+test("bot pane loads while changes stream faster than its reads", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await mockBots(page);
+  let changes = 0;
+  // Each connection delivers a burst of changes, then the browser reconnects
+  // 100 ms later: several changes a second, as live runs make them.
+  await page.route("http://axe.test/api/stream", (route) => {
+    const body =
+      "retry: 100\n\n" +
+      Array.from({ length: 3 }, () => `event: change\ndata: {"seq":${++changes}}\n\n`).join("");
+    return route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream", "Access-Control-Allow-Origin": "*" },
+      body,
+    });
+  });
+  // Every bot pane read takes longer than the gap between changes.
+  await page.route(/^http:\/\/axe\.test\/api\/bots\/ops-bot/, async (route) => {
+    await new Promise((r) => setTimeout(r, 700));
+    return route.fallback();
+  });
+  await page.goto(base + "&view=bots&bot=ops-bot&tab=board");
+  const detail = page.getByRole("region", { name: "Bot detail" });
+  await expect(detail.getByRole("region", { name: "Decide" })).toContainText("2 to decide", {
+    timeout: 8000,
+  });
+  expect(changes).toBeGreaterThan(6);
+});
+// Task 2044: the web board does what the pin's buttons do. Done ticks an
+// item, Park parks a decision, and the task link opens it; each press is a
+// POST the server takes from a read session on its own pages.
+test("the web board ticks items and parks decisions", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await mockBots(page);
+  const posts: { path: string; body: unknown }[] = [];
+  await page.route(/^http:\/\/axe\.test\/api\/bots\/ops-bot\/board\/.+/, (route) => {
+    const r = route.request();
+    if (r.method() !== "POST") return route.fallback();
+    const path = new URL(r.url()).pathname;
+    posts.push({ path, body: r.postDataJSON() });
+    if (path.endsWith("/park")) return route.fulfill({ status: 401, json: { error: "unauthorized" } });
+    return route.fulfill({ json: { id: 5, state: "done", text: "Log retention cap" } });
+  });
+  await page.goto(base + "&view=bots&bot=ops-bot&tab=board");
+  const detail = page.getByRole("region", { name: "Bot detail" });
+  const decide = detail.getByRole("region", { name: "Decide" });
+  await expect(decide.getByRole("link", { name: "task #12" })).toBeVisible();
+  await expect(decide.locator("#board-card-40")).toContainText("Telegram");
+  await expect(detail.getByRole("region", { name: "Goals" })).toContainText("attention 1/3 wk");
+  // Goals have no press; done items reopen.
+  await expect(detail.getByRole("region", { name: "Goals" }).getByRole("button")).toHaveCount(0);
+  await expect(detail.getByRole("button", { name: "Reopen: Old thing" })).toBeVisible();
+  await expect(detail.getByRole("button", { name: "Done: Core fixes" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath("bot-board-phone.png"), fullPage: true });
+  await detail.getByRole("button", { name: "Done: Log retention cap" }).click();
+  await expect(detail.getByRole("status")).toHaveText("Done: Log retention cap");
+  expect(posts).toEqual([
+    { path: "/api/bots/ops-bot/board/items/5/done", body: { why: "ticked on the web board" } },
+  ]);
+  // A refused press says so and changes nothing.
+  await decide.getByRole("button", { name: "Park: Which host?" }).click();
+  await expect(detail.getByRole("alert")).toContainText("Park failed: Error: HTTP 401: unauthorized");
+  expect(posts[1]).toEqual({ path: "/api/bots/ops-bot/board/park", body: { card: 40 } });
 });

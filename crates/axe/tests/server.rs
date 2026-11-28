@@ -1473,6 +1473,77 @@ fn a_login_link_signs_in_once() {
     );
 }
 
+/// The pin's Web button opens `/?bot=<name>&tab=board` (task 2044): a
+/// browser with no session gets the sign-in page there, and signing in, by
+/// the token form or a link minted with `--next`, lands on that page, never
+/// on another host.
+#[test]
+fn signing_in_returns_to_the_page_that_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = Server::start(dir.path());
+    let board = "/?bot=cos&tab=board";
+    match no_redirects().get(&format!("{}{board}", srv.url)).call() {
+        Err(ureq::Error::Status(401, r)) => {
+            let page = r.into_string().unwrap();
+            assert!(
+                page.contains(r#"name="next" value="/?bot=cos&amp;tab=board""#),
+                "{page}"
+            );
+            assert!(page.contains("brings you back to this page"), "{page}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let form = |next: &str| {
+        let r = no_redirects()
+            .post(&format!("{}/login", srv.url))
+            .send_form(&[("token", TOKEN), ("next", next)])
+            .unwrap();
+        assert_eq!(r.status(), 303);
+        r.header("location").unwrap().to_string()
+    };
+    assert_eq!(form(board), board);
+    assert_eq!(form("//evil.test/"), "/");
+    assert_eq!(form("https://evil.test/"), "/");
+
+    let out = srv.run(&["web", "login-link", "--bot", "cos", "--next", "board"]);
+    assert!(out.status.success(), "{out:?}");
+    let link = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert!(
+        link.ends_with("&next=%2F%3Fbot%3Dcos%26tab%3Dboard"),
+        "{link}"
+    );
+    let path = link.split_once("127.0.0.1").unwrap().1;
+    let path = &path[path.find('/').unwrap()..];
+    let r = no_redirects()
+        .get(&format!("{}{path}", srv.url))
+        .call()
+        .unwrap();
+    assert_eq!(r.header("location"), Some(board));
+    let cookie = r
+        .header("set-cookie")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    // The used link in the browser it signed in goes on to the page.
+    let again = no_redirects()
+        .get(&format!("{}{path}", srv.url))
+        .set("Cookie", &cookie)
+        .call()
+        .unwrap();
+    assert_eq!(
+        (again.status(), again.header("location")),
+        (303, Some(board))
+    );
+    assert!(again.header("set-cookie").is_none());
+    // Only a path on this server is minted.
+    let bad = ureq::post(&format!("{}/api/login-links", srv.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
+        .send_json(serde_json::json!({"next": "https://evil.test/"}));
+    assert!(matches!(bad, Err(ureq::Error::Status(400, _))));
+}
+
 /// `/healthz` must answer while a request waits on the DB (task 1587): a
 /// write blocked behind another SQLite writer holds the shared connection, and
 /// the accept loop must not wait for it.
