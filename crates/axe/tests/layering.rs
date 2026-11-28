@@ -47,7 +47,7 @@ const CHANNEL_ALLOWLIST: &[(&str, &str, usize)] = &[
     ("telegram.rs", "conn", 0),
     ("owner_views.rs", "sql", 1),
     ("board.rs", "sql", 24),
-    ("channel.rs", "sql", 31),
+    ("channel.rs", "sql", 34),
     ("server.rs", "sql", 15),
 ];
 

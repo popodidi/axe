@@ -130,6 +130,11 @@ pub trait Axe: Send + Sync + 'static {
     fn live_chats(&self, name: &str) -> Result<Vec<(i64, Option<i64>)>> {
         channel::live_chats(&self.db(), name)
     }
+    /// Bot `name`'s voice acks due their edit, with their voice messages
+    /// (`channel::due_voice_acks`).
+    fn due_voice_acks(&self, name: &str) -> Result<Vec<(StoredMessage, StoredMessage)>> {
+        channel::due_voice_acks(&self.db(), name)
+    }
     /// Bot `name`'s runtime cards that still have buttons, oldest first.
     fn open_runtime_cards(&self, name: &str) -> Result<Vec<StoredMessage>> {
         channel::open_runtime_cards(&self.db(), name)
@@ -407,6 +412,12 @@ pub trait Axe: Send + Sync + 'static {
     /// Records the server's edit of message `msg` to `text`.
     fn set_text_edited(&self, msg: i64, text: &str) -> Result<()> {
         channel::set_text_edited(&self.db(), msg, text)?;
+        self.changed();
+        Ok(())
+    }
+    /// Settles voice ack `msg` (`channel::settle_voice_ack`).
+    fn settle_voice_ack(&self, msg: i64, text: Option<&str>) -> Result<()> {
+        channel::settle_voice_ack(&self.db(), msg, text)?;
         self.changed();
         Ok(())
     }

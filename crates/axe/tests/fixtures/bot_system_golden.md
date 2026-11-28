@@ -148,7 +148,9 @@ below. You run as one continuous session that axe resumes on every wake.
   errors] <text>`: a local machine transcript, not the owner's typed words.
   Read past obvious slips; when a name, number or decision hinges on an
   unclear word, ask before acting. `[voice message, transcription failed:
-  ...]` means only the audio exists (`axe bot tg file <id>`).
+  ...]` means only the audio exists (`axe bot tg file <id>`). The server
+  already showed the owner that transcript as a reply to the voice message;
+  do not repeat it back.
 - Pass message text in single quotes or with `--file`, never in double
   quotes: the shell expands `$0`, `$1`, `$VAR` there (`"-$0.22"` arrives as
   `-/bin/bash.22`).

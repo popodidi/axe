@@ -302,6 +302,42 @@ pub fn open_runtime_cards(conn: &Connection, name: &str) -> Result<Vec<StoredMes
         .collect()
 }
 
+/// Bot `name`'s voice acks (`flags.voice_ack`, the voice message's id) that
+/// are due their edit: the voice message has a transcript, or a run it woke
+/// started without one. Each comes with its voice message, oldest first.
+pub fn due_voice_acks(
+    conn: &Connection,
+    name: &str,
+) -> Result<Vec<(StoredMessage, StoredMessage)>> {
+    let b = bot_id(conn, name)?;
+    let ids: Vec<(i64, i64)> = conn
+        .prepare(
+            "SELECT a.id, v.id FROM bot_messages a
+             JOIN bot_messages v ON v.id=json_extract(a.flags,'$.voice_ack') AND v.bot_id=a.bot_id
+             WHERE a.bot_id=?1 AND a.direction='out'
+               AND json_type(a.flags,'$.voice_ack_done') IS NULL
+               AND json_type(a.flags,'$.deleted') IS NULL
+               AND (json_type(v.flags,'$.transcript') IS NOT NULL
+                 OR EXISTS (SELECT 1 FROM bot_wakes w JOIN bot_runs r ON r.id=w.run_id
+                            WHERE w.message_ref=v.id AND r.log_path<>''))
+             ORDER BY a.id",
+        )?
+        .query_map([b], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    ids.into_iter()
+        .map(|(a, v)| Ok((get_message(conn, name, a)?, get_message(conn, name, v)?)))
+        .collect()
+}
+
+/// Voice ack `msg` is settled: edited to `text` when given (else Telegram
+/// refused the edit), and never edited again.
+pub fn settle_voice_ack(conn: &Connection, msg: i64, text: Option<&str>) -> Result<()> {
+    if let Some(t) = text {
+        set_text_edited(conn, msg, t)?;
+    }
+    set_flag(conn, msg, "$.voice_ack_done", &Value::Bool(true))
+}
+
 /// (chat, thread) of the messages whose wakes the bot's live run took.
 pub fn live_chats(conn: &Connection, name: &str) -> Result<Vec<(i64, Option<i64>)>> {
     Ok(conn

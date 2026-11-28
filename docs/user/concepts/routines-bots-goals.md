@@ -24,7 +24,10 @@ code gains no branches for them.
   `[voice message, auto-transcribed, may contain errors]`: the node runs
   SenseVoice-Small (sherpa-onnx) in a child process before the run, with no
   API or key, and keeps the audio as the message's attachment
-  (`transcribe.rs`; off with `[defaults] transcribe_voice = false`).
+  (`transcribe.rs`; off with `[defaults] transcribe_voice = false`). The
+  server replies "Transcribing…" to the voice message at once and edits that
+  reply into the transcript, or a failure line, when the node stores it
+  (`telegram.rs` `voice_acks`).
   Design: [docs/design/bots.md](../../../docs/design/bots.md).
 - **Services** (`axe service`, `service.rs`, `dispatch/services.rs`) are
   long-running processes a bot declares: name, shell command, cwd (default
