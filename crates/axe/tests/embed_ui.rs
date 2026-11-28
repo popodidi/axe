@@ -30,7 +30,7 @@ fn server_serves_the_dashboard_at_root() {
     let (status, mime, body) = get(&srv, "/");
     assert_eq!(status, 200);
     assert!(mime.starts_with("text/html"), "{mime}");
-    assert!(body.contains("<title>axe · Tasks</title>"), "{body}");
+    assert!(body.contains("<title>Axe OS · Tasks</title>"), "{body}");
 
     // Every script the page loads is embedded too.
     let script = body
