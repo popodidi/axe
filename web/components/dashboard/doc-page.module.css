@@ -8,14 +8,21 @@
   position: relative;
   padding: var(--pane-padding);
 }
-/* The theme toggle: one icon at the top right. Narrow, its own row above
-   the doc; wide, out of the flow in the page's corner, so the sticky rails
-   start where they stick and the metadata rail keeps its top clear of it
-   (above the rail, which can reach the corner). */
+/* The theme toggle: one icon at the top right that stays put while the
+   window scrolls, like the rails. Narrow, its own sticky row above the doc,
+   on the page background so the doc scrolls under it, not under the icon;
+   wide, fixed in the window's corner, out of the flow, with the metadata
+   rail keeping its top clear of it (above the rail, which can reach the
+   corner). */
 .bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
   display: flex;
   justify-content: flex-end;
-  margin-bottom: var(--space-1);
+  margin: calc(var(--space-snug) * -1) 0 var(--space-1);
+  padding-top: var(--space-snug);
+  background: var(--bg);
 }
 .layout {
   --doc-meta-width: calc(var(--space-8) * 2);
@@ -111,8 +118,9 @@
   align-content: start;
   min-width: 0;
 }
+/* A section opened from the contents lands below the sticky toggle row. */
 .body :is(h1, h2, h3)[id] {
-  scroll-margin-top: var(--space-3);
+  scroll-margin-top: calc(var(--space-snug) + var(--control-min-height) + var(--space-3));
 }
 .file {
   display: grid;
@@ -181,6 +189,9 @@
     grid-column: 2;
     grid-row: 1;
   }
+  .body :is(h1, h2, h3)[id] {
+    scroll-margin-top: var(--space-3);
+  }
   .meta {
     grid-column: 3;
     grid-row: 1;
@@ -189,13 +200,19 @@
     display: none;
   }
   .bar {
-    position: absolute;
+    position: fixed;
     top: var(--space-snug);
     right: var(--space-2);
-    z-index: 1;
     margin: 0;
+    padding: 0;
+    background: none;
   }
+  /* The metadata rail keeps its top clear of the toggle; that band is
+     clipped, so the rail's own scrolling never shows under the icon. */
   .meta {
-    padding-top: calc(var(--control-min-height) + var(--space-1));
+    --doc-bar-clear: calc(var(--control-min-height) + var(--space-1));
+
+    padding-top: var(--doc-bar-clear);
+    clip-path: inset(var(--doc-bar-clear) 0 0);
   }
 }
