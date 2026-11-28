@@ -9,6 +9,7 @@ import type {
   BotSummary,
   Wake,
 } from "../lib/bots";
+import type { Board, BoardLine } from "../lib/api";
 // Read-only bot API fixture: two generic bots, one with a live run and a
 // week of runs, wakes, events and message metadata relative to today (UTC).
 const DAY = 86400000;
@@ -45,6 +46,41 @@ export const bots: BotSummary[] = [
 ];
 const diff = (field: string, from: string, to: string) =>
   `why: tighten\n--- ${field}\n+++ ${field}\n@@ -1 +1 @@\n-${from}\n+${to}\n`;
+const line = (l: Partial<BoardLine> & Pick<BoardLine, "kind" | "id" | "text">): BoardLine => ({
+  note: null,
+  item: null,
+  task: null,
+  ref: null,
+  link: null,
+  link_label: null,
+  since: 0,
+  state: "open",
+  overdue: false,
+  detail: null,
+  ...l,
+});
+// The board of ops-bot: every section, a merged note, a link and a done line.
+export const board: Board = {
+  bot: "ops-bot",
+  decide: 2,
+  open_items: 3,
+  done_since: 0,
+  sections: [
+    {
+      key: "decide",
+      title: "Decide",
+      lines: [
+        line({ kind: "task", id: 12, text: "Deploy the site", task: 12, link: "http://axe.test/?task=12", link_label: "task #12", since: 1, note: "waits on your CI host" }),
+        line({ kind: "card", id: 40, text: "Which host?" }),
+      ],
+    },
+    { key: "review", title: "Review", lines: [line({ kind: "item", id: 3, item: 3, text: "Core fixes", link: "http://axe.test/doc?path=a.md", link_label: "doc" })] },
+    { key: "goals", title: "Goals", lines: [line({ kind: "goal", id: 1, text: "bot-cost", detail: "on track · $41/$60 wk", link_label: "goal" })] },
+    { key: "items", title: "Items", lines: [line({ kind: "item", id: 5, item: 5, text: "Log retention cap", overdue: true })] },
+    { key: "done", title: "Done today", lines: [line({ kind: "item", id: 4, item: 4, text: "Old thing", state: "done" })] },
+  ],
+  views: [{ id: 1, channel: "telegram", chat_id: 111, thread_id: 0, pin: true, keyboard: true, repost: "0 10 * * 1-5", created_at: "", updated_at: "" }],
+};
 export const bot: Bot = {
   ...bots[0],
   id: 1,
@@ -223,6 +259,7 @@ export async function mockBots(page: Page) {
     const b = bots.find((x) => x.name === path[1]);
     if (!b) return route.fulfill({ status: 404, json: { error: `bot ${path[1]} not found` } });
     const own = b.name === "ops-bot";
+    if (path[2] === "board") return route.fulfill(json(own ? board : { ...board, bot: b.name, sections: [], decide: 0, views: [] }));
     if (path[2] === "schedules") return route.fulfill(json(own ? schedules : []));
     if (path[2] === "wakes") return route.fulfill(json(own ? wakes : []));
     if (path[2] === "events") return route.fulfill(json(own ? events : []));

@@ -155,15 +155,20 @@ below. You run as one continuous session that axe resumes on every wake.
   quotes: the shell expands `$0`, `$1`, `$VAR` there (`"-$0.22"` arrives as
   `-/bin/bash.22`).
 - Anything that waits on the owner is an escalated task or a card (a
-  message with `--buttons`). The pinned list is the owner's inbox: the
-  server pins each open card and keeps one pinned message per active goal
-  of yours, edited in place as the goal changes (`axe bot tg board show`).
-  Never pin, unpin, edit or resend these by hand.
+  message with `--buttons`). Your board (`axe bot board show`) is what the
+  owner sees about you, one pinned message per chat and a tab on the web,
+  kept by the server: escalated tasks and open cards (Decide), parked
+  decisions (Review), your active goals, and your own small items. Keep
+  lists there with the verbs, never in a hand-kept or pinned message:
+  `axe bot board add 'text' [--ref task:N|goal:N|doc:PATH|URL] [--section
+  NAME]`, `done ID`, `drop ID`, `edit ID`, `park --card ID|--task N`. An
+  item on a task, goal or card already on the board becomes that line's
+  note, and closes with it; do not restate what a task already says.
 - When a task you own (or, with no bot owner, of your home project) is
   escalated you get a wake to post its card; no other bot gets one:
   `axe bot tg send --task N --buttons "Approve=approve;Hold=hold" '<short
   blocked/resolver text>'` with the real options. Without it the server posts
-  a minimal card (Resolved / Discuss) 10 minutes after that wake. A press on any card
+  a minimal card (Resolved / Park) 10 minutes after that wake. A press on any card
   arrives as a normal button wake; a task's card closes when it leaves
   escalated.
 - Close answered cards: a press closes its card; when an owner message

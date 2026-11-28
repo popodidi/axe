@@ -158,6 +158,127 @@ export type TaskAction = { task_id: number, at: string, actor: string, kind: str
 
 export type Activity = { messages: Array<MessageMeta>, task_actions: Array<TaskAction>, };
 
+export type Board = { bot: string, sections: Array<BoardSection>, 
+/**
+ * Decide lines.
+ */
+decide: number, 
+/**
+ * Open items.
+ */
+open_items: number, 
+/**
+ * Done today counts from this time (epoch seconds).
+ */
+done_since: number, views: Array<BoardView>, };
+
+export type BoardSection = { 
+/**
+ * `decide`, `review`, `goals`, `items` (Items and named item sections)
+ * or `done`.
+ */
+key: string, title: string, lines: Array<BoardLine>, };
+
+export type BoardLine = { 
+/**
+ * `task`, `card`, `goal` or `item`.
+ */
+kind: string, 
+/**
+ * Task id, card message id, goal id or item id.
+ */
+id: number, 
+/**
+ * What the line says (plain text).
+ */
+text: string, 
+/**
+ * The bot's words on a derived line (a merged item).
+ */
+note: string | null, 
+/**
+ * The item behind the line (an item, or the one merged into it).
+ */
+item: number | null, 
+/**
+ * The task a card stands for, or the task an item names.
+ */
+task: number | null, 
+/**
+ * The item's ref, as written.
+ */
+ref: string | null, 
+/**
+ * Where the line links to, signed or built at render time.
+ */
+link: string | null, 
+/**
+ * What the link is: `task #12`, `goal`, `doc`, `file`, `link`.
+ */
+link_label: string | null, 
+/**
+ * When it started (epoch seconds).
+ */
+since: number, 
+/**
+ * `open` or `done`.
+ */
+state: string, 
+/**
+ * Past its `until`.
+ */
+overdue: boolean, 
+/**
+ * A goal's status and budget, one line.
+ */
+detail: string | null, };
+
+export type BoardItem = { id: number, 
+/**
+ * Its own words; may be empty when `ref` names a task, goal or card.
+ */
+text: string, 
+/**
+ * `task:N`, `goal:N`, `card:N` (a local message id), `doc:<path>`,
+ * `blob:<sha256>` or an `http(s)://` URL.
+ */
+ref: string | null, 
+/**
+ * Empty: Items; `Review`: a parked decision; else a named section.
+ */
+section: string, 
+/**
+ * What a parked decision came from: `card:N` or `task:N` ([`park`]).
+ */
+source: string | null, 
+/**
+ * `open`, `done` or `dropped`.
+ */
+state: string, pos: number | null, 
+/**
+ * Shown as overdue after this time (RFC3339); never removed by it.
+ */
+until: string | null, created_at: string, updated_at: string, closed_at: string | null, };
+
+export type BoardView = { id: number, channel: string, chat_id: number, 
+/**
+ * 0: the chat itself, not a topic.
+ */
+thread_id: number, 
+/**
+ * The board is pinned in this chat; off, it does not appear there.
+ */
+pin: boolean, 
+/**
+ * The pin's button row.
+ */
+keyboard: boolean, 
+/**
+ * When a changed board is posted again as a new pin (cron, in the bot's
+ * timezone); `None` edits in place only.
+ */
+repost: string | null, created_at: string, updated_at: string, };
+
 export type BotSchedule = { id: number, name: string, cron: string, timezone: string, objective: string, enabled: boolean, next_at: string, last_fired_at: string | null, created_at: string, updated_at: string, 
 /**
  * The goal each firing is labeled with (`[goal NAME]`).

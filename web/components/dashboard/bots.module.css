@@ -184,3 +184,8 @@
     display: none;
   }
 }
+
+.boardDone {
+  text-decoration: line-through;
+  color: var(--text-tertiary);
+}

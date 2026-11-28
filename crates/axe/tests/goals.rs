@@ -455,7 +455,7 @@ fn v15_database_migrates_to_v16_additively() {
     let version: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     assert_eq!(db::get_task(&c, 1).unwrap().title, "t");
     let s = &schedule::list(&c, "a").unwrap()[0];
     assert_eq!((s.name.as_str(), s.goal.as_deref()), ("s", None));
@@ -874,7 +874,7 @@ fn the_pin_and_the_api_show_an_idle_goal() {
         assert_eq!(lines.len(), 1);
         (
             lines[0].idle_since.clone(),
-            axe::goal_board::pin_text(&lines[0]),
+            axe::goal_board::goal_text(&lines[0]),
         )
     };
     // Quiet for minutes only: not idle yet.

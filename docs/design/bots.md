@@ -204,18 +204,39 @@ commands. `/node` is the node's latest sample, the same for every bot
 budget-style bars, runs by kind, one versions line; no quote block). Which bot runs and its services
 and schedules stay in that bot's `/status`, so the two never repeat.
 
-The owner's inbox is the bot chat's pinned list, rendered by the server
-(`board.rs`, `goal_board.rs`): one pinned card per open decision and one
-pinned message per active goal, edited in place as the goal changes, so the
-owner never keeps a list by hand. The single pinned overview with task stats
-was retired on 2026-11-13 at the owner's request: it only repeated what the
-cards and goals show. The inbox is on by default: a bot's first plain
-`bot tg send` (not a card, alert or command reply) becomes its board
-message, so a new bot's chat gets its pins without a manual
-`board set-message`; a bot with earlier messages, or whose inbox was turned
-off, is left as it is (2026-11-14). With the inbox on, every escalated task in
-the bot's subscribed projects gets a card, posted by the server if the bot
-does not post one.
+### Board
+
+The board is one core primitive per bot, always on (`board.rs`): what the
+owner should see about the bot, derived from what axe already stores plus
+the bot's own small items. Sections, in a fixed order: Decide (escalated
+tasks in the bot's subscribed projects with no open card, then its open
+cards), Review (parked decisions), Goals (active goals), up to three named
+item sections, Items, and Done today. Derived lines are references, never
+copies: an item whose ref (`task:N`, `goal:N`, `card:N`) is already a line
+becomes that line's note, a task or goal ref takes its title from the source
+at render time and closes when the source does, and doc and blob links are
+built or signed at render time, so they never expire in a pin. Items are
+written only through typed verbs (`axe bot board add|edit|move|done|drop|
+reopen|park`, `/api/bots/<name>/board/...`), capped at 50 open items of 200
+characters. Rendering is mechanical: the server keeps every view in step with
+no bot run; a bot spends tokens only on the wording of its own items.
+
+Views are thin adapters. The web shows the board as the first tab of the bot
+pane (a read session sees cards by id only). Telegram renders one pinned
+message per chat (`tg_board.rs`), set per chat as a `board_views` row (pin on
+or off, the button row on or off, a repost cadence): it is edited in place on
+every change and, when it changed since it was posted, re-posted at the
+cadence (default workdays 10:00 in the bot's timezone) so it comes back into
+view; Telegram's 4096 limit drops Done today, then items, then Review before
+Decide, with "+N more" linking the web. Its buttons jump to a Decide line,
+tick an item or park a decision, handled by the server with no wake (a park
+asks the bot for a decision doc). `/board pin|buttons on|off` and
+`/board repost off|CRON` set the chat's view. A bot's first send makes a
+view (pin on) in that chat when it has none, and the bot's first pinned view
+is its home chat: escalated tasks get a card there, posted by the server if
+the bot does not post one. The old card pins, goal pins and overview were
+retired in one cutover (schema v26, 2026-11-28): the server unpinned them and
+each old inbox chat became a view.
 
 ## Capabilities: set by conduct, not by hard limits
 

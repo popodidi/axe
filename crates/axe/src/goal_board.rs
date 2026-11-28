@@ -1,24 +1,18 @@
-//! The goals of a bot as Telegram shows them: one pinned message per active
-//! goal (the "goal pin", `flags.goal_pin` holds the goal id), kept current
-//! by the gateway (`telegram.rs`, `goal_pins`). Design: `docs/design/goals.md`,
-//! "Budget". `show` renders the goal lines of every open goal (proposed,
-//! active, paused) as one text. The separate goal board message
-//! (`flags.goal_board`) is retired: the gateway unpins it, edits it to a
-//! pointer and clears the flag; `set_message` only unsets it.
-use anyhow::{bail, Result};
+//! The goal lines of a bot: one [`GoalLine`] per open goal (proposed,
+//! active, paused), read by the board's Goals section (`board.rs`, active
+//! goals only) and the `/goals` view (`owner_views.rs`, [`block`]). Design:
+//! `docs/design/goals.md`, "Budget".
+use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
-use crate::board::{cap, escape, short, utf16, FOOTER_ROOM, TEXT_LIMIT};
-use crate::bot;
-use crate::channel::{bot_id, get_message, StoredMessage};
+use crate::board::{cap, escape, short};
 use crate::goal;
 
-pub const EMPTY: &str = "No active goals.";
 /// Goal states the board shows; `done` and `dropped` are omitted.
 pub const SHOWN_STATES: [&str; 3] = ["proposed", "active", "paused"];
-/// The goal state that has a pinned message.
-pub const PINNED_STATE: &str = "active";
+/// The goal state the board shows.
+pub const BOARD_STATE: &str = "active";
 /// Characters of the summary line.
 const SUMMARY_CAP: usize = 120;
 /// Characters of the next task's title.
@@ -89,47 +83,6 @@ pub struct GoalLine {
     /// The goal's page in the web dashboard, when the server's public URL
     /// is set (`[blobs] public_url`).
     pub url: Option<String>,
-}
-
-/// What `bot tg goal-board show` returns.
-#[derive(Debug, Serialize)]
-pub struct GoalBoard {
-    /// Local id of the goal board message, if one is set.
-    pub message: Option<i64>,
-    pub goals: Vec<GoalLine>,
-    /// The goal lines as one text.
-    pub text: String,
-}
-
-/// One goal pin, as `bot tg board show` lists it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Pin {
-    pub goal: String,
-    /// Local id of its pinned message; `None` until the gateway posts it.
-    pub message: Option<i64>,
-    /// Whether that message shows the current text.
-    pub current: bool,
-}
-
-/// The bot's goal board message, if one is set.
-pub fn message(conn: &Connection, name: &str) -> Result<Option<StoredMessage>> {
-    crate::board::flagged(conn, name, "goal_board")
-}
-
-/// With `None`, stops rendering the bot's old goal board message. A new one
-/// is refused: each active goal has its own pinned message.
-pub fn set_message(conn: &mut Connection, name: &str, msg: Option<i64>) -> Result<Option<i64>> {
-    if msg.is_some() {
-        bail!("each active goal has its own pinned message now (`axe bot tg board show`); there is no goal board message");
-    }
-    crate::board::set_flagged(
-        conn,
-        name,
-        None,
-        "goal_board",
-        &["goal_board", "goal_board_key"],
-        "board",
-    )
 }
 
 /// The goals bot `name` is attached to that are still open, oldest first.
@@ -248,7 +201,7 @@ fn clip(s: &str, limit: usize) -> String {
 }
 
 /// `<web>/?goal=<name>`, the goal's page in the web dashboard.
-fn goal_url(web: &str, name: &str) -> String {
+pub(crate) fn goal_url(web: &str, name: &str) -> String {
     let mut q = String::new();
     for b in name.bytes() {
         if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
@@ -421,92 +374,17 @@ pub(crate) fn block(g: &GoalLine) -> String {
     out
 }
 
-/// The goal board as Telegram HTML: one block per goal, then "Updated
-/// <time>". Goals that do not fit become "+N more".
-pub fn render(goals: &[GoalLine], now: i64) -> String {
-    let mut out = String::from("<b>Goals</b>");
-    if goals.is_empty() {
-        out.push_str("\n\n");
-        out.push_str(EMPTY);
-    }
-    let mut shown = 0;
-    for g in goals {
-        let b = block(g);
-        if utf16(&out) + utf16(&b) > TEXT_LIMIT - FOOTER_ROOM {
-            break;
-        }
-        out.push_str(&b);
-        shown += 1;
-    }
-    if shown < goals.len() {
-        out.push_str(&format!("\n\n+{} more", goals.len() - shown));
-    }
-    out.push_str(&format!(
-        "\n\n<i>Updated {} UTC</i>",
-        bot::ts(now)[..16].replace('T', " ")
-    ));
-    out
-}
-
-/// The text of goal `g`'s pinned message. It has no time in it, so it is
-/// also the render key: the gateway edits the pin when the text changes.
-pub fn pin_text(g: &GoalLine) -> String {
+/// Goal `g`'s block alone, as the `/goals` view shows it.
+pub fn goal_text(g: &GoalLine) -> String {
     block(g).trim_start().to_string()
 }
 
-/// The goal lines of bot `name` that have a pinned message.
+/// The active goal lines of bot `name`, for its board.
 pub fn pinned_lines(conn: &Connection, name: &str, web: Option<&str>) -> Result<Vec<GoalLine>> {
     Ok(lines(conn, name, web)?
         .into_iter()
-        .filter(|g| g.state == PINNED_STATE)
+        .filter(|g| g.state == BOARD_STATE)
         .collect())
-}
-
-/// The bot's goal pins (messages with `flags.goal_pin`), oldest first.
-pub fn pins(conn: &Connection, name: &str) -> Result<Vec<StoredMessage>> {
-    let b = bot_id(conn, name)?;
-    let ids: Vec<i64> = conn
-        .prepare(
-            "SELECT id FROM bot_messages WHERE bot_id=?1
-               AND json_type(flags,'$.goal_pin')='integer' ORDER BY id",
-        )?
-        .query_map([b], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    ids.into_iter()
-        .map(|id| get_message(conn, name, id))
-        .collect()
-}
-
-/// Each goal of bot `name` that has a pinned message, with that message.
-pub fn pin_views(conn: &Connection, name: &str, web: Option<&str>) -> Result<Vec<Pin>> {
-    let pins = pins(conn, name)?;
-    Ok(pinned_lines(conn, name, web)?
-        .iter()
-        .map(|g| {
-            let m = pins
-                .iter()
-                .find(|m| m.flags["goal_pin"].as_i64() == Some(g.id));
-            Pin {
-                goal: g.name.clone(),
-                message: m.map(|m| m.id),
-                current: m.is_some_and(|m| {
-                    m.flags["goal_pin_key"].as_str() == Some(pin_text(g).as_str())
-                }),
-            }
-        })
-        .collect())
-}
-
-/// The goal lines of bot `name`, and its old goal board message if one is
-/// still set.
-pub fn show(conn: &Connection, name: &str, now: i64, web: Option<&str>) -> Result<GoalBoard> {
-    let goals = lines(conn, name, web)?;
-    let msg = message(conn, name)?;
-    Ok(GoalBoard {
-        message: msg.as_ref().map(|m| m.id),
-        text: render(&goals, now),
-        goals,
-    })
 }
 
 #[cfg(test)]
@@ -566,7 +444,7 @@ mod tests {
     #[test]
     fn metric_goal_renders_the_scoreboard() {
         assert_eq!(
-            pin_text(&metric_goal()),
+            goal_text(&metric_goal()),
             "<b>cut-cost</b> · <i>at risk</i> · Dec 8\n\
              Cost is trending down &amp; under target.\n\
              cost/day $59 → $125\n\
@@ -597,7 +475,7 @@ mod tests {
         g.attention_week = Some(20);
         g.deadline = Some("2027-01-31".into());
         assert_eq!(
-            pin_text(&g),
+            goal_text(&g),
             "<b>ship-v1</b> · <i>active</i> · Jan 31\n\
              Ship version one.\n\
              Next: Goal pin: scoreboard layout #894 · Needs you: 2 open cards\n\
@@ -607,22 +485,22 @@ mod tests {
         g.needs_you = 1;
         g.next = None;
         assert!(
-            pin_text(&g).contains("\nNext: nothing open · Needs you: 1 open card\n"),
+            goal_text(&g).contains("\nNext: nothing open · Needs you: 1 open card\n"),
             "{}",
-            pin_text(&g)
+            goal_text(&g)
         );
     }
 
     #[test]
-    fn an_idle_goal_says_idle_on_its_pin() {
+    fn an_idle_goal_says_idle_in_its_block() {
         let mut g = goal("stalled", "active");
-        assert!(!pin_text(&g).contains("idle"));
+        assert!(!goal_text(&g).contains("idle"));
         g.idle_since = Some("2027-01-14T08:00:00Z".into());
         assert!(
-            pin_text(&g)
+            goal_text(&g)
                 .starts_with("<b>stalled</b> · <i>active</i> · <b>idle</b> · no deadline\n"),
             "{}",
-            pin_text(&g)
+            goal_text(&g)
         );
     }
 
@@ -653,7 +531,7 @@ mod tests {
         );
         // No limit: always shown, empty.
         let g = goal("free", "active");
-        let t = pin_text(&g);
+        let t = goal_text(&g);
         assert!(
             t.contains("\n<code>Cost ░░░░░░░░░░    -  $0.00 wk, no limit</code>\n<code>Attn ░░░░░░░░░░    -  0 wk, no limit</code>"),
             "{t}"
@@ -694,45 +572,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_blocks_and_footer() {
-        let mut later = goal("next", "proposed");
-        later.summary = "Grow <it>".into();
-        let t = render(&[metric_goal(), later], 0);
-        assert!(
-            t.starts_with("<b>Goals</b>\n\n<b>cut-cost</b> · <i>at risk</i> · Dec 8\n"),
-            "{t}"
-        );
-        assert!(
-            t.contains("\n\n<b>next</b> · <i>proposed</i> · awaiting your Go · no deadline\nGrow &lt;it&gt;\nNext: nothing open"),
-            "{t}"
-        );
-        assert!(
-            t.ends_with("\n\n<i>Updated 1970-01-01 00:00 UTC</i>"),
-            "{t}"
-        );
-        assert_eq!(
-            render(&[], 0),
-            format!("<b>Goals</b>\n\n{EMPTY}\n\n<i>Updated 1970-01-01 00:00 UTC</i>")
-        );
-    }
-
-    #[test]
-    fn overflow_becomes_more_and_stays_under_the_limit() {
-        let many: Vec<GoalLine> = (0..200)
-            .map(|i| {
-                let mut g = goal(&format!("goal-{i:03}-{}", "x".repeat(40)), "active");
-                g.open_tasks = (0..5).collect();
-                g
-            })
-            .collect();
-        let t = render(&many, 0);
-        assert!(utf16(&t) <= TEXT_LIMIT, "{}", utf16(&t));
-        let shown = t.matches("<i>active</i>").count();
-        assert!(shown > 5 && shown < 200, "{shown}");
-        assert!(t.contains(&format!("+{} more", 200 - shown)), "{t}");
-    }
-
-    #[test]
     fn intent_line_skips_markdown_headings() {
         assert_eq!(
             intent_line("# Intent\n\n## Outcome\nCut bot run cost.\n\n## Done when\nx"),
@@ -744,13 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn pin_text_has_no_time_and_tracks_spend() {
+    fn goal_text_has_no_time_and_tracks_spend() {
         let mut g = goal("g", "active");
         g.cost_spent = 1.0;
         g.cost_week = Some(10.0);
-        let t = pin_text(&g);
+        let t = goal_text(&g);
         assert!(!t.contains("Updated"), "{t}");
         g.cost_spent = 1.01;
-        assert_ne!(pin_text(&g), t, "a spend change edits the pin");
+        assert_ne!(goal_text(&g), t, "a spend change edits the pin");
     }
 }

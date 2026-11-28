@@ -111,7 +111,9 @@ export function botHold(a: Admission | null) {
 }
 /** Every read is the latest this many records (the server cap). */
 export const BOT_READ_LIMIT = 1000;
-export const botTabs = ["profile", "wakes", "runs", "events", "stats"];
+// The board is first: what the owner should see about the bot
+// (crates/axe/src/board.rs), the same model a Telegram pin renders.
+export const botTabs = ["board", "profile", "wakes", "runs", "events", "stats"];
 export function botStatus(b: Pick<BotSummary, "state" | "attention">) {
   return b.attention ? "Needs attention" : b.state === "paused" ? "Paused" : "Active";
 }

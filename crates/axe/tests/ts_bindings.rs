@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use axe::{ask, bot, db, goal, node_metrics, schedule, server, service};
+use axe::{ask, board, bot, db, goal, node_metrics, schedule, server, service};
 use ts_rs::{Config, TS};
 
 fn bindings() -> String {
@@ -27,6 +27,11 @@ fn bindings() -> String {
         bot::MessageMeta::decl(&cfg),
         bot::TaskAction::decl(&cfg),
         bot::Activity::decl(&cfg),
+        board::Board::decl(&cfg),
+        board::Section::decl(&cfg),
+        board::BoardLine::decl(&cfg),
+        board::Item::decl(&cfg),
+        board::View::decl(&cfg),
         schedule::Schedule::decl(&cfg),
         goal::Goal::decl(&cfg),
         goal::Budget::decl(&cfg),

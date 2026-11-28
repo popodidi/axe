@@ -18,7 +18,6 @@ use crate::board;
 use crate::bot::{self, NewMessage};
 use crate::channel::{self, StoredMessage};
 use crate::db::Actor;
-use crate::goal_board;
 use crate::owner_views;
 
 fn now() -> i64 {
@@ -168,11 +167,37 @@ pub trait Axe: Send + Sync + 'static {
     fn bot_retro(&self, bot: &str, limit: Option<usize>) -> Result<ask::Retro> {
         ask::bot_retro(&self.db(), now(), bot, limit)
     }
-    fn board_message(&self, bot: &str) -> Result<Option<StoredMessage>> {
-        board::message(&self.db(), bot)
+    /// A fresh signed link to blob `sha`, when the server has a blob store.
+    fn blob_link(&self, _sha: &str) -> Option<String> {
+        None
     }
-    fn goal_board_message(&self, bot: &str) -> Result<Option<StoredMessage>> {
-        goal_board::message(&self.db(), bot)
+    /// Bot `bot`'s board now (`board::board`): Done today from `done_since`,
+    /// default the start of the day in the bot's timezone; `web` is the
+    /// public URL for links.
+    fn board(&self, bot: &str, done_since: Option<i64>, web: Option<&str>) -> Result<board::Board> {
+        let conn = self.db();
+        let id = channel::bot_id(&conn, bot)?;
+        let tz = board::timezone(&conn, id)?;
+        let t = now();
+        let since = done_since.unwrap_or_else(|| board::day_start(&tz, t));
+        let blob = |sha: &str| self.blob_link(sha);
+        board::board(&conn, bot, since, t, &board::Links { web, blob: &blob })
+    }
+    /// Bot `bot`'s open board items.
+    fn board_items(&self, bot: &str) -> Result<Vec<board::Item>> {
+        board::items(&self.db(), bot)
+    }
+    /// Bot `bot`'s timezone (`board::timezone`).
+    fn bot_timezone(&self, bot: &str) -> Result<String> {
+        let conn = self.db();
+        board::timezone(&conn, channel::bot_id(&conn, bot)?)
+    }
+    fn board_views(&self, bot: &str) -> Result<Vec<board::View>> {
+        board::views(&self.db(), bot)
+    }
+    /// Bot `bot`'s home chat (`board::home`).
+    fn board_home(&self, bot: &str) -> Result<Option<board::View>> {
+        board::home(&self.db(), bot)
     }
     fn card_needs(&self, bot: &str) -> Result<Vec<board::CardNeed>> {
         board::card_needs(&self.db(), bot)
@@ -180,23 +205,17 @@ pub trait Axe: Send + Sync + 'static {
     fn stale_task_cards(&self, bot: &str) -> Result<Vec<(i64, i64, String)>> {
         board::stale_task_cards(&self.db(), bot)
     }
-    fn closed_pins(&self, bot: &str) -> Result<Vec<StoredMessage>> {
-        board::closed_pins(&self.db(), bot)
+    /// Bot `bot`'s board pins in a channel (`channel::board_pins`).
+    fn board_pins(&self, bot: &str) -> Result<Vec<StoredMessage>> {
+        channel::board_pins(&self.db(), bot)
     }
-    fn board_lines(&self, bot: &str) -> Result<Vec<board::Line>> {
-        board::lines(&self.db(), bot)
+    /// Bot `bot`'s messages with a retired pin's flags.
+    fn legacy_pins(&self, bot: &str) -> Result<Vec<StoredMessage>> {
+        channel::legacy_pins(&self.db(), bot)
     }
-    /// Bot `bot`'s active goals and its goal pins.
-    fn goal_pins(
-        &self,
-        bot: &str,
-        web: Option<&str>,
-    ) -> Result<(Vec<goal_board::GoalLine>, Vec<StoredMessage>)> {
-        let conn = self.db();
-        Ok((
-            goal_board::pinned_lines(&conn, bot, web)?,
-            goal_board::pins(&conn, bot)?,
-        ))
+    /// Bot `bot`'s parked cards whose keyboard is still shown.
+    fn parked_cards(&self, bot: &str) -> Result<Vec<StoredMessage>> {
+        channel::parked_cards(&self.db(), bot)
     }
     fn goal_name(&self, id: i64) -> Result<Option<String>> {
         crate::goal::name_of(&self.db(), id)
@@ -436,38 +455,104 @@ pub trait Axe: Send + Sync + 'static {
         }
         Ok(n > 0)
     }
-    fn mark_card_pinned(&self, msg: i64) -> Result<()> {
-        channel::mark_card_pinned(&self.db(), msg)?;
+    /// Adds an item to bot `bot`'s board (`board::add`).
+    fn board_add(&self, actor: &Actor, bot: &str, n: &board::NewItem) -> Result<board::Item> {
+        let r = board::add(&mut self.db(), actor, bot, n, now())?;
         self.changed();
-        Ok(())
+        Ok(r)
     }
-    fn clear_board_flags(&self, msg: i64) -> Result<()> {
-        channel::clear_board_flags(&self.db(), msg)?;
+    /// Changes board item `id` (`board::edit`).
+    fn board_edit(
+        &self,
+        actor: &Actor,
+        bot: &str,
+        id: i64,
+        e: &board::ItemEdit,
+    ) -> Result<board::Item> {
+        let r = board::edit(&mut self.db(), actor, bot, id, e, now())?;
         self.changed();
-        Ok(())
+        Ok(r)
     }
-    fn drop_goal_pin(&self, msg: i64, goal_pin: &str) -> Result<()> {
-        channel::drop_goal_pin(&self.db(), msg, goal_pin)?;
+    /// `done`, `drop` or `reopen` board item `id` (`board::set_state`).
+    fn board_state(
+        &self,
+        actor: &Actor,
+        bot: &str,
+        id: i64,
+        action: &str,
+        why: &str,
+    ) -> Result<board::Item> {
+        let r = board::set_state(&mut self.db(), actor, bot, id, action, why, now())?;
         self.changed();
-        Ok(())
+        Ok(r)
     }
-    fn set_goal_pin_text(&self, msg: i64, text: &str) -> Result<()> {
-        channel::set_goal_pin_text(&self.db(), msg, text)?;
+    /// Parks a decision for review (`board::park`). With `wake` (the
+    /// owner parked it) and no doc yet, the bot gets one wake to write it.
+    fn board_park(
+        &self,
+        actor: &Actor,
+        bot: &str,
+        p: &board::Park,
+        wake: bool,
+    ) -> Result<board::Item> {
+        let r = {
+            let mut conn = self.db();
+            let item = board::park(&mut conn, actor, bot, p, now())?;
+            if wake && item.reference.is_none() {
+                let key = format!("board-park-{}", item.id);
+                bot::add_wake(
+                    &mut conn,
+                    actor,
+                    bot,
+                    now(),
+                    &board::park_wake_note(&item),
+                    Some(&key),
+                    now(),
+                )?;
+            }
+            item
+        };
         self.changed();
-        Ok(())
+        Ok(r)
     }
-    /// Message `msg` becomes bot `bot`'s board message when it has none
-    /// (`board::default_on`).
-    fn board_default_on(&self, bot: &str, msg: i64) -> Result<bool> {
-        let on = board::default_on(&mut self.db(), bot, msg)?;
-        if on {
+    /// Creates or changes bot `bot`'s view in a chat (`board::set_view`).
+    fn board_view_set(
+        &self,
+        actor: &Actor,
+        bot: &str,
+        channel: &str,
+        chat: i64,
+        thread: i64,
+        e: &board::ViewEdit,
+    ) -> Result<board::View> {
+        let r = board::set_view(&mut self.db(), actor, bot, channel, chat, thread, e, now())?;
+        self.changed();
+        Ok(r)
+    }
+    /// Bot `bot`'s first view, in the chat it sends to, when it has none
+    /// (`board::default_view`).
+    fn board_view_default(&self, bot: &str, channel: &str, chat: i64, thread: i64) -> Result<bool> {
+        let made = board::default_view(&mut self.db(), bot, channel, chat, thread, now())?;
+        if made {
             self.changed();
         }
-        Ok(on)
+        Ok(made)
     }
-    /// Bot `bot` has no separate goal board any more.
-    fn clear_goal_board(&self, bot: &str) -> Result<()> {
-        goal_board::set_message(&mut self.db(), bot, None)?;
+    /// Board pin `msg` shows `text`; `key` is its text and keyboard.
+    fn set_board_text(&self, msg: i64, text: &str, key: &str) -> Result<()> {
+        channel::set_board_text(&self.db(), msg, text, key)?;
+        self.changed();
+        Ok(())
+    }
+    /// Message `msg` is no longer a board pin (`channel::drop_board_pin`).
+    fn drop_board_pin(&self, msg: i64, text: Option<&str>) -> Result<()> {
+        channel::drop_board_pin(&self.db(), msg, text)?;
+        self.changed();
+        Ok(())
+    }
+    /// Message `msg` no longer carries a retired pin's flags.
+    fn clear_legacy_pin(&self, msg: i64, unpinned: bool) -> Result<()> {
+        channel::clear_legacy_pin(&self.db(), msg, unpinned)?;
         self.changed();
         Ok(())
     }

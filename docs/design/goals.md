@@ -31,9 +31,9 @@ branches in task code beyond an event kind.
 - A goal can be worked by several bots. Budget and trajectory belong to the
   goal, not to a bot.
 - The per-goal autonomy tier lives in the freeform intent, not in a field.
-- Budget is soft accounting plus one hard gate, shown on Telegram in each
-  active goal's own pinned message (owner decision 2026-11-13; it replaced
-  the goal lines of the pinned overview).
+- Budget is soft accounting plus one hard gate, shown as each active goal's
+  line on its bots' boards (`docs/design/bots.md`, "Board"; the goal pins it
+  replaced were retired on 2026-11-28).
 
 ## Authority
 
@@ -73,16 +73,14 @@ Spend is computed on read over a rolling seven-day window; nothing is stored.
   goal is refused until the owner raises it. Nothing else is refused, and a
   goal with no budget never gates.
 
-Each active goal has one pinned message in its bots' chats, a scoreboard
-(owner's layout, 2026-11-14): name, status and deadline; a one-line summary;
-the metric; the next linked task and how many linked tasks wait on the owner;
-cost and attention as text bars against the weekly limits, always shown; and
-a link to the goal's web page when the server's public URL is set (`[blobs]
-public_url`). Status, summary and metric come from the latest observation
-that opens with a status (`at risk: ...`, `goal::status_of`), so they need no
-new field; without one the pin shows the goal state and the intent's first
-sentence. It is edited in place whenever its text changes. Edits are silent,
-and pausing, finishing or dropping the goal unpins it. Goal intent never goes into a bot's system prompt, so the
+Each active goal is one line in the Goals section of its bots' boards: its
+name (linking the goal's web page when the server's public URL is set), its
+status, the cost bar against the weekly limit, the next linked task and how
+many linked tasks wait on the owner. Pausing, finishing or dropping the goal
+takes it off. The `/goals` view keeps the full scoreboard per goal (owner's
+layout, 2026-11-14: summary, metric, cost and attention bars). Status, summary
+and metric come from the latest observation that opens with a status
+(`at risk: ...`, `goal::status_of`), so they need no new field. Goal intent never goes into a bot's system prompt, so the
 prompt cache stays stable when an intent changes.
 
 ## Deferred

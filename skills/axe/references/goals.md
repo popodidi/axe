@@ -79,9 +79,10 @@ Use `--kind observation` for evidence that will feed the next hypothesis.
 
 ### Status
 
-Each active goal's pinned message is a scoreboard: status, a one-line
-summary, the metric, the next task, what waits on the owner and the weekly
-budget bars. Set the first three with an observation whose first line is a
+Each active goal is a line on the board (`axe bot board show`) with its
+status, budget bar and next task; `/goals` shows the full scoreboard: status,
+a one-line summary, the metric, the next task, what waits on the owner and
+the weekly budget bars. Set the first three with an observation whose first line is a
 status (`on track`, `at risk` or `off track`) and a one-line summary, and an
 optional `metric:` line:
 
@@ -114,8 +115,8 @@ Self-start an H task (state `pending`) only if all hold:
 - it is not on the project's "ask the owner first" list.
 
 Otherwise create it with `--state escalated`, then `axe task escalate ID --class
-decision ...` and post its card, so it is one pinned Go/Skip in the owner's
-inbox: `axe bot tg send --task ID --buttons "Go=go;Skip=skip" '...'`. Never
+decision ...` and post its card, so it is one Go/Skip on the owner's
+board: `axe bot tg send --task ID --buttons "Go=go;Skip=skip" '...'`. Never
 self-approve.
 
 ## 4. Budget
